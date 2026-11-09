@@ -1,0 +1,5 @@
+target/
+reference/
+renkatsu.toml
+*.png
+!docs/**/*.png
