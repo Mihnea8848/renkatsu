@@ -8,6 +8,7 @@
 mod bundle;
 mod common_strings;
 mod io;
+pub mod objects;
 mod serialized;
 mod value;
 
