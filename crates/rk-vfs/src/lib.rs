@@ -4,9 +4,12 @@
 //! Virtual file system over the game's `abdata` folder and all zipmods,
 //! plus the item database and card ID resolution.
 
+pub mod assets;
 pub mod index;
 pub mod items;
+pub mod resolve;
 
+pub use assets::{AssetFile, Assets, Game, LoadedBundle, ObjRef};
 pub use index::{Index, ModInfo};
 pub use items::{resolve_infos, Item, ItemDb, Lookup, ResolveInfo};
 
