@@ -6,6 +6,7 @@
 
 pub mod loader;
 pub mod scene;
+pub mod shape;
 
 pub use loader::Loader;
 pub use scene::{DrawMesh, Image, MaterialInst, Part, RendererInst, Scene, TexSlot, Trs};
