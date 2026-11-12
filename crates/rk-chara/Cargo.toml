@@ -1,0 +1,17 @@
+[package]
+name = "rk-chara"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glam = "0.29"
+rk-core.workspace = true
+rk-card.workspace = true
+rk-unityfs.workspace = true
+rk-vfs.workspace = true
+rmpv.workspace = true
+
+[dev-dependencies]
+rayon.workspace = true
