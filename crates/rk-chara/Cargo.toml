@@ -14,3 +14,4 @@ rk-unityfs.workspace = true
 rk-vfs.workspace = true
 rmpv.workspace = true
 rayon.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

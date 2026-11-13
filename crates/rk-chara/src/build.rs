@@ -42,6 +42,8 @@ pub struct Character {
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
     pub ramp: Option<std::sync::Arc<crate::scene::Image>>,
+    /// How many MaterialEditor overrides found their material.
+    pub material_edits: crate::material_editor::Applied,
     pub warnings: Vec<String>,
 }
 
@@ -1094,6 +1096,21 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     if !mods.is_empty() {
         crate::abmx::apply(&mut b.scene, &mods, outfit, &bones, &accessory_nodes);
     }
+    // MaterialEditor overrides come last, so they win over everything the
+    // card's own settings produced.
+    let mut targets = crate::material_editor::Targets::new();
+    for (ri, r) in b.scene.renderers.iter().enumerate() {
+        use crate::material_editor::Owner;
+        let owner = match r.part {
+            Part::Clothes(k) => Owner::Clothing(k as i64),
+            Part::Accessory(k) => Owner::Accessory(k as i64),
+            Part::Hair(k) => Owner::Hair(k as i64),
+            Part::Body | Part::Head => continue,
+        };
+        targets.entry(owner).or_default().push(ri);
+    }
+    let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets);
+
     // The game's default ramp. Studio scenes can pick another one.
     let ramp = game.items.vanilla(cat::MT_RAMP, 1).and_then(|item| {
         b.loader
@@ -1107,6 +1124,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         top,
         bones,
         ramp,
+        material_edits,
         warnings: b.loader.warnings,
     })
 }
