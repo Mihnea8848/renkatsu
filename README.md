@@ -111,12 +111,24 @@ The code is split into crates, each with one job:
 
 ## Roadmap
 
-1. Koikatsu shaders, card colours and texture compositing
-2. Overlays, MaterialEditor and the other plugin data that cards depend on
-3. Poses, animation and dynamic bones
-4. A viewer window, then the character maker and the studio
-5. Studio scene import
-6. A visual novel layer where scripts use live scenes
+Renkatsu will be one app with two parts: Renkatsu Studio for scenes, and later
+Renkatsu Character Maker with everything the Koikatsu maker can do.
+
+1. Character look: Koikatsu shaders, card colours, texture compositing,
+   overlays and the other plugin data that cards depend on
+2. The studio: a docked editor with a viewport, scene tree and inspector, and
+   scene and project files stored as readable text
+3. Import of existing CharaStudio scenes
+4. The Ren'Py link: baked images and video that are rendered again when a
+   character changes
+5. Animation and dynamic bones
+6. Maps from glTF and FBX files, and a Renkatsu map format for sharing
+7. The character maker
+8. Games in real 3D for desktop and Android
+9. Koikatsu Sunshine content
+
+The default look will stay anime style, with real shadows and better lighting
+than the game has.
 
 ## Contributing
 
