@@ -5,6 +5,7 @@
 
 use crate::compose::{self, ClothColor, Decal};
 use crate::loader::{assign_weights, Loader};
+use crate::overlays::{self, kind, ClothOverlay};
 use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
 use crate::shape::{self, Rules, ShapeSet};
 use anyhow::{Context, Result};
@@ -52,6 +53,8 @@ struct Builder<'g> {
     game: &'g Game,
     infos: HashMap<String, ResolveInfo>,
     scene: Scene,
+    skin_overlays: HashMap<i64, Arc<Image>>,
+    cloth_overlays: HashMap<String, ClothOverlay>,
 }
 
 impl<'g> Builder<'g> {
@@ -189,6 +192,22 @@ impl<'g> Builder<'g> {
         out
     }
 
+    /// Paints a plugin overlay onto a source texture before it is used.
+    fn under(&self, kind: i64, base: Option<Arc<Image>>) -> Option<Arc<Image>> {
+        match (self.skin_overlays.get(&kind), base) {
+            (Some(over), Some(base)) => Some(Arc::new(compose::blend(&base, over))),
+            (_, base) => base,
+        }
+    }
+
+    /// Paints a plugin overlay onto a finished texture.
+    fn over(&self, kind: i64, image: Image) -> Image {
+        match self.skin_overlays.get(&kind) {
+            Some(over) => compose::blend(&image, over),
+            None => image,
+        }
+    }
+
     /// First value of a script field on the prefab, e.g. a `useColor01` flag.
     fn script_field(&self, inst: &Instance, field: &str) -> Option<rk_unityfs::UValue> {
         inst.scripts
@@ -302,6 +321,11 @@ impl<'g> Builder<'g> {
             "MainAB",
             "NoseTex",
         );
+        let (up, down) = (
+            self.under(kind::EYELINE_UNDER, up),
+            self.under(kind::EYELINE_UNDER, down),
+        );
+        let brow = self.under(kind::EYEBROW_UNDER, brow);
         let skin = card.body.skin_main_color;
         // (mesh, material index, texture, colour)
         type Line = (&'static str, usize, Option<Arc<Image>>, Option<[f32; 4]>);
@@ -428,7 +452,14 @@ impl<'g> Builder<'g> {
 
     /// Builds a clothing piece's textures from the card's colours and
     /// patterns and puts them on the meshes the prefab assigns them to.
-    fn dress(&mut self, inst: &Instance, item: &Item, colors: &[rk_card::ClothesColor], pattern_prop: &str) {
+    fn dress(
+        &mut self,
+        inst: &Instance,
+        item: &Item,
+        colors: &[rk_card::ClothesColor],
+        pattern_prop: &str,
+        clothes_id: &str,
+    ) {
         let pairs = [
             (
                 "MainTexAB",
@@ -476,7 +507,12 @@ impl<'g> Builder<'g> {
             }
         };
         let cloth = [color(0), color(1), color(2)];
-        for (main_ab, main_tex, mask_ab, mask_tex, fields) in pairs {
+        let overlay = self.cloth_overlays.get(clothes_id).cloned();
+        let mask_override = self
+            .cloth_overlays
+            .get(&overlays::mask_id(clothes_id))
+            .and_then(|o| o.image.clone());
+        for (index, (main_ab, main_tex, mask_ab, mask_tex, fields)) in pairs.into_iter().enumerate() {
             let ab = |key: &str| item.get(key).or_else(|| item.get("MainAB"));
             let (Some(main), Some(mask)) = (
                 ab(main_ab)
@@ -492,7 +528,19 @@ impl<'g> Builder<'g> {
             if targets.is_empty() {
                 continue;
             }
-            let image = Arc::new(compose::clothes(&main, &mask, &cloth));
+            // Plugin overlays: a replacement colour mask, then an image
+            // painted over (or instead of) the first two textures.
+            let mask = mask_override.clone().unwrap_or(mask);
+            let mut image = compose::clothes(&main, &mask, &cloth);
+            if let (true, Some(o)) = (index < 2, &overlay) {
+                if o.replace {
+                    image = compose::clear(image.width, image.height, "clothes_composed");
+                }
+                if let Some(over) = &o.image {
+                    image = compose::blend(&image, over);
+                }
+            }
+            let image = Arc::new(image);
             for r in targets {
                 if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                     m.textures.insert(
@@ -568,7 +616,13 @@ impl<'g> Builder<'g> {
                 "ColorMaskAB",
                 "ColorMaskTex",
             );
-            let iris = Arc::new(compose::eye(&compose::EyeInputs {
+            let (under, over) = if side == 0 {
+                (kind::EYE_UNDER_L, kind::EYE_OVER_L)
+            } else {
+                (kind::EYE_UNDER_R, kind::EYE_OVER_R)
+            };
+            let main = self.under(under, main);
+            let iris = compose::eye(&compose::EyeInputs {
                 size: 512,
                 main: main.as_deref(),
                 gradient: gradient.as_deref(),
@@ -577,7 +631,8 @@ impl<'g> Builder<'g> {
                 blend: pupil.grad_blend,
                 gradient_offset_y: pupil.grad_offset_y,
                 gradient_scale: pupil.grad_scale,
-            }));
+            });
+            let iris = Arc::new(self.over(over, iris));
             for &ri in &inst.renderers {
                 let r = &mut self.scene.renderers[ri];
                 let Some(m) = r.materials.first_mut() else { continue };
@@ -648,6 +703,7 @@ impl<'g> Builder<'g> {
             color: body.paint_color.get(k).copied().unwrap_or([1.0; 4]),
             layout: layouts[k],
         };
+        let main = self.under(kind::BODY_UNDER, main);
         let image = compose::body(&compose::BodyInputs {
             size: 2048,
             main: main.as_deref(),
@@ -663,6 +719,7 @@ impl<'g> Builder<'g> {
         let draw = self
             .loader
             .material_by_name(MATERIALS, if female { "cf_m_body" } else { "cm_m_body" }, None);
+        let image = self.over(kind::BODY_OVER, image);
         self.set_skin(inst, "o_body_a", draw, image);
     }
 
@@ -736,6 +793,7 @@ impl<'g> Builder<'g> {
             }
         };
         let m = face.mole_layout;
+        let main = self.under(kind::FACE_UNDER, main);
         let image = compose::face(&compose::FaceInputs {
             size: 1024,
             main: main.as_deref(),
@@ -792,6 +850,7 @@ impl<'g> Builder<'g> {
             m.textures.remove("_overtex2");
             m.floats.insert("_nip".into(), 0.0);
         }
+        let image = self.over(kind::FACE_OVER, image);
         self.set_skin(inst, "cf_O_face", draw, image);
     }
 }
@@ -802,6 +861,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         game,
         infos: resolve_infos(&card.ext),
         scene: Scene::default(),
+        skin_overlays: overlays::skin(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
+        cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -976,7 +1037,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 if let Some(inst) = &inst {
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
                     hide_undressed_states(&mut b.scene, inst);
-                    b.dress(inst, item, &cp.color_info, &pattern_prop);
+                    b.dress(inst, item, &cp.color_info, &pattern_prop, overlays::MAIN_IDS[i]);
                 }
                 let one_piece = item.int("Coordinate") == Some(2);
                 match (i, inst) {
@@ -1021,7 +1082,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             if k == 2 && colors.len() > 3 {
                                 colors[0] = colors[3].clone();
                             }
-                            b.dress(&inst, sub, &colors, &pattern_prop);
+                            b.dress(&inst, sub, &colors, &pattern_prop, overlays::SUB_IDS[k]);
                             top_insts.push(inst);
                         }
                         top_items.push(sub);

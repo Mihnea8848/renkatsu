@@ -142,6 +142,37 @@ fn opaque(c: [f32; 3]) -> Rgba {
     [c[0], c[1], c[2], 1.0]
 }
 
+/// Paints `over` onto `base` by its alpha. The result is as large as the
+/// larger of the two, so a detailed overlay keeps its detail.
+pub fn blend(base: &Image, over: &Image) -> Image {
+    let mut out = render(
+        base.width.max(over.width),
+        base.height.max(over.height),
+        &base.name,
+        |uv| {
+            let b = sample(base, uv[0], uv[1]);
+            let o = sample(over, uv[0], uv[1]);
+            let c = mix3(rgb(b), rgb(o), o[3]);
+            [c[0], c[1], c[2], o[3] + b[3] * (1.0 - o[3])]
+        },
+    );
+    out.repeat = base.repeat;
+    out
+}
+
+/// A fully transparent image, the starting point when an overlay replaces
+/// a texture.
+pub fn clear(width: u32, height: u32, name: &str) -> Image {
+    Image {
+        name: name.to_string(),
+        width,
+        height,
+        rgba: vec![0; (width * height * 4) as usize],
+        srgb: true,
+        repeat: false,
+    }
+}
+
 pub struct BodyInputs<'a> {
     pub size: u32,
     pub main: Option<&'a Image>,
@@ -533,5 +564,32 @@ mod tests {
         let half = solid([128, 0, 0, 255]);
         let out = eye_white(2, Some(&half), [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(px(&out, 1, 1), [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn overlays_blend_by_alpha_at_the_larger_size() {
+        let base = solid([0, 0, 255, 255]);
+        let mut over = Image {
+            name: "o".into(),
+            width: 4,
+            height: 4,
+            rgba: [255, 0, 0, 128].repeat(16),
+            srgb: true,
+            repeat: false,
+        };
+        let out = blend(&base, &over);
+        assert_eq!((out.width, out.height), (4, 4));
+        let p = px(&out, 1, 1);
+        assert!(
+            (p[0] as i32 - 128).abs() <= 1 && p[1] == 0 && (p[2] as i32 - 127).abs() <= 1 && p[3] == 255,
+            "{p:?}"
+        );
+        // A transparent overlay leaves the base alone.
+        over.rgba = [255, 0, 0, 0].repeat(16);
+        assert_eq!(px(&blend(&base, &over), 2, 2), [0, 0, 255, 255]);
+        // Over a cleared texture only the overlay remains.
+        let empty = clear(2, 2, "c");
+        over.rgba = [10, 20, 30, 255].repeat(16);
+        assert_eq!(px(&blend(&empty, &over), 0, 0), [10, 20, 30, 255]);
     }
 }
