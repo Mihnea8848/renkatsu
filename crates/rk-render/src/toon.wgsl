@@ -34,6 +34,7 @@ const HAS_ALPHA_MASK: u32 = 16u;
 const HAS_OVER1: u32 = 32u;
 const HAS_OVER2: u32 = 64u;
 const BLENDED: u32 = 128u;
+const HAS_OVER3: u32 = 256u;
 
 struct Material {
     color1: vec4<f32>,
@@ -42,6 +43,7 @@ struct Material {
     shadow: vec4<f32>,
     over1: vec4<f32>,
     over2: vec4<f32>,
+    over3: vec4<f32>,
     // xy: main uv scale, zw: offset
     st_main: vec4<f32>,
     // cutoff, shadow extend, shadow extend another, detail R as line R
@@ -50,6 +52,8 @@ struct Material {
     p1: vec4<f32>,
     // body mask weights a and b, unused
     p2: vec4<f32>,
+    // x: 1 when overlay 1 is placed like a nipple, y: its size
+    p3: vec4<f32>,
     // x: kind, y: flags
     info: vec4<u32>,
 };
@@ -61,7 +65,8 @@ struct Material {
 @group(1) @binding(5) var alpha_mask_tex: texture_2d<f32>;
 @group(1) @binding(6) var over1_tex: texture_2d<f32>;
 @group(1) @binding(7) var over2_tex: texture_2d<f32>;
-@group(1) @binding(8) var samp: sampler;
+@group(1) @binding(8) var over3_tex: texture_2d<f32>;
+@group(1) @binding(9) var samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -69,6 +74,8 @@ struct VsIn {
     @location(2) uv0: vec2<f32>,
     @location(3) uv1: vec2<f32>,
     @location(4) uv2: vec2<f32>,
+    @location(5) uv3: vec2<f32>,
+    @location(6) color: vec4<f32>,
 };
 
 struct VsOut {
@@ -78,6 +85,8 @@ struct VsOut {
     @location(2) uv1: vec2<f32>,
     @location(3) uv2: vec2<f32>,
     @location(4) world: vec3<f32>,
+    @location(5) uv3: vec2<f32>,
+    @location(6) color: vec4<f32>,
 };
 
 fn has(flag: u32) -> bool {
@@ -92,6 +101,8 @@ fn vs_main(v: VsIn) -> VsOut {
     o.uv0 = v.uv0;
     o.uv1 = v.uv1;
     o.uv2 = v.uv2;
+    o.uv3 = v.uv3;
+    o.color = v.color;
     o.world = v.pos;
     return o;
 }
@@ -113,6 +124,8 @@ fn vs_outline(v: VsIn) -> VsOut {
     o.uv0 = v.uv0;
     o.uv1 = v.uv1;
     o.uv2 = v.uv2;
+    o.uv3 = v.uv3;
+    o.color = v.color;
     o.world = pos;
     return o;
 }
@@ -188,6 +201,28 @@ fn read_surface(i: VsOut) -> Surface {
         tint = m.color1.rgb;
     }
     s.diffuse = texel.rgb * tint;
+
+    // Skin layers drawn over the base texture: lips, blush and eyeshadow on
+    // the face; nipples and underhair on the body. Vertex colours scale the
+    // UVs so each layer only lands where it belongs.
+    if (kind == KIND_SKIN) {
+        if (has(HAS_OVER1)) {
+            let plain = i.uv1 * i.color.r;
+            let ring = clamp(length(i.uv1 - 0.5) * 16.6666698 - 1.0, 0.0, 1.0);
+            let scale = m.p3.y * vec2<f32>(-1.39999998, 0.699999988) + vec2<f32>(2.0, -0.5);
+            let grown = (ring * (i.uv1 * scale.x + scale.y - i.uv1) + i.uv1) * i.color.r;
+            let t = textureSample(over1_tex, samp, mix(plain, grown, m.p3.x)) * m.over1;
+            s.diffuse = mix(s.diffuse, t.rgb, t.a);
+        }
+        if (has(HAS_OVER2)) {
+            let t = textureSample(over2_tex, samp, i.uv2 * i.color.b);
+            s.diffuse = mix(s.diffuse, t.rgb * m.over2.rgb, t.a * m.over2.a);
+        }
+        if (has(HAS_OVER3)) {
+            let t = textureSample(over3_tex, samp, i.uv3);
+            s.diffuse = mix(s.diffuse, t.rgb * m.over3.rgb, t.a * m.over3.a);
+        }
+    }
 
     var mask_alpha = 1.0;
     if (has(HAS_ALPHA_MASK)) {
