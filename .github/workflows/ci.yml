@@ -4,21 +4,43 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # weekly, so new advisories show up without a push
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Build
-        run: cargo build --workspace --locked
-        env:
-          RUSTFLAGS: -D warnings
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # corpus tests skip themselves: there is no game folder here
       - name: Test
         run: cargo test --workspace --locked
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace --locked
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.95.0"
+          command: check advisories bans sources

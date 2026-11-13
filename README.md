@@ -50,7 +50,7 @@ the game yet.
 
 ## Requirements
 
-- A recent stable Rust toolchain. I build with 1.95
+- Rust 1.95. `rustup` installs it on its own from `rust-toolchain.toml`
 - A GPU with Vulkan, Metal or DirectX 12
 - Your own Koikatsu install. Renkatsu ships no game files and reads everything
   from your copy

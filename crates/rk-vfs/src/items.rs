@@ -238,3 +238,125 @@ impl ItemDb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::ModInfo;
+
+    fn list(mod_idx: Option<u32>, category: i32, rows: &[(&str, &str)]) -> ListData {
+        ListData {
+            mod_idx,
+            category,
+            distribution: 0,
+            keys: vec!["ID".into(), "Name".into(), "MainAB".into()],
+            rows: rows
+                .iter()
+                .map(|(id, name)| vec![id.to_string(), name.to_string(), "0".into()])
+                .collect(),
+        }
+    }
+
+    fn db() -> ItemDb {
+        let mut index = Index::default();
+        for guid in ["mod.new", "mod.other"] {
+            index.mods.push(ModInfo {
+                guid: guid.into(),
+                ..Default::default()
+            });
+        }
+        index.lists.push(list(None, 105, &[("0", "none"), ("7", "game top")]));
+        index.lists.push(list(None, 105, &[("7", "shadowed duplicate")]));
+        index
+            .lists
+            .push(list(Some(0), 105, &[("7", "mod top"), ("15", "moved here")]));
+        index.lists.push(list(Some(1), 122, &[("3", "hat")]));
+        index.migrations.push(Migration {
+            kind: MigrationKind::Migrate,
+            guid_old: "mod.old".into(),
+            guid_new: "mod.new".into(),
+            category: 105,
+            id_old: 900,
+            id_new: 15,
+        });
+        index.migrations.push(Migration {
+            kind: MigrationKind::MigrateAll,
+            guid_old: "mod.renamed".into(),
+            guid_new: "mod.other".into(),
+            category: 0,
+            id_old: 0,
+            id_new: 0,
+        });
+        index.migrations.push(Migration {
+            kind: MigrationKind::StripAll,
+            guid_old: "mod.hard".into(),
+            guid_new: String::new(),
+            category: 0,
+            id_old: 0,
+            id_new: 0,
+        });
+        ItemDb::build(&index)
+    }
+
+    fn info(prop: &str, guid: &str, slot: i32, category: i32) -> HashMap<String, ResolveInfo> {
+        let mut m = HashMap::new();
+        m.insert(
+            prop.to_string(),
+            ResolveInfo {
+                guid: guid.into(),
+                slot,
+                category,
+                property: prop.into(),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn game_items_first_definition_wins() {
+        let db = db();
+        let none = HashMap::new();
+        assert_eq!(db.lookup(&none, "p", 105, 7).item().unwrap().name(), "game top");
+        assert!(matches!(db.lookup(&none, "p", 105, 99), Lookup::Missing { id: 99 }));
+    }
+
+    #[test]
+    fn mod_items_resolve_by_guid_and_slot() {
+        let db = db();
+        // The ID stored in the card is irrelevant when a record names the mod.
+        let infos = info("p", "mod.new", 7, 105);
+        assert_eq!(db.lookup(&infos, "p", 105, 100000123).item().unwrap().name(), "mod top");
+        // Other properties are unaffected by that record.
+        assert_eq!(db.lookup(&infos, "q", 105, 7).item().unwrap().name(), "game top");
+    }
+
+    #[test]
+    fn missing_mod_is_reported() {
+        let db = db();
+        let infos = info("p", "mod.absent", 4, 105);
+        assert!(matches!(
+            db.lookup(&infos, "p", 105, 100000001),
+            Lookup::MissingMod { slot: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn migrations_redirect_items() {
+        let db = db();
+        let moved = info("p", "mod.old", 900, 105);
+        assert_eq!(db.lookup(&moved, "p", 105, 1).item().unwrap().name(), "moved here");
+        let renamed = info("p", "mod.renamed", 3, 122);
+        assert_eq!(db.lookup(&renamed, "p", 122, 1).item().unwrap().name(), "hat");
+        let stripped = info("p", "mod.hard", 7, 105);
+        assert_eq!(db.lookup(&stripped, "p", 105, 7).item().unwrap().name(), "game top");
+    }
+
+    #[test]
+    fn placeholder_columns_read_as_absent() {
+        let db = db();
+        let item = db.vanilla(105, 7).unwrap();
+        assert_eq!(item.raw("MainAB"), Some("0"));
+        assert_eq!(item.get("MainAB"), None);
+        assert_eq!(item.int("ID"), Some(7));
+    }
+}

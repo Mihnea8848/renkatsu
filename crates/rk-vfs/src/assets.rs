@@ -51,9 +51,12 @@ impl ObjRef {
     }
 }
 
+/// Virtual path plus the mod it comes from (`None` for the game).
+type BundleKey = (String, Option<u32>);
+
 pub struct Assets {
     pub index: Arc<Index>,
-    loaded: Mutex<HashMap<(String, Option<u32>), Arc<LoadedBundle>>>,
+    loaded: Mutex<HashMap<BundleKey, Arc<LoadedBundle>>>,
     by_cab: Mutex<HashMap<String, Arc<AssetFile>>>,
 }
 

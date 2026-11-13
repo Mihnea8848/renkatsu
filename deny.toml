@@ -1,0 +1,19 @@
+# cargo-deny: dependency checks run by CI.
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # paste is a compile-time macro crate pulled in by texture2ddecoder.
+    # It is finished, not broken, and has no replacement there yet.
+    { id = "RUSTSEC-2024-0436", reason = "build-time macro used by texture2ddecoder" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# the workspace crates depend on each other by path
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

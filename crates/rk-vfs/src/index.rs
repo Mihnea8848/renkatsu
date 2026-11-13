@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -295,7 +295,11 @@ fn scan_zipmod(path: &Path) -> ZipScan {
             author: field("author"),
             website: field("website"),
         });
-        let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+        let names: Vec<String> = zip
+            .file_names()
+            .filter_map(|n| n.ok())
+            .map(|n| n.into_owned())
+            .collect();
         for name in names {
             let lower = norm(&name);
             let Some(inner) = lower.strip_prefix("abdata/") else {
@@ -349,7 +353,7 @@ impl Index {
         let cache_file = cache_path(&cfg.game_dir);
         let mut cache: Cache = std::fs::read(&cache_file)
             .ok()
-            .and_then(|b| bincode::deserialize(&b).ok())
+            .and_then(|b| rmp_serde::from_slice(&b).ok())
             .filter(|c: &Cache| c.version == CACHE_VERSION && c.game_dir == cfg.game_dir.to_string_lossy())
             .unwrap_or_default();
         cache.version = CACHE_VERSION;
@@ -417,7 +421,7 @@ impl Index {
             if let Some(dir) = cache_file.parent() {
                 std::fs::create_dir_all(dir).ok();
             }
-            std::fs::write(&cache_file, bincode::serialize(&cache)?).ok();
+            std::fs::write(&cache_file, rmp_serde::to_vec(&cache)?).ok();
         }
         Ok(Self::build(cfg, cache))
     }
@@ -430,7 +434,7 @@ impl Index {
 
         // Game files, in path order so "first list wins" matches the game.
         let mut game: Vec<_> = cache.game.into_iter().collect();
-        game.sort_by(|a, b| norm(&a.0).cmp(&norm(&b.0)));
+        game.sort_by_key(|g| norm(&g.0));
         for (path, scan) in game {
             let vpath = norm(&path);
             for cab in scan.cabs {
@@ -491,5 +495,41 @@ impl Index {
             }
         }
         idx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_list_follows_sideloader_layout() {
+        let text = "\u{feff}122\r\n0\r\nAssets/list.bytes\r\nID,Kind,Name,MainAB\r\n501,1,Hair A,chara/a.unity3d\r\n506,1,Hair B,chara/b.unity3d\r\n\r\nignored,after,blank\r\n";
+        let l = parse_csv_list(text).unwrap();
+        assert_eq!(l.category, 122);
+        assert_eq!(l.distribution, 0);
+        assert_eq!(l.keys, ["ID", "Kind", "Name", "MainAB"]);
+        assert_eq!(l.rows.len(), 2);
+        assert_eq!(l.rows[1][2], "Hair B");
+    }
+
+    #[test]
+    fn csv_list_rejects_garbage() {
+        assert!(parse_csv_list("not a number\n0\npath\nID\n").is_none());
+        assert!(parse_csv_list("").is_none());
+    }
+
+    #[test]
+    fn versions_compare_numerically() {
+        assert!(version_key("v1.10") > version_key("v1.9"));
+        assert!(version_key("2") > version_key("1.6.5"));
+        assert_eq!(version_key("rev21.2"), vec![21, 2]);
+        assert!(version_key("") < version_key("0.1"));
+    }
+
+    #[test]
+    fn paths_are_normalised() {
+        assert_eq!(norm("Chara\\Mod\\A.unity3d"), "chara/mod/a.unity3d");
+        assert_eq!(norm("/abdata/x"), "abdata/x");
     }
 }

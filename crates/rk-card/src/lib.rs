@@ -188,13 +188,17 @@ impl Card {
             .collect::<Result<Vec<_>>>()?;
 
         let parameter = read_value(block("Parameter")?, "Parameter")?;
+        // Optional blocks may be absent from the header, but one that is
+        // listed and cut short is a damaged file.
         let status = match block("Status") {
             Ok(b) => read_value(b, "Status")?,
-            Err(_) => Value::Nil,
+            Err(CardError::MissingBlock(_)) => Value::Nil,
+            Err(e) => return Err(e),
         };
         let ext = match block("KKEx") {
             Ok(b) => parse_ext(b)?,
-            Err(_) => ExtData::new(),
+            Err(CardError::MissingBlock(_)) => ExtData::new(),
+            Err(e) => return Err(e),
         };
 
         Ok(Card {

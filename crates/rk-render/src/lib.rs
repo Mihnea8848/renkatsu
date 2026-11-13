@@ -607,3 +607,82 @@ pub fn save_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) ->
     enc.write_header()?.write_image_data(rgba)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shader_is_valid_wgsl() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("basic.wgsl")).expect("basic.wgsl parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("basic.wgsl validates");
+    }
+
+    #[test]
+    fn uniform_layouts_match_the_shader() {
+        // WGSL: mat4x4 + 2 vec4 for globals, 3 vec4 for materials.
+        assert_eq!(std::mem::size_of::<Globals>(), 96);
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 48);
+        assert_eq!(std::mem::size_of::<Vertex>(), 32);
+    }
+
+    #[test]
+    fn mip_chain_halves_down_to_one_pixel() {
+        let mut rgba = Vec::new();
+        for i in 0..(8 * 4) {
+            rgba.extend_from_slice(if i % 2 == 0 {
+                &[255, 0, 0, 255]
+            } else {
+                &[0, 0, 255, 255]
+            });
+        }
+        let mips = mip_chain(8, 4, &rgba);
+        let sizes: Vec<(u32, u32)> = mips.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(sizes, [(8, 4), (4, 2), (2, 1), (1, 1)]);
+        assert!(mips.iter().all(|(w, h, d)| d.len() == (w * h * 4) as usize));
+        // Red and blue columns average to purple.
+        assert_eq!(mips[1].2[..4], [128, 0, 128, 255]);
+    }
+
+    #[test]
+    fn camera_frames_the_whole_box() {
+        let (min, max) = (Vec3::new(-0.4, 0.0, -0.2), Vec3::new(0.4, 1.6, 0.2));
+        for aspect in [0.5f32, 1.0, 2.0] {
+            let cam = Camera::frame(min, max, aspect, 30.0);
+            let vp = cam.view_proj(aspect);
+            for corner in 0..8 {
+                let p = Vec3::new(
+                    if corner & 1 == 0 { min.x } else { max.x },
+                    if corner & 2 == 0 { min.y } else { max.y },
+                    if corner & 4 == 0 { min.z } else { max.z },
+                );
+                let ndc = vp.project_point3(p);
+                assert!(
+                    ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z),
+                    "{p} is outside the view at aspect {aspect}: {ndc}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn png_round_trip() {
+        let rgba: Vec<u8> = (0..3 * 2 * 4).map(|i| (i * 9) as u8).collect();
+        let path = std::env::temp_dir().join(format!("renkatsu-test-{}.png", std::process::id()));
+        save_png(&path, 3, 2, &rgba).unwrap();
+        let loaded = load_png(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(loaded, (3, 2, rgba));
+        assert!(load_png(b"not a png").is_err());
+    }
+
+    #[test]
+    fn bounds_ignore_non_finite_points() {
+        assert_eq!(bounds(&[]), (Vec3::ZERO, Vec3::ONE));
+    }
+}

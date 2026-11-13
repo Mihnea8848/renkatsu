@@ -295,11 +295,18 @@ impl ShapeSet {
         category_asset: &str,
         prefer_mod: Option<u32>,
     ) -> Result<Self> {
-        let keys = KeyTable::parse(&text_asset(game, key_bundle, key_asset, prefer_mod)?)?;
+        let keys = text_asset(game, key_bundle, key_asset, prefer_mod)?;
         let text = text_asset(game, "list/customshape.unity3d", category_asset, None)?;
+        Self::from_tables(&keys, &text)
+    }
+
+    /// Builds a slider set from the raw key table and the tab-separated
+    /// slider-to-source table.
+    pub fn from_tables(keys: &[u8], text: &[u8]) -> Result<Self> {
+        let keys = KeyTable::parse(keys)?;
         let mut categories = Vec::new();
         let mut sources = HashMap::new();
-        for line in String::from_utf8_lossy(&text).lines() {
+        for line in String::from_utf8_lossy(text).lines() {
             let cols: Vec<&str> = line.trim_end_matches('\r').split('\t').collect();
             if cols.len() < 11 {
                 continue;

@@ -546,9 +546,8 @@ impl Texture2D {
         let px = w * h;
         let need = |n: usize| data.get(..n).ok_or(Error::Eof);
         let mut out = vec![0u8; px * 4];
-        let bc = |f: fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>,
-                  out: &mut [u8]|
-         -> Result<()> {
+        type Decoder = fn(&[u8], usize, usize, &mut [u32]) -> std::result::Result<(), &'static str>;
+        let bc = |f: Decoder, out: &mut [u8]| -> Result<()> {
             let mut buf = vec![0u32; px];
             f(data, w, h, &mut buf).map_err(|e| Error::Format(format!("texture decode: {e}")))?;
             for (o, p) in out.chunks_exact_mut(4).zip(&buf) {
