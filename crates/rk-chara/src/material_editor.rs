@@ -48,7 +48,7 @@ fn floats(v: &Value) -> Vec<f32> {
 }
 
 /// Decodes an embedded PNG or JPEG to a bottom-up RGBA image.
-fn decode(bytes: &[u8], name: String) -> Option<Image> {
+pub(crate) fn decode(bytes: &[u8], name: String) -> Option<Image> {
     let img = image::load_from_memory(bytes).ok()?.flipv().into_rgba8();
     Some(Image {
         name,
