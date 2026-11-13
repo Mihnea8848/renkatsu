@@ -106,9 +106,7 @@ impl Default for Environment {
             line_depth: 1.0,
             line_width: 0.307,
             light_intensity: 1.0,
-            // The reference shaders add 0.666 here, which clips skin and whites.
-            // 0.4 keeps a fully lit surface at its own colour until this is
-            // calibrated against game captures.
+            // The game's shaders compute light * 0.6 + 0.4.
             ambient: 0.4,
         }
     }

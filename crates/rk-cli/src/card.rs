@@ -55,6 +55,9 @@ pub fn dump(path: &Path, full_ext: bool) -> Result<()> {
         .map(|co| {
             json!({
                 "clothes": co.clothes.parts.iter().map(|p| p.id).collect::<Vec<_>>(),
+                "clothesColors": co.clothes.parts.iter().map(|p| p.color_info.iter()
+                    .map(|c| json!({"base": c.base_color, "pattern": c.pattern, "patternColor": c.pattern_color, "tiling": c.tiling}))
+                    .collect::<Vec<_>>()).collect::<Vec<_>>(),
                 "subParts": co.clothes.sub_parts_id,
                 "accessories": co.accessory.parts.iter().filter(|a| !a.is_empty())
                     .map(|a| json!({"type": a.kind, "id": a.id, "parent": a.parent_key})).collect::<Vec<_>>(),
