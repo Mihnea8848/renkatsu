@@ -11,32 +11,60 @@ on:
 permissions:
   contents: read
 
+# a newer push to the same branch replaces the run in progress
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # `build` is the required check, so it always reports. For changes that
+  # touch no code it finishes in seconds.
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Look for code changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >>"$GITHUB_OUTPUT"
+          elif git diff --name-only "origin/${{ github.base_ref }}...HEAD" |
+              grep -qvE '\.md$|^LICENSE$|^\.github/(ISSUE_TEMPLATE/|PULL_REQUEST_TEMPLATE\.md|CODEOWNERS)'; then
+            echo "code=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "code=false" >>"$GITHUB_OUTPUT"
+            echo "Only documentation changed, skipping the build."
+          fi
       - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.code == 'true'
       - name: Check formatting
+        if: steps.changes.outputs.code == 'true'
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        if: steps.changes.outputs.code == 'true'
+        run: cargo clippy --profile ci --workspace --all-targets --locked -- -D warnings
       # corpus tests skip themselves: there is no game folder here
       - name: Test
-        run: cargo test --workspace --locked
+        if: steps.changes.outputs.code == 'true'
+        run: cargo test --profile ci --workspace --locked
 
+  # slow, so not on pull requests: a Windows break shows up on main
   windows:
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --profile ci --workspace --locked
 
   audit:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -30,3 +30,12 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# CI: no optimisation and no debug info, to compile as fast as possible.
+[profile.ci]
+inherits = "dev"
+opt-level = 0
+debug = false
+
+[profile.ci.package."*"]
+opt-level = 0

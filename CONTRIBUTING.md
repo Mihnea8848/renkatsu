@@ -55,9 +55,11 @@ A bug fix should come with a unit test that fails without the fix.
 ## Pull requests
 
 - Fork the repository, create a branch, and open a pull request against `main`.
-- CI checks formatting, runs clippy and the unit tests on Linux, runs the tests
-  on Windows, and checks dependencies for known security advisories. The
-  `build` job must pass.
+- CI checks formatting and runs clippy and the unit tests on Linux. That is
+  the `build` job and it must pass. A pull request that only changes
+  documentation skips the build.
+- The Windows tests and the dependency audit run on `main` after a merge, and
+  once a week.
 - Pull requests are merged with squash, so the branch history does not matter.
 - Keep one topic per pull request.
 
