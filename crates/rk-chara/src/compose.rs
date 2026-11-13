@@ -115,28 +115,31 @@ impl<'a> Decal<'a> {
     }
 }
 
-fn render(size: u32, name: &str, pixel: impl Fn([f32; 2]) -> [f32; 3] + Sync) -> Image {
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    rgba.par_chunks_mut((size * 4) as usize)
+fn render(width: u32, height: u32, name: &str, pixel: impl Fn([f32; 2]) -> Rgba + Sync) -> Image {
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    rgba.par_chunks_mut((width * 4) as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            let v = (y as f32 + 0.5) / size as f32;
+            let v = (y as f32 + 0.5) / height as f32;
             for (x, px) in row.chunks_exact_mut(4).enumerate() {
-                let c = pixel([(x as f32 + 0.5) / size as f32, v]);
-                for k in 0..3 {
+                let c = pixel([(x as f32 + 0.5) / width as f32, v]);
+                for k in 0..4 {
                     px[k] = (c[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                 }
-                px[3] = 255;
             }
         });
     Image {
         name: name.to_string(),
-        width: size,
-        height: size,
+        width,
+        height,
         rgba,
         srgb: true,
         repeat: false,
     }
+}
+
+fn opaque(c: [f32; 3]) -> Rgba {
+    [c[0], c[1], c[2], 1.0]
 }
 
 pub struct BodyInputs<'a> {
@@ -154,7 +157,7 @@ pub struct BodyInputs<'a> {
 
 /// Body skin texture.
 pub fn body(i: &BodyInputs) -> Image {
-    render(i.size, "body_composed", |uv| {
+    render(i.size, i.size, "body_composed", |uv| {
         // Sunburn replaces the skin colour where its texture is dark.
         let sun = i.sunburn.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
         let skin = mix3(
@@ -172,7 +175,7 @@ pub fn body(i: &BodyInputs) -> Image {
             base = p.apply(base, paint_uv(uv, p.layout, true), paint_mask);
         }
         // Blue marks the nails.
-        mix3(base, mul3(rgb(i.nail), base), mask[2])
+        opaque(mix3(base, mul3(rgb(i.nail), base), mask[2]))
     })
 }
 
@@ -192,7 +195,7 @@ pub struct FaceInputs<'a> {
 
 /// Face skin texture.
 pub fn face(i: &FaceInputs) -> Image {
-    render(i.size, "face_composed", |uv| {
+    render(i.size, i.size, "face_composed", |uv| {
         let mask = i.color_mask.map(|t| sample(t, uv[0], uv[1])).unwrap_or([0.0; 4]);
         // Red takes the skin colour, green the secondary colour, and blue
         // areas stay untinted.
@@ -211,7 +214,101 @@ pub fn face(i: &FaceInputs) -> Image {
         for p in &i.paints {
             base = p.apply(base, paint_uv(uv, p.layout, true), paint_mask);
         }
-        i.mole.apply(base, paint_uv(uv, i.mole.layout, false), 1.0)
+        opaque(i.mole.apply(base, paint_uv(uv, i.mole.layout, false), 1.0))
+    })
+}
+
+/// One of the three colour areas of a clothing piece.
+#[derive(Clone, Copy)]
+pub struct ClothColor<'a> {
+    pub base: Rgba,
+    pub pattern: Option<&'a Image>,
+    pub pattern_color: Rgba,
+    /// 0 to 1 per axis: how often the pattern repeats.
+    pub tiling: [f32; 2],
+}
+
+impl ClothColor<'_> {
+    fn at(&self, uv: [f32; 2]) -> [f32; 3] {
+        // The pattern colour shows where the pattern texture is dark.
+        let pat = match self.pattern {
+            Some(p) => sample(
+                p,
+                uv[0] * (20.0 - 19.0 * self.tiling[0]),
+                uv[1] * (20.0 - 19.0 * self.tiling[1]),
+            )[0],
+            None => 1.0,
+        };
+        mix3(
+            rgb(self.pattern_color),
+            rgb(self.base),
+            pat.max(1.0 - self.pattern_color[3]),
+        )
+    }
+}
+
+/// Clothing texture: the base texture tinted by up to three colours, each
+/// with an optional pattern, placed by the colour mask's channels. The
+/// alpha of the base texture is kept, since clothes use it for cut-outs.
+pub fn clothes(main: &Image, mask: &Image, colors: &[ClothColor; 3]) -> Image {
+    render(main.width, main.height, "clothes_composed", |uv| {
+        let m = sample(mask, uv[0], uv[1]);
+        let mut tint = [1.0; 3];
+        for (k, c) in colors.iter().enumerate() {
+            tint = mix3(tint, c.at(uv), m[k]);
+        }
+        let t = sample(main, uv[0], uv[1]);
+        let c = mul3(tint, [t[0].clamp(0.0, 1.0), t[1].clamp(0.0, 1.0), t[2].clamp(0.0, 1.0)]);
+        [c[0], c[1], c[2], t[3]]
+    })
+}
+
+pub struct EyeInputs<'a> {
+    pub size: u32,
+    /// Iris drawing: brightness in red, shape in alpha.
+    pub main: Option<&'a Image>,
+    /// Gradient between the two colours.
+    pub gradient: Option<&'a Image>,
+    pub base: Rgba,
+    pub sub: Rgba,
+    pub blend: f32,
+    /// Card values, 0 to 1.
+    pub gradient_offset_y: f32,
+    pub gradient_scale: f32,
+}
+
+/// Iris texture: a two-colour gradient overlaid on the iris drawing.
+pub fn eye(i: &EyeInputs) -> Image {
+    let y = -0.5 + i.gradient_offset_y;
+    let s = 1.0 - (-1.0 + 2.0 * i.gradient_scale);
+    render(i.size, i.size, "eye_composed", |uv| {
+        let g = match i.gradient {
+            Some(t) => sample(t, uv[0] * (2.0 * s) + (0.5 - s), (uv[1] + y) * (2.0 * s) + (0.5 - s))[0],
+            None => 1.0,
+        };
+        let col = mix3(rgb(i.sub), rgb(i.base), g);
+        let t = i.main.map(|t| sample(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
+        let m = t[0];
+        let mut out = [0.0; 4];
+        for k in 0..3 {
+            // Overlay blend of the colour with the drawing's brightness.
+            let over = if m > 0.5 {
+                col[k] / (2.0 * (1.0 - m))
+            } else {
+                1.0 - (1.0 - col[k]) * 0.5 / m
+            };
+            out[k] = col[k] * m + i.blend * (over.clamp(0.0, 1.0) - m * col[k]);
+        }
+        out[3] = t[3] * i.base[3];
+        out
+    })
+}
+
+/// Eye white: the drawing's red channel blends between two colours.
+pub fn eye_white(size: u32, main: Option<&Image>, base: Rgba, sub: Rgba) -> Image {
+    render(size, size, "eyewhite_composed", |uv| {
+        let m = main.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
+        opaque(mix3(rgb(sub), rgb(base), m))
     })
 }
 
@@ -357,5 +454,84 @@ mod tests {
         // A quarter turn rotates around the centre.
         let uv = paint_uv([1.0, 0.5], [0.0, 0.0, 0.25, 0.75], true);
         assert!((uv[0] - 0.5).abs() < 1e-5 && (uv[1] - 0.0).abs() < 1e-5, "{uv:?}");
+    }
+
+    #[test]
+    fn clothes_colours_follow_the_mask_and_keep_alpha() {
+        let main = solid([128, 255, 255, 64]);
+        let red_mask = solid([255, 0, 0, 255]);
+        let plain = ClothColor {
+            base: [1.0, 0.5, 0.0, 1.0],
+            pattern: None,
+            pattern_color: [0.0, 0.0, 1.0, 1.0],
+            tiling: [0.0; 2],
+        };
+        let unused = ClothColor {
+            base: [0.0; 4],
+            pattern: None,
+            pattern_color: [0.0; 4],
+            tiling: [0.0; 2],
+        };
+        let out = clothes(&main, &red_mask, &[plain, unused, unused]);
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(px(&out, 0, 0), [128, 128, 0, 64]);
+
+        // A dark pattern texture switches the area to the pattern colour.
+        let dark = solid([0, 0, 0, 255]);
+        let patterned = ClothColor {
+            pattern: Some(&dark),
+            ..plain
+        };
+        assert_eq!(
+            px(&clothes(&main, &red_mask, &[patterned, unused, unused]), 0, 0)[..3],
+            [0, 0, 255]
+        );
+        // With no mask coverage the base texture is left as it is.
+        let none = solid([0, 0, 0, 255]);
+        assert_eq!(
+            px(&clothes(&main, &none, &[plain, unused, unused]), 0, 0)[..3],
+            [128, 255, 255]
+        );
+    }
+
+    #[test]
+    fn eye_gradient_and_overlay() {
+        let mut i = EyeInputs {
+            size: 2,
+            main: None,
+            gradient: None,
+            base: [0.2, 0.4, 0.8, 1.0],
+            sub: [1.0, 0.0, 0.0, 1.0],
+            blend: 0.0,
+            gradient_offset_y: 0.5,
+            gradient_scale: 0.5,
+        };
+        // White drawing, no gradient texture: the base colour.
+        assert_eq!(px(&eye(&i), 0, 0), [51, 102, 204, 255]);
+        let dark = solid([0, 0, 0, 255]);
+        i.gradient = Some(&dark);
+        assert_eq!(
+            px(&eye(&i), 0, 0)[..3],
+            [255, 0, 0],
+            "dark gradient picks the second colour"
+        );
+        // Half-bright drawing: plain multiply without blend.
+        let grey = solid([128, 128, 128, 128]);
+        i.gradient = None;
+        i.main = Some(&grey);
+        let p = px(&eye(&i), 0, 0);
+        assert!(
+            (p[2] as i32 - 102).abs() <= 1 && (p[3] as i32 - 128).abs() <= 1,
+            "{p:?}"
+        );
+        i.blend = 1.0;
+        assert!(px(&eye(&i), 0, 0)[2] > p[2], "overlay brightens the colour");
+    }
+
+    #[test]
+    fn eye_white_blends_two_colours() {
+        let half = solid([128, 0, 0, 255]);
+        let out = eye_white(2, Some(&half), [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(px(&out, 1, 1), [128, 128, 128, 255]);
     }
 }
