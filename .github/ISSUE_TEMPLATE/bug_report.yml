@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not work or looks different than in the game
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Command output
+      description: The output of the command that failed, or of `rk resolve` for a card that renders wrong.
+      render: text
+  - type: input
+    id: game
+    attributes:
+      label: Game version and patch
+      placeholder: Koikatsu, Better Repack RX22 / HF Patch 3.31
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and GPU
+      placeholder: Windows 11, RTX 4060 / Arch Linux, RX 7800
+    validations:
+      required: true

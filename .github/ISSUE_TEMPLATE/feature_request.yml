@@ -1,0 +1,11 @@
+name: Feature request
+description: Something Renkatsu should support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: The card data, mod type or plugin that should work, and what it does in the game.
+    validations:
+      required: true

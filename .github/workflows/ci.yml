@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Build
+        run: cargo build --workspace --locked
+        env:
+          RUSTFLAGS: -D warnings
+      # corpus tests skip themselves: there is no game folder here
+      - name: Test
+        run: cargo test --workspace --locked
