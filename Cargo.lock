@@ -1019,6 +1019,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "glam",
  "rk-card",
  "rk-chara",
  "rk-core",

@@ -309,6 +309,12 @@ impl Renderer {
         texture.create_view(&Default::default())
     }
 
+    /// Drops uploaded textures. Call between characters: the cache is keyed
+    /// by image address, which can be reused once a character is dropped.
+    pub fn clear_textures(&mut self) {
+        self.textures.clear();
+    }
+
     fn texture(&mut self, image: &Arc<Image>) -> wgpu::TextureView {
         let key = Arc::as_ptr(image) as usize;
         if let Some(v) = self.textures.get(&key) {
@@ -573,6 +579,24 @@ pub fn bounds(draws: &[DrawMesh]) -> (Vec3, Vec3) {
         return (Vec3::ZERO, Vec3::ONE);
     }
     (min, max)
+}
+
+/// Decodes a PNG to RGBA8, top row first.
+pub fn load_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    let mut dec = png::Decoder::new(bytes);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        png::ColorType::Grayscale => buf.iter().flat_map(|g| [*g, *g, *g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        png::ColorType::Indexed => return Err(anyhow!("indexed PNG was not expanded")),
+    };
+    Ok((info.width, info.height, rgba))
 }
 
 pub fn save_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {

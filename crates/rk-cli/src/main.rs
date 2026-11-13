@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod bundle;
 mod card;
+mod compare;
 mod render;
 mod vfs;
 
@@ -56,6 +57,16 @@ enum Cmd {
         #[arg(long)]
         list: bool,
     },
+    /// Write a contact sheet: each card's own image beside our render.
+    Compare {
+        /// Cards to compare. Without any, a sample of the game folder is used.
+        cards: Vec<PathBuf>,
+        /// Sample size when no cards are given.
+        #[arg(long, default_value_t = 20)]
+        count: usize,
+        #[arg(short, long, default_value = "compare.png")]
+        out: PathBuf,
+    },
     /// Inspect Unity asset bundle files.
     Bundle {
         #[command(subcommand)]
@@ -104,6 +115,7 @@ fn main() -> Result<()> {
             cmd: CardCmd::Dump { path, ext },
         } => card::dump(&path, ext),
         Cmd::Index => vfs::index(),
+        Cmd::Compare { cards, count, out } => compare::compare(cards, count, &out),
         Cmd::Render {
             card,
             out,
