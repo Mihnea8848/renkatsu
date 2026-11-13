@@ -9,6 +9,7 @@ pub mod build;
 pub mod compose;
 pub mod loader;
 pub mod material_editor;
+pub mod more_accessories;
 pub mod scene;
 pub mod shape;
 

@@ -1037,7 +1037,22 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             for (k, v) in &head_bones {
                 points.entry(k.clone()).or_insert(*v);
             }
-            for (i, acc) in co.accessory.parts.iter().enumerate() {
+            // Old MoreAccessories data continues the list after slot twenty.
+            let extra = crate::more_accessories::read(&card.ext)
+                .remove(&outfit)
+                .unwrap_or_default();
+            let extra = if co.accessory.parts.len() > 20 {
+                &[][..]
+            } else {
+                &extra[..]
+            };
+            let slots = co
+                .accessory
+                .parts
+                .iter()
+                .take(20.max(co.accessory.parts.len()))
+                .chain(extra.iter());
+            for (i, acc) in slots.enumerate() {
                 if acc.is_empty() {
                     continue;
                 }
