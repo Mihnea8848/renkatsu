@@ -46,6 +46,8 @@ struct Material {
     over3: vec4<f32>,
     // xy: main uv scale, zw: offset
     st_main: vec4<f32>,
+    // the same for the alpha mask
+    st_alpha: vec4<f32>,
     // cutoff, shadow extend, shadow extend another, detail R as line R
     p0: vec4<f32>,
     // detail B as line G, outline width scale, alpha, unused
@@ -226,7 +228,7 @@ fn read_surface(i: VsOut) -> Surface {
 
     var mask_alpha = 1.0;
     if (has(HAS_ALPHA_MASK)) {
-        let am = textureSample(alpha_mask_tex, samp, i.uv0);
+        let am = textureSample(alpha_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw);
         if (kind == KIND_HAIR) {
             mask_alpha = am.r;
         } else {

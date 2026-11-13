@@ -52,6 +52,7 @@ pub struct MaterialUniform {
     pub over2: [f32; 4],
     pub over3: [f32; 4],
     pub st_main: [f32; 4],
+    pub st_alpha: [f32; 4],
     pub p0: [f32; 4],
     pub p1: [f32; 4],
     pub p2: [f32; 4],
@@ -103,12 +104,16 @@ impl MaterialDesc {
         let mut flags = if blended { BLENDED } else { 0 };
         let mut textures: [Option<Arc<Image>>; 8] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
+        let mut st_alpha = st_main;
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             if let Some(slot) = mat.textures.get(*name) {
                 textures[i] = Some(slot.image.clone());
                 flags |= flag;
-                if i == 0 {
-                    st_main = [slot.scale[0], slot.scale[1], slot.offset[0], slot.offset[1]];
+                let st = [slot.scale[0], slot.scale[1], slot.offset[0], slot.offset[1]];
+                match *name {
+                    "_MainTex" => st_main = st,
+                    "_AlphaMask" => st_alpha = st,
+                    _ => {}
                 }
             }
         }
@@ -132,6 +137,7 @@ impl MaterialDesc {
             over2: color("_overcolor2", [1.0; 4]),
             over3: color("_overcolor3", [1.0; 4]),
             st_main,
+            st_alpha,
             p0: [
                 cutoff,
                 float("_ShadowExtend", 1.0),
@@ -216,7 +222,7 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // WGSL: twelve vec4<f32> and one vec4<u32>.
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 208);
+        // WGSL: thirteen vec4<f32> and one vec4<u32>.
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 224);
     }
 }

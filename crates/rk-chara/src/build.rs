@@ -340,6 +340,90 @@ impl<'g> Builder<'g> {
         }
     }
 
+    /// Applies the masks a top brings for what is worn under it: one cuts
+    /// the body, one the bra, one the inner layer of the top itself. A top
+    /// can also rule out a bra altogether.
+    fn hide_under_top(
+        &mut self,
+        body: &Instance,
+        tops: &[&Item],
+        top_insts: &[Instance],
+        bra: Option<&(Instance, &Item)>,
+    ) {
+        let mut masks: [Option<Arc<Image>>; 3] = [None, None, None];
+        let columns = [
+            ("OverBodyMaskAB", "OverBodyMask"),
+            ("OverBraMaskAB", "OverBraMask"),
+            ("OverInnerMaskAB", "OverInnerMask"),
+        ];
+        let mut no_bra = false;
+        for item in tops {
+            no_bra |= item.int("NotBra") == Some(1);
+            for (k, (ab, tex)) in columns.iter().enumerate() {
+                if let (Some(ab), Some(tex)) = (item.get(ab), item.get(tex)) {
+                    if let Some(image) = self.loader.image_by_name(ab, tex, item.mod_idx) {
+                        masks[k] = Some(image);
+                    }
+                }
+            }
+        }
+        let [body_mask, bra_mask, inner_mask] = masks;
+        let put = |scene: &mut Scene,
+                   inst: &Instance,
+                   names: &[&str],
+                   image: &Arc<Image>,
+                   scale: [f32; 2],
+                   offset: [f32; 2]| {
+            for &ri in &inst.renderers {
+                let r = &mut scene.renderers[ri];
+                if !names.contains(&r.name.as_str()) {
+                    continue;
+                }
+                if let Some(m) = r.materials.first_mut() {
+                    m.textures.insert(
+                        "_AlphaMask".into(),
+                        TexSlot {
+                            image: image.clone(),
+                            scale,
+                            offset,
+                        },
+                    );
+                    // Fully dressed: both mask channels apply.
+                    m.floats.insert("_alpha_a".into(), 1.0);
+                    m.floats.insert("_alpha_b".into(), 1.0);
+                }
+            }
+        };
+        if let Some(image) = &body_mask {
+            put(&mut self.scene, body, &["o_body_a"], image, [1.0, 1.0], [0.0, 0.0]);
+        }
+        if let Some((inst, item)) = bra {
+            if no_bra {
+                self.scene.nodes[inst.root].active = false;
+            } else if let Some(image) = &bra_mask {
+                // One-piece bras use the lower half of a taller mask.
+                let (scale, offset) = if item.int("Coordinate") == Some(2) {
+                    ([1.0, 2.0], [0.0, -1.0])
+                } else {
+                    ([1.0, 1.0], [0.0, 0.0])
+                };
+                put(&mut self.scene, inst, &["o_bra_a", "o_bra_b"], image, scale, offset);
+            }
+        }
+        if let Some(image) = &inner_mask {
+            for inst in top_insts {
+                put(
+                    &mut self.scene,
+                    inst,
+                    &["o_inner_a", "o_inner_b"],
+                    image,
+                    [1.0, 1.0],
+                    [0.0, 0.0],
+                );
+            }
+        }
+    }
+
     /// Builds a clothing piece's textures from the card's colours and
     /// patterns and puts them on the meshes the prefab assigns them to.
     fn dress(&mut self, inst: &Instance, item: &Item, colors: &[rk_card::ClothesColor], pattern_prop: &str) {
@@ -865,9 +949,19 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let shoes_type = rk_card::map_get(&card.status, "shoesType")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(1);
+            // What the top (and its sub-parts) and the bra say about the
+            // pieces around them.
+            let mut top_items: Vec<&Item> = Vec::new();
+            let mut top_insts: Vec<Instance> = Vec::new();
+            let mut bra: Option<(Instance, &Item)> = None;
+            let (mut no_bottom, mut no_shorts) = (false, false);
             for (i, cp) in co.clothes.parts.iter().enumerate().take(9) {
                 // Only one of indoor (7) and outdoor (8) shoes is worn.
                 if (i == 7 && shoes_type != 0) || (i == 8 && shoes_type == 0) {
+                    continue;
+                }
+                // One-piece tops replace the bottom, one-piece bras the shorts.
+                if (i == 1 && no_bottom) || (i == 3 && no_shorts) {
                     continue;
                 }
                 let label = format!("outfit{outfit}.{}", rk_card::CLOTHES_KIND_NAMES[i]);
@@ -881,6 +975,19 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
                     hide_undressed_states(&mut b.scene, inst);
                     b.dress(inst, item, &cp.color_info, &pattern_prop);
+                }
+                let one_piece = item.int("Coordinate") == Some(2);
+                match (i, inst) {
+                    (0, inst) => {
+                        no_bottom = one_piece;
+                        top_items.push(item);
+                        top_insts.extend(inst);
+                    }
+                    (2, Some(inst)) => {
+                        no_shorts = one_piece;
+                        bra = Some((inst, item));
+                    }
+                    _ => {}
                 }
                 // Sailor and jacket tops are assembled from three sub-parts.
                 let kind = item.int("Kind").unwrap_or(0);
@@ -913,10 +1020,13 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                                 colors[0] = colors[3].clone();
                             }
                             b.dress(&inst, sub, &colors, &pattern_prop);
+                            top_insts.push(inst);
                         }
+                        top_items.push(sub);
                     }
                 }
             }
+            b.hide_under_top(&body, &top_items, &top_insts, bra.as_ref());
         }
 
         if opts.accessories {
