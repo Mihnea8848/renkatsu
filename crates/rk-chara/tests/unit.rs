@@ -339,3 +339,156 @@ fn abmx_modifiers_read_and_apply() {
 
     assert!(rk_chara::abmx::read(&ExtData::new()).is_empty());
 }
+
+#[test]
+fn material_editor_overrides_find_their_materials() {
+    use rk_chara::material_editor::{apply, Owner, Targets, KEY};
+    use rk_chara::scene::MaterialInst;
+
+    fn pack(v: &Value) -> Value {
+        let mut out = Vec::new();
+        rmpv::encode::write_value(&mut out, v).unwrap();
+        Value::Binary(out)
+    }
+    fn entry(fields: Vec<(&str, Value)>) -> Value {
+        Value::Map(fields.into_iter().map(|(k, v)| (Value::from(k), v)).collect())
+    }
+    let base = |kind: i64, coordinate: i64, slot: i64, material: &str| {
+        vec![
+            ("ObjectType", Value::from(kind)),
+            ("CoordinateIndex", Value::from(coordinate)),
+            ("Slot", Value::from(slot)),
+            ("MaterialName", Value::from(material)),
+        ]
+    };
+    let with = |mut e: Vec<(&'static str, Value)>, more: Vec<(&'static str, Value)>| {
+        e.extend(more);
+        entry(e)
+    };
+
+    // A 1x1 red PNG.
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+
+    let mut plugin = PluginData::default();
+    plugin.data.insert(
+        "MaterialFloatPropertyList".into(),
+        pack(&Value::Array(vec![
+            with(
+                base(1, 0, 2, "cloth"),
+                vec![("Property", "Cutoff".into()), ("Value", "0.25".into())],
+            ),
+            // Other outfit: must not apply.
+            with(
+                base(1, 3, 2, "cloth"),
+                vec![("Property", "Cutoff".into()), ("Value", "0.9".into())],
+            ),
+        ])),
+    );
+    plugin.data.insert(
+        "MaterialColorPropertyList".into(),
+        pack(&Value::Array(vec![with(
+            base(4, 0, 0, "skin"),
+            vec![
+                ("Property", "Color".into()),
+                (
+                    "Value",
+                    Value::Array(vec![0.5.into(), 0.25.into(), 0.0.into(), 1.0.into()]),
+                ),
+            ],
+        )])),
+    );
+    plugin.data.insert(
+        "MaterialShaderList".into(),
+        pack(&Value::Array(vec![with(
+            base(3, 0, 1, "hair"),
+            vec![
+                ("ShaderName", "Shader Forge/main_alpha".into()),
+                ("RenderQueue", 3100.into()),
+            ],
+        )])),
+    );
+    plugin.data.insert(
+        "MaterialTexturePropertyList".into(),
+        pack(&Value::Array(vec![with(
+            base(1, 0, 2, "cloth"),
+            vec![
+                ("Property", "MainTex".into()),
+                ("TexID", 7.into()),
+                ("Scale", Value::Array(vec![2.0.into(), 3.0.into()])),
+            ],
+        )])),
+    );
+    plugin.data.insert(
+        "TextureDictionary".into(),
+        pack(&Value::Map(vec![(7.into(), Value::Binary(png))])),
+    );
+    plugin.data.insert(
+        "RendererPropertyList".into(),
+        pack(&Value::Array(vec![entry(vec![
+            ("ObjectType", 1.into()),
+            ("CoordinateIndex", 0.into()),
+            ("Slot", 2.into()),
+            ("RendererName", "cloth_mesh".into()),
+            ("Property", 0.into()),
+            ("Value", "0".into()),
+        ])])),
+    );
+    let mut ext = ExtData::new();
+    ext.insert(KEY.into(), plugin);
+
+    let mut scene = Scene::default();
+    let node = scene.add_node("n", None, Trs::default());
+    for (name, material, part) in [
+        ("cloth_mesh", "cloth", Part::Clothes(2)),
+        ("hair_mesh", "hair", Part::Hair(1)),
+        ("body_mesh", "skin", Part::Body),
+    ] {
+        scene.renderers.push(RendererInst {
+            name: name.into(),
+            node,
+            part,
+            mesh: Arc::new(Mesh::default()),
+            materials: vec![MaterialInst {
+                name: material.into(),
+                ..Default::default()
+            }],
+            skinned: false,
+            bones: Vec::new(),
+            enabled: true,
+            shadows_only: false,
+        });
+    }
+    let mut targets = Targets::new();
+    targets.insert(Owner::Clothing(2), vec![0]);
+    targets.insert(Owner::Hair(1), vec![1]);
+
+    let applied = apply(&mut scene, &ext, 0, &targets);
+    assert_eq!(
+        (
+            applied.floats,
+            applied.colors,
+            applied.textures,
+            applied.shaders,
+            applied.renderers
+        ),
+        (1, 1, 1, 1, 1)
+    );
+    let cloth = &scene.renderers[0].materials[0];
+    assert_eq!(cloth.floats["_Cutoff"], 0.25);
+    let tex = &cloth.textures["_MainTex"];
+    assert_eq!(
+        (tex.image.rgba.as_slice(), tex.scale),
+        (&[255u8, 0, 0, 255][..], [2.0, 3.0])
+    );
+    assert!(!scene.renderers[0].enabled);
+    let hair = &scene.renderers[1].materials[0];
+    assert_eq!(
+        (hair.shader.as_str(), hair.render_queue),
+        ("Shader Forge/main_alpha", 3100)
+    );
+    // Character-wide entries reach any renderer by material name.
+    assert_eq!(scene.renderers[2].materials[0].colors["_Color"], [0.5, 0.25, 0.0, 1.0]);
+}

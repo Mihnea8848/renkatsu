@@ -67,6 +67,13 @@ pub fn render(a: Args) -> Result<()> {
         t.elapsed().as_secs_f32(),
         a.out.display()
     );
+    let e = chara.material_edits;
+    if e != Default::default() {
+        println!(
+            "  material overrides: {} floats, {} colours, {} textures, {} shaders, {} renderers",
+            e.floats, e.colors, e.textures, e.shaders, e.renderers
+        );
+    }
     for w in &chara.warnings {
         println!("  warning: {w}");
     }
