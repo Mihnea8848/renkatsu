@@ -27,9 +27,10 @@ pub const HAS_ALPHA_MASK: u32 = 16;
 pub const HAS_OVER1: u32 = 32;
 pub const HAS_OVER2: u32 = 64;
 pub const BLENDED: u32 = 128;
+pub const HAS_OVER3: u32 = 256;
 
 /// Texture slots in bind order.
-pub const SLOTS: [(&str, u32); 7] = [
+pub const SLOTS: [(&str, u32); 8] = [
     ("_MainTex", HAS_MAIN),
     ("_ColorMask", HAS_COLOR_MASK),
     ("_DetailMask", HAS_DETAIL),
@@ -37,6 +38,7 @@ pub const SLOTS: [(&str, u32); 7] = [
     ("_AlphaMask", HAS_ALPHA_MASK),
     ("_overtex1", HAS_OVER1),
     ("_overtex2", HAS_OVER2),
+    ("_overtex3", HAS_OVER3),
 ];
 
 #[repr(C)]
@@ -48,10 +50,12 @@ pub struct MaterialUniform {
     pub shadow: [f32; 4],
     pub over1: [f32; 4],
     pub over2: [f32; 4],
+    pub over3: [f32; 4],
     pub st_main: [f32; 4],
     pub p0: [f32; 4],
     pub p1: [f32; 4],
     pub p2: [f32; 4],
+    pub p3: [f32; 4],
     pub info: [u32; 4],
 }
 
@@ -62,7 +66,7 @@ pub struct MaterialDesc {
     pub blended: bool,
     pub outline: bool,
     pub uniform: MaterialUniform,
-    pub textures: [Option<Arc<Image>>; 7],
+    pub textures: [Option<Arc<Image>>; 8],
 }
 
 /// Material kind from a Unity shader name such as `Shader Forge/main_skin`.
@@ -97,7 +101,7 @@ impl MaterialDesc {
         let float = |name: &str, default: f32| mat.floats.get(name).copied().unwrap_or(default);
 
         let mut flags = if blended { BLENDED } else { 0 };
-        let mut textures: [Option<Arc<Image>>; 7] = Default::default();
+        let mut textures: [Option<Arc<Image>>; 8] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             if let Some(slot) = mat.textures.get(*name) {
@@ -126,6 +130,7 @@ impl MaterialDesc {
             shadow: color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
             over1: color("_overcolor1", [1.0; 4]),
             over2: color("_overcolor2", [1.0; 4]),
+            over3: color("_overcolor3", [1.0; 4]),
             st_main,
             p0: [
                 cutoff,
@@ -140,6 +145,7 @@ impl MaterialDesc {
                 0.0,
             ],
             p2: [float("_alpha_a", 1.0), float("_alpha_b", 1.0), 0.0, 0.0],
+            p3: [float("_nip", 0.0), float("_nipsize", 0.5), 0.0, 0.0],
             info: [kind as u32, flags, 0, 0],
         };
         let default_queue = match kind {
@@ -210,7 +216,7 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // WGSL: ten vec4<f32> and one vec4<u32>.
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 176);
+        // WGSL: twelve vec4<f32> and one vec4<u32>.
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 208);
     }
 }

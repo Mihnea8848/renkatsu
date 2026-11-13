@@ -103,6 +103,22 @@ fn hide_undressed_states(scene: &mut Scene, inst: &Instance) {
 
 const MATERIALS: &str = "chara/mm_base.unity3d";
 
+/// Sets or clears one of a skin material's overlay layers.
+fn set_layer(m: &mut crate::scene::MaterialInst, tex: &str, color: &str, image: Option<Arc<Image>>, value: [f32; 4]) {
+    match image {
+        Some(image) => drop(m.textures.insert(
+            tex.into(),
+            TexSlot {
+                image,
+                scale: [1.0, 1.0],
+                offset: [0.0, 0.0],
+            },
+        )),
+        None => drop(m.textures.remove(tex)),
+    }
+    m.colors.insert(color.into(), value);
+}
+
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -169,6 +185,159 @@ impl<'g> Builder<'g> {
             }
         }
         out
+    }
+
+    /// First value of a script field on the prefab, e.g. a `useColor01` flag.
+    fn script_field(&self, inst: &Instance, field: &str) -> Option<rk_unityfs::UValue> {
+        inst.scripts
+            .iter()
+            .find_map(|(_, script)| script.read().ok()?.get(field).cloned())
+    }
+
+    /// Hair colours: base, root and tip on the hair meshes, and the card's
+    /// colours on ornaments that are part of the hair style.
+    fn color_hair(&mut self, inst: &Instance, part: &rk_card::HairPart) {
+        let solid = |c: [f32; 4]| [c[0], c[1], c[2], 1.0];
+        for r in self.listed_renderers(inst, "rendHair") {
+            if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                m.colors.insert("_Color".into(), solid(part.base_color));
+                m.colors.insert("_Color2".into(), solid(part.start_color));
+                m.colors.insert("_Color3".into(), solid(part.end_color));
+                m.colors.insert("_LineColor".into(), part.outline_color);
+            }
+        }
+        let count = match self.script_field(inst, "acsDefColor") {
+            Some(rk_unityfs::UValue::Array(a)) => a.len().min(3),
+            _ => 0,
+        };
+        for r in self.listed_renderers(inst, "rendAccessory") {
+            if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                for (j, name) in ["_Color", "_Color2", "_Color3"].iter().enumerate().take(count) {
+                    if let Some(c) = part.acs_color.get(j) {
+                        m.colors.insert((*name).into(), solid(*c));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Accessory colours, for the colour slots the accessory says it uses.
+    fn color_accessory(&mut self, inst: &Instance, acc: &rk_card::AccessoryPart, hair_root: [f32; 4]) {
+        let uses = |b: &Self, field: &str| b.script_field(inst, field).and_then(|v| v.as_bool()).unwrap_or(false);
+        let slots = [
+            (uses(self, "useColor01"), "_Color"),
+            (uses(self, "useColor02"), "_Color2"),
+            (uses(self, "useColor03"), "_Color3"),
+        ];
+        for r in self.listed_renderers(inst, "rendNormal") {
+            if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                for (k, (used, name)) in slots.iter().enumerate() {
+                    if let (true, Some(c)) = (*used, acc.color.get(k)) {
+                        m.colors.insert((*name).into(), *c);
+                    }
+                }
+            }
+        }
+        if let Some(c) = acc.color.get(3) {
+            for r in self.listed_renderers(inst, "rendAlpha") {
+                // A fully transparent fourth colour switches the part off.
+                self.scene.renderers[r].enabled &= c[3] != 0.0;
+                if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                    m.colors.insert("_Color4".into(), *c);
+                }
+            }
+        }
+        // Hair-like accessories follow the hair's root colour.
+        for r in self.listed_renderers(inst, "rendHair") {
+            if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                for name in ["_Color", "_Color2", "_Color3"] {
+                    m.colors.insert(name.into(), hair_root);
+                }
+            }
+        }
+    }
+
+    /// Eyebrows, eyeliner and the nose line: texture and colour per mesh.
+    fn face_lines(&mut self, card: &Card, inst: &Instance) {
+        let face = &card.face;
+        let up = self.item_image(
+            "eyeline",
+            "ChaFileFace.eyelineUpId",
+            cat::MT_EYELINE_UP,
+            face.eyeline_up_id,
+            "MainAB",
+            "EyelineUpTex",
+        );
+        let up_shadow = self.item_image(
+            "eyeline",
+            "ChaFileFace.eyelineUpId",
+            cat::MT_EYELINE_UP,
+            face.eyeline_up_id,
+            "MainAB",
+            "EyelineShadowTex",
+        );
+        let down = self.item_image(
+            "eyeline",
+            "ChaFileFace.eyelineDownId",
+            cat::MT_EYELINE_DOWN,
+            face.eyeline_down_id,
+            "MainAB",
+            "EyelineDownTex",
+        );
+        let brow = self.item_image(
+            "eyebrow",
+            "ChaFileFace.eyebrowId",
+            cat::MT_EYEBROW,
+            face.eyebrow_id,
+            "MainAB",
+            "EyebrowTex",
+        );
+        let nose = self.item_image(
+            "nose",
+            "ChaFileFace.noseId",
+            cat::MT_NOSE,
+            face.nose_id,
+            "MainAB",
+            "NoseTex",
+        );
+        let skin = card.body.skin_main_color;
+        // (mesh, material index, texture, colour)
+        type Line = (&'static str, usize, Option<Arc<Image>>, Option<[f32; 4]>);
+        let plan: [Line; 5] = [
+            ("cf_O_eyeline", 0, up, Some(face.eyeline_color)),
+            ("cf_O_eyeline", 1, up_shadow, Some(skin)),
+            ("cf_O_eyeline_low", 0, down, Some(face.eyeline_color)),
+            ("cf_O_mayuge", 0, brow, Some(face.eyebrow_color)),
+            ("cf_O_noseline", 0, nose, None),
+        ];
+        for &ri in &inst.renderers {
+            let r = &mut self.scene.renderers[ri];
+            for (mesh, index, image, color) in &plan {
+                let Some(m) = (r.name == *mesh).then(|| r.materials.get_mut(*index)).flatten() else {
+                    continue;
+                };
+                match image {
+                    Some(image) => {
+                        m.textures.insert(
+                            "_MainTex".into(),
+                            TexSlot {
+                                image: image.clone(),
+                                scale: [1.0, 1.0],
+                                offset: [0.0, 0.0],
+                            },
+                        );
+                    }
+                    // "None" in the maker: nothing is drawn.
+                    None => {
+                        m.textures.remove("_MainTex");
+                        m.floats.insert("_Alpha".into(), 0.0);
+                    }
+                }
+                if let Some(c) = color {
+                    m.colors.insert("_Color".into(), *c);
+                }
+            }
+        }
     }
 
     /// Builds a clothing piece's textures from the card's colours and
@@ -510,10 +679,33 @@ impl<'g> Builder<'g> {
                 ],
             },
         });
-        let draw = match (head.get("MatAB"), head.get("MatData")) {
+        let mut draw = match (head.get("MatAB"), head.get("MatData")) {
             (Some(ab), Some(name)) => self.loader.material_by_name(ab, name, head.mod_idx),
             _ => None,
         };
+        let lip = self.item_image(
+            "lip",
+            "ChaFileMakeup.lipId",
+            cat::MT_LIP,
+            makeup.lip_id,
+            "MainAB",
+            "LipTex",
+        );
+        let shadow = self.item_image(
+            "eyeshadow",
+            "ChaFileMakeup.eyeshadowId",
+            cat::MT_EYESHADOW,
+            makeup.eyeshadow_id,
+            "MainAB",
+            "EyeshadowTex",
+        );
+        if let Some(m) = draw.as_mut() {
+            set_layer(m, "_overtex1", "_overcolor1", lip, makeup.lip_color);
+            set_layer(m, "_overtex3", "_overcolor3", shadow, makeup.eyeshadow_color);
+            // The second layer is the blush, which is an expression state.
+            m.textures.remove("_overtex2");
+            m.floats.insert("_nip".into(), 0.0);
+        }
         self.set_skin(inst, "cf_O_face", draw, image);
     }
 }
@@ -615,6 +807,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             };
             b.skin_face(card, makeup, &head, item);
             b.eyes(card, &head);
+            b.face_lines(card, &head);
             let mut hidden = vec![
                 "cf_O_namida_S",
                 "cf_O_namida_M",
@@ -658,7 +851,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let label = format!("hair {}", ["back", "front", "side", "option"][i]);
             let prop = format!("ChaFileHair.{}", cat::HAIR_PROPS[i]);
             if let Some(item) = b.item(&label, &prop, cat::HAIR[i], hp.id) {
-                b.part(&label, item, Some(hair_parent), Part::Hair(i as u8));
+                if let Some(inst) = b.part(&label, item, Some(hair_parent), Part::Hair(i as u8)) {
+                    b.color_hair(&inst, hp);
+                }
             }
         }
     }
@@ -759,6 +954,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     }
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
+                let hair_root = card.hair.parts.first().map(|p| p.start_color).unwrap_or([1.0; 4]);
+                b.color_accessory(&inst, acc, hair_root);
                 for (k, name) in ["N_move", "N_move2"].iter().enumerate() {
                     let Some(node) = b.scene.find(inst.root, name) else {
                         continue;
