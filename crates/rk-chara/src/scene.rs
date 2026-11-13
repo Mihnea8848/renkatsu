@@ -110,6 +110,9 @@ pub struct Instance {
     pub root: usize,
     pub nodes: Vec<usize>,
     pub renderers: Vec<usize>,
+    /// Scene renderer for each renderer component of the prefab, so script
+    /// fields that point at renderers can be followed.
+    pub renderer_keys: HashMap<(usize, i64), usize>,
     /// Scripts attached to the prefab's objects, by node.
     pub scripts: Vec<(usize, ObjRef)>,
 }

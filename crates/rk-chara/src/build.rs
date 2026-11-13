@@ -3,7 +3,7 @@
 
 //! Character assembly, following the order the game's loader uses.
 
-use crate::compose::{self, Decal};
+use crate::compose::{self, ClothColor, Decal};
 use crate::loader::{assign_weights, Loader};
 use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
 use crate::shape::{self, Rules, ShapeSet};
@@ -143,6 +143,205 @@ impl<'g> Builder<'g> {
                 r.materials[0] = draw;
             }
             r.materials[0].textures.insert("_MainTex".into(), slot.clone());
+        }
+    }
+
+    /// Scene renderers a clothing prefab lists under one of its fields
+    /// (`rendNormal01`...). The lists live in a script on the prefab root.
+    fn listed_renderers(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (_, script) in &inst.scripts {
+            let Ok(obj) = script.read() else { continue };
+            let entries: Vec<rk_unityfs::PPtr> = match obj.get(field) {
+                Some(rk_unityfs::UValue::Array(a)) => a.iter().filter_map(|v| v.as_pptr()).collect(),
+                Some(v) => v.as_pptr().into_iter().collect(),
+                None => continue,
+            };
+            for p in entries {
+                if let Some(r) = self
+                    .game
+                    .assets
+                    .deref(&script.file, p)
+                    .and_then(|o| inst.renderer_keys.get(&o.key()).copied())
+                {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// Builds a clothing piece's textures from the card's colours and
+    /// patterns and puts them on the meshes the prefab assigns them to.
+    fn dress(&mut self, inst: &Instance, item: &Item, colors: &[rk_card::ClothesColor], pattern_prop: &str) {
+        let pairs = [
+            (
+                "MainTexAB",
+                "MainTex",
+                "ColorMaskAB",
+                "ColorMaskTex",
+                &["rendNormal01", "rendAlpha01", "rendAccessory"][..],
+            ),
+            (
+                "MainTex02AB",
+                "MainTex02",
+                "ColorMask02AB",
+                "ColorMask02Tex",
+                &["rendNormal02"][..],
+            ),
+            (
+                "MainTex03AB",
+                "MainTex03",
+                "ColorMask03AB",
+                "ColorMask03Tex",
+                &["rendNormal03"][..],
+            ),
+        ];
+        let mut patterns = [None, None, None];
+        for (k, slot) in patterns.iter_mut().enumerate() {
+            let Some(c) = colors.get(k) else { continue };
+            if c.pattern != 0 {
+                *slot = self.item_image(
+                    "pattern",
+                    &format!("{pattern_prop}{k}"),
+                    cat::MT_PATTERN,
+                    c.pattern,
+                    "MainTexAB",
+                    "MainTex",
+                );
+            }
+        }
+        let color = |k: usize| {
+            let c = colors.get(k).cloned().unwrap_or_default();
+            ClothColor {
+                base: c.base_color,
+                pattern: patterns[k].as_deref(),
+                pattern_color: c.pattern_color,
+                tiling: c.tiling,
+            }
+        };
+        let cloth = [color(0), color(1), color(2)];
+        for (main_ab, main_tex, mask_ab, mask_tex, fields) in pairs {
+            let ab = |key: &str| item.get(key).or_else(|| item.get("MainAB"));
+            let (Some(main), Some(mask)) = (
+                ab(main_ab)
+                    .zip(item.get(main_tex))
+                    .and_then(|(ab, t)| self.loader.image_by_name(ab, t, item.mod_idx)),
+                ab(mask_ab)
+                    .zip(item.get(mask_tex))
+                    .and_then(|(ab, t)| self.loader.image_by_name(ab, t, item.mod_idx)),
+            ) else {
+                continue;
+            };
+            let targets: Vec<usize> = fields.iter().flat_map(|f| self.listed_renderers(inst, f)).collect();
+            if targets.is_empty() {
+                continue;
+            }
+            let image = Arc::new(compose::clothes(&main, &mask, &cloth));
+            for r in targets {
+                if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                    m.textures.insert(
+                        "_MainTex".into(),
+                        TexSlot {
+                            image: image.clone(),
+                            scale: [1.0, 1.0],
+                            offset: [0.0, 0.0],
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Builds iris and eye-white textures and sets the eye highlights.
+    fn eyes(&mut self, card: &Card, inst: &Instance) {
+        let face = &card.face;
+        let white = self.item_image(
+            "eye white",
+            "ChaFileFace.whiteId",
+            cat::MT_EYE_WHITE,
+            face.white_id,
+            "MainAB",
+            "EyeWhiteTex",
+        );
+        let white = Arc::new(compose::eye_white(
+            512,
+            white.as_deref(),
+            face.white_base_color,
+            face.white_sub_color,
+        ));
+        let hl_up = self.item_image(
+            "eye highlight",
+            "ChaFileFace.hlUpId",
+            cat::MT_EYE_HI_UP,
+            face.hl_up_id,
+            "MainAB",
+            "EyeHiUpTex",
+        );
+        let hl_down = self.item_image(
+            "eye highlight",
+            "ChaFileFace.hlDownId",
+            cat::MT_EYE_HI_DOWN,
+            face.hl_down_id,
+            "MainAB",
+            "EyeHiDownTex",
+        );
+        let slot = |image: Arc<Image>| TexSlot {
+            image,
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        };
+
+        for (side, (iris_mesh, white_mesh)) in [("cf_Ohitomi_L02", "cf_Ohitomi_L"), ("cf_Ohitomi_R02", "cf_Ohitomi_R")]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(pupil) = face.pupil.get(side) else { continue };
+            let main = self.item_image(
+                "pupil",
+                &format!("ChaFileFace.Pupil{}", side + 1),
+                cat::MT_EYE,
+                pupil.id,
+                "MainAB",
+                "EyeTex",
+            );
+            let gradient = self.item_image(
+                "pupil gradient",
+                &format!("ChaFileFace.PupilGradient{}", side + 1),
+                cat::MT_EYE_GRADATION,
+                pupil.grad_mask_id,
+                "ColorMaskAB",
+                "ColorMaskTex",
+            );
+            let iris = Arc::new(compose::eye(&compose::EyeInputs {
+                size: 512,
+                main: main.as_deref(),
+                gradient: gradient.as_deref(),
+                base: pupil.base_color,
+                sub: pupil.sub_color,
+                blend: pupil.grad_blend,
+                gradient_offset_y: pupil.grad_offset_y,
+                gradient_scale: pupil.grad_scale,
+            }));
+            for &ri in &inst.renderers {
+                let r = &mut self.scene.renderers[ri];
+                let Some(m) = r.materials.first_mut() else { continue };
+                if r.name == iris_mesh {
+                    m.textures.insert("_MainTex".into(), slot(iris.clone()));
+                    for (tex, color, image, value) in [
+                        ("_overtex1", "_overcolor1", &hl_up, face.hl_up_color),
+                        ("_overtex2", "_overcolor2", &hl_down, face.hl_down_color),
+                    ] {
+                        match image {
+                            Some(image) => drop(m.textures.insert(tex.into(), slot(image.clone()))),
+                            None => drop(m.textures.remove(tex)),
+                        }
+                        m.colors.insert(color.into(), value);
+                    }
+                } else if r.name == white_mesh {
+                    m.textures.insert("_MainTex".into(), slot(white.clone()));
+                }
+            }
         }
     }
 
@@ -415,6 +614,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 _ => &card.face.base_makeup,
             };
             b.skin_face(card, makeup, &head, item);
+            b.eyes(card, &head);
             let mut hidden = vec![
                 "cf_O_namida_S",
                 "cf_O_namida_M",
@@ -481,9 +681,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     continue;
                 };
                 let inst = b.part(&label, item, Some(top), Part::Clothes(i as u8));
+                let pattern_prop = format!("outfit{outfit}.ChaFileClothes.{}Pattern", cat::CLOTHES_PROPS[i]);
                 if let Some(inst) = &inst {
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
                     hide_undressed_states(&mut b.scene, inst);
+                    b.dress(inst, item, &cp.color_info, &pattern_prop);
                 }
                 // Sailor and jacket tops are assembled from three sub-parts.
                 let kind = item.int("Kind").unwrap_or(0);
@@ -509,6 +711,13 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         if let Some(inst) = b.part(&sub_label, sub, Some(top), Part::Clothes(0)) {
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root");
                             hide_undressed_states(&mut b.scene, &inst);
+                            // Sub-parts share the top's colours. The third
+                            // one takes its first colour from the fourth entry.
+                            let mut colors = cp.color_info.clone();
+                            if k == 2 && colors.len() > 3 {
+                                colors[0] = colors[3].clone();
+                            }
+                            b.dress(&inst, sub, &colors, &pattern_prop);
                         }
                     }
                 }

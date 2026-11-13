@@ -166,6 +166,7 @@ impl<'a> Loader<'a> {
             root: 0,
             nodes: Vec::new(),
             renderers: Vec::new(),
+            renderer_keys: HashMap::new(),
             scripts: Vec::new(),
         };
 
@@ -260,6 +261,7 @@ impl<'a> Loader<'a> {
                         .and_then(|t| by_transform.get(&t.key()).copied())
                 })
                 .collect();
+            inst.renderer_keys.insert(p.renderer.key(), scene.renderers.len());
             inst.renderers.push(scene.renderers.len());
             scene.renderers.push(RendererInst {
                 name,

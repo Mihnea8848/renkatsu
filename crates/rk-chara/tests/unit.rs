@@ -246,6 +246,7 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         root: top,
         nodes: vec![top, own_root, own_hips, extra, mesh_node],
         renderers: vec![0],
+        renderer_keys: HashMap::new(),
         scripts: Vec::new(),
     };
 
