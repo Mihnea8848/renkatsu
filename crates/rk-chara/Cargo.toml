@@ -13,6 +13,4 @@ rk-card.workspace = true
 rk-unityfs.workspace = true
 rk-vfs.workspace = true
 rmpv.workspace = true
-
-[dev-dependencies]
 rayon.workspace = true

@@ -6,6 +6,7 @@
 
 pub mod abmx;
 pub mod build;
+pub mod compose;
 pub mod loader;
 pub mod scene;
 pub mod shape;

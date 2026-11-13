@@ -3,14 +3,16 @@
 
 //! Character assembly, following the order the game's loader uses.
 
+use crate::compose::{self, Decal};
 use crate::loader::{assign_weights, Loader};
-use crate::scene::{euler_deg, Instance, Part, Scene};
+use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
 use crate::shape::{self, Rules, ShapeSet};
 use anyhow::{Context, Result};
 use glam::Vec3;
 use rk_card::Card;
 use rk_vfs::{cat, resolve_infos, Game, Item, Lookup, ResolveInfo};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const BASE: &str = "chara/oo_base.unity3d";
 
@@ -99,6 +101,224 @@ fn hide_undressed_states(scene: &mut Scene, inst: &Instance) {
     }
 }
 
+const MATERIALS: &str = "chara/mm_base.unity3d";
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+impl<'g> Builder<'g> {
+    /// Texture of an item, named by two of its list columns.
+    fn item_image(
+        &mut self,
+        label: &str,
+        property: &str,
+        category: i32,
+        id: i32,
+        ab_key: &str,
+        tex_key: &str,
+    ) -> Option<Arc<Image>> {
+        let item = self.item(label, property, category, id)?;
+        self.loader
+            .image_by_name(item.get(ab_key)?, item.get(tex_key)?, item.mod_idx)
+    }
+
+    /// Puts a composed texture on a renderer, swapping in the material the
+    /// game draws that surface with when it can be loaded.
+    fn set_skin(&mut self, inst: &Instance, renderer: &str, draw: Option<crate::scene::MaterialInst>, image: Image) {
+        let slot = TexSlot {
+            image: Arc::new(image),
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        };
+        for &ri in &inst.renderers {
+            let r = &mut self.scene.renderers[ri];
+            if r.name != renderer {
+                continue;
+            }
+            if r.materials.is_empty() {
+                r.materials.push(Default::default());
+            }
+            if let Some(draw) = draw.clone() {
+                r.materials[0] = draw;
+            }
+            r.materials[0].textures.insert("_MainTex".into(), slot.clone());
+        }
+    }
+
+    /// Builds the body skin texture from the card.
+    fn skin_body(&mut self, card: &Card, inst: &Instance, female: bool) {
+        let body = &card.body;
+        let main = self.loader.image_by_name(BASE, "cf_body_00_t", None);
+        let mask = self
+            .loader
+            .image_by_name(BASE, if female { "cf_body_00_mc" } else { "cm_body_00_mc" }, None);
+        let create = self.loader.material_by_name(MATERIALS, "cf_m_body_create", None);
+        let paint_mask = create
+            .as_ref()
+            .and_then(|m| m.textures.get("_paintmask"))
+            .map(|t| t.image.clone());
+        let sunburn = self.item_image(
+            "sunburn",
+            "ChaFileBody.sunburnId",
+            cat::MT_SUNBURN,
+            body.sunburn_id,
+            "MainAB",
+            "SunburnTex",
+        );
+
+        let mut images = [None, None];
+        let mut layouts = [[0.0f32; 4]; 2];
+        for k in 0..2 {
+            let Some(&id) = body.paint_id.get(k) else { continue };
+            let prop = format!("ChaFileBody.PaintID{}", k + 1);
+            images[k] = self.item_image("body paint", &prop, cat::MT_BODY_PAINT, id, "MainAB", "PaintTex");
+            let layout_id = body.paint_layout_id.get(k).copied().unwrap_or(0);
+            let prop = format!("ChaFileBody.PaintLayoutID{}", k + 1);
+            let (Some(item), Some(l)) = (
+                self.item("body paint layout", &prop, cat::BODYPAINT_LAYOUT, layout_id),
+                body.paint_layout.get(k),
+            ) else {
+                continue;
+            };
+            let f = |key: &str| item.float(key).unwrap_or(0.0);
+            layouts[k] = [
+                lerp(f("CenterX") + f("MoveX"), f("CenterX") - f("MoveX"), l[0]),
+                lerp(f("CenterY") + f("MoveY"), f("CenterY") - f("MoveY"), l[1]),
+                lerp(-1.0, 1.0, l[2]),
+                lerp(f("CenterScale") - f("AddScale"), f("CenterScale") + f("AddScale"), l[3]),
+            ];
+        }
+        let decal = |k: usize| Decal {
+            image: images[k].as_deref(),
+            color: body.paint_color.get(k).copied().unwrap_or([1.0; 4]),
+            layout: layouts[k],
+        };
+        let image = compose::body(&compose::BodyInputs {
+            size: 2048,
+            main: main.as_deref(),
+            color_mask: mask.as_deref(),
+            skin_main: body.skin_main_color,
+            skin_sub: body.skin_sub_color,
+            nail: body.nail_color,
+            sunburn: sunburn.as_deref(),
+            sunburn_color: body.sunburn_color,
+            paint_mask: paint_mask.as_deref(),
+            paints: [decal(0), decal(1)],
+        });
+        let draw = self
+            .loader
+            .material_by_name(MATERIALS, if female { "cf_m_body" } else { "cm_m_body" }, None);
+        self.set_skin(inst, "o_body_a", draw, image);
+    }
+
+    /// Builds the face skin texture from the card and the active makeup.
+    fn skin_face(&mut self, card: &Card, makeup: &rk_card::Makeup, inst: &Instance, head: &Item) {
+        let face = &card.face;
+        let image_of =
+            |b: &mut Self, ab: &str, tex: &str| b.loader.image_by_name(head.get(ab)?, head.get(tex)?, head.mod_idx);
+        let main = image_of(self, "MainTexAB", "MainTex");
+        let mask = image_of(self, "ColorMaskAB", "ColorMaskTex");
+        let create = self.loader.material_by_name(MATERIALS, "cf_m_face_create", None);
+        let paint_mask = create
+            .as_ref()
+            .and_then(|m| m.textures.get("_paintmask"))
+            .map(|t| t.image.clone());
+        let vector = |name: &str| {
+            create
+                .as_ref()
+                .and_then(|m| m.colors.get(name))
+                .copied()
+                .unwrap_or([0.0; 4])
+        };
+
+        let cheek = self.item_image(
+            "cheek",
+            "ChaFileMakeup.cheekId",
+            cat::MT_CHEEK,
+            makeup.cheek_id,
+            "MainAB",
+            "CheekTex",
+        );
+        let lip_line = self.item_image(
+            "lip line",
+            "ChaFileFace.lipLineId",
+            cat::MT_LIPLINE,
+            face.lip_line_id,
+            "MainAB",
+            "LiplineTex",
+        );
+        let mole = self.item_image(
+            "mole",
+            "ChaFileFace.moleId",
+            cat::MT_MOLE,
+            face.mole_id,
+            "MainAB",
+            "MoleTex",
+        );
+        let mut paints = [None, None];
+        for (k, paint) in paints.iter_mut().enumerate() {
+            let Some(&id) = makeup.paint_id.get(k) else { continue };
+            *paint = self.item_image(
+                "face paint",
+                &format!("ChaFileMakeup.PaintID{}", k + 1),
+                cat::MT_FACE_PAINT,
+                id,
+                "MainAB",
+                "PaintTex",
+            );
+        }
+        let paint = |k: usize| {
+            let l = makeup.paint_layout.get(k).copied().unwrap_or([0.5; 4]);
+            Decal {
+                image: paints[k].as_deref(),
+                color: makeup.paint_color.get(k).copied().unwrap_or([1.0; 4]),
+                layout: [
+                    lerp(0.25, -0.25, l[0]),
+                    lerp(0.3, -0.3, l[1]),
+                    lerp(1.0, -1.0, l[2]),
+                    lerp(-8.0, 0.7, l[3]),
+                ],
+            }
+        };
+        let m = face.mole_layout;
+        let image = compose::face(&compose::FaceInputs {
+            size: 1024,
+            main: main.as_deref(),
+            color_mask: mask.as_deref(),
+            skin_main: card.body.skin_main_color,
+            skin_sub: card.body.skin_sub_color,
+            cheek: Decal {
+                image: cheek.as_deref(),
+                color: makeup.cheek_color,
+                layout: vector("_tex4uv"),
+            },
+            lip_line: Decal {
+                image: lip_line.as_deref(),
+                color: face.lip_line_color,
+                layout: vector("_tex5uv"),
+            },
+            paint_mask: paint_mask.as_deref(),
+            paints: [paint(0), paint(1)],
+            mole: Decal {
+                image: mole.as_deref(),
+                color: face.mole_color,
+                layout: [
+                    lerp(0.25, -0.25, m[0]),
+                    lerp(0.3, -0.3, m[1]),
+                    0.0,
+                    lerp(0.0, 0.7, m[3]),
+                ],
+            },
+        });
+        let draw = match (head.get("MatAB"), head.get("MatData")) {
+            (Some(ab), Some(name)) => self.loader.material_by_name(ab, name, head.mod_idx),
+            _ => None,
+        };
+        self.set_skin(inst, "cf_O_face", draw, image);
+    }
+}
+
 pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character> {
     let mut b = Builder {
         loader: Loader::new(game),
@@ -137,6 +357,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .loader
         .load_prefab(&mut b.scene, BASE, body_name, None, Some(top), Part::Body)?;
     assign_weights(&mut b.scene, &body, &bones, "cf_j_root");
+
+    b.skin_body(card, &body, female);
 
     // Parts the game only shows in special states.
     for name in [
@@ -187,6 +409,12 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot");
+            let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
+            let makeup = match card.coordinates.get(outfit) {
+                Some(co) if co.enable_makeup => &co.makeup,
+                _ => &card.face.base_makeup,
+            };
+            b.skin_face(card, makeup, &head, item);
             let mut hidden = vec![
                 "cf_O_namida_S",
                 "cf_O_namida_M",

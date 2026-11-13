@@ -37,6 +37,9 @@ impl Item {
     pub fn int(&self, key: &str) -> Option<i32> {
         self.raw(key)?.trim().parse().ok()
     }
+    pub fn float(&self, key: &str) -> Option<f32> {
+        self.raw(key)?.trim().parse().ok()
+    }
     pub fn name(&self) -> &str {
         self.raw("Name").unwrap_or("")
     }
