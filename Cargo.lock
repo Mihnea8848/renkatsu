@@ -1073,6 +1073,7 @@ dependencies = [
  "rk-unityfs",
  "rk-vfs",
  "rmpv",
+ "roxmltree",
 ]
 
 [[package]]

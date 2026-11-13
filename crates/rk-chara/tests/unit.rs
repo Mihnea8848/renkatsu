@@ -492,3 +492,30 @@ fn material_editor_overrides_find_their_materials() {
     // Character-wide entries reach any renderer by material name.
     assert_eq!(scene.renderers[2].materials[0].colors["_Color"], [0.5, 0.25, 0.0, 1.0]);
 }
+
+#[test]
+fn old_more_accessories_xml_is_read() {
+    let xml = r#"<additionalAccessories version="2.0.21.1"><accessorySet type="0"><accessory type="123" id="100" parentKey="a_n_headside" addMove00x="1.2" addMove00y="-9" addMove00z="-6" addMove02x="1" addMove02y="1.4" addMove02z="1" color0r="0.5" color0g="0.25" color0b="0" color0a="1" hideCategory="1" noShake="true" /><accessory type="120" id="0" parentKey="" /></accessorySet><accessorySet type="2" /></additionalAccessories>"#;
+    let mut plugin = PluginData::default();
+    plugin.data.insert("additionalAccessories".into(), Value::from(xml));
+    let mut ext = ExtData::new();
+    ext.insert(rk_chara::more_accessories::KEY.into(), plugin);
+
+    let sets = rk_chara::more_accessories::read(&ext);
+    assert_eq!(sets.len(), 2);
+    assert!(sets[&2].is_empty());
+    let first = &sets[&0][0];
+    assert_eq!(
+        (first.kind, first.id, first.parent_key.as_str()),
+        (123, 100, "a_n_headside")
+    );
+    assert_eq!(first.add_move.get(0, 0), Some(&[1.2, -9.0, -6.0]));
+    assert_eq!(first.add_move.get(0, 2), Some(&[1.0, 1.4, 1.0]));
+    // Missing values fall back to no rotation and unit scale.
+    assert_eq!(first.add_move.get(1, 1), Some(&[0.0, 0.0, 0.0]));
+    assert_eq!(first.add_move.get(1, 2), Some(&[1.0, 1.0, 1.0]));
+    assert_eq!(first.color[0], [0.5, 0.25, 0.0, 1.0]);
+    assert_eq!((first.hide_category, first.no_shake), (1, true));
+    assert!(sets[&0][1].is_empty());
+    assert!(rk_chara::more_accessories::read(&ExtData::new()).is_empty());
+}
