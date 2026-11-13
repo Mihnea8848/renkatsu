@@ -38,6 +38,8 @@ pub struct Character {
     pub top: usize,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
+    /// The scene's shading ramp: light amount to brightness.
+    pub ramp: Option<std::sync::Arc<crate::scene::Image>>,
     pub warnings: Vec<String>,
 }
 
@@ -348,10 +350,19 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     if !mods.is_empty() {
         crate::abmx::apply(&mut b.scene, &mods, outfit, &bones, &accessory_nodes);
     }
+    // The game's default ramp. Studio scenes can pick another one.
+    let ramp = game.items.vanilla(cat::MT_RAMP, 1).and_then(|item| {
+        b.loader
+            .image_by_name(item.get("MainTexAB")?, item.get("MainTex")?, None)
+    });
+    if ramp.is_none() {
+        b.loader.warn("shading ramp not found, using a hard edge");
+    }
     Ok(Character {
         scene: b.scene,
         top,
         bones,
+        ramp,
         warnings: b.loader.warnings,
     })
 }

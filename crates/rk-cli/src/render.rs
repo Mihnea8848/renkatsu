@@ -5,7 +5,7 @@ use anyhow::Result;
 use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_core::Config;
-use rk_render::{bounds, save_png, Camera, Renderer};
+use rk_render::{bounds, save_png, Camera, Environment, Renderer};
 use rk_vfs::Game;
 use std::path::Path;
 use std::time::Instant;
@@ -52,7 +52,11 @@ pub fn render(a: Args) -> Result<()> {
     let (min, max) = bounds(&draws);
     let camera = Camera::frame(min, max, a.width as f32 / a.height as f32, a.yaw);
     let mut renderer = Renderer::new()?;
-    let pixels = renderer.render(&draws, &camera, a.width, a.height, [0.93, 0.93, 0.95, 1.0])?;
+    let env = Environment {
+        ramp: chara.ramp.clone(),
+        ..Default::default()
+    };
+    let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, [0.93, 0.93, 0.95, 1.0])?;
     save_png(a.out, a.width, a.height, &pixels)?;
     println!(
         "{}: {} meshes, {} nodes, built in {:.2}s, total {:.2}s -> {}",

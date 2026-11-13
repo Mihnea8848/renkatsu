@@ -9,7 +9,7 @@ use glam::Vec3;
 use rk_card::Card;
 use rk_chara::{BuildOptions, Part};
 use rk_core::Config;
-use rk_render::{bounds, load_png, save_png, Camera, Renderer};
+use rk_render::{bounds, load_png, save_png, Camera, Environment, Renderer};
 use rk_vfs::Game;
 use std::path::{Path, PathBuf};
 
@@ -158,7 +158,11 @@ pub fn compare(cards: Vec<PathBuf>, count: usize, out: &Path) -> Result<()> {
         };
         let camera = Camera::frame(min, max, CELL_W as f32 / CELL_H as f32, 0.0);
         renderer.clear_textures();
-        let pixels = renderer.render(&draws, &camera, CELL_W, CELL_H, [0.93, 0.93, 0.95, 1.0])?;
+        let env = Environment {
+            ramp: chara.ramp.clone(),
+            ..Default::default()
+        };
+        let pixels = renderer.render(&draws, &camera, &env, CELL_W, CELL_H, [0.93, 0.93, 0.95, 1.0])?;
         sheet.blit(i, 1, CELL_W, CELL_H, &pixels);
         println!(
             "{:>3} {} ({} warnings)",

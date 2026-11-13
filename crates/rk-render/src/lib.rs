@@ -4,10 +4,13 @@
 //! wgpu renderer for assembled characters. Scene data stays in the stored
 //! conventions: left-handed, Y up, clockwise front faces.
 
+pub mod material;
+
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use rk_chara::{DrawMesh, Image, MaterialInst};
+use material::{MaterialDesc, MaterialUniform};
+use rk_chara::{DrawMesh, Image};
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -60,7 +63,9 @@ impl Camera {
 struct Vertex {
     pos: [f32; 3],
     normal: [f32; 3],
-    uv: [f32; 2],
+    uv0: [f32; 2],
+    uv1: [f32; 2],
+    uv2: [f32; 2],
 }
 
 #[repr(C)]
@@ -69,25 +74,56 @@ struct Globals {
     view_proj: [f32; 16],
     light_dir: [f32; 4],
     eye: [f32; 4],
+    ambient_shadow: [f32; 4],
+    line_color: [f32; 4],
+    params: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct MaterialUniform {
-    color: [f32; 4],
-    st: [f32; 4],
-    params: [f32; 4],
+/// Scene-wide shading settings. The defaults are the game's own.
+#[derive(Debug, Clone)]
+pub struct Environment {
+    /// Light amount to brightness. `None` gives a hard light/shadow edge.
+    pub ramp: Option<Arc<Image>>,
+    /// Colour of shadows across the scene.
+    pub shadow_color: [f32; 3],
+    /// How dark shadows get, 0 to 1.
+    pub shadow_depth: f32,
+    /// How dark outlines and drawn lines get, 0 to 1.
+    pub line_depth: f32,
+    pub line_width: f32,
+    pub light_intensity: f32,
+    pub ambient: f32,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self {
+            ramp: None,
+            shadow_color: [0.5, 0.5, 0.5],
+            shadow_depth: 0.26,
+            line_depth: 1.0,
+            line_width: 0.307,
+            light_intensity: 1.0,
+            // The reference shaders add 0.666 here, which clips skin and whites.
+            // 0.4 keeps a fully lit surface at its own colour until this is
+            // calibrated against game captures.
+            ambient: 0.4,
+        }
+    }
 }
 
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
+    opaque: wgpu::RenderPipeline,
+    blend: wgpu::RenderPipeline,
+    outline: wgpu::RenderPipeline,
     globals_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     sampler_repeat: wgpu::Sampler,
     sampler_clamp: wgpu::Sampler,
     white: wgpu::TextureView,
+    hard_ramp: wgpu::TextureView,
     textures: HashMap<usize, wgpu::TextureView>,
 }
 
@@ -123,6 +159,48 @@ fn mip_chain(width: u32, height: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
     out
 }
 
+fn texture_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Pass {
+    Opaque,
+    Blend,
+    Outline,
+}
+
 impl Renderer {
     pub fn new() -> Result<Self> {
         pollster::block_on(Self::new_async())
@@ -154,94 +232,85 @@ impl Renderer {
             .await?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("basic"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("basic.wgsl").into()),
+            label: Some("toon"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("toon.wgsl").into()),
         });
-        let uniform_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
-        });
-        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("material"),
             entries: &[
-                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                uniform_entry(0),
+                texture_entry(1, wgpu::ShaderStages::FRAGMENT),
+                sampler_entry(2),
             ],
         });
+        let mut material_entries = vec![uniform_entry(0)];
+        for i in 0..material::SLOTS.len() as u32 {
+            material_entries.push(texture_entry(1 + i, wgpu::ShaderStages::VERTEX_FRAGMENT));
+        }
+        material_entries.push(sampler_entry(1 + material::SLOTS.len() as u32));
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material"),
+            entries: &material_entries,
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("basic"),
+            label: Some("toon"),
             bind_group_layouts: &[&globals_layout, &material_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("basic"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: COLOR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: SAMPLES,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        let pipeline = |pass: Pass| {
+            let (vs, fs) = if pass == Pass::Outline {
+                ("vs_outline", "fs_outline")
+            } else {
+                ("vs_main", "fs_main")
+            };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fs),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: COLOR_FORMAT,
+                        blend: (pass == Pass::Blend).then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Cw,
+                    // The outline is the mesh's back faces, pushed outward.
+                    cull_mode: (pass == Pass::Outline).then_some(wgpu::Face::Front),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: pass != Pass::Blend,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    // Blended layers lie on top of the surface they decorate.
+                    bias: if pass == Pass::Blend {
+                        wgpu::DepthBiasState { constant: -8, slope_scale: -1.0, clamp: 0.0 }
+                    } else {
+                        Default::default()
+                    },
+                }),
+                multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
+                multiview: None,
+                cache: None,
+            })
+        };
+        let (opaque, blend, outline) = (pipeline(Pass::Opaque), pipeline(Pass::Blend), pipeline(Pass::Outline));
         let sampler = |mode| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: mode,
@@ -256,15 +325,23 @@ impl Renderer {
         let sampler_repeat = sampler(wgpu::AddressMode::Repeat);
         let sampler_clamp = sampler(wgpu::AddressMode::ClampToEdge);
         let white = Self::upload(&device, &queue, 1, 1, &[255, 255, 255, 255]);
+        // Fallback ramp: dark below half light, bright above.
+        let hard: Vec<u8> = (0..16)
+            .flat_map(|i| if i < 8 { [0u8, 0, 0, 255] } else { [255, 255, 255, 255] })
+            .collect();
+        let hard_ramp = Self::upload(&device, &queue, 16, 1, &hard);
         Ok(Self {
             device,
             queue,
-            pipeline,
+            opaque,
+            blend,
+            outline,
             globals_layout,
             material_layout,
             sampler_repeat,
             sampler_clamp,
             white,
+            hard_ramp,
             textures: HashMap::new(),
         })
     }
@@ -330,50 +407,44 @@ impl Renderer {
         view
     }
 
-    fn material_bind_group(&mut self, mat: Option<&MaterialInst>) -> wgpu::BindGroup {
-        let mut uniform = MaterialUniform {
-            color: [1.0; 4],
-            st: [1.0, 1.0, 0.0, 0.0],
-            params: [0.5, 0.0, 0.0, 0.0],
-        };
-        let mut view = self.white.clone();
-        let mut repeat = true;
-        if let Some(mat) = mat {
-            if let Some(c) = mat.colors.get("_Color") {
-                uniform.color = [c[0], c[1], c[2], 1.0];
-            }
-            if let Some(slot) = mat.textures.get("_MainTex") {
-                view = self.texture(&slot.image);
-                repeat = slot.image.repeat;
-                uniform.st = [slot.scale[0], slot.scale[1], slot.offset[0], slot.offset[1]];
-            }
-        }
+    fn material_bind_group(&mut self, desc: &MaterialDesc) -> wgpu::BindGroup {
+        let views: Vec<wgpu::TextureView> = desc
+            .textures
+            .iter()
+            .map(|t| {
+                t.as_ref()
+                    .map(|i| self.texture(i))
+                    .unwrap_or_else(|| self.white.clone())
+            })
+            .collect();
+        let repeat = desc.textures[0].as_ref().is_none_or(|i| i.repeat);
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::bytes_of(&uniform),
+            contents: bytemuck::bytes_of::<MaterialUniform>(&desc.uniform),
             usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }];
+        for (i, v) in views.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1 + i as u32,
+                resource: wgpu::BindingResource::TextureView(v),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1 + views.len() as u32,
+            resource: wgpu::BindingResource::Sampler(if repeat {
+                &self.sampler_repeat
+            } else {
+                &self.sampler_clamp
+            }),
         });
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.material_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(if repeat {
-                        &self.sampler_repeat
-                    } else {
-                        &self.sampler_clamp
-                    }),
-                },
-            ],
+            entries: &entries,
         })
     }
 
@@ -382,6 +453,7 @@ impl Renderer {
         &mut self,
         draws: &[DrawMesh],
         camera: &Camera,
+        env: &Environment,
         width: u32,
         height: u32,
         background: [f64; 4],
@@ -395,30 +467,61 @@ impl Renderer {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
+            ambient_shadow: [
+                env.shadow_color[0],
+                env.shadow_color[1],
+                env.shadow_color[2],
+                1.0 - env.shadow_depth,
+            ],
+            line_color: [0.5, 0.5, 0.5, 1.0 - env.line_depth],
+            params: [env.line_width, env.light_intensity, env.ambient, 0.0],
         };
         let globals_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globals"),
             contents: bytemuck::bytes_of(&globals),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let ramp = match &env.ramp {
+            Some(image) => self.texture(image),
+            None => self.hard_ramp.clone(),
+        };
         let globals_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.globals_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: globals_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ramp),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_clamp),
+                },
+            ],
         });
 
         struct Batch {
             vb: wgpu::Buffer,
             ib: wgpu::Buffer,
-            parts: Vec<(u32, u32, wgpu::BindGroup)>,
+        }
+        struct Item {
+            batch: usize,
+            first: u32,
+            count: u32,
+            queue: i32,
+            blended: bool,
+            outline: bool,
+            bind: wgpu::BindGroup,
         }
         let mut batches = Vec::new();
+        let mut items = Vec::new();
         for d in draws {
             let mesh = &d.renderer.mesh;
-            let uv = &mesh.uv[0];
+            let uv = |set: usize, i: usize| mesh.uv[set].get(i).copied().unwrap_or([0.0, 0.0]);
             let verts: Vec<Vertex> = d
                 .positions
                 .iter()
@@ -426,7 +529,9 @@ impl Renderer {
                 .map(|(i, p)| Vertex {
                     pos: *p,
                     normal: d.normals[i],
-                    uv: uv.get(i).copied().unwrap_or([0.0, 0.0]),
+                    uv0: uv(0, i),
+                    uv1: uv(1, i),
+                    uv2: uv(2, i),
                 })
                 .collect();
             if verts.is_empty() || mesh.indices.is_empty() {
@@ -442,16 +547,26 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            let mut parts = Vec::new();
             for (si, sm) in mesh.submeshes.iter().enumerate() {
                 if sm.topology != 0 || sm.index_count == 0 {
                     continue;
                 }
-                let bg = self.material_bind_group(d.renderer.materials.get(si));
-                parts.push((sm.first_index, sm.index_count, bg));
+                let desc = MaterialDesc::new(d.renderer.materials.get(si));
+                let bind = self.material_bind_group(&desc);
+                items.push(Item {
+                    batch: batches.len(),
+                    first: sm.first_index,
+                    count: sm.index_count,
+                    queue: desc.queue,
+                    blended: desc.blended,
+                    outline: desc.outline,
+                    bind,
+                });
             }
-            batches.push(Batch { vb, ib, parts });
+            batches.push(Batch { vb, ib });
         }
+        // Unity order: by render queue, ties in submission order.
+        items.sort_by_key(|i| i.queue);
 
         let size = wgpu::Extent3d {
             width,
@@ -508,14 +623,28 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &globals_bg, &[]);
-            for b in &batches {
-                pass.set_vertex_buffer(0, b.vb.slice(..));
-                pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
-                for (first, count, bg) in &b.parts {
-                    pass.set_bind_group(1, bg, &[]);
-                    pass.draw_indexed(*first..*first + *count, 0, 0..1);
+            // Solid surfaces, their outlines, then blended layers on top.
+            for which in [Pass::Opaque, Pass::Outline, Pass::Blend] {
+                pass.set_pipeline(match which {
+                    Pass::Opaque => &self.opaque,
+                    Pass::Outline => &self.outline,
+                    Pass::Blend => &self.blend,
+                });
+                for item in &items {
+                    let wanted = match which {
+                        Pass::Opaque => !item.blended,
+                        Pass::Outline => item.outline,
+                        Pass::Blend => item.blended,
+                    };
+                    if !wanted {
+                        continue;
+                    }
+                    let b = &batches[item.batch];
+                    pass.set_vertex_buffer(0, b.vb.slice(..));
+                    pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_bind_group(1, &item.bind, &[]);
+                    pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
                 }
             }
         }
@@ -614,21 +743,20 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgpu::naga::front::wgsl::parse_str(include_str!("basic.wgsl")).expect("basic.wgsl parses");
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("toon.wgsl")).expect("toon.wgsl parses");
         wgpu::naga::valid::Validator::new(
             wgpu::naga::valid::ValidationFlags::all(),
             wgpu::naga::valid::Capabilities::empty(),
         )
         .validate(&module)
-        .expect("basic.wgsl validates");
+        .expect("toon.wgsl validates");
     }
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 + 2 vec4 for globals, 3 vec4 for materials.
-        assert_eq!(std::mem::size_of::<Globals>(), 96);
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 48);
-        assert_eq!(std::mem::size_of::<Vertex>(), 32);
+        // WGSL: mat4x4 and five vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 144);
+        assert_eq!(std::mem::size_of::<Vertex>(), 48);
     }
 
     #[test]
