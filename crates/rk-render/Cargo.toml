@@ -8,7 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 glam.workspace = true
 wgpu = "24.0"
-pollster = "0.4"
+pollster = "1.0"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.17"
 rk-chara.workspace = true
