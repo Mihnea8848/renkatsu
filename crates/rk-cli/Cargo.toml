@@ -1,0 +1,21 @@
+[package]
+name = "rk-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+rk-core.workspace = true
+rk-card.workspace = true
+rmpv.workspace = true
+rk-unityfs.workspace = true
+rk-vfs.workspace = true
+rk-chara.workspace = true
+rk-render.workspace = true
