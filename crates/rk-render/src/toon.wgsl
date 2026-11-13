@@ -178,7 +178,8 @@ fn read_surface(i: VsOut) -> Surface {
     }
     let kind = m.info.x;
     var tint = vec3<f32>(1.0);
-    if (has(HAS_COLOR_MASK)) {
+    // Skin has its colours baked into the main texture already.
+    if (has(HAS_COLOR_MASK) && kind != KIND_SKIN) {
         let mask = textureSample(color_mask_tex, samp, i.uv0);
         tint = mix(tint, m.color1.rgb, mask.r);
         tint = mix(tint, m.color2.rgb, mask.g);

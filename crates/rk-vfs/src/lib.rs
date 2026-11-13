@@ -15,6 +15,7 @@ pub use items::{resolve_infos, Item, ItemDb, Lookup, ResolveInfo};
 
 /// Item list categories (`ChaListDefine.CategoryNo` in the game).
 pub mod cat {
+    pub const BODYPAINT_LAYOUT: i32 = 3;
     pub const BO_HEAD: i32 = 100;
     pub const BO_HAIR_B: i32 = 101;
     pub const BO_HAIR_F: i32 = 102;

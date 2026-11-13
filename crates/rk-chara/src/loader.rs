@@ -107,6 +107,18 @@ impl<'a> Loader<'a> {
         Ok(inst)
     }
 
+    /// Loads a material asset by bundle path and name.
+    pub fn material_by_name(&mut self, vpath: &str, name: &str, prefer_mod: Option<u32>) -> Option<MaterialInst> {
+        let obj = self.game.assets.find(vpath, name, Some(class::MATERIAL), prefer_mod)?;
+        match self.material(&obj) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                self.warn(format!("material {name}: {e:#}"));
+                None
+            }
+        }
+    }
+
     /// Finds a prefab by bundle path and name and instantiates it.
     pub fn load_prefab(
         &mut self,
