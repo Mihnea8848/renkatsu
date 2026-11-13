@@ -9,7 +9,7 @@ thiserror.workspace = true
 serde.workspace = true
 rmpv.workspace = true
 rmp-serde.workspace = true
-lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-decode"] }
 
 [dev-dependencies]
 rk-core.workspace = true
