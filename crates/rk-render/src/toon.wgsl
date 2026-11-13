@@ -308,7 +308,9 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     let drawn_lines = mix(line.g, detail.b, m.p1.x);
     let keep = pow((1.0 - g.params.x) * 0.889999986 + 0.00999999978, drawn_lines);
     let body = lit * (drawn_shadow * (1.0 - shade) + shade);
-    let rgb = clamp(mix(lines, body, keep), vec3<f32>(0.0), vec3<f32>(1.0));
+    // The game draws the inside of a surface at two thirds brightness.
+    let facing = select(0.660000026, 1.0, front);
+    let rgb = clamp(mix(lines, body * facing, keep), vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(rgb, select(1.0, s.alpha * m.p1.z, blended));
 }
 
