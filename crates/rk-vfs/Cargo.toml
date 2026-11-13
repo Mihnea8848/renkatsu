@@ -16,4 +16,4 @@ rk-unityfs.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 bincode = "1"
 roxmltree = "0.20"
-parking_lot = "0.12"
+parking_lot = "0.13"
