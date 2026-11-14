@@ -347,12 +347,12 @@ impl Renderer {
         };
         let sampler_repeat = sampler(wgpu::AddressMode::Repeat);
         let sampler_clamp = sampler(wgpu::AddressMode::ClampToEdge);
-        let white = Self::upload(&device, &queue, 1, 1, &[255, 255, 255, 255]);
+        let white = Self::upload(&device, &queue, 1, 1, &[255, 255, 255, 255], false);
         // Fallback ramp: dark below half light, bright above.
         let hard: Vec<u8> = (0..16)
             .flat_map(|i| if i < 8 { [0u8, 0, 0, 255] } else { [255, 255, 255, 255] })
             .collect();
-        let hard_ramp = Self::upload(&device, &queue, 16, 1, &hard);
+        let hard_ramp = Self::upload(&device, &queue, 16, 1, &hard, false);
         Ok(Self {
             device,
             queue,
@@ -452,7 +452,16 @@ impl Renderer {
         })
     }
 
-    fn upload(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
+    /// Uploads an image. sRGB images get an sRGB format, so sampling returns
+    /// linear values as Unity does in linear colour space.
+    fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        srgb: bool,
+    ) -> wgpu::TextureView {
         let mips = mip_chain(width, height, rgba);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -464,7 +473,11 @@ impl Renderer {
             mip_level_count: mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: if srgb {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -507,7 +520,14 @@ impl Renderer {
         let view = if image.width == 0 || image.height == 0 || image.width > max || image.height > max {
             self.white.clone()
         } else {
-            Self::upload(&self.device, &self.queue, image.width, image.height, &image.rgba)
+            Self::upload(
+                &self.device,
+                &self.queue,
+                image.width,
+                image.height,
+                &image.rgba,
+                image.srgb,
+            )
         };
         self.textures.insert(key, view.clone());
         view
@@ -576,24 +596,15 @@ impl Renderer {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
-            ambient_shadow: [
+            // Both are set with SetGlobalColor, which Unity linearises.
+            ambient_shadow: material::linear([
                 env.shadow_color[0],
                 env.shadow_color[1],
                 env.shadow_color[2],
                 1.0 - env.shadow_depth,
-            ],
-            line_color: [0.5, 0.5, 0.5, 1.0 - env.line_depth],
-            params: [
-                env.line_width,
-                env.light_intensity,
-                env.ambient,
-                // Tells the clothes shaders to decode the ramp.
-                if env.ramp.as_ref().is_some_and(|r| r.srgb) {
-                    1.0
-                } else {
-                    0.0
-                },
-            ],
+            ]),
+            line_color: material::linear([0.5, 0.5, 0.5, 1.0 - env.line_depth]),
+            params: [env.line_width, env.light_intensity, env.ambient, 0.0],
         };
         let globals_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globals"),

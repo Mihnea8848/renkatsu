@@ -28,8 +28,6 @@ pub const HAS_OVER1: u32 = 32;
 pub const HAS_OVER2: u32 = 64;
 pub const BLENDED: u32 = 128;
 pub const HAS_OVER3: u32 = 256;
-/// The main texture holds sRGB values.
-pub const MAIN_SRGB: u32 = 512;
 
 /// Which of the game's clothes shaders an item follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +173,21 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
     }
 }
 
+/// sRGB to linear for one channel.
+pub fn srgb_to_linear(x: f32) -> f32 {
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// A colour as Unity hands it to shaders in linear colour space: the colour
+/// channels converted, alpha left as it is.
+pub fn linear(c: [f32; 4]) -> [f32; 4] {
+    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
+}
+
 impl MaterialDesc {
     pub fn new(mat: Option<&MaterialInst>) -> Self {
         let empty = MaterialInst::default();
@@ -190,7 +203,9 @@ impl MaterialDesc {
         };
         let cloth = item != ItemShader::Other;
         let sheer = item == ItemShader::Alpha;
-        let color = |name: &str, default: [f32; 4]| mat.colors.get(name).copied().unwrap_or(default);
+        // Colour properties reach the shader linearised; vector properties,
+        // which the material stores beside them, do not go through this.
+        let color = |name: &str, default: [f32; 4]| linear(mat.colors.get(name).copied().unwrap_or(default));
         let float = |name: &str, default: f32| mat.floats.get(name).copied().unwrap_or(default);
 
         let mut flags = if blended { BLENDED } else { 0 };
@@ -212,9 +227,6 @@ impl MaterialDesc {
             if let Some(slot) = mat.textures.get(name) {
                 textures[i] = Some(slot.image.clone());
                 flags |= flag;
-                if name == "_MainTex" && slot.image.srgb {
-                    flags |= MAIN_SRGB;
-                }
                 let st = [slot.scale[0], slot.scale[1], slot.offset[0], slot.offset[1]];
                 match name {
                     "_MainTex" => st_main = st,
@@ -230,7 +242,7 @@ impl MaterialDesc {
         // Skin gets its texture built at load time. Until then use a plain tone.
         let mut color1 = color("_Color", [1.0; 4]);
         if kind == Kind::Skin && flags & HAS_MAIN == 0 {
-            color1 = [1.0, 0.88, 0.83, 1.0];
+            color1 = linear([1.0, 0.88, 0.83, 1.0]);
         }
         let cutoff = match kind {
             Kind::Overlay | Kind::Eye => 0.02,
@@ -462,7 +474,7 @@ mod tests {
             mat.floats.insert(name.into(), value);
         }
         let set = MaterialDesc::new(Some(&mat)).uniform;
-        assert_eq!(set.color2, [0.8, 0.7, 0.6, 0.5]);
+        assert_eq!(set.color2, linear([0.8, 0.7, 0.6, 0.5]));
         assert_eq!(set.color3, [0.9, 0.3, 0.4, 0.25]);
         assert_eq!(set.line, [0.0, 1.0, 0.7, 1.0]);
     }
@@ -536,14 +548,14 @@ mod tests {
         // Not a property of the shader: left out.
         sheer.textures.insert("_overtex1".into(), slot(false));
         let d = MaterialDesc::new(Some(&sheer));
-        assert_eq!(d.uniform.over1, [0.9, 0.8, 0.7, 0.3]);
+        // A colour property arrives linearised; its alpha does not.
+        let spec = d.uniform.over1;
+        assert!((spec[0] - 0.7874).abs() < 1e-4 && (spec[2] - 0.4479).abs() < 1e-4);
+        assert_eq!(spec[3], 0.3);
         assert_eq!(d.uniform.over2, [0.96, 0.2, 0.0, 0.0]);
         assert_eq!(d.uniform.over3, [0.4, 0.2, 0.0, 0.0]);
         assert_eq!((d.uniform.p0[1], d.uniform.p1[0]), (0.8, 1.0));
-        assert_eq!(
-            d.uniform.info[1],
-            BLENDED | HAS_MAIN | MAIN_SRGB | HAS_OVER1 | HAS_OVER2
-        );
+        assert_eq!(d.uniform.info[1], BLENDED | HAS_MAIN | HAS_OVER1 | HAS_OVER2);
         assert!(d.textures[5].is_some() && d.textures[6].is_some() && d.textures[7].is_none());
 
         // Other items keep their layer colours and ignore the normal map.
@@ -556,6 +568,24 @@ mod tests {
         let d = MaterialDesc::new(Some(&other));
         assert_eq!((d.uniform.info[1], d.uniform.info[2]), (HAS_MAIN, 0));
         assert_eq!(d.uniform.over1, [1.0; 4]);
+    }
+
+    #[test]
+    fn colours_are_linearised_but_not_vectors() {
+        assert_eq!(linear([0.0, 1.0, 0.04045, 0.5]), [0.0, 1.0, 0.04045 / 12.92, 0.5]);
+        assert!((srgb_to_linear(0.5) - 0.214_041_14).abs() < 1e-6);
+        let mut eye = MaterialInst {
+            shader: "Shader Forge/toon_eye_lod0".into(),
+            ..Default::default()
+        };
+        eye.colors.insert("_shadowcolor".into(), [0.5, 0.5, 0.5, 1.0]);
+        eye.floats.insert("_rotation".into(), 0.5);
+        let u = MaterialDesc::new(Some(&eye)).uniform;
+        assert!((u.shadow[0] - 0.214_041_14).abs() < 1e-6);
+        assert_eq!(u.shadow[3], 1.0);
+        // The highlight placement is not a colour and stays as stored.
+        assert_eq!(u.color2, [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(u.p3[1], 0.5);
     }
 
     #[test]
