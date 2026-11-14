@@ -5,6 +5,7 @@
 //! hair, clothes and accessories assembled the way the game does it.
 
 pub mod abmx;
+pub mod accessory_clothes;
 pub mod build;
 pub mod compose;
 pub mod dynamic_bone_editor;

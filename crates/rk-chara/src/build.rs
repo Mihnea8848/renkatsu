@@ -40,6 +40,9 @@ pub struct BuildOptions {
     /// Studio's pose targets overwrite the hand size correction. On by
     /// default, since Renkatsu stands in for CharaStudio.
     pub studio: bool,
+    /// Run the Accessory Clothes plugin: accessories made for it are bound
+    /// to the body skeleton like clothes.
+    pub accessory_clothes: bool,
 }
 
 impl Default for BuildOptions {
@@ -53,6 +56,7 @@ impl Default for BuildOptions {
             settle_frames: crate::physics::SETTLE_FRAMES,
             frame_time: crate::physics::FRAME_TIME,
             studio: true,
+            accessory_clothes: true,
         }
     }
 }
@@ -413,6 +417,44 @@ impl<'g> Builder<'g> {
             }
         }
         out
+    }
+
+    /// Runs the Accessory Clothes plugin on an accessory: when the prefab has
+    /// a `ChaAccessoryClothes` script, the `rendNormal` renderers of the
+    /// `ChaAccessoryComponent` on the same object are bound to the body
+    /// skeleton and the prefab's own armature is destroyed.
+    fn accessory_clothes(&mut self, inst: &Instance, dict: &HashMap<String, usize>, root_bone: Option<usize>) {
+        use crate::accessory_clothes::{self as ac, ARMATURE_ROOT, COMPONENT, RENDERERS, SCRIPT};
+        for (node, script) in &inst.scripts {
+            if self.script_class(script).as_deref() != Some(SCRIPT) {
+                continue;
+            }
+            // `Start` reads `GetComponent<ChaAccessoryComponent>()` first and
+            // throws without one, before anything is bound or destroyed.
+            let Some(component) = inst
+                .scripts
+                .iter()
+                .find(|(n, s)| n == node && self.script_class(s).as_deref() == Some(COMPONENT))
+                .and_then(|(_, s)| s.read().ok())
+            else {
+                continue;
+            };
+            let assets = &self.game.assets;
+            let renderers: Vec<usize> = match component.get(RENDERERS) {
+                Some(rk_unityfs::UValue::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| v.as_pptr())
+                    .filter_map(|p| inst.renderer_keys.get(&assets.deref(&script.file, p)?.key()).copied())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let armature = script
+                .read()
+                .ok()
+                .and_then(|o| o.get(ARMATURE_ROOT)?.as_pptr())
+                .and_then(|p| inst.transform_nodes.get(&assets.deref(&script.file, p)?.key()).copied());
+            ac::bind(&mut self.scene, &renderers, armature, dict, root_bone);
+        }
     }
 
     /// Like `listed_renderers`, limited to scripts of one class when given.
@@ -985,6 +1027,7 @@ impl<'g> Builder<'g> {
         inst: &Instance,
         item: &Item,
         colors: &[rk_card::ClothesColor],
+        sources: [usize; 3],
         pattern_prop: &str,
         clothes_id: &str,
     ) {
@@ -1013,11 +1056,13 @@ impl<'g> Builder<'g> {
         ];
         let mut patterns = [None, None, None];
         for (k, slot) in patterns.iter_mut().enumerate() {
-            let Some(c) = colors.get(k) else { continue };
+            let Some(c) = colors.get(sources[k]) else { continue };
             if c.pattern != 0 {
+                // Sideloader keys a pattern by the card entry it is stored
+                // in, which for a top's third sub-part is the fourth one.
                 *slot = self.item_image(
                     "pattern",
-                    &format!("{pattern_prop}{k}"),
+                    &format!("{pattern_prop}{}", sources[k]),
                     cat::MT_PATTERN,
                     c.pattern,
                     "MainTexAB",
@@ -1026,7 +1071,7 @@ impl<'g> Builder<'g> {
             }
         }
         let color = |k: usize| {
-            let c = colors.get(k).cloned().unwrap_or_default();
+            let c = colors.get(sources[k]).cloned().unwrap_or_default();
             ClothColor {
                 base: c.base_color,
                 pattern: patterns[k].as_deref(),
@@ -1679,7 +1724,15 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     b.physics_source(inst, true, i < 2, true);
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
                     hide_undressed_states(&mut b.scene, inst);
-                    b.dress(inst, item, &cp.color_info, &pattern_prop, overlays::MAIN_IDS[i]);
+                    let sources = compose::color_sources(None);
+                    b.dress(
+                        inst,
+                        item,
+                        &cp.color_info,
+                        sources,
+                        &pattern_prop,
+                        overlays::MAIN_IDS[i],
+                    );
                     let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
                     b.emblems(inst, cp, &prop);
                 }
@@ -1753,13 +1806,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             b.physics_source(&inst, true, true, true);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             hide_undressed_states(&mut b.scene, &inst);
-                            // Sub-parts share the top's colours. The third
-                            // one takes its first colour from the fourth entry.
-                            let mut colors = cp.color_info.clone();
-                            if k == 2 && colors.len() > 3 {
-                                colors[0] = colors[3].clone();
-                            }
-                            b.dress(&inst, sub, &colors, &pattern_prop, overlays::SUB_IDS[k]);
+                            // Sub-parts share the top's colours.
+                            let sources = compose::color_sources(Some(k));
+                            b.dress(&inst, sub, &cp.color_info, sources, &pattern_prop, overlays::SUB_IDS[k]);
                             b.emblems(&inst, cp, &sub_prop);
                             top_insts.push(inst);
                         }
@@ -1830,6 +1879,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         Some(&p) => b.scene.set_parent(inst.root, Some(p)),
                         None => b.loader.warn(format!("{label}: no attachment point {key}")),
                     }
+                }
+                if opts.accessory_clothes {
+                    b.accessory_clothes(&inst, &bones, hips);
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
                 b.physics_source(&inst, true, false, !acc.no_shake);

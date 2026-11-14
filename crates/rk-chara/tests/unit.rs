@@ -801,3 +801,86 @@ fn culling_boxes_follow_the_root_bone() {
     assert!(near(Vec3::from(min), Vec3::new(-0.5, 0.4, -0.5)));
     assert!(near(Vec3::from(max), Vec3::new(0.5, 1.4, 0.5)));
 }
+
+fn skinned_renderer(name: &str, node: usize, part: Part, bones: Vec<Option<usize>>) -> RendererInst {
+    RendererInst {
+        name: name.into(),
+        node,
+        part,
+        mesh: Arc::new(Mesh::default()),
+        materials: Vec::new(),
+        skinned: true,
+        bones,
+        enabled: true,
+        cast_shadows: ShadowCasting::On,
+        receive_shadows: true,
+        shape_weights: Vec::new(),
+        bounds: None,
+        root_bone: None,
+    }
+}
+
+#[test]
+fn accessory_clothes_bind_to_the_body_and_lose_their_armature() {
+    let mut scene = Scene::default();
+    let skel = scene.add_node("cf_j_root", None, Trs::default());
+    let hips = scene.add_node("cf_j_hips", Some(skel), Trs::default());
+    let neck = scene.add_node("cf_j_neck", Some(hips), Trs::default());
+    let point = scene.add_node("a_n_neck", Some(neck), Trs::default());
+    let dict = scene.name_map(skel);
+
+    // The accessory hangs from its attachment point with its own armature.
+    let acc = scene.add_node("gf_choker", Some(point), Trs::default());
+    let armature = scene.add_node("cf_j_root", Some(acc), Trs::default());
+    let own_hips = scene.add_node("cf_j_hips", Some(armature), Trs::default());
+    let own_neck = scene.add_node("cf_j_neck", Some(own_hips), Trs::default());
+    let extra = scene.add_node("own_bone", Some(own_neck), Trs::default());
+    let listed = scene.add_node("top", Some(acc), Trs::default());
+    let other = scene.add_node("alpha", Some(acc), Trs::default());
+    let bones = vec![Some(own_neck), Some(extra), None];
+    scene
+        .renderers
+        .push(skinned_renderer("top", listed, Part::Accessory(4), bones.clone()));
+    scene
+        .renderers
+        .push(skinned_renderer("alpha", other, Part::Accessory(4), bones.clone()));
+    scene.renderers[0].root_bone = Some(own_neck);
+
+    rk_chara::accessory_clothes::bind(&mut scene, &[0], Some(armature), &dict, Some(hips));
+    // Bones go to the body by name; one the body lacks becomes null.
+    assert_eq!(scene.renderers[0].bones, [Some(neck), None, None]);
+    assert_eq!(scene.renderers[0].bounds, Some(Bounds::CHARA));
+    assert_eq!(scene.renderers[0].root_bone, Some(hips));
+    // Only the listed renderer is touched.
+    assert_eq!(scene.renderers[1].bones, bones);
+    assert_eq!(scene.renderers[1].bounds, None);
+    // The armature is destroyed, the accessory stays on its point.
+    assert_eq!(scene.nodes[armature].parent, None);
+    assert_eq!(scene.nodes[acc].parent, Some(point));
+    let (_, active) = scene.world();
+    assert!(!active[own_neck] && active[listed]);
+
+    // Without A_ROOTBONE the old root bone is looked up by name.
+    let mut scene2 = Scene::default();
+    let skel = scene2.add_node("cf_j_root", None, Trs::default());
+    let neck = scene2.add_node("cf_j_neck", Some(skel), Trs::default());
+    let dict = scene2.name_map(skel);
+    let acc = scene2.add_node("acc", None, Trs::default());
+    let own_neck = scene2.add_node("cf_j_neck", Some(acc), Trs::default());
+    scene2
+        .renderers
+        .push(skinned_renderer("top", acc, Part::Accessory(0), vec![Some(own_neck)]));
+    scene2.renderers[0].root_bone = Some(own_neck);
+    rk_chara::accessory_clothes::bind(&mut scene2, &[0], None, &dict, None);
+    assert_eq!(scene2.renderers[0].root_bone, Some(neck));
+    assert_eq!(scene2.renderers[0].bones, [Some(neck)]);
+}
+
+#[test]
+fn a_tops_third_sub_part_takes_its_first_colour_from_the_fourth_entry() {
+    use rk_chara::compose::color_sources;
+    assert_eq!(color_sources(None), [0, 1, 2]);
+    assert_eq!(color_sources(Some(0)), [0, 1, 2]);
+    assert_eq!(color_sources(Some(1)), [0, 1, 2]);
+    assert_eq!(color_sources(Some(2)), [3, 1, 2]);
+}
