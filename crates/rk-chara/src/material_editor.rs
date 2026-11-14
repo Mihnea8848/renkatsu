@@ -5,7 +5,7 @@
 //! textures, shader swaps and renderer switches, addressed by the object
 //! they belong to and a material or renderer name.
 
-use crate::scene::{DrawState, Image, MaterialInst, Scene, TexSlot};
+use crate::scene::{DrawState, Image, MaterialInst, Scene, ShadowCasting, TexSlot};
 use rk_card::{map_get, ExtData, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -273,19 +273,33 @@ pub fn apply(
         }) as usize;
     }
     for e in list("RendererPropertyList") {
-        // Property 0 is "enabled"; the others concern shadows and normals.
-        if map_get(&e, "Property").and_then(Value::as_i64) != Some(0) {
+        // MaterialAPI.RendererProperties: 0 enabled, 1 shadow casting mode,
+        // 2 receive shadows. The others concern normals and culling bounds.
+        let Some(prop) = map_get(&e, "Property").and_then(Value::as_i64) else {
             continue;
-        }
+        };
         let (Some(o), Some(name), Some(value)) = (owner(&e, outfit), text(&e, "RendererName"), text(&e, "Value"))
         else {
             continue;
         };
+        // MaterialAPI.SetRendererProperty parses the value as a whole number.
+        let Ok(value) = value.trim().parse::<i32>() else {
+            continue;
+        };
+        if !(0..=2).contains(&prop) {
+            continue;
+        }
         for &ri in renderers_of(o) {
-            if scene.renderers[ri].name == name {
-                scene.renderers[ri].enabled = value.trim() == "1";
-                applied.renderers += 1;
+            let r = &mut scene.renderers[ri];
+            if r.name != name {
+                continue;
             }
+            match prop {
+                0 => r.enabled = value == 1,
+                1 => r.cast_shadows = ShadowCasting::from_unity(value),
+                _ => r.receive_shadows = value == 1,
+            }
+            applied.renderers += 1;
         }
     }
     applied
@@ -294,7 +308,7 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Stencil;
+    use crate::scene::{ShadowPass, Stencil};
 
     fn state(queue: i32) -> DrawState {
         DrawState {
@@ -304,6 +318,7 @@ mod tests {
             outline: true,
             stencil: Stencil::None,
             stencil_ref: 0,
+            shadow: ShadowPass::TwoSided,
         }
     }
 

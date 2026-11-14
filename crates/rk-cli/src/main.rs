@@ -64,6 +64,9 @@ enum Cmd {
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
+        /// Leave out the light's real-time shadows.
+        #[arg(long)]
+        no_shadows: bool,
     },
     /// Write a contact sheet: each card's own image beside our render.
     Compare {
@@ -95,6 +98,9 @@ enum Cmd {
         /// Also list the bones whose name contains one of these texts.
         #[arg(long)]
         bones: Vec<String>,
+        /// Leave out the light's real-time shadows.
+        #[arg(long)]
+        no_shadows: bool,
     },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
@@ -159,6 +165,7 @@ fn main() -> Result<()> {
             no_physics,
             settle_frames,
             bones,
+            no_shadows,
         } => {
             // Captures are made in Studio, which is also the default.
             let mut opts = rk_chara::BuildOptions {
@@ -168,7 +175,7 @@ fn main() -> Result<()> {
             if let Some(frames) = settle_frames {
                 opts.settle_frames = frames;
             }
-            reference::reference(&card, &capture, &out, &opts, &bones)
+            reference::reference(&card, &capture, &out, &opts, &bones, !no_shadows)
         }
         Cmd::Audit { count, threads } => audit::audit(count, threads),
         Cmd::Compare {
@@ -189,6 +196,7 @@ fn main() -> Result<()> {
             outdoor_shoes,
             no_physics,
             list,
+            no_shadows,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -201,6 +209,7 @@ fn main() -> Result<()> {
             outdoor_shoes,
             no_physics,
             list,
+            shadows: !no_shadows,
         }),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),
         Cmd::Bundle {

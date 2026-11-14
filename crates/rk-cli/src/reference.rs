@@ -10,6 +10,7 @@ use glam::{Quat, Vec3};
 use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_core::Config;
+use rk_render::shadow::ShadowSettings;
 use rk_render::{load_png, save_png, Camera, Environment, Renderer};
 use rk_vfs::Game;
 use serde_json::Value;
@@ -39,6 +40,10 @@ pub struct Capture {
     /// From the scene towards the first directional light.
     pub light_dir: Option<[f32; 3]>,
     pub light_intensity: f32,
+    /// Whether that light casts shadows, and how strong they are; `None`
+    /// where the capture does not say.
+    pub light_shadows: Option<bool>,
+    pub shadow_strength: Option<f32>,
     /// Number of the shading ramp the scene used.
     pub ramp: Option<i32>,
     /// Scene shadow colour, and how deep shadows are (0 to 1).
@@ -67,11 +72,15 @@ impl Capture {
         }
         let mut light_dir = None;
         let mut light_intensity = 1.0;
+        let mut light_shadows = None;
+        let mut shadow_strength = None;
         for l in v["lights"].as_array().map(Vec::as_slice).unwrap_or_default() {
             if l["type"] == "Directional" {
                 let d = Vec3::from(floats::<3>(&l["direction"])?);
                 light_dir = Some((-d).to_array());
                 light_intensity = l["intensity"].as_f64().unwrap_or(1.0) as f32;
+                light_shadows = l["shadows"].as_str().map(|mode| mode != "None");
+                shadow_strength = l["shadow_strength"].as_f64().map(|n| n as f32);
                 break;
             }
         }
@@ -82,6 +91,8 @@ impl Capture {
             background: floats(&cam["background"])?,
             light_dir,
             light_intensity,
+            light_shadows,
+            shadow_strength,
             ramp: v["studio"]["ramp_g"].as_i64().map(|n| n as i32),
             // The game stores depth as one minus the value in alpha.
             shadow: floats::<4>(&v["globals"]["_ambientshadowG"])
@@ -137,6 +148,7 @@ pub fn reference(
     out: &Path,
     opts: &BuildOptions,
     watch: &[String],
+    shadows: bool,
 ) -> Result<()> {
     let capture_text = std::fs::read_to_string(capture_path)?;
     let cap = Capture::parse(&capture_text)?;
@@ -160,6 +172,11 @@ pub fn reference(
         line_width: cap.line_width.unwrap_or(defaults.line_width),
         light_dir: cap.light_dir,
         light_intensity: cap.light_intensity,
+        shadows: ShadowSettings {
+            enabled: shadows && cap.light_shadows.unwrap_or(true),
+            strength: cap.shadow_strength.unwrap_or(defaults.shadows.strength),
+            ..defaults.shadows
+        },
         ..defaults
     };
     println!(
@@ -419,7 +436,7 @@ mod tests {
         "globals": {"_ambientshadowG": [0.5, 0.4, 0.3, 0.74], "_LineColorG": [0.5, 0.5, 0.5, 0], "_linewidthG": 0.307},
         "lights": [
             {"type": "Point", "direction": [1, 0, 0], "intensity": 3},
-            {"type": "Directional", "direction": [0, -0.6, -0.8], "intensity": 2}
+            {"type": "Directional", "direction": [0, -0.6, -0.8], "intensity": 2, "shadows": "Soft", "shadow_strength": 0.75}
         ]
     }"#;
 
@@ -437,6 +454,11 @@ mod tests {
         let l = c.light_dir.unwrap();
         assert!((Vec3::from(l) - Vec3::new(0.0, 0.6, 0.8)).length() < 1e-6);
         assert_eq!(c.light_intensity, 2.0);
+        assert_eq!((c.light_shadows, c.shadow_strength), (Some(true), Some(0.75)));
+        let off = Capture::parse(&SAMPLE.replace("\"Soft\"", "\"None\"")).unwrap();
+        assert_eq!(off.light_shadows, Some(false));
+        let silent = Capture::parse(&SAMPLE.replace(", \"shadows\": \"Soft\", \"shadow_strength\": 0.75", "")).unwrap();
+        assert_eq!((silent.light_shadows, silent.shadow_strength), (None, None));
         assert_eq!(c.ramp, Some(2));
         let (color, depth) = c.shadow.unwrap();
         assert_eq!(color, [0.5, 0.4, 0.3]);
