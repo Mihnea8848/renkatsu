@@ -6,6 +6,7 @@
 use crate::compose::{self, ClothColor, Decal};
 use crate::expression;
 use crate::eyelook::{self, EyeLook};
+use crate::foreground;
 use crate::loader::{assign_weights, Loader};
 use crate::overlays::{self, kind, ClothOverlay};
 use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
@@ -97,8 +98,9 @@ impl<'g> Builder<'g> {
     }
 }
 
-/// The ramp the game selects when its settings are untouched.
-pub const DEFAULT_RAMP: i32 = 1;
+/// The ramp Better Repack ships in the game's settings: a soft gradient.
+/// The game's own factory setting is 1, a hard edge.
+pub const DEFAULT_RAMP: i32 = 2;
 
 fn ramp_image(loader: &mut Loader, id: i32) -> Option<Arc<Image>> {
     let item = loader.game.items.vanilla(cat::MT_RAMP, id)?;
@@ -292,6 +294,33 @@ impl<'g> Builder<'g> {
         match self.skin_overlays.get(&kind) {
             Some(over) => compose::blend(&image, over),
             None => image,
+        }
+    }
+
+    /// Sets when each brow and eye layer is drawn, so it ends up in front of
+    /// or behind front hair as the card and the game setting say.
+    fn face_layer_order(&mut self, inst: &Instance, eyes_flag: u8, brow_flag: u8) {
+        for (node, script) in &inst.scripts {
+            let Some(stored) = script.read().ok().as_ref().and_then(foreground::read) else {
+                continue;
+            };
+            for &ri in &inst.renderers {
+                let r = &mut self.scene.renderers[ri];
+                if r.node != *node {
+                    continue;
+                }
+                let flag = if foreground::is_brow(&r.name) {
+                    brow_flag
+                } else {
+                    eyes_flag
+                };
+                let front = foreground::in_front(flag, foreground::DEFAULT_IN_FRONT);
+                for q in foreground::with_hair_shadows_fix(&r.name, stored.clone()) {
+                    if let Some(m) = r.materials.get_mut(q.material) {
+                        m.render_queue = if front { q.in_front } else { q.behind };
+                    }
+                }
+            }
         }
     }
 
@@ -1161,6 +1190,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot");
             b.rest_expression(&head);
+            b.face_layer_order(&head, card.face.foreground_eyes, card.face.foreground_eyebrow);
             let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
             let makeup = match card.coordinates.get(outfit) {
                 Some(co) if co.enable_makeup => &co.makeup,
@@ -1229,6 +1259,15 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let prop = format!("ChaFileHair.{}", cat::HAIR_PROPS[i]);
             if let Some(item) = b.item(&label, &prop, cat::HAIR[i], hp.id) {
                 if let Some(inst) = b.part(&label, item, Some(hair_parent), Part::Hair(i as u8)) {
+                    // The Hair Shadows Fix draws front hair between the two
+                    // queues of the face layers.
+                    for &ri in &inst.renderers {
+                        for m in &mut b.scene.renderers[ri].materials {
+                            if m.shader == foreground::FRONT_HAIR_SHADER {
+                                m.render_queue = foreground::FRONT_HAIR_QUEUE;
+                            }
+                        }
+                    }
                     b.color_hair(&inst, hp);
                 }
             }
