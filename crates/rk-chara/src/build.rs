@@ -1292,22 +1292,24 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     } else {
         None
     };
-    match ShapeSet::load(game, BASE, "cf_anmShapeBody", "cf_custombody", None) {
+    // Kept so the Pushup plugin's bust can be applied once the clothes are known.
+    let body_rules = Rules::parse(shape::BODY_RULES)?;
+    let body_bones = b.scene.name_map(body_root);
+    let mut body_set = match ShapeSet::load(game, BASE, "cf_anmShapeBody", "cf_custombody", None) {
         Ok(mut set) => {
             set.vars.insert("headsize".into(), if female { 1.0 } else { 0.91 });
             set.vars.insert("necksize".into(), if female { 1.0 } else { 0.91 });
             for (i, v) in card.body.shape_value_body.iter().enumerate() {
                 set.set(i, *v);
             }
-            set.apply(
-                &mut b.scene,
-                body_root,
-                &Rules::parse(shape::BODY_RULES)?,
-                corrections.as_deref(),
-            );
+            set.apply_named(&mut b.scene, &body_bones, &body_rules, corrections.as_deref());
+            Some(set)
         }
-        Err(e) => b.loader.warn(format!("body sliders: {e:#}")),
-    }
+        Err(e) => {
+            b.loader.warn(format!("body sliders: {e:#}"));
+            None
+        }
+    };
 
     // Head: its prefab carries the bone layout for this face type.
     if let Some(item) = b.item("head", "ChaFileFace.headId", cat::BO_HEAD, card.face.head_id) {
@@ -1416,6 +1418,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let mut top_insts: Vec<Instance> = Vec::new();
             let mut bra: Option<(Instance, &Item)> = None;
             let (mut no_bottom, mut no_shorts) = (false, false);
+            let mut kinds = crate::pushup::StateKinds::default();
             for (i, cp) in co.clothes.parts.iter().enumerate().take(9) {
                 // Only one of indoor (7) and outdoor (8) shoes is worn.
                 if (i == 7 && opts.outdoor_shoes) || (i == 8 && !opts.outdoor_shoes) {
@@ -1440,6 +1443,29 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     b.emblems(inst, cp, &prop);
                 }
                 let one_piece = item.int("Coordinate") == Some(2);
+                let has_top = inst
+                    .as_ref()
+                    .is_some_and(|inst| inst.nodes.iter().any(|&n| b.scene.nodes[n].name == "n_top_a"));
+                let state = item.int("StateType");
+                match i {
+                    0 => {
+                        kinds.top = state;
+                        kinds.not_bra = item.int("NotBra") == Some(1);
+                    }
+                    1 => {
+                        kinds.bottom = state;
+                        kinds.bottom_has_top = has_top;
+                    }
+                    2 => {
+                        kinds.bra = state;
+                        kinds.not_shorts = one_piece;
+                    }
+                    3 => {
+                        kinds.shorts = state;
+                        kinds.shorts_have_top = has_top;
+                    }
+                    _ => {}
+                }
                 match (i, inst) {
                     (0, inst) => {
                         no_bottom = one_piece;
@@ -1473,6 +1499,15 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         let Some(sub) = b.item(&sub_label, &sub_prop, cats[k], id) else {
                             continue;
                         };
+                        // ChangeClothesTopParts: the first sailor part, or
+                        // either of the first two jacket parts, decides notBra.
+                        let sub_no_bra = sub.int("NotBra") == Some(1);
+                        match (kind, k) {
+                            (1, 0) => kinds.not_bra = sub_no_bra,
+                            (2, 0) => kinds.not_bra = sub_no_bra,
+                            (2, 1) => kinds.not_bra |= sub_no_bra,
+                            _ => {}
+                        }
                         if let Some(inst) = b.part(&sub_label, sub, Some(top), Part::Clothes(0)) {
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root");
                             hide_undressed_states(&mut b.scene, &inst);
@@ -1491,6 +1526,21 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 }
             }
             b.hide_under_top(&body, &top_items, &top_insts, bra.as_ref());
+
+            // Pushup: the bust of a worn top or bra replaces the card's.
+            let base = crate::pushup::BodyData::from_body(
+                &card.body.shape_value_body,
+                card.body.bust_softness,
+                card.body.bust_weight,
+            );
+            let pushed = crate::pushup::for_outfit(&card.ext, outfit, &base)
+                .and_then(|o| crate::pushup::bust(&base, &o, kinds.top_kind(), kinds.bra_kind()));
+            if let (Some(pushed), Some(set)) = (pushed, body_set.as_mut()) {
+                for (i, v) in pushed.shapes().into_iter().enumerate() {
+                    set.set(crate::pushup::SHAPE_FIRST + i, v);
+                }
+                set.apply_named(&mut b.scene, &body_bones, &body_rules, corrections.as_deref());
+            }
         }
 
         if opts.accessories {
