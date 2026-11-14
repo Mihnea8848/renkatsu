@@ -97,6 +97,21 @@ impl<'g> Builder<'g> {
     }
 }
 
+/// The ramp the game selects when its settings are untouched.
+pub const DEFAULT_RAMP: i32 = 1;
+
+fn ramp_image(loader: &mut Loader, id: i32) -> Option<Arc<Image>> {
+    let item = loader.game.items.vanilla(cat::MT_RAMP, id)?;
+    loader.image_by_name(item.get("MainTexAB")?, item.get("MainTex")?, None)
+}
+
+/// A shading ramp by its number in the game's list: the texture that turns
+/// the amount of light on a surface into brightness. The game setting and
+/// every Studio scene pick one.
+pub fn ramp(game: &Game, id: i32) -> Option<Arc<Image>> {
+    ramp_image(&mut Loader::new(game), id)
+}
+
 /// Bundle and texture name the game tries first for a head type other than
 /// the first: the bundle name with its last two characters replaced by `50`,
 /// and the texture name with `_<head>` appended.
@@ -211,6 +226,31 @@ impl<'g> Builder<'g> {
                 r.materials[0] = draw;
             }
             r.materials[0].textures.insert("_MainTex".into(), slot.clone());
+        }
+    }
+
+    /// Sets the values the game writes onto a skin material from the card:
+    /// the line mask of the chosen detail, and plain numbers.
+    fn skin_values(&mut self, inst: &Instance, renderer: &str, lines: Option<Arc<Image>>, floats: &[(&str, f32)]) {
+        for &ri in &inst.renderers {
+            let r = &mut self.scene.renderers[ri];
+            let Some(m) = r.materials.first_mut().filter(|_| r.name == renderer) else {
+                continue;
+            };
+            match &lines {
+                Some(image) => drop(m.textures.insert(
+                    "_LineMask".into(),
+                    TexSlot {
+                        image: image.clone(),
+                        scale: [1.0, 1.0],
+                        offset: [0.0, 0.0],
+                    },
+                )),
+                None => drop(m.textures.remove("_LineMask")),
+            }
+            for (name, value) in floats {
+                m.floats.insert((*name).into(), *value);
+            }
         }
     }
 
@@ -852,6 +892,28 @@ impl<'g> Builder<'g> {
             .material_by_name(MATERIALS, if female { "cf_m_body" } else { "cm_m_body" }, None);
         let image = self.over(kind::BODY_OVER, image);
         self.set_skin(inst, "o_body_a", draw, image);
+        // Body detail: painted lines and their strength, and the shine sliders.
+        let lines = self.item_image(
+            "body detail",
+            "ChaFileBody.detailId",
+            cat::MT_BODY_DETAIL,
+            body.detail_id,
+            "MainAB",
+            "LineMask",
+        );
+        self.skin_values(
+            inst,
+            "o_body_a",
+            lines,
+            &[
+                ("_DetailNormalMapScale", body.detail_power),
+                // Status can add gloss on top; a character at rest has none.
+                ("_SpecularPower", body.skin_gloss_power),
+                ("_SpecularPowerNail", body.nail_gloss_power),
+                ("_nip_specular", body.nip_gloss_power),
+                ("_linetexon", if body.draw_add_line { 1.0 } else { 0.0 }),
+            ],
+        );
     }
 
     /// Builds the face skin texture from the card and the active makeup.
@@ -983,6 +1045,25 @@ impl<'g> Builder<'g> {
         }
         let image = self.over(kind::FACE_OVER, image);
         self.set_skin(inst, "cf_O_face", draw, image);
+        // Face detail: painted lines and their strength, cheek and lip shine.
+        let lines = self.item_image(
+            "face detail",
+            "ChaFileFace.detailId",
+            cat::MT_FACE_DETAIL,
+            face.detail_id,
+            "MainAB",
+            "LineMask",
+        );
+        self.skin_values(
+            inst,
+            "cf_O_face",
+            lines,
+            &[
+                ("_DetailNormalMapScale", face.detail_power),
+                ("_SpecularPower", face.cheek_gloss_power),
+                ("_SpecularPowerNail", face.lip_gloss_power),
+            ],
+        );
     }
 }
 
@@ -1336,11 +1417,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     }
     let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets);
 
-    // The game's default ramp. Studio scenes can pick another one.
-    let ramp = game.items.vanilla(cat::MT_RAMP, 1).and_then(|item| {
-        b.loader
-            .image_by_name(item.get("MainTexAB")?, item.get("MainTex")?, None)
-    });
+    let ramp = ramp_image(&mut b.loader, DEFAULT_RAMP);
     if ramp.is_none() {
         b.loader.warn("shading ramp not found, using a hard edge");
     }
