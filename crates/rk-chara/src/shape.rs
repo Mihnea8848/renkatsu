@@ -377,6 +377,18 @@ impl ShapeSet {
     /// Writes the slider results into the bones below `root`.
     pub fn apply(&self, scene: &mut Scene, root: usize, rules: &Rules, corr: Option<&[Channels]>) {
         let names = scene.name_map(root);
+        self.apply_named(scene, &names, rules, corr);
+    }
+
+    /// `apply` on bones looked up earlier. Every value is set outright, so
+    /// applying again after changing slider values is safe.
+    pub fn apply_named(
+        &self,
+        scene: &mut Scene,
+        names: &HashMap<String, usize>,
+        rules: &Rules,
+        corr: Option<&[Channels]>,
+    ) {
         for rule in &rules.bones {
             let Some(&node) = names.get(&rule.bone) else { continue };
             if let Some(e) = &rule.head_scale {

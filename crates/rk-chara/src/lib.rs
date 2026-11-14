@@ -15,6 +15,7 @@ pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;
 pub mod overlays;
+pub mod pushup;
 pub mod scene;
 pub mod shape;
 
