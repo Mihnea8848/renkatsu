@@ -9,7 +9,7 @@ use rk_card::{ExtData, PluginData, Value};
 use rk_chara::loader::assign_weights;
 use rk_chara::scene::{euler_deg, Instance, Part, RendererInst, Scene, Trs};
 use rk_chara::shape::{Rules, ShapeSet, BODY_RULES, HEAD_RULES};
-use rk_unityfs::objects::{BoneWeight, Mesh};
+use rk_unityfs::objects::{BlendShape, BlendShapeVertex, BoneWeight, Mesh};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -187,6 +187,7 @@ fn skinned_scene() -> (Scene, usize, usize) {
         bones: vec![Some(bone), Some(root)],
         enabled: true,
         shadows_only: false,
+        shape_weights: Vec::new(),
     });
     (scene, bone, node)
 }
@@ -218,6 +219,48 @@ fn skinning_blends_bone_transforms() {
 }
 
 #[test]
+fn blend_shapes_move_vertices_before_skinning() {
+    let (mut scene, bone, _) = skinned_scene();
+    let mut mesh = (*scene.renderers[0].mesh).clone();
+    mesh.blend_shapes = vec![
+        BlendShape {
+            name: "lift".into(),
+            vertices: vec![BlendShapeVertex {
+                index: 0,
+                position: [0.0, 2.0, 0.0],
+                normal: [0.0; 3],
+            }],
+            full_weight: 100.0,
+        },
+        BlendShape {
+            name: "side".into(),
+            vertices: vec![BlendShapeVertex {
+                index: 0,
+                position: [4.0, 0.0, 0.0],
+                normal: [0.0; 3],
+            }],
+            full_weight: 100.0,
+        },
+    ];
+    scene.renderers[0].mesh = Arc::new(mesh);
+
+    // No weights: the stored mesh.
+    assert!(near(Vec3::from(scene.pose()[0].positions[0]), Vec3::ZERO));
+
+    // Half of the first shape; a missing entry for the second counts as 0.
+    scene.renderers[0].shape_weights = vec![0.5];
+    assert!(near(Vec3::from(scene.pose()[0].positions[0]), Vec3::new(0.0, 1.0, 0.0)));
+
+    // Shapes add up, and the bone moves the reshaped vertex.
+    scene.renderers[0].shape_weights = vec![0.5, 0.25];
+    scene.nodes[bone].local.pos = Vec3::new(0.0, 0.0, 3.0);
+    let posed = scene.pose();
+    assert!(near(Vec3::from(posed[0].positions[0]), Vec3::new(1.0, 1.0, 3.0)));
+    // Other vertices are untouched by the shapes.
+    assert!(near(Vec3::from(posed[0].positions[2]), Vec3::new(0.0, 1.0, 0.0)));
+}
+
+#[test]
 fn weights_rebind_by_name_and_extra_bones_are_grafted() {
     let mut scene = Scene::default();
     // Main skeleton.
@@ -241,12 +284,14 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         bones: vec![Some(own_hips), Some(extra), None],
         enabled: true,
         shadows_only: false,
+        shape_weights: Vec::new(),
     });
     let inst = Instance {
         root: top,
         nodes: vec![top, own_root, own_hips, extra, mesh_node],
         renderers: vec![0],
         renderer_keys: HashMap::new(),
+        object_nodes: HashMap::new(),
         scripts: Vec::new(),
     };
 
@@ -459,6 +504,7 @@ fn material_editor_overrides_find_their_materials() {
             bones: Vec::new(),
             enabled: true,
             shadows_only: false,
+            shape_weights: Vec::new(),
         });
     }
     let mut targets = Targets::new();

@@ -4,6 +4,7 @@
 //! Character assembly, following the order the game's loader uses.
 
 use crate::compose::{self, ClothColor, Decal};
+use crate::expression;
 use crate::loader::{assign_weights, Loader};
 use crate::overlays::{self, kind, ClothOverlay};
 use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
@@ -205,6 +206,47 @@ impl<'g> Builder<'g> {
         match self.skin_overlays.get(&kind) {
             Some(over) => compose::blend(&image, over),
             None => image,
+        }
+    }
+
+    /// Sets the face to the game's resting expression: pattern 0 with eyes
+    /// and eyebrows open and the mouth closed.
+    fn rest_expression(&mut self, inst: &Instance) {
+        for (_, script) in &inst.scripts {
+            let Ok(obj) = script.read() else { continue };
+            for (field, open) in expression::REST {
+                let Some(ctrl) = obj
+                    .get(field)
+                    .and_then(rk_unityfs::UValue::as_object)
+                    .and_then(expression::Controller::read)
+                else {
+                    continue;
+                };
+                for target in &ctrl.targets {
+                    let Some(node) = self
+                        .game
+                        .assets
+                        .deref(&script.file, target.object)
+                        .and_then(|o| inst.object_nodes.get(&o.key()).copied())
+                    else {
+                        continue;
+                    };
+                    for &r in &inst.renderers {
+                        let rend = &mut self.scene.renderers[r];
+                        if rend.node != node {
+                            continue;
+                        }
+                        // A mesh can be moved by more than one controller.
+                        let count = rend.mesh.blend_shapes.len();
+                        rend.shape_weights.resize(count, 0.0);
+                        for (shape, w) in ctrl.weights(target, 0, open) {
+                            if let Some(slot) = rend.shape_weights.get_mut(shape) {
+                                *slot = w;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -947,6 +989,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot");
+            b.rest_expression(&head);
             let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
             let makeup = match card.coordinates.get(outfit) {
                 Some(co) if co.enable_makeup => &co.makeup,

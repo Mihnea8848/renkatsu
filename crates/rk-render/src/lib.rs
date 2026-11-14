@@ -95,6 +95,9 @@ pub struct Environment {
     pub line_width: f32,
     pub light_intensity: f32,
     pub ambient: f32,
+    /// Unit vector pointing from the scene to the light. `None` puts the
+    /// light at the camera's upper left.
+    pub light_dir: Option<[f32; 3]>,
 }
 
 impl Default for Environment {
@@ -108,6 +111,7 @@ impl Default for Environment {
             light_intensity: 1.0,
             // The game's shaders compute light * 0.6 + 0.4.
             ambient: 0.4,
+            light_dir: None,
         }
     }
 }
@@ -462,7 +466,10 @@ impl Renderer {
         let to_eye = (camera.eye - camera.target).normalize_or_zero();
         // Key light from the camera's upper left, as a viewer expects.
         let right = Vec3::Y.cross(-to_eye).normalize_or_zero();
-        let light = (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize();
+        let light = match env.light_dir {
+            Some(d) => Vec3::from(d).normalize_or_zero(),
+            None => (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize(),
+        };
         let globals = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],

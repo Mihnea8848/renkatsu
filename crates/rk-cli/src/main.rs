@@ -9,6 +9,7 @@ mod audit;
 mod bundle;
 mod card;
 mod compare;
+mod reference;
 mod render;
 mod vfs;
 
@@ -71,6 +72,15 @@ enum Cmd {
         #[arg(short, long, default_value = "compare.png")]
         out: PathBuf,
     },
+    /// Render a card with the camera and light of a capture made in the game,
+    /// and write the game picture, our render and their difference side by side.
+    Reference {
+        card: PathBuf,
+        /// The .json file written by the capture plugin.
+        capture: PathBuf,
+        #[arg(short, long, default_value = "reference.png")]
+        out: PathBuf,
+    },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
         /// How many cards to sample from the game folder.
@@ -127,6 +137,7 @@ fn main() -> Result<()> {
             cmd: CardCmd::Dump { path, ext },
         } => card::dump(&path, ext),
         Cmd::Index => vfs::index(),
+        Cmd::Reference { card, capture, out } => reference::reference(&card, &capture, &out),
         Cmd::Audit { count, threads } => audit::audit(count, threads),
         Cmd::Compare {
             cards,
