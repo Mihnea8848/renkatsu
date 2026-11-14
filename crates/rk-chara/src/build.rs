@@ -720,6 +720,26 @@ impl<'g> Builder<'g> {
         }
     }
 
+    /// The Hair Shadows Fix (IllusionFixes) draws front hair between the two
+    /// queues of the face layers. It hooks every object the game loads that
+    /// has a hair component, so hair worn as an accessory counts too.
+    fn hair_shadows_fix(&mut self, inst: &Instance) {
+        if !inst
+            .scripts
+            .iter()
+            .any(|(_, s)| self.script_class(s).as_deref() == Some("ChaCustomHairComponent"))
+        {
+            return;
+        }
+        for &ri in &inst.renderers {
+            for m in &mut self.scene.renderers[ri].materials {
+                if m.shader == foreground::FRONT_HAIR_SHADER {
+                    m.render_queue = foreground::FRONT_HAIR_QUEUE;
+                }
+            }
+        }
+    }
+
     /// Hair Accessory Customizer's settings on an accessory with a hair
     /// component, applied after the game's colours as the plugin does.
     fn hair_accessory(
@@ -1596,15 +1616,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let prop = format!("ChaFileHair.{}", cat::HAIR_PROPS[i]);
             if let Some(item) = b.item(&label, &prop, cat::HAIR[i], hp.id) {
                 if let Some(inst) = b.part(&label, item, Some(hair_parent), Part::Hair(i as u8)) {
-                    // The Hair Shadows Fix draws front hair between the two
-                    // queues of the face layers.
-                    for &ri in &inst.renderers {
-                        for m in &mut b.scene.renderers[ri].materials {
-                            if m.shader == foreground::FRONT_HAIR_SHADER {
-                                m.render_queue = foreground::FRONT_HAIR_QUEUE;
-                            }
-                        }
-                    }
+                    b.hair_shadows_fix(&inst);
                     b.color_hair(&inst, hp);
                     b.hair_length(&inst, Some(hp.length));
                     b.physics_source(&inst, true, false, !hp.no_shake);
@@ -1812,6 +1824,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 }
                 b.color_accessory(&inst, acc, card.hair.parts.first(), hair_settings.get(&i).copied());
                 b.hair_length(&inst, hair_settings.get(&i).map(|h| h.hair_length));
+                b.hair_shadows_fix(&inst);
                 for (k, name) in ["N_move", "N_move2"].iter().enumerate() {
                     let Some(node) = b.scene.find(inst.root, name) else {
                         continue;
