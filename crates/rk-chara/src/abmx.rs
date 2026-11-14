@@ -28,6 +28,26 @@ pub struct BoneModifier {
     pub location: i64,
 }
 
+impl BoneModifier {
+    /// The entry for `outfit`: the shared one, or that outfit's own.
+    pub fn for_outfit(&self, outfit: usize) -> Option<&Modifier> {
+        if self.per_outfit.len() == 1 {
+            self.per_outfit.first()
+        } else {
+            self.per_outfit.get(outfit)
+        }
+    }
+}
+
+/// Whether a body modifier changes the scale of `bone` in `outfit`
+/// (`BoneModifierData.HasScale`).
+pub fn scales(mods: &[BoneModifier], outfit: usize, bone: &str) -> bool {
+    mods.iter()
+        .filter(|m| m.location < 10 && m.bone == bone)
+        .filter_map(|m| m.for_outfit(outfit))
+        .any(|d| d.scale != Vec3::ONE)
+}
+
 fn vec3(v: &Value) -> Option<Vec3> {
     let a = v.as_array()?;
     Some(Vec3::new(
@@ -98,13 +118,7 @@ pub fn apply(
     accessories: &HashMap<usize, HashMap<String, usize>>,
 ) {
     for m in mods {
-        let Some(data) = (if m.per_outfit.len() == 1 {
-            m.per_outfit.first()
-        } else {
-            m.per_outfit.get(outfit)
-        }) else {
-            continue;
-        };
+        let Some(data) = m.for_outfit(outfit) else { continue };
         let node = if m.location >= 10 {
             accessories
                 .get(&((m.location - 10) as usize))

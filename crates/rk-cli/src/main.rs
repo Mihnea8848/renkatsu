@@ -160,6 +160,7 @@ fn main() -> Result<()> {
             settle_frames,
             bones,
         } => {
+            // Captures are made in Studio, which is also the default.
             let mut opts = rk_chara::BuildOptions {
                 physics: !no_physics,
                 ..Default::default()

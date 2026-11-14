@@ -12,6 +12,7 @@ pub mod expression;
 pub mod eyelook;
 pub mod foreground;
 pub mod hair_accessories;
+pub mod hand_size;
 pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;
