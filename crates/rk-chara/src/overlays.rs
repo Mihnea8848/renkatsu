@@ -43,14 +43,19 @@ pub mod kind {
     }
 }
 
-/// Entry for an outfit in a per-outfit table. Tables that are not split by
-/// outfit only have one entry, which then applies to all of them.
+/// Entry for an outfit in a per-outfit table. A table that is not split by
+/// outfit has one entry under a key that is not a number, and that entry
+/// applies to all outfits. An entry for another outfit never does.
 fn for_outfit(table: &Value, outfit: usize) -> Option<&Value> {
     let entries = table.as_map()?;
     entries
         .iter()
         .find(|(k, _)| k.as_i64() == Some(outfit as i64))
-        .or_else(|| entries.first().filter(|_| entries.len() == 1))
+        .or_else(|| {
+            entries
+                .first()
+                .filter(|(k, _)| entries.len() == 1 && k.as_i64().is_none())
+        })
         .map(|(_, v)| v)
 }
 
@@ -164,4 +169,31 @@ pub fn clothes(ext: &ExtData, outfit: usize) -> HashMap<String, ClothOverlay> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_for_another_outfit_does_not_apply() {
+        let entry = |key: Value| Value::Map(vec![(key, Value::from("data"))]);
+
+        // Only outfit 6 has an entry.
+        let table = entry(Value::from(6));
+        assert!(for_outfit(&table, 0).is_none());
+        assert_eq!(for_outfit(&table, 6), Some(&Value::from("data")));
+
+        // One entry under a name is shared by all outfits.
+        let shared = entry(Value::from("all"));
+        assert_eq!(for_outfit(&shared, 3), Some(&Value::from("data")));
+
+        // Several entries: only an exact match counts.
+        let two = Value::Map(vec![
+            (Value::from(0), Value::from("a")),
+            (Value::from(1), Value::from("b")),
+        ]);
+        assert_eq!(for_outfit(&two, 1), Some(&Value::from("b")));
+        assert!(for_outfit(&two, 2).is_none());
+    }
 }
