@@ -8,7 +8,7 @@ use glam::{Quat, Vec3};
 use rk_card::{ExtData, PluginData, Value};
 use rk_chara::loader::assign_weights;
 use rk_chara::scene::{
-    euler_deg, DrawState, Instance, Part, RendererInst, Scene, ShadowCasting, ShadowPass, Stencil, Trs,
+    euler_deg, Bounds, DrawState, Instance, Part, RendererInst, Scene, ShadowCasting, ShadowPass, Stencil, Trs,
 };
 use rk_chara::shape::{Rules, ShapeSet, BODY_RULES, HEAD_RULES};
 use rk_unityfs::objects::{parse_queue, BlendShape, BlendShapeVertex, BoneWeight, Mesh, ShaderPass};
@@ -191,6 +191,8 @@ fn skinned_scene() -> (Scene, usize, usize) {
         cast_shadows: ShadowCasting::On,
         receive_shadows: true,
         shape_weights: Vec::new(),
+        bounds: None,
+        root_bone: None,
     });
     (scene, bone, node)
 }
@@ -318,6 +320,8 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         cast_shadows: ShadowCasting::On,
         receive_shadows: true,
         shape_weights: Vec::new(),
+        bounds: None,
+        root_bone: None,
     });
     let inst = Instance {
         root: top,
@@ -329,8 +333,11 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         scripts: Vec::new(),
     };
 
-    assign_weights(&mut scene, &inst, &dict, "cf_j_root");
+    assign_weights(&mut scene, &inst, &dict, "cf_j_root", Some(hips));
     assert_eq!(scene.renderers[0].bones, [Some(hips), Some(extra), None]);
+    // The game's culling box, around the root bone it names.
+    assert_eq!(scene.renderers[0].bounds, Some(Bounds::CHARA));
+    assert_eq!(scene.renderers[0].root_bone, Some(hips));
     assert_eq!(
         scene.nodes[extra].parent,
         Some(hips),
@@ -558,6 +565,8 @@ fn material_editor_overrides_find_their_materials() {
             cast_shadows: ShadowCasting::On,
             receive_shadows: true,
             shape_weights: Vec::new(),
+            bounds: None,
+            root_bone: None,
         });
     }
     let mut targets = Targets::new();
@@ -759,4 +768,36 @@ fn head_types_look_in_the_twin_bundle_first() {
         head_variant("a.unity3d", "t", 1),
         Some(("50.unity3d".to_string(), "t_1".to_string()))
     );
+}
+
+#[test]
+fn culling_boxes_follow_the_root_bone() {
+    // A box turned a quarter around Z and moved: its sides swap.
+    let b = Bounds {
+        center: [1.0, 0.0, 0.0],
+        extent: [2.0, 0.5, 0.25],
+    };
+    let turn = Trs {
+        pos: Vec3::new(0.0, 10.0, 0.0),
+        rot: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        scale: Vec3::ONE,
+    };
+    let [min, max] = b.transformed(turn.matrix());
+    assert!(near(Vec3::from(min), Vec3::new(-0.5, 9.0, -0.25)));
+    assert!(near(Vec3::from(max), Vec3::new(0.5, 13.0, 0.25)));
+
+    // A posed mesh reports its box: around the root bone when it has one,
+    // else around its own node; none without a box.
+    let (mut scene, bone, node) = skinned_scene();
+    assert!(scene.pose()[0].bounds.is_none());
+    scene.renderers[0].bounds = Some(Bounds::CHARA);
+    scene.nodes[node].local.pos = Vec3::new(5.0, 0.0, 0.0);
+    scene.nodes[bone].local.pos = Vec3::new(0.0, 1.0, 0.0);
+    scene.nodes[bone].local.scale = Vec3::splat(0.5);
+    let own = scene.pose()[0].bounds.unwrap();
+    assert!(near(Vec3::from(own[0]), Vec3::new(4.0, -1.2, -1.0)));
+    scene.renderers[0].root_bone = Some(bone);
+    let [min, max] = scene.pose()[0].bounds.unwrap();
+    assert!(near(Vec3::from(min), Vec3::new(-0.5, 0.4, -0.5)));
+    assert!(near(Vec3::from(max), Vec3::new(0.5, 1.4, 0.5)));
 }

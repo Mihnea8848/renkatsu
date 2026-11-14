@@ -26,6 +26,6 @@ pub mod slider_unlocker;
 pub use build::{build, BuildOptions, Character};
 pub use loader::Loader;
 pub use scene::{
-    Blend, DrawMesh, DrawState, Image, MaterialInst, Part, RendererInst, Scene, ShadowCasting, ShadowPass, Stencil,
-    TexSlot, Trs,
+    Blend, Bounds, DrawMesh, DrawState, Image, MaterialInst, Part, RendererInst, Scene, ShadowCasting, ShadowPass,
+    Stencil, TexSlot, Trs,
 };
