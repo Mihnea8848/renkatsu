@@ -313,7 +313,7 @@ mod tests {
     fn state(queue: i32) -> DrawState {
         DrawState {
             queue,
-            blend: true,
+            blend: crate::scene::Blend::Alpha,
             zwrite: true,
             outline: true,
             stencil: Stencil::None,

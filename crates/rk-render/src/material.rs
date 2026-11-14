@@ -4,7 +4,7 @@
 //! Maps Unity materials to Renkatsu's material kinds and render settings.
 
 use bytemuck::{Pod, Zeroable};
-use rk_chara::{DrawState, Image, MaterialInst, ShadowPass, Stencil};
+use rk_chara::{Blend, DrawState, Image, MaterialInst, ShadowPass, Stencil};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub enum ItemShader {
     Alpha = 2,
     /// main_item_studio_alpha, which MaterialEditor carries.
     StudioAlpha = 3,
+    /// toon_glasses_lod0: the lens of glasses.
+    Glasses = 4,
 }
 
 /// Clothes shader from a Unity shader name. Mod shaders follow the game's
@@ -53,6 +55,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
         "main_alpha" => ItemShader::Alpha,
         "main_opaque" | "main_opaque2" => ItemShader::Opaque,
         "main_item_studio_alpha" => ItemShader::StudioAlpha,
+        "toon_glasses_lod0" => ItemShader::Glasses,
         n if n.starts_with("mainalphaplus") => ItemShader::Alpha,
         n if n.starts_with("mainopaqueplus") => ItemShader::Opaque,
         _ => ItemShader::Other,
@@ -96,7 +99,10 @@ pub struct MaterialDesc {
     pub kind: Kind,
     /// Unity render queue: lower draws first.
     pub queue: i32,
+    /// The shader writes an alpha that the blend uses.
     pub blended: bool,
+    /// The blend the surface is drawn with.
+    pub blend: Blend,
     pub outline: bool,
     pub zwrite: bool,
     pub stencil: Stencil,
@@ -132,7 +138,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
     let solid = DrawState {
         queue: 2450,
-        blend: false,
+        blend: Blend::Off,
         zwrite: true,
         outline: true,
         stencil: Stencil::None,
@@ -143,7 +149,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
     // and take the one of their fallback.
     let layer = DrawState {
         queue: 3000,
-        blend: true,
+        blend: Blend::Alpha,
         zwrite: false,
         outline: false,
         shadow: ShadowPass::Fallback,
@@ -167,7 +173,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
         // main_hair_front leaves pixels marked 2 alone.
         Kind::Hair if name.contains("front") => DrawState {
             queue: 3040,
-            blend: true,
+            blend: Blend::Alpha,
             stencil: Stencil::SkipEqual,
             stencil_ref: 2,
             ..solid
@@ -177,7 +183,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
         // toon_glasses
         _ if name.contains("glass") => DrawState {
             queue: 4010,
-            blend: true,
+            blend: Blend::Premultiplied,
             outline: false,
             shadow: ShadowPass::Fallback,
             ..solid
@@ -185,7 +191,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
         // main_alpha
         _ if name.contains("alpha") => DrawState {
             queue: 3040,
-            blend: true,
+            blend: Blend::Alpha,
             ..solid
         },
         _ => solid,
@@ -213,18 +219,28 @@ impl MaterialDesc {
         let mat = mat.unwrap_or(&empty);
         let kind = classify(&mat.shader);
         let state = mat.draw.unwrap_or_else(|| state_for_name(&mat.shader, kind));
-        let blended = state.blend;
         // The clothes shaders have their own defaults and texture slots.
         let item = if kind == Kind::Item {
             item_shader(&mat.shader)
         } else {
             ItemShader::Other
         };
+        let glasses = item == ItemShader::Glasses;
+        // One with OneMinusSrcAlpha is drawn as such for the lens, which
+        // scales its colour by its alpha. main_skin, main_opaque and
+        // main_emblem have the same factors and write an alpha of one, which
+        // is no blending. main_item writes twice its cut alpha minus one;
+        // that is not followed yet and drawn solid.
+        let blend = match state.blend {
+            Blend::Premultiplied if !glasses => Blend::Off,
+            other => other,
+        };
+        let blended = blend != Blend::Off;
         let cloth = matches!(item, ItemShader::Opaque | ItemShader::Alpha);
         let sheer = item == ItemShader::Alpha;
         let studio = item == ItemShader::StudioAlpha;
         // Shaders whose normal map and second ramp take the layer slots.
-        let mapped = cloth || studio;
+        let mapped = cloth || studio || glasses;
         // Colour properties reach the shader linearised; vector properties,
         // which the material stores beside them, do not go through this.
         let color = |name: &str, default: [f32; 4]| linear(mat.colors.get(name).copied().unwrap_or(default));
@@ -239,6 +255,8 @@ impl MaterialDesc {
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
         let mut st_over = [st_main; 2];
+        let mut st_normal = st_main;
+        let mut st_ramp = st_main;
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
             // Clothes have none either; their normal map and second ramp
@@ -246,9 +264,13 @@ impl MaterialDesc {
             let name = match *name {
                 "_overtex1" if kind == Kind::Hair => "_HairGloss",
                 "_overtex1" if mapped => "_NormalMap",
+                "_overtex2" if glasses => "_GlassRamp",
                 "_overtex2" if mapped => "_AnotherRamp",
                 // Not properties of main_item_studio_alpha.
                 "_AlphaMask" | "_overtex3" if studio => continue,
+                // toon_glasses has the main texture, the normal map and
+                // the ramp only.
+                "_ColorMask" | "_DetailMask" | "_LineMask" | "_AlphaMask" | "_overtex3" if glasses => continue,
                 other => other,
             };
             if let Some(slot) = mat.textures.get(name) {
@@ -261,6 +283,8 @@ impl MaterialDesc {
                     "_HairGloss" => st_gloss = st,
                     "_overtex1" => st_over[0] = st,
                     "_overtex2" => st_over[1] = st,
+                    "_NormalMap" => st_normal = st,
+                    "_GlassRamp" => st_ramp = st,
                     _ => {}
                 }
             }
@@ -294,6 +318,9 @@ impl MaterialDesc {
                 st_over[0]
             } else if kind == Kind::Skin {
                 color("_SpecularColor", [0.0; 4])
+            } else if glasses {
+                // The lens colour; its alpha is how solid the lens is.
+                color("_Color4", [0.501_960_8, 0.501_960_8, 0.501_960_8, 1.0])
             } else {
                 color("_Color2", tint)
             },
@@ -312,10 +339,19 @@ impl MaterialDesc {
             // The face layer shaders spell it in lower case.
             shadow: match kind {
                 Kind::Eye | Kind::Overlay => color("_shadowcolor", [0.628, 0.628, 0.628, 1.0]),
+                // toon_glasses declares its own default.
+                _ if glasses => color("_ShadowColor", [0.694_348_3, 0.757_679_5, 0.823_529_4, 1.0]),
                 _ => color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
             },
             over1: if cloth {
                 color("_SpecularColor", [1.0, 1.0, 1.0, 0.0])
+            } else if glasses {
+                [
+                    float("_ColorInverse", 0.0),
+                    float("_ColorSort", 0.0),
+                    float("_RimPower", 1.0),
+                    0.0,
+                ]
             } else if studio {
                 [
                     float("_AnotherRampFull", 0.0),
@@ -329,6 +365,9 @@ impl MaterialDesc {
             // Hair: scale and offset of the gloss mask.
             over2: if kind == Kind::Hair {
                 st_gloss
+            } else if glasses {
+                // Scale and offset of the normal map.
+                st_normal
             } else if mapped {
                 [
                     float("_SpeclarHeight", if sheer { 0.985 } else { 0.98 }),
@@ -350,7 +389,8 @@ impl MaterialDesc {
                 color("_overcolor3", [1.0; 4])
             },
             st_main,
-            st_alpha,
+            // The lens has no alpha mask; its ramp's placement goes here.
+            st_alpha: if glasses { st_ramp } else { st_alpha },
             p0: [
                 cutoff,
                 float("_ShadowExtend", if sheer { 0.5 } else { 1.0 }),
@@ -402,6 +442,7 @@ impl MaterialDesc {
                 state.queue
             },
             blended,
+            blend,
             outline: state.outline && matches!(kind, Kind::Item | Kind::Skin | Kind::Hair),
             zwrite: state.zwrite,
             stencil: state.stencil,
@@ -474,7 +515,7 @@ mod tests {
         let mut read = mat("Shader Forge/main_opaque", -1);
         read.draw = Some(DrawState {
             queue: 3100,
-            blend: true,
+            blend: Blend::Alpha,
             zwrite: false,
             outline: false,
             stencil: Stencil::Write,
@@ -672,6 +713,105 @@ mod tests {
         let d = MaterialDesc::new(Some(&other));
         assert_eq!((d.uniform.info[1], d.uniform.info[2]), (HAS_MAIN, 0));
         assert_eq!(d.uniform.over1, [1.0; 4]);
+    }
+
+    #[test]
+    fn the_lens_of_glasses_follows_toon_glasses() {
+        assert_eq!(item_shader("Shader Forge/toon_glasses_lod0"), ItemShader::Glasses);
+        let pass = |blend| DrawState {
+            queue: 4010,
+            blend,
+            zwrite: true,
+            outline: false,
+            stencil: Stencil::None,
+            stencil_ref: 0,
+            shadow: ShadowPass::Fallback,
+        };
+        let mut lens = MaterialInst {
+            shader: "Shader Forge/toon_glasses_lod0".into(),
+            draw: Some(pass(Blend::Premultiplied)),
+            ..Default::default()
+        };
+        // Without values: the defaults the shader declares.
+        let d = MaterialDesc::new(Some(&lens));
+        assert_eq!(
+            (d.queue, d.blend, d.blended, d.zwrite),
+            (4010, Blend::Premultiplied, true, true)
+        );
+        let u = d.uniform;
+        assert_eq!(u.info[1], BLENDED | CASTER_FALLBACK);
+        assert_eq!(u.info[2], ItemShader::Glasses as u32);
+        assert_eq!(u.color1, [1.0; 4]);
+        let grey = srgb_to_linear(0.501_960_8);
+        assert_eq!(u.color2, [grey, grey, grey, 1.0]);
+        assert_eq!(u.shadow, linear([0.694_348_3, 0.757_679_5, 0.823_529_4, 1.0]));
+        assert_eq!(u.over1, [0.0, 0.0, 1.0, 0.0]);
+
+        // Values and the three textures reach the shader with their
+        // placement; textures of other shaders do not.
+        lens.colors.insert("_Color4".into(), [0.0, 0.5, 1.0, 0.125]);
+        lens.colors.insert("_Color".into(), [0.5, 0.5, 0.5, 1.0]);
+        for (name, value) in [("_ColorInverse", 0.25), ("_ColorSort", 0.3), ("_RimPower", 9.0)] {
+            lens.floats.insert(name.into(), value);
+        }
+        let slot = |scale: f32| rk_chara::TexSlot {
+            image: Arc::new(Image {
+                name: "t".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb: false,
+                repeat: true,
+            }),
+            scale: [scale, scale],
+            offset: [0.5, 0.0],
+        };
+        lens.textures.insert("_GlassRamp".into(), slot(2.0));
+        lens.textures.insert("_NormalMap".into(), slot(3.0));
+        lens.textures.insert("_AlphaMask".into(), slot(1.0));
+        lens.textures.insert("_DetailMask".into(), slot(1.0));
+        let d = MaterialDesc::new(Some(&lens));
+        let u = d.uniform;
+        assert_eq!(u.info[1], BLENDED | CASTER_FALLBACK | HAS_OVER1 | HAS_OVER2);
+        assert_eq!(u.color2, [0.0, srgb_to_linear(0.5), 1.0, 0.125]);
+        assert_eq!(u.over1, [0.25, 0.3, 9.0, 0.0]);
+        assert_eq!(u.over2, [3.0, 3.0, 0.5, 0.0]);
+        assert_eq!(u.st_alpha, [2.0, 2.0, 0.5, 0.0]);
+        assert!(d.textures[2].is_none() && d.textures[4].is_none());
+
+        // A shader that plugins carry is known by its name.
+        lens.draw = None;
+        let d = MaterialDesc::new(Some(&lens));
+        assert_eq!(
+            (d.queue, d.blend, d.shadow),
+            (4010, Blend::Premultiplied, ShadowPass::Fallback)
+        );
+
+        // The other shaders with these factors write an alpha of one and
+        // are drawn solid.
+        for name in [
+            "Shader Forge/main_skin",
+            "Shader Forge/main_item",
+            "Shader Forge/main_opaque",
+        ] {
+            let solid = MaterialInst {
+                shader: name.into(),
+                draw: Some(pass(Blend::Premultiplied)),
+                ..Default::default()
+            };
+            let d = MaterialDesc::new(Some(&solid));
+            assert_eq!(
+                (d.blend, d.blended, d.uniform.info[1] & BLENDED),
+                (Blend::Off, false, 0),
+                "{name}"
+            );
+        }
+        let sheer = MaterialInst {
+            shader: "Shader Forge/main_alpha".into(),
+            draw: Some(pass(Blend::Alpha)),
+            ..Default::default()
+        };
+        assert_eq!(MaterialDesc::new(Some(&sheer)).blend, Blend::Alpha);
     }
 
     #[test]

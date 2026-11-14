@@ -539,7 +539,7 @@ fn material_editor_overrides_find_their_materials() {
         (name == "Shader Forge/main_alpha").then_some(rk_chara::material_editor::Shader {
             draw: rk_chara::scene::DrawState {
                 queue: 3040,
-                blend: true,
+                blend: rk_chara::scene::Blend::Alpha,
                 zwrite: true,
                 outline: true,
                 stencil: rk_chara::scene::Stencil::None,
@@ -642,7 +642,7 @@ fn draw_state_comes_from_the_forward_pass() {
         DrawState::from_passes(&passes),
         Some(DrawState {
             queue: 3040,
-            blend: true,
+            blend: rk_chara::scene::Blend::Alpha,
             zwrite: true,
             outline: true,
             stencil: Stencil::SkipEqual,
@@ -689,7 +689,19 @@ fn draw_state_comes_from_the_forward_pass() {
     let plain = DrawState::from_passes(&[pass("OUTLINE", ""), pass("BASE", "")]).unwrap();
     assert_eq!(
         (plain.blend, plain.stencil, plain.outline),
-        (false, Stencil::None, true)
+        (rk_chara::scene::Blend::Off, Stencil::None, true)
+    );
+    // The lens of glasses: One with OneMinusSrcAlpha. Other pairs do not blend.
+    let mut lens = pass("FORWARD", "FORWARDBASE");
+    lens.dst_blend = 10;
+    assert_eq!(
+        DrawState::from_passes(&[lens]).unwrap().blend,
+        rk_chara::scene::Blend::Premultiplied
+    );
+    use rk_chara::scene::Blend;
+    assert_eq!(
+        [(1, 0), (5, 10), (1, 10), (1, 1), (0, 0)].map(|(s, d)| Blend::from_unity(s, d)),
+        [Blend::Off, Blend::Alpha, Blend::Premultiplied, Blend::Off, Blend::Off]
     );
     assert_eq!(DrawState::from_passes(&[pass("SHADOWCASTER", "SHADOWCASTER")]), None);
     assert_eq!(DrawState::from_passes(&[]), None);

@@ -51,6 +51,8 @@ pub struct Capture {
     /// How dark and how wide lines are.
     pub line_depth: Option<f32>,
     pub line_width: Option<f32>,
+    /// `RenderSettings.ambientLight` of the scene.
+    pub ambient_light: Option<[f32; 3]>,
 }
 
 impl Capture {
@@ -100,6 +102,9 @@ impl Capture {
                 .map(|c| ([c[0], c[1], c[2]], 1.0 - c[3])),
             line_depth: floats::<4>(&v["globals"]["_LineColorG"]).ok().map(|c| 1.0 - c[3]),
             line_width: v["globals"]["_linewidthG"].as_f64().map(|n| n as f32),
+            ambient_light: floats::<4>(&v["globals"]["ambient_light"])
+                .ok()
+                .map(|c| [c[0], c[1], c[2]]),
         })
     }
 }
@@ -172,6 +177,7 @@ pub fn reference(
         line_width: cap.line_width.unwrap_or(defaults.line_width),
         light_dir: cap.light_dir,
         light_intensity: cap.light_intensity,
+        ambient_light: cap.ambient_light.unwrap_or(defaults.ambient_light),
         shadows: ShadowSettings {
             enabled: shadows && cap.light_shadows.unwrap_or(true),
             strength: cap.shadow_strength.unwrap_or(defaults.shadows.strength),
@@ -433,7 +439,8 @@ mod tests {
         "views": [{"name": "body", "position": [0, 1, 8], "rotation": [0, 1, 0, 0]},
                   {"name": "face", "position": [0, 1.5, 2], "rotation": [0, 1, 0, 0]}],
         "studio": {"ramp_g": 2},
-        "globals": {"_ambientshadowG": [0.5, 0.4, 0.3, 0.74], "_LineColorG": [0.5, 0.5, 0.5, 0], "_linewidthG": 0.307},
+        "globals": {"_ambientshadowG": [0.5, 0.4, 0.3, 0.74], "_LineColorG": [0.5, 0.5, 0.5, 0], "_linewidthG": 0.307,
+                    "ambient_light": [0.3, 0.3405, 0.3885, 1.5]},
         "lights": [
             {"type": "Point", "direction": [1, 0, 0], "intensity": 3},
             {"type": "Directional", "direction": [0, -0.6, -0.8], "intensity": 2, "shadows": "Soft", "shadow_strength": 0.75}
@@ -465,6 +472,9 @@ mod tests {
         assert!((depth - 0.26).abs() < 1e-6);
         assert_eq!(c.line_depth, Some(1.0));
         assert_eq!(c.line_width, Some(0.307));
+        assert_eq!(c.ambient_light, Some([0.3, 0.3405, 0.3885]));
+        let bare = Capture::parse(&SAMPLE.replace("\"ambient_light\"", "\"other\"")).unwrap();
+        assert_eq!(bare.ambient_light, None);
     }
 
     #[test]
