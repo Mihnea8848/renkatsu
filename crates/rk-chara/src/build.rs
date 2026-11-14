@@ -26,6 +26,9 @@ pub struct BuildOptions {
     pub outfit: usize,
     pub clothes: bool,
     pub accessories: bool,
+    /// Wear the outdoor shoes instead of the indoor ones. The game loads
+    /// cards without their saved status, so it starts with indoor shoes.
+    pub outdoor_shoes: bool,
 }
 
 impl Default for BuildOptions {
@@ -34,6 +37,7 @@ impl Default for BuildOptions {
             outfit: 0,
             clothes: true,
             accessories: true,
+            outdoor_shoes: false,
         }
     }
 }
@@ -279,6 +283,53 @@ impl<'g> Builder<'g> {
             }
         }
         out
+    }
+
+    /// The card's emblems on a clothing piece, as the game's
+    /// `ChangeCustomEmblem` does: the first emblem goes to the renderers in
+    /// `rendEmblem01`, `rendEmblem02` and `exRendEmblem01`, the second to
+    /// `exRendEmblem02`. Sub-parts of a top take the top's emblems.
+    fn emblems(&mut self, inst: &Instance, part: &rk_card::ClothesPart, property: &str) {
+        let slots: [(i32, &[&str]); 2] = [
+            (part.embleme_id, &["rendEmblem01", "rendEmblem02", "exRendEmblem01"]),
+            (part.embleme_id2, &["exRendEmblem02"]),
+        ];
+        for (k, (id, fields)) in slots.into_iter().enumerate() {
+            let targets: Vec<usize> = fields.iter().flat_map(|f| self.listed_renderers(inst, f)).collect();
+            if targets.is_empty() {
+                continue;
+            }
+            // Studio draws the full-detail texture, without the `_low` suffix.
+            let image = self.item_image(
+                "emblem",
+                &format!("{property}Emblem{k}"),
+                cat::MT_EMBLEM,
+                id,
+                "MainTexAB",
+                "MainTex",
+            );
+            for ri in targets {
+                for m in &mut self.scene.renderers[ri].materials {
+                    match &image {
+                        Some(image) => {
+                            let st = m.tex_st.get("_MainTex").copied().unwrap_or([1.0, 1.0, 0.0, 0.0]);
+                            m.textures.insert(
+                                "_MainTex".into(),
+                                TexSlot {
+                                    image: image.clone(),
+                                    scale: [st[0], st[1]],
+                                    offset: [st[2], st[3]],
+                                },
+                            );
+                        }
+                        // No emblem: the game sets no texture.
+                        None => {
+                            m.textures.remove("_MainTex");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Paints a plugin overlay onto a source texture before it is used.
@@ -1278,9 +1329,6 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut accessory_nodes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     if let Some(co) = card.coordinates.get(outfit) {
         if opts.clothes {
-            let shoes_type = rk_card::map_get(&card.status, "shoesType")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
             // What the top (and its sub-parts) and the bra say about the
             // pieces around them.
             let mut top_items: Vec<&Item> = Vec::new();
@@ -1289,7 +1337,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let (mut no_bottom, mut no_shorts) = (false, false);
             for (i, cp) in co.clothes.parts.iter().enumerate().take(9) {
                 // Only one of indoor (7) and outdoor (8) shoes is worn.
-                if (i == 7 && shoes_type != 0) || (i == 8 && shoes_type == 0) {
+                if (i == 7 && opts.outdoor_shoes) || (i == 8 && !opts.outdoor_shoes) {
                     continue;
                 }
                 // One-piece tops replace the bottom, one-piece bras the shorts.
@@ -1307,6 +1355,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
                     hide_undressed_states(&mut b.scene, inst);
                     b.dress(inst, item, &cp.color_info, &pattern_prop, overlays::MAIN_IDS[i]);
+                    let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
+                    b.emblems(inst, cp, &prop);
                 }
                 let one_piece = item.int("Coordinate") == Some(2);
                 match (i, inst) {
@@ -1352,6 +1402,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                                 colors[0] = colors[3].clone();
                             }
                             b.dress(&inst, sub, &colors, &pattern_prop, overlays::SUB_IDS[k]);
+                            b.emblems(&inst, cp, &sub_prop);
                             top_insts.push(inst);
                         }
                         top_items.push(sub);
@@ -1454,7 +1505,15 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         };
         targets.entry(owner).or_default().push(ri);
     }
-    let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets);
+    let assets = &b.loader.game.assets;
+    let shaders = |name: &str| {
+        let info = assets.me_shader(name)?;
+        Some(crate::material_editor::Shader {
+            draw: crate::scene::DrawState::from_passes(&info.passes)?,
+            queue: info.queue,
+        })
+    };
+    let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
 
     let ramp = ramp_image(&mut b.loader, DEFAULT_RAMP);
     if ramp.is_none() {
