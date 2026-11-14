@@ -4,8 +4,8 @@
 // Koikatsu reference shading. One module serves every material kind; the kind
 // is a uniform so the pipeline count stays small. The game renders in linear
 // colour space: the target is sRGB, so blending happens on linear values as
-// in the game. The clothes shaders (main_opaque, main_alpha) work on linear
-// values throughout. The older branches still do their maths on gamma values
+// in the game. The clothes shaders (main_opaque, main_alpha) and
+// main_item_studio_alpha work on linear values throughout. The older branches still do their maths on gamma values
 // and are converted on the way out.
 
 struct Globals {
@@ -47,6 +47,7 @@ const HAS_ANOTHER_RAMP: u32 = 64u;
 // Which game shader an item follows (info.z).
 const ITEM_OPAQUE: u32 = 1u;
 const ITEM_ALPHA: u32 = 2u;
+const ITEM_STUDIO_ALPHA: u32 = 3u;
 
 struct Material {
     color1: vec4<f32>,
@@ -520,7 +521,8 @@ fn outline_color(i: VsOut) -> vec4<f32> {
     return vec4<f32>(line_color(s.diffuse * shade, light_color()), 1.0);
 }
 
-// Clothes (main_opaque, main_alpha): everything below works on linear values.
+// Clothes and studio items (main_opaque, main_alpha, main_item_studio_alpha):
+// everything below works on linear values.
 
 // The main texture; the game bakes the card's colours into it.
 fn item_main(i: VsOut) -> vec4<f32> {
@@ -722,8 +724,97 @@ fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     return vec4<f32>(mix(lines, rgb, keep), 1.0);
 }
 
+// Studio item, after MaterialEditor's main_item_studio_alpha pixel shader
+// (forward base pass without the shadow map). Left out: the three pattern
+// masks, read as the white the shader defaults to, and the scale and offset
+// of every texture but the main one.
+// m.over1: second ramp everywhere, emission power, scene shadow off, alpha.
+fn item_studio_alpha(i: VsOut, front: bool) -> vec4<f32> {
+    // The pass culls back faces.
+    if (!front) {
+        discard;
+    }
+    let main = item_main(i);
+    let alpha = main.a * m.over1.w;
+    if (alpha * 0.500999987 - 0.000999987125 < 0.0) {
+        discard;
+    }
+
+    // The three colours, placed by the colour mask.
+    var tint = vec3<f32>(1.0);
+    if (has(HAS_COLOR_MASK)) {
+        let cm = textureSample(color_mask_tex, samp, i.uv0);
+        tint = mix(mix(cm.r * (m.color1.rgb - 1.0) + 1.0, m.color2.rgb, cm.g), m.color3.rgb, cm.b);
+    }
+    let base = main.rgb * tint;
+
+    var dm = vec4<f32>(0.0);
+    if (has(HAS_DETAIL)) {
+        dm = textureSample(detail_tex, samp, i.uv0);
+    }
+    var lm = vec4<f32>(0.0);
+    if (has(HAS_LINE)) {
+        lm = textureSample(line_tex, samp, i.uv0);
+    }
+
+    let n = item_normal(i, true);
+    let l = normalize(g.light_dir.xyz);
+    let view = normalize(g.eye.xyz - i.world);
+    let ndl = dot(l, n);
+    let ndh = max(dot(n, normalize(view + l)), 0.0);
+    let ndv = dot(n, view);
+
+    // Where the material's own ramp replaces the scene ramp.
+    let line_r = mix(lm.r, dm.r, m.p0.w);
+    let another = mix(line_r, 1.0, m.over1.x);
+    let factor = item_shadow_factor(base);
+    let shade = factor * (clamp(2.0 - m.p0.z - another, 0.0, 1.0) * 0.670000017 + 0.330000013);
+
+    // Light amount, with the shadows painted into the masks.
+    let ramp = mix(item_ramp(ndl), item_another_ramp(ndh), another);
+    let extend = m.p0.y * -1.20000005 + 1.0;
+    let drawn = min(1.0 - dm.g, 1.0 - lm.b) * (1.0 - extend) + extend;
+    var rgb = mix(base * shade, base, ramp * drawn);
+
+    // Highlight: the shine painted in the detail mask, or a plain one.
+    let shine = item_shine(i, view, 0.899999976);
+    let power = m.over2.y;
+    var glint = 0.0;
+    if (power > 0.0) {
+        glint = (pow(ndh, power * 256.0) * 5.0 - 4.0) * power;
+    }
+    let textured = clamp(glint + min(shine * shine, 1.0), 0.0, 1.0);
+    let plain = clamp(glint, 0.0, 1.0) * dm.r;
+    rgb += mix(textured, plain, m.over2.w);
+
+    // Rim towards the silhouette, tinted by the hue of the scene shadow.
+    let fresnel = max(1.0 - max(ndv, 0.0), 1e-6);
+    let rim = clamp(pow(fresnel, m.over3.x * 9.0 + 1.0) * 2.5 - 0.5, 0.0, 1.0) * m.over3.y
+        * ((1.0 - dm.b) * 9.99999809 - 8.99999809);
+    let hue = rgb_to_hsv(g.ambient_shadow.rgb).x;
+    let rim_rgb = rim * (hsv_to_rgb(vec3<f32>(hue, 1.0, 1.0)) * 0.400000006 + 0.300000012);
+    rgb += clamp((1.0 - dm.g) * rim_rgb, vec3<f32>(0.0), vec3<f32>(0.5));
+
+    let light = light_color();
+    rgb *= max(light, g.ambient_shadow.rgb);
+    rgb *= drawn * (1.0 - shade) + shade;
+
+    // Lines painted into the masks.
+    let lines = item_lines(base * g.line_color.rgb * shade * light, light);
+    rgb = mix(rgb, lines, mix(lm.g, dm.b, m.p1.x));
+
+    // Glow, and the switch that shows the plain colour instead of the light.
+    let off = m.over1.z;
+    let glow = min(min(min(base, vec3<f32>(dm.r)), vec3<f32>(1.0 - dm.g)), vec3<f32>(m.over1.y)) * (m.over1.y * 3.0);
+    rgb = min(vec3<f32>(1.0 - off), rgb) + mix(glow, base, off);
+    return vec4<f32>(rgb, alpha);
+}
+
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_STUDIO_ALPHA) {
+        return item_studio_alpha(i, front);
+    }
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_ALPHA) {
         return item_alpha(i, front);
     }

@@ -38,17 +38,19 @@ pub enum ItemShader {
     Opaque = 1,
     /// main_alpha
     Alpha = 2,
+    /// main_item_studio_alpha, which MaterialEditor carries.
+    StudioAlpha = 3,
 }
 
 /// Clothes shader from a Unity shader name. Mod shaders follow the game's
 /// naming (`xukmi/MainAlphaPlus`), so matching is by substring.
 pub fn item_shader(shader: &str) -> ItemShader {
-    // Whole names, since main_item_studio_alpha and main_opaque_low are
-    // other shaders. KKShadersPlus stands in for the two under its own names.
+    // Whole names, since main_opaque_low is another shader. KKShadersPlus stands in for the two under its own names.
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
     match name.as_str() {
         "main_alpha" => ItemShader::Alpha,
         "main_opaque" | "main_opaque2" => ItemShader::Opaque,
+        "main_item_studio_alpha" => ItemShader::StudioAlpha,
         n if n.starts_with("mainalphaplus") => ItemShader::Alpha,
         n if n.starts_with("mainopaqueplus") => ItemShader::Opaque,
         _ => ItemShader::Other,
@@ -203,8 +205,11 @@ impl MaterialDesc {
         } else {
             ItemShader::Other
         };
-        let cloth = item != ItemShader::Other;
+        let cloth = matches!(item, ItemShader::Opaque | ItemShader::Alpha);
         let sheer = item == ItemShader::Alpha;
+        let studio = item == ItemShader::StudioAlpha;
+        // Shaders whose normal map and second ramp take the layer slots.
+        let mapped = cloth || studio;
         // Colour properties reach the shader linearised; vector properties,
         // which the material stores beside them, do not go through this.
         let color = |name: &str, default: [f32; 4]| linear(mat.colors.get(name).copied().unwrap_or(default));
@@ -222,8 +227,10 @@ impl MaterialDesc {
             // take the first two.
             let name = match *name {
                 "_overtex1" if kind == Kind::Hair => "_HairGloss",
-                "_overtex1" if cloth => "_NormalMap",
-                "_overtex2" if cloth => "_AnotherRamp",
+                "_overtex1" if mapped => "_NormalMap",
+                "_overtex2" if mapped => "_AnotherRamp",
+                // Not properties of main_item_studio_alpha.
+                "_AlphaMask" | "_overtex3" if studio => continue,
                 other => other,
             };
             if let Some(slot) = mat.textures.get(name) {
@@ -242,7 +249,13 @@ impl MaterialDesc {
         }
 
         // Skin gets its texture built at load time. Until then use a plain tone.
-        let mut color1 = color("_Color", [1.0; 4]);
+        // main_item_studio_alpha declares its own default for the three colours.
+        let tint = if studio {
+            [0.960_784_3, 0.960_784_3, 0.960_784_3, 1.0]
+        } else {
+            [1.0; 4]
+        };
+        let mut color1 = color("_Color", tint);
         if kind == Kind::Skin && flags & HAS_MAIN == 0 {
             color1 = linear([1.0, 0.88, 0.83, 1.0]);
         }
@@ -264,7 +277,7 @@ impl MaterialDesc {
             } else if kind == Kind::Skin {
                 color("_SpecularColor", [0.0; 4])
             } else {
-                color("_Color2", [1.0; 4])
+                color("_Color2", tint)
             },
             color3: if kind == Kind::Eye {
                 st_over[1]
@@ -276,7 +289,7 @@ impl MaterialDesc {
                     float("_DetailNormalMapScale", 1.0),
                 ]
             } else {
-                color("_Color3", [1.0; 4])
+                color("_Color3", tint)
             },
             // The face layer shaders spell it in lower case.
             shadow: match kind {
@@ -285,13 +298,20 @@ impl MaterialDesc {
             },
             over1: if cloth {
                 color("_SpecularColor", [1.0, 1.0, 1.0, 0.0])
+            } else if studio {
+                [
+                    float("_AnotherRampFull", 0.0),
+                    float("_EmissionPower", 0.0),
+                    float("_ambientshadowOFF", 0.0),
+                    float("_alpha", 1.0),
+                ]
             } else {
                 color("_overcolor1", [1.0; 4])
             },
             // Hair: scale and offset of the gloss mask.
             over2: if kind == Kind::Hair {
                 st_gloss
-            } else if cloth {
+            } else if mapped {
                 [
                     float("_SpeclarHeight", if sheer { 0.985 } else { 0.98 }),
                     float("_SpecularPower", 0.0),
@@ -301,7 +321,7 @@ impl MaterialDesc {
             } else {
                 color("_overcolor2", [1.0; 4])
             },
-            over3: if cloth {
+            over3: if mapped {
                 [
                     float("_rimpower", 0.5),
                     float("_rimV", if sheer { 0.75 } else { 0.5 }),
@@ -489,7 +509,7 @@ mod tests {
             ("xukmi/MainAlphaPlus", ItemShader::Alpha),
             ("xukmi/MainOpaquePlus", ItemShader::Opaque),
             ("Shader Forge/main_item", ItemShader::Other),
-            ("Shader Forge/main_item_studio_alpha", ItemShader::Other),
+            ("Shader Forge/main_item_studio_alpha", ItemShader::StudioAlpha),
             ("Shader Forge/main_opaque_low", ItemShader::Other),
             ("Standard", ItemShader::Other),
         ] {
@@ -561,6 +581,55 @@ mod tests {
         assert_eq!((d.uniform.p0[1], d.uniform.p1[0]), (0.8, 1.0));
         assert_eq!(d.uniform.info[1], BLENDED | HAS_MAIN | HAS_OVER1 | HAS_OVER2);
         assert!(d.textures[5].is_some() && d.textures[6].is_some() && d.textures[7].is_none());
+
+        // main_item_studio_alpha: the defaults its property list declares.
+        let mut studio = MaterialInst {
+            shader: "Shader Forge/main_item_studio_alpha".into(),
+            ..Default::default()
+        };
+        let u = MaterialDesc::new(Some(&studio)).uniform;
+        assert_eq!(u.info[2], ItemShader::StudioAlpha as u32);
+        let grey = srgb_to_linear(0.960_784_3);
+        assert_eq!(u.color1, [grey, grey, grey, 1.0]);
+        assert_eq!((u.color2, u.color3), (u.color1, u.color1));
+        assert_eq!(u.over1, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(u.over2, [0.98, 0.0, 0.0, 0.0]);
+        assert_eq!(u.over3[..2], [0.5, 0.5]);
+        assert_eq!(u.p0[1..], [1.0, 1.0, 0.0]);
+        assert_eq!(u.p1[0], 0.0);
+        // Its values and textures reach the shader; an alpha mask left over
+        // from the shader the material had before does not.
+        studio.colors.insert("_Color2".into(), [0.5, 0.5, 0.5, 0.0]);
+        for (name, value) in [
+            ("_AnotherRampFull", 1.0),
+            ("_EmissionPower", 0.25),
+            ("_ambientshadowOFF", 1.0),
+            ("_alpha", 0.9),
+            ("_Alpha", 0.1),
+            ("_ShadowExtendAnother", 0.0),
+            ("_notusetexspecular", 1.0),
+        ] {
+            studio.floats.insert(name.into(), value);
+        }
+        for name in [
+            "_MainTex",
+            "_ColorMask",
+            "_NormalMap",
+            "_AnotherRamp",
+            "_AlphaMask",
+            "_overtex3",
+        ] {
+            studio.textures.insert(name.into(), slot(false));
+        }
+        let d = MaterialDesc::new(Some(&studio));
+        assert_eq!(d.uniform.over1, [1.0, 0.25, 1.0, 0.9]);
+        assert!((d.uniform.color2[0] - 0.214_041_14).abs() < 1e-6);
+        assert_eq!((d.uniform.p0[2], d.uniform.over2[3]), (0.0, 1.0));
+        assert_eq!(
+            d.uniform.info[1],
+            BLENDED | HAS_MAIN | HAS_COLOR_MASK | HAS_OVER1 | HAS_OVER2
+        );
+        assert!(d.textures[4].is_none() && d.textures[7].is_none());
 
         // Other items keep their layer colours and ignore the normal map.
         let mut other = MaterialInst {
