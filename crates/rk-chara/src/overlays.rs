@@ -138,6 +138,17 @@ pub const MAIN_IDS: [&str; 9] = [
 ];
 pub const SUB_IDS: [&str; 3] = ["ct_top_parts_A", "ct_top_parts_B", "ct_top_parts_C"];
 
+/// Names the plugin gives the masks a top brings (its MaskKind), in the
+/// order body, bra, inner layer.
+pub const MASK_IDS: [&str; 3] = ["BodyMask", "BraMask", "InnerMask"];
+
+/// The mask a material ends up with. The plugin hooks Material.SetTexture
+/// for `_AlphaMask` on the body, the bra and the top's inner layer and swaps
+/// in its own image when the card has one, whatever the game passed.
+pub fn mask(overlays: &HashMap<String, ClothOverlay>, kind: &str, game: Option<Arc<Image>>) -> Option<Arc<Image>> {
+    overlays.get(kind).and_then(|o| o.image.clone()).or(game)
+}
+
 /// Clothes overlays for an outfit, by clothing id.
 pub fn clothes(ext: &ExtData, outfit: usize) -> HashMap<String, ClothOverlay> {
     let mut out = HashMap::new();
@@ -174,6 +185,43 @@ pub fn clothes(ext: &ExtData, outfit: usize) -> HashMap<String, ClothOverlay> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_mask_replaces_the_games() {
+        let image = |name: &str| {
+            Arc::new(Image {
+                name: name.into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb: true,
+                repeat: true,
+            })
+        };
+        let mut saved = HashMap::new();
+        saved.insert(
+            "InnerMask".to_string(),
+            ClothOverlay {
+                image: Some(image("saved")),
+                replace: false,
+            },
+        );
+        // An entry without an image, as "replace" alone leaves, changes nothing.
+        saved.insert(
+            "BraMask".to_string(),
+            ClothOverlay {
+                image: None,
+                replace: true,
+            },
+        );
+        let name = |kind: &str, game: Option<Arc<Image>>| mask(&saved, kind, game).map(|i| i.name.clone());
+        assert_eq!(name("InnerMask", Some(image("game"))).as_deref(), Some("saved"));
+        // The plugin's image is used even when the item brings no mask.
+        assert_eq!(name("InnerMask", None).as_deref(), Some("saved"));
+        assert_eq!(name("BodyMask", Some(image("game"))).as_deref(), Some("game"));
+        assert_eq!(name("BraMask", Some(image("game"))).as_deref(), Some("game"));
+        assert_eq!(name("BodyMask", None), None);
+    }
 
     #[test]
     fn an_entry_for_another_outfit_does_not_apply() {
