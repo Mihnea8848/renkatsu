@@ -85,7 +85,7 @@ pub fn dump(path: &Path, full_ext: bool) -> Result<()> {
         "face": {"headId": c.face.head_id, "skinId": c.face.skin_id, "detailId": c.face.detail_id,
                  "eyebrowId": c.face.eyebrow_id, "noseId": c.face.nose_id,
                  "pupil": c.face.pupil.iter().map(|p| p.id).collect::<Vec<_>>(),
-                 "shapes": c.face.shape_value_face.len()},
+                 "shapes": c.face.shape_value_face},
         "body": {"skinId": c.body.skin_id, "detailId": c.body.detail_id, "skinMainColor": c.body.skin_main_color,
                  "shapes": c.body.shape_value_body},
         "hair": c.hair.parts.iter().map(|p| p.id).collect::<Vec<_>>(),
