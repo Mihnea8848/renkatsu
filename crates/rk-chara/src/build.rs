@@ -5,6 +5,7 @@
 
 use crate::compose::{self, ClothColor, Decal};
 use crate::expression;
+use crate::eyelook::{self, EyeLook};
 use crate::loader::{assign_weights, Loader};
 use crate::overlays::{self, kind, ClothOverlay};
 use crate::scene::{euler_deg, Image, Instance, Part, Scene, TexSlot};
@@ -690,6 +691,21 @@ impl<'g> Builder<'g> {
             scale: [1.0, 1.0],
             offset: [0.0, 0.0],
         };
+        // Each eye's script holds how far a look may move the iris.
+        let mut looks = [EyeLook::default(); 2];
+        for (_, script) in &inst.scripts {
+            if let Some((side, look)) = script.read().ok().as_ref().and_then(EyeLook::read) {
+                if let Some(l) = looks.get_mut(side) {
+                    *l = look;
+                }
+            }
+        }
+        let pupil_sliders = eyelook::Pupil {
+            x: face.pupil_x,
+            y: face.pupil_y,
+            width: face.pupil_width,
+            height: face.pupil_height,
+        };
 
         for (side, (iris_mesh, white_mesh)) in [("cf_Ohitomi_L02", "cf_Ohitomi_L"), ("cf_Ohitomi_R02", "cf_Ohitomi_R")]
             .into_iter()
@@ -733,13 +749,32 @@ impl<'g> Builder<'g> {
                 let r = &mut self.scene.renderers[ri];
                 let Some(m) = r.materials.first_mut() else { continue };
                 if r.name == iris_mesh {
-                    m.textures.insert("_MainTex".into(), slot(iris.clone()));
-                    for (tex, color, image, value) in [
-                        ("_overtex1", "_overcolor1", &hl_up, face.hl_up_color),
-                        ("_overtex2", "_overcolor2", &hl_down, face.hl_down_color),
+                    // Eyes at rest look straight ahead.
+                    let place = eyelook::placement(&looks[side], side == 1, pupil_sliders, [0.0, 0.0]);
+                    let placed = |image: Arc<Image>, shift_y: f32| TexSlot {
+                        image,
+                        scale: place.scale,
+                        offset: [place.offset[0], place.offset[1] + shift_y],
+                    };
+                    m.textures.insert("_MainTex".into(), placed(iris.clone(), 0.0));
+                    for (tex, color, image, value, shift) in [
+                        (
+                            "_overtex1",
+                            "_overcolor1",
+                            &hl_up,
+                            face.hl_up_color,
+                            eyelook::highlight_shift(face.hl_up_y),
+                        ),
+                        (
+                            "_overtex2",
+                            "_overcolor2",
+                            &hl_down,
+                            face.hl_down_color,
+                            eyelook::highlight_shift(face.hl_down_y),
+                        ),
                     ] {
                         match image {
-                            Some(image) => drop(m.textures.insert(tex.into(), slot(image.clone()))),
+                            Some(image) => drop(m.textures.insert(tex.into(), placed(image.clone(), shift))),
                             None => drop(m.textures.remove(tex)),
                         }
                         m.colors.insert(color.into(), value);

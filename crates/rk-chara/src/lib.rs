@@ -8,6 +8,7 @@ pub mod abmx;
 pub mod build;
 pub mod compose;
 pub mod expression;
+pub mod eyelook;
 pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;

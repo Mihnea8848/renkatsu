@@ -125,6 +125,7 @@ pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()
     let card = Card::load(card_path)?;
     let mut chara = rk_chara::build(&game, &card, &BuildOptions::default())?;
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
+    let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene);
     let draws = chara.scene.pose();
     let env = Environment {
         ramp: chara.ramp.clone(),
@@ -183,7 +184,9 @@ pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()
     for warning in &chara.warnings {
         println!("  warning: {warning}");
     }
-    println!("  expression: blend shapes of {shaped} meshes set from the capture");
+    println!(
+        "  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture"
+    );
     compare_bones(&capture_text, &chara.scene)?;
     Ok(())
 }
@@ -220,6 +223,53 @@ fn apply_shapes(shapes: &[Shapes], scene: &mut rk_chara::Scene) -> usize {
                 if let Some(slot) = r.shape_weights.get_mut(index) {
                     *slot = w;
                 }
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Scale and offset the game had on each iris texture, per renderer name.
+/// They include where the eyes were looking.
+pub fn capture_iris(capture: &str) -> Result<Vec<(String, [f32; 4])>> {
+    let v: Value = serde_json::from_str(capture)?;
+    let mut out = Vec::new();
+    for r in v["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let material = &r["materials"][0];
+        let shader = material["shader"].as_str().unwrap_or_default().to_lowercase();
+        // The iris shader, not the one for eye whites and lashes.
+        if !shader.contains("eye") || shader.contains("eyew") {
+            continue;
+        }
+        if let (Some(name), Some(_)) = (r["name"].as_str(), material["main_tex_st"].as_array()) {
+            out.push((name.to_owned(), floats::<4>(&material["main_tex_st"])?));
+        }
+    }
+    Ok(out)
+}
+
+/// Puts the captured scale and offset on the iris textures. The highlights
+/// keep their distance from the iris. Returns how many eyes were set.
+fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara::Scene) -> usize {
+    let mut count = 0;
+    for (name, st) in placements {
+        for r in scene.renderers.iter_mut().filter(|r| &r.name == name) {
+            let Some(m) = r.materials.first_mut() else { continue };
+            let Some((old, old_scale)) = m.textures.get("_MainTex").map(|t| (t.offset, t.scale)) else {
+                continue;
+            };
+            // The scale does not depend on the gaze, so it checks our own rule.
+            println!(
+                "  iris {name}: scale from the card {:.4} x {:.4}, in the game {:.4} x {:.4}",
+                old_scale[0], old_scale[1], st[0], st[1]
+            );
+            for (key, slot) in m.textures.iter_mut() {
+                if !matches!(key.as_str(), "_MainTex" | "_overtex1" | "_overtex2") {
+                    continue;
+                }
+                slot.scale = [st[0], st[1]];
+                slot.offset = [st[2] + slot.offset[0] - old[0], st[3] + slot.offset[1] - old[1]];
             }
             count += 1;
         }
@@ -318,6 +368,18 @@ mod tests {
         assert_eq!(shapes[0], ("face".to_owned(), vec![(0, 0.3), (1, 0.7)]));
         assert_eq!(shapes[1], ("brow".to_owned(), vec![]));
         assert!(capture_shapes("{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn capture_iris_placement() {
+        let text = r#"{"renderers": [
+            {"name": "iris_l", "materials": [{"shader": "Shader Forge/toon_eye_lod0", "main_tex_st": [1.05, 1.1, -0.04, -0.01]}]},
+            {"name": "white_l", "materials": [{"shader": "Shader Forge/toon_eyew_lod0", "main_tex_st": [1, 1, 0, 0]}]},
+            {"name": "shirt", "materials": [{"shader": "Shader Forge/main_opaque", "main_tex_st": [1, 1, 0, 0]}]},
+            {"name": "bare", "materials": []}
+        ]}"#;
+        let iris = capture_iris(text).unwrap();
+        assert_eq!(iris, vec![("iris_l".to_owned(), [1.05, 1.1, -0.04, -0.01])]);
     }
 
     #[test]
