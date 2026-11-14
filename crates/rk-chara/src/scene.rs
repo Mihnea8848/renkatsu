@@ -252,6 +252,32 @@ pub struct MaterialInst {
     pub colors: HashMap<String, [f32; 4]>,
 }
 
+/// Culling box of a renderer as Unity keeps it: centre and half size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounds {
+    pub center: [f32; 3],
+    pub extent: [f32; 3],
+}
+
+impl Bounds {
+    /// The box the game gives every mesh it rebinds to the skeleton
+    /// (`ChaControl.bounds`).
+    pub const CHARA: Bounds = Bounds {
+        center: [0.0, -0.2, 0.0],
+        extent: [1.0, 1.0, 1.0],
+    };
+
+    /// Lowest and highest corner of the box after `mat`, as Unity's
+    /// `TransformAABB` gives them.
+    pub fn transformed(&self, mat: Mat4) -> [[f32; 3]; 2] {
+        let c = mat.transform_point3(Vec3::from(self.center));
+        let e = Vec3::from(self.extent);
+        let half =
+            mat.x_axis.truncate().abs() * e.x + mat.y_axis.truncate().abs() * e.y + mat.z_axis.truncate().abs() * e.z;
+        [(c - half).to_array(), (c + half).to_array()]
+    }
+}
+
 pub struct RendererInst {
     pub name: String,
     pub node: usize,
@@ -267,6 +293,12 @@ pub struct RendererInst {
     /// Weight per blend shape of the mesh, 0 to 1. May be shorter than the
     /// shape list; missing entries count as 0.
     pub shape_weights: Vec<f32>,
+    /// Culling box: a skinned renderer's own (`m_AABB` or what the game
+    /// set as `localBounds`), else the mesh's. In the space of `root_bone`,
+    /// or of the renderer's node without one.
+    pub bounds: Option<Bounds>,
+    /// `SkinnedMeshRenderer.rootBone`.
+    pub root_bone: Option<usize>,
 }
 
 /// Nodes and renderers created by instantiating one prefab.
@@ -375,6 +407,9 @@ pub struct DrawMesh<'a> {
     pub normals: Vec<[f32; 3]>,
     /// Direction along the surface, with Unity's handedness sign in `w`.
     pub tangents: Vec<[f32; 4]>,
+    /// Lowest and highest corner of the renderer's culling box in the world
+    /// (`Renderer.bounds`); `None` when the files give no box.
+    pub bounds: Option<[[f32; 3]; 2]>,
 }
 
 impl Scene {
@@ -483,11 +518,13 @@ impl Scene {
             if !has_tangents {
                 tangents = vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
             }
+            let bounds = r.bounds.map(|b| b.transformed(world[r.root_bone.unwrap_or(r.node)]));
             out.push(DrawMesh {
                 renderer: r,
                 positions,
                 normals,
                 tangents,
+                bounds,
             });
         }
         out

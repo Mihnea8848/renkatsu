@@ -1481,6 +1481,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .find(anim.root, "cf_j_root")
         .context("skeleton has no cf_j_root")?;
     let mut bones = b.scene.name_map(body_root);
+    // Root bone of every mesh the game rebinds (`RefObjKey.A_ROOTBONE`).
+    let hips = bones.get("cf_j_hips").copied();
     b.physics_source(&anim, false, false, true);
 
     // Head bones hang from the neck end.
@@ -1501,7 +1503,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let body = b
         .loader
         .load_prefab(&mut b.scene, BASE, body_name, None, Some(top), Part::Body)?;
-    assign_weights(&mut b.scene, &body, &bones, "cf_j_root");
+    assign_weights(&mut b.scene, &body, &bones, "cf_j_root", hips);
     b.physics_source(&body, false, false, true);
 
     b.skin_body(card, &body, female);
@@ -1557,7 +1559,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 }
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
-            assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot");
+            assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot", hips);
             b.rest_expression(&head);
             b.face_layer_order(&head, card.face.foreground_eyes, card.face.foreground_eyebrow);
             let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
@@ -1675,7 +1677,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     // The game copies DynamicBone roots onto the body
                     // skeleton for tops and bottoms only.
                     b.physics_source(inst, true, i < 2, true);
-                    assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
+                    assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
                     hide_undressed_states(&mut b.scene, inst);
                     b.dress(inst, item, &cp.color_info, &pattern_prop, overlays::MAIN_IDS[i]);
                     let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
@@ -1749,7 +1751,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         }
                         if let Some(inst) = b.part(&sub_label, sub, Some(top), Part::Clothes(0)) {
                             b.physics_source(&inst, true, true, true);
-                            assign_weights(&mut b.scene, &inst, &bones, "cf_j_root");
+                            assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             hide_undressed_states(&mut b.scene, &inst);
                             // Sub-parts share the top's colours. The third
                             // one takes its first colour from the fourth entry.
@@ -1816,7 +1818,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 };
                 if item_parent == "null" {
                     // Skinned accessory: follows the head bones.
-                    assign_weights(&mut b.scene, &inst, &head_bones, "cf_J_N_FaceRoot");
+                    assign_weights(&mut b.scene, &inst, &head_bones, "cf_J_N_FaceRoot", hips);
                 }
                 let key = if acc.parent_key.is_empty() {
                     item_parent

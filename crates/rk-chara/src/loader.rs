@@ -4,7 +4,9 @@
 //! Turns Unity prefabs into scene nodes and renderers, with caches for the
 //! meshes and textures they share.
 
-use crate::scene::{DrawState, Image, Instance, MaterialInst, Part, RendererInst, Scene, ShadowCasting, TexSlot, Trs};
+use crate::scene::{
+    Bounds, DrawState, Image, Instance, MaterialInst, Part, RendererInst, Scene, ShadowCasting, TexSlot, Trs,
+};
 use anyhow::{anyhow, Context, Result};
 use glam::{Quat, Vec3};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
@@ -290,6 +292,13 @@ impl<'a> Loader<'a> {
                         .and_then(|t| by_transform.get(&t.key()).copied())
                 })
                 .collect();
+            let own = if skinned { r.aabb } else { mesh.local_aabb };
+            let bounds = own.map(|(center, extent)| Bounds { center, extent });
+            let root_bone = self
+                .game
+                .assets
+                .deref(&p.renderer.file, r.root_bone)
+                .and_then(|t| by_transform.get(&t.key()).copied());
             inst.renderer_keys.insert(p.renderer.key(), scene.renderers.len());
             inst.renderers.push(scene.renderers.len());
             scene.renderers.push(RendererInst {
@@ -304,6 +313,8 @@ impl<'a> Loader<'a> {
                 cast_shadows: ShadowCasting::from_unity(r.cast_shadows),
                 receive_shadows: r.receive_shadows,
                 shape_weights: Vec::new(),
+                bounds,
+                root_bone,
             });
         }
         Ok(inst)
@@ -315,8 +326,29 @@ impl<'a> Loader<'a> {
 ///
 /// Bones the skeleton lacks are grafted onto it under the matching parent,
 /// so clothes and accessories with extra bones keep working.
-pub fn assign_weights(scene: &mut Scene, inst: &Instance, dict: &HashMap<String, usize>, del_top: &str) {
+///
+/// As `AssignedAnotherWeights.AssignedWeightsAndSetBounds` does, every
+/// skinned mesh also gets the character's culling box, around `root_bone`
+/// when one is given (the game passes `cf_j_hips`); without one the mesh's
+/// own root bone is looked up in `dict`.
+pub fn assign_weights(
+    scene: &mut Scene,
+    inst: &Instance,
+    dict: &HashMap<String, usize>,
+    del_top: &str,
+    root_bone: Option<usize>,
+) {
     for &ri in &inst.renderers {
+        if scene.renderers[ri].skinned {
+            scene.renderers[ri].bounds = Some(Bounds::CHARA);
+            if root_bone.is_some() {
+                scene.renderers[ri].root_bone = root_bone;
+            } else if let Some(old) = scene.renderers[ri].root_bone {
+                if let Some(&target) = dict.get(&scene.nodes[old].name) {
+                    scene.renderers[ri].root_bone = Some(target);
+                }
+            }
+        }
         let bones = scene.renderers[ri].bones.clone();
         let mut out = Vec::with_capacity(bones.len());
         for b in bones {

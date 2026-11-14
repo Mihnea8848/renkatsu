@@ -91,6 +91,9 @@ pub struct Renderer {
     pub mesh: PPtr,
     pub bones: Vec<PPtr>,
     pub root_bone: PPtr,
+    /// Skinned renderers only: centre and half size of the culling box
+    /// (`m_AABB`), in the space of the root bone.
+    pub aabb: Option<([f32; 3], [f32; 3])>,
     pub blend_shape_weights: Vec<f32>,
 }
 
@@ -106,12 +109,19 @@ impl Renderer {
             mesh: o.pptr("m_Mesh").unwrap_or_default(),
             bones: pptrs(o, "m_Bones"),
             root_bone: o.pptr("m_RootBone").unwrap_or_default(),
+            aabb: aabb(o, "m_AABB"),
             blend_shape_weights: o
                 .array("m_BlendShapeWeights")
                 .map(|a| a.iter().filter_map(UValue::as_f32).collect())
                 .unwrap_or_default(),
         })
     }
+}
+
+/// Reads an `AABB` field: centre and half size.
+fn aabb(o: &UObject, name: &str) -> Option<([f32; 3], [f32; 3])> {
+    let b = o.get(name)?;
+    Some((b.get("m_Center")?.floats::<3>()?, b.get("m_Extent")?.floats::<3>()?))
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +184,8 @@ pub struct Mesh {
     /// Row-major 4x4 matrices, one per bone.
     pub bind_poses: Vec<[f32; 16]>,
     pub blend_shapes: Vec<BlendShape>,
+    /// Centre and half size of the mesh's box (`m_LocalAABB`).
+    pub local_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 fn half_to_f32(h: u16) -> f32 {
@@ -199,6 +211,7 @@ impl Mesh {
             name: o.str("m_Name").unwrap_or_default().to_string(),
             ..Default::default()
         };
+        m.local_aabb = aabb(o, "m_LocalAABB");
         if o.i64("m_MeshCompression").unwrap_or(0) != 0 {
             return Err(Error::Format(format!(
                 "mesh {} uses packed compression, not supported yet",

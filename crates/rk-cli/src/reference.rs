@@ -43,6 +43,8 @@ pub struct Capture {
     /// Whether that light casts shadows, and how strong they are; `None`
     /// where the capture does not say.
     pub light_shadows: Option<bool>,
+    /// Whether they are soft (`LightShadows.Soft`).
+    pub light_soft: Option<bool>,
     pub shadow_strength: Option<f32>,
     /// Number of the shading ramp the scene used.
     pub ramp: Option<i32>,
@@ -75,6 +77,7 @@ impl Capture {
         let mut light_dir = None;
         let mut light_intensity = 1.0;
         let mut light_shadows = None;
+        let mut light_soft = None;
         let mut shadow_strength = None;
         for l in v["lights"].as_array().map(Vec::as_slice).unwrap_or_default() {
             if l["type"] == "Directional" {
@@ -82,6 +85,7 @@ impl Capture {
                 light_dir = Some((-d).to_array());
                 light_intensity = l["intensity"].as_f64().unwrap_or(1.0) as f32;
                 light_shadows = l["shadows"].as_str().map(|mode| mode != "None");
+                light_soft = l["shadows"].as_str().map(|mode| mode == "Soft");
                 shadow_strength = l["shadow_strength"].as_f64().map(|n| n as f32);
                 break;
             }
@@ -94,6 +98,7 @@ impl Capture {
             light_dir,
             light_intensity,
             light_shadows,
+            light_soft,
             shadow_strength,
             ramp: v["studio"]["ramp_g"].as_i64().map(|n| n as i32),
             // The game stores depth as one minus the value in alpha.
@@ -147,6 +152,51 @@ pub fn difference(a: &[u8], b: &[u8], background: [u8; 3]) -> Difference {
     }
 }
 
+/// How well the game's cast shadows are met.
+pub struct ShadowDifference {
+    /// Character pixels where the game is darker than our picture without
+    /// real-time shadows.
+    pub pixels: usize,
+    /// Mean colour difference between the game and our picture there.
+    pub mean: f32,
+    /// The same against our picture without real-time shadows.
+    pub mean_without: f32,
+}
+
+/// Mean channel steps the game must be darker by to count as shadowed.
+const SHADOW_STEP: i32 = 4;
+
+/// Compares the game with our picture where the game shows a shadow: the
+/// pixels that are character in the game and in `plain` (our picture without
+/// real-time shadows) and darker in the game by at least `SHADOW_STEP`.
+pub fn shadow_difference(game: &[u8], ours: &[u8], plain: &[u8], background: [u8; 3]) -> ShadowDifference {
+    let is_back = |p: &[u8]| (0..3).all(|c| p[c].abs_diff(background[c]) <= 6);
+    let apart = |a: &[u8], b: &[u8]| (0..3).map(|c| a[c].abs_diff(b[c]) as u64).sum::<u64>() / 3;
+    let (mut pixels, mut sum, mut sum_without) = (0usize, 0u64, 0u64);
+    for ((g, o), p) in game
+        .chunks_exact(4)
+        .zip(ours.chunks_exact(4))
+        .zip(plain.chunks_exact(4))
+    {
+        if is_back(g) || is_back(p) {
+            continue;
+        }
+        let darker = (0..3).map(|c| p[c] as i32 - g[c] as i32).sum::<i32>();
+        if darker < SHADOW_STEP * 3 {
+            continue;
+        }
+        pixels += 1;
+        sum += apart(g, o);
+        sum_without += apart(g, p);
+    }
+    let n = pixels.max(1) as f32;
+    ShadowDifference {
+        pixels,
+        mean: sum as f32 / n,
+        mean_without: sum_without as f32 / n,
+    }
+}
+
 pub fn reference(
     card_path: &Path,
     capture_path: &Path,
@@ -181,6 +231,7 @@ pub fn reference(
         shadows: ShadowSettings {
             enabled: shadows && cap.light_shadows.unwrap_or(true),
             strength: cap.shadow_strength.unwrap_or(defaults.shadows.strength),
+            soft: cap.light_soft.unwrap_or(defaults.shadows.soft),
             ..defaults.shadows
         },
         ..defaults
@@ -236,6 +287,21 @@ pub fn reference(
             100.0 * diff.outline_mismatch
         );
         println!("    mean colour difference: {:.1} of 255", diff.mean);
+        if env.shadows.enabled {
+            let plain_env = Environment {
+                shadows: ShadowSettings {
+                    enabled: false,
+                    ..env.shadows
+                },
+                ..env.clone()
+            };
+            let plain = renderer.render(&draws, camera, &plain_env, w, h, back)?;
+            let s = shadow_difference(&game_px, &ours, &plain, back8);
+            println!(
+                "    shadows: {:.2} of 255 over the {} pixels the game shades ({:.2} without our shadows)",
+                s.mean, s.pixels, s.mean_without
+            );
+        }
     }
     for warning in &chara.warnings {
         println!("  warning: {warning}");
@@ -462,6 +528,7 @@ mod tests {
         assert!((Vec3::from(l) - Vec3::new(0.0, 0.6, 0.8)).length() < 1e-6);
         assert_eq!(c.light_intensity, 2.0);
         assert_eq!((c.light_shadows, c.shadow_strength), (Some(true), Some(0.75)));
+        assert_eq!(c.light_soft, Some(true));
         let off = Capture::parse(&SAMPLE.replace("\"Soft\"", "\"None\"")).unwrap();
         assert_eq!(off.light_shadows, Some(false));
         let silent = Capture::parse(&SAMPLE.replace(", \"shadows\": \"Soft\", \"shadow_strength\": 0.75", "")).unwrap();
@@ -508,6 +575,23 @@ mod tests {
         ]}"#;
         let iris = capture_iris(text).unwrap();
         assert_eq!(iris, vec![("iris_l".to_owned(), [1.05, 1.1, -0.04, -0.01])]);
+    }
+
+    #[test]
+    fn shadow_difference_looks_where_the_game_is_darker() {
+        let back = [128, 128, 128];
+        let px = |v: u8| [v, v, v, 255];
+        // Background, a lit pixel, a shadowed pixel we meet, one we miss.
+        let game: Vec<u8> = [px(128), px(200), px(150), px(150)].concat();
+        let plain: Vec<u8> = [px(128), px(201), px(200), px(200)].concat();
+        let ours: Vec<u8> = [px(128), px(201), px(152), px(200)].concat();
+        let s = shadow_difference(&game, &ours, &plain, back);
+        assert_eq!(s.pixels, 2);
+        assert_eq!(s.mean, 26.0);
+        assert_eq!(s.mean_without, 50.0);
+        // Nothing darker: no pixels, and no division by zero.
+        let none = shadow_difference(&plain, &ours, &plain, back);
+        assert_eq!((none.pixels, none.mean), (0, 0.0));
     }
 
     #[test]

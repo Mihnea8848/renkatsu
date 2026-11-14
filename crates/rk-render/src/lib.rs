@@ -856,6 +856,8 @@ impl Renderer {
         let mut items = Vec::new();
         let mut casters = Vec::new();
         let mut binds = Vec::new();
+        // Culling boxes of the renderers that receive shadows.
+        let mut receivers = Vec::new();
         for d in draws {
             let mesh = &d.renderer.mesh;
             let uv = |set: usize, i: usize| mesh.uv[set].get(i).copied().unwrap_or([0.0, 0.0]);
@@ -890,6 +892,7 @@ impl Renderer {
             // Unity draws materials beyond the submesh count with the last
             // submesh again; MaterialEditor's copies rely on this.
             let pairs = submesh_materials(mesh.submeshes.len(), d.renderer.materials.len());
+            let mut receives = false;
             for (si, mi) in pairs {
                 let sm = &mesh.submeshes[si];
                 if sm.topology != 0 || sm.index_count == 0 {
@@ -897,6 +900,7 @@ impl Renderer {
                 }
                 let mut desc = MaterialDesc::new(d.renderer.materials.get(mi));
                 desc.uniform.info[3] = shadow::receives(d.renderer.receive_shadows, desc.queue) as u32;
+                receives |= desc.uniform.info[3] != 0 && d.renderer.cast_shadows != ShadowCasting::ShadowsOnly;
                 let bind = binds.len();
                 binds.push(self.material_bind_group(&desc));
                 let role = shadow::role(d.renderer.cast_shadows, desc.shadow, desc.queue);
@@ -924,6 +928,17 @@ impl Renderer {
                     stencil_ref: desc.stencil_ref as u32,
                     bind,
                 });
+            }
+            if receives {
+                // Without a box in the files, the posed mesh's own.
+                let own = match d.bounds {
+                    Some([min, max]) => Some(shadow::Aabb {
+                        min: min.into(),
+                        max: max.into(),
+                    }),
+                    None => shadow::Aabb::of(d.positions.iter().map(|p| Vec3::from(*p))),
+                };
+                receivers.extend(own);
             }
             batches.push(Batch { vb, ib });
         }
@@ -1024,6 +1039,7 @@ impl Renderer {
             let side = shadow::atlas_size(
                 width,
                 height,
+                set.resolution,
                 set.max_resolution.min(self.device.limits().max_texture_dimension_2d),
             );
             let half = side / 2;
@@ -1035,7 +1051,13 @@ impl Renderer {
             };
             let ranges = shadow::cascade_ranges(set.camera_near, set.distance, set.cascade_splits);
             let light_view = shadow::light_view(light);
-            let cascades = ranges.map(|r| shadow::fit_cascade(&view, r, light_view, set.near_plane_offset, half));
+            // Close Fit: each cascade around the part of its view slice
+            // that holds shadow receivers. A slice without any is not drawn.
+            let bounds = shadow::receiver_bounds(&view, set, receivers.iter().copied());
+            let cascades = ranges.map(|r| {
+                let hull = shadow::focused_hull(&view.slice_corners(r.0, r.1), light, bounds.as_ref()?);
+                shadow::fit_cascade(&hull, light_view, set.near_plane_offset, [half, half], true)
+            });
             let map = self
                 .device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -1053,25 +1075,24 @@ impl Renderer {
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
-            let groups: Vec<wgpu::BindGroup> = cascades
-                .iter()
-                .map(|c| {
-                    let globals = Globals {
-                        view_proj: c.view_proj.to_cols_array(),
-                        shadow: [
-                            shadow::caster_bias(set.bias, c.depth_range),
-                            1.0,
-                            0.0,
-                            shadow::caster_normal_bias(set.normal_bias, c.texel),
-                        ],
-                        ..base
-                    };
-                    globals_group(self, globals, &self.white)
-                })
-                .collect();
+            let groups = cascades.map(|c| {
+                let c = c?;
+                let globals = Globals {
+                    view_proj: c.view_proj.to_cols_array(),
+                    shadow: [
+                        shadow::caster_bias(set.bias, c.depth_range),
+                        1.0,
+                        0.0,
+                        shadow::caster_normal_bias(set.normal_bias, set.soft, c.texel),
+                    ],
+                    ..base
+                };
+                Some(globals_group(self, globals, &self.white))
+            });
             {
                 let mut pass = encoder.begin_render_pass(&depth_pass(&map));
                 for (i, group) in groups.iter().enumerate() {
+                    let Some(group) = group else { continue };
                     let [ox, oy] = shadow::atlas_origin(i);
                     let h = half as f32;
                     pass.set_viewport(ox * side as f32, oy * side as f32, h, h, 0.0, 1.0);
@@ -1095,7 +1116,11 @@ impl Renderer {
             let uniform = ShadowUniform {
                 inv_view_proj: view_proj.inverse().to_cols_array(),
                 world_to_shadow: std::array::from_fn(|i| {
-                    shadow::world_to_shadow(cascades[i].view_proj, i).to_cols_array()
+                    // A cascade that was not drawn has no matrix: its pixels
+                    // compare against the nearest depth and stay lit.
+                    cascades[i]
+                        .map_or(Mat4::ZERO, |c| shadow::world_to_shadow(c.view_proj, i))
+                        .to_cols_array()
                 }),
                 splits_near: ranges.map(|r| r.0),
                 splits_far: ranges.map(|r| r.1),
