@@ -57,6 +57,8 @@ pub struct MaterialUniform {
     pub p1: [f32; 4],
     pub p2: [f32; 4],
     pub p3: [f32; 4],
+    /// The material's own outline colour (hair).
+    pub line: [f32; 4],
     pub info: [u32; 4],
 }
 
@@ -106,6 +108,12 @@ impl MaterialDesc {
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
+            // Hair has no skin layers; its gloss mask takes the first layer slot.
+            let name = if kind == Kind::Hair && *name == "_overtex1" {
+                &"_HairGloss"
+            } else {
+                name
+            };
             if let Some(slot) = mat.textures.get(*name) {
                 textures[i] = Some(slot.image.clone());
                 flags |= flag;
@@ -133,7 +141,11 @@ impl MaterialDesc {
             color2: color("_Color2", [1.0; 4]),
             color3: color("_Color3", [1.0; 4]),
             shadow: color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
-            over1: color("_overcolor1", [1.0; 4]),
+            over1: if kind == Kind::Hair {
+                color("_GlossColor", [1.0; 4])
+            } else {
+                color("_overcolor1", [1.0; 4])
+            },
             over2: color("_overcolor2", [1.0; 4]),
             over3: color("_overcolor3", [1.0; 4]),
             st_main,
@@ -151,7 +163,18 @@ impl MaterialDesc {
                 0.0,
             ],
             p2: [float("_alpha_a", 1.0), float("_alpha_b", 1.0), 0.0, 0.0],
-            p3: [float("_nip", 0.0), float("_nipsize", 0.5), 0.0, 0.0],
+            p3: if kind == Kind::Hair {
+                let front = mat.shader.to_lowercase().contains("front");
+                [
+                    float("_rimpower", 0.5),
+                    float("_rimV", 0.75),
+                    float("_SpeclarHeight", 0.85),
+                    if front { 1.0 } else { 0.0 },
+                ]
+            } else {
+                [float("_nip", 0.0), float("_nipsize", 0.5), 0.0, 0.0]
+            },
+            line: color("_LineColor", [0.5, 0.5, 0.5, 1.0]),
             info: [kind as u32, flags, 0, 0],
         };
         let default_queue = match kind {
@@ -223,6 +246,6 @@ mod tests {
     #[test]
     fn uniform_matches_the_shader_layout() {
         // WGSL: thirteen vec4<f32> and one vec4<u32>.
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 224);
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 240);
     }
 }

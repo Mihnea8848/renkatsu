@@ -210,6 +210,8 @@ pub struct DrawMesh<'a> {
     pub renderer: &'a RendererInst,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// Direction along the surface, with Unity's handedness sign in `w`.
+    pub tangents: Vec<[f32; 4]>,
 }
 
 impl Scene {
@@ -244,6 +246,8 @@ impl Scene {
             }
             let mut positions = Vec::with_capacity(m.positions.len());
             let mut normals = Vec::with_capacity(m.positions.len());
+            let has_tangents = m.tangents.len() == m.positions.len();
+            let mut tangents = Vec::with_capacity(if has_tangents { m.positions.len() } else { 0 });
             if r.skinned && !m.skin.is_empty() && !m.bind_poses.is_empty() {
                 let mats: Vec<Option<Mat4>> = (0..m.bind_poses.len())
                     .map(|i| {
@@ -271,6 +275,11 @@ impl Scene {
                         world[r.node]
                     };
                     positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
+                    if has_tangents {
+                        let t = m.tangents[vi];
+                        let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
+                        tangents.push([dir.x, dir.y, dir.z, t[3]]);
+                    }
                     if has_normals {
                         normals.push(
                             mat.transform_vector3(Vec3::from(base_normals[vi]))
@@ -284,6 +293,11 @@ impl Scene {
                 let nmat = mat.inverse().transpose();
                 for (vi, p) in base_positions.iter().enumerate() {
                     positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
+                    if has_tangents {
+                        let t = m.tangents[vi];
+                        let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
+                        tangents.push([dir.x, dir.y, dir.z, t[3]]);
+                    }
                     if has_normals {
                         normals.push(
                             nmat.transform_vector3(Vec3::from(base_normals[vi]))
@@ -296,10 +310,14 @@ impl Scene {
             if !has_normals {
                 normals = vec![[0.0, 0.0, 1.0]; positions.len()];
             }
+            if !has_tangents {
+                tangents = vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
+            }
             out.push(DrawMesh {
                 renderer: r,
                 positions,
                 normals,
+                tangents,
             });
         }
         out

@@ -68,6 +68,7 @@ struct Vertex {
     uv2: [f32; 2],
     uv3: [f32; 2],
     color: [f32; 4],
+    tangent: [f32; 4],
 }
 
 #[repr(C)]
@@ -276,7 +277,7 @@ impl Renderer {
                     buffers: &[wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4, 7 => Float32x4],
                     }],
                     compilation_options: Default::default(),
                 },
@@ -541,6 +542,7 @@ impl Renderer {
                     uv2: uv(2, i),
                     uv3: uv(3, i),
                     color: mesh.colors.get(i).copied().unwrap_or([1.0; 4]),
+                    tangent: d.tangents[i],
                 })
                 .collect();
             if verts.is_empty() || mesh.indices.is_empty() {
@@ -765,7 +767,7 @@ mod tests {
     fn uniform_layouts_match_the_shader() {
         // WGSL: mat4x4 and five vec4 for globals.
         assert_eq!(std::mem::size_of::<Globals>(), 144);
-        assert_eq!(std::mem::size_of::<Vertex>(), 72);
+        assert_eq!(std::mem::size_of::<Vertex>(), 88);
     }
 
     #[test]
