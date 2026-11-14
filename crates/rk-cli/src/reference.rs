@@ -311,7 +311,16 @@ fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
     let (mut same, mut differ) = (0, Vec::new());
     for r in v["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let Some(name) = r["name"].as_str() else { continue };
-        let Some(ours) = scene.renderers.iter().find(|x| x.name == name) else {
+        // Unity names instances "<material> (Instance)"; names repeat across
+        // renderers, so the first material's name picks between them.
+        let first = r["materials"][0]["name"].as_str().unwrap_or("");
+        let first = first.split(" (Instance)").next().unwrap_or(first);
+        let mut same_name = scene.renderers.iter().filter(|x| x.name == name);
+        let Some(ours) = same_name
+            .clone()
+            .find(|x| x.materials.first().is_some_and(|m| m.name == first))
+            .or_else(|| same_name.next())
+        else {
             continue;
         };
         for (i, m) in r["materials"]
@@ -324,14 +333,19 @@ fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
             let (Some(game), Some(mine)) = (m["queue"].as_i64(), ours.materials.get(i)) else {
                 continue;
             };
-            // Only where we set a queue; the rest comes from the shader.
-            if mine.render_queue <= 0 {
-                continue;
-            }
-            if game == mine.render_queue as i64 {
+            // The material's own queue, or else its shader's.
+            let queue = if mine.render_queue > 0 {
+                mine.render_queue
+            } else {
+                match mine.draw {
+                    Some(d) => d.queue,
+                    None => continue,
+                }
+            };
+            if game == queue as i64 {
                 same += 1;
             } else {
-                differ.push(format!("{name}[{i}] game {game}, ours {}", mine.render_queue));
+                differ.push(format!("{name}[{i}] game {game}, ours {queue}"));
             }
         }
     }

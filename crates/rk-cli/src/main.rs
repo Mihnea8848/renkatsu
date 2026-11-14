@@ -55,6 +55,9 @@ enum Cmd {
         no_clothes: bool,
         #[arg(long)]
         no_accessories: bool,
+        /// Wear the outdoor shoes; the game starts with the indoor ones.
+        #[arg(long)]
+        outdoor_shoes: bool,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -154,6 +157,7 @@ fn main() -> Result<()> {
             yaw,
             no_clothes,
             no_accessories,
+            outdoor_shoes,
             list,
         } => render::render(render::Args {
             card: &card,
@@ -164,6 +168,7 @@ fn main() -> Result<()> {
             yaw,
             no_clothes,
             no_accessories,
+            outdoor_shoes,
             list,
         }),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),

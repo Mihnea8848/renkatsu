@@ -19,6 +19,7 @@ pub struct Args<'a> {
     pub yaw: f32,
     pub no_clothes: bool,
     pub no_accessories: bool,
+    pub outdoor_shoes: bool,
     pub list: bool,
 }
 
@@ -30,6 +31,7 @@ pub fn render(a: Args) -> Result<()> {
         outfit: a.outfit,
         clothes: !a.no_clothes,
         accessories: !a.no_accessories,
+        outdoor_shoes: a.outdoor_shoes,
     };
     let chara = rk_chara::build(&game, &card, &opts)?;
     let t_build = t.elapsed();

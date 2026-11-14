@@ -7,6 +7,7 @@
 use crate::index::{norm, BundleLoc, Index};
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
+use rk_unityfs::objects::ShaderPass;
 use rk_unityfs::objects::Texture2D;
 use rk_unityfs::{class, Bundle, ObjectInfo, PPtr, SerializedFile, UObject, UValue};
 use std::collections::HashMap;
@@ -58,6 +59,79 @@ pub struct Assets {
     pub index: Arc<Index>,
     loaded: Mutex<HashMap<BundleKey, Arc<LoadedBundle>>>,
     by_cab: Mutex<HashMap<String, Arc<AssetFile>>>,
+    /// MaterialEditor shaders looked up so far, by name.
+    me_shaders: Mutex<HashMap<String, Option<MeShaderInfo>>>,
+    /// Shaders in MaterialEditor's own embedded bundles, read once.
+    me_builtin: std::sync::OnceLock<HashMap<String, Vec<ShaderPass>>>,
+}
+
+/// A shader MaterialEditor can switch a material to.
+#[derive(Debug, Clone)]
+pub struct MeShaderInfo {
+    pub passes: Vec<ShaderPass>,
+    /// Queue MaterialEditor forces on the material, from the shader's XML entry.
+    pub queue: Option<i32>,
+}
+
+/// Unity bundles stored inside a file, found by their signature. The size
+/// in each header bounds the bundle.
+fn embedded_bundles(bytes: &[u8]) -> Vec<Bundle> {
+    const SIG: &[u8] = b"UnityFS\0";
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(off) = bytes[at..].windows(SIG.len()).position(|w| w == SIG) {
+        let start = at + off;
+        at = start + SIG.len();
+        // Signature, format version (4 bytes), two version strings, then the size.
+        let mut p = at + 4;
+        for _ in 0..2 {
+            match bytes.get(p..).and_then(|r| r.iter().position(|&b| b == 0)) {
+                Some(n) => p += n + 1,
+                None => return out,
+            }
+        }
+        let Some(size) = bytes
+            .get(p..p + 8)
+            .map(|b| u64::from_be_bytes(b.try_into().unwrap()) as usize)
+        else {
+            return out;
+        };
+        let Some(slice) = bytes.get(start..start.saturating_add(size)) else {
+            continue;
+        };
+        if let Ok(b) = Bundle::from_bytes(slice.to_vec()) {
+            out.push(b);
+            at = start + size;
+        }
+    }
+    out
+}
+
+/// Serialized files of a bundle that parse.
+fn files_of(bundle: &Bundle) -> Vec<SerializedFile> {
+    bundle
+        .nodes
+        .iter()
+        .filter(|n| n.is_serialized())
+        .filter_map(|n| SerializedFile::parse(bundle.read_node(n).ok()?).ok())
+        .collect()
+}
+
+/// Every shader in some files, by its Unity name.
+fn shaders_in<'a>(files: impl IntoIterator<Item = &'a SerializedFile>) -> HashMap<String, Vec<ShaderPass>> {
+    let mut out = HashMap::new();
+    for sf in files {
+        for info in sf.objects_of(class::SHADER) {
+            let Ok(v) = sf.read_until(info, "m_ParsedForm") else {
+                continue;
+            };
+            if let Some(name) = rk_unityfs::objects::shader_name(&v) {
+                out.entry(name)
+                    .or_insert_with(|| rk_unityfs::objects::shader_passes(&v));
+            }
+        }
+    }
+    out
 }
 
 fn stem(path: &str) -> String {
@@ -71,6 +145,8 @@ impl Assets {
             index,
             loaded: Default::default(),
             by_cab: Default::default(),
+            me_shaders: Default::default(),
+            me_builtin: Default::default(),
         }
     }
 
@@ -267,9 +343,84 @@ impl Assets {
         Some((name, rk_unityfs::objects::shader_passes(&v)))
     }
 
+    /// The shader MaterialEditor uses for `name`: one a zipmod offers, or
+    /// one of the game shaders MaterialEditor carries in its own file.
+    pub fn me_shader(&self, name: &str) -> Option<MeShaderInfo> {
+        if let Some(hit) = self.me_shaders.lock().get(name) {
+            return hit.clone();
+        }
+        let found = match self.index.me_shaders.get(name) {
+            Some(entry) => {
+                let obj = entry
+                    .asset
+                    .as_deref()
+                    .and_then(|a| self.find(&entry.bundle, a, Some(class::SHADER), entry.mod_idx));
+                let passes = match obj {
+                    Some(obj) => obj
+                        .file
+                        .sf
+                        .read_until(&obj.info, "m_ParsedForm")
+                        .ok()
+                        .map(|v| rk_unityfs::objects::shader_passes(&v)),
+                    // Without an asset name it is loaded by its shader name.
+                    None => self
+                        .sources(&entry.bundle, entry.mod_idx)
+                        .first()
+                        .and_then(|b| shaders_in(b.files.iter().map(|f| &f.sf)).remove(name)),
+                };
+                passes.map(|passes| MeShaderInfo {
+                    passes,
+                    queue: entry.queue,
+                })
+            }
+            None => self.me_builtin().get(name).map(|p| MeShaderInfo {
+                passes: p.clone(),
+                queue: None,
+            }),
+        };
+        self.me_shaders.lock().insert(name.to_string(), found.clone());
+        found
+    }
+
+    fn me_builtin(&self) -> &HashMap<String, Vec<ShaderPass>> {
+        self.me_builtin.get_or_init(|| {
+            let Some(dll) = find_file(
+                &self.index.game_dir.join("BepInEx").join("plugins"),
+                "KK_MaterialEditor.dll",
+            ) else {
+                return HashMap::new();
+            };
+            let Ok(bytes) = std::fs::read(dll) else {
+                return HashMap::new();
+            };
+            let mut out = HashMap::new();
+            for b in embedded_bundles(&bytes) {
+                for (k, v) in shaders_in(&files_of(&b)) {
+                    out.entry(k).or_insert(v);
+                }
+            }
+            out
+        })
+    }
+
     pub fn mod_guid(&self, mod_idx: Option<u32>) -> Option<&str> {
         mod_idx.map(|m| self.index.mods[m as usize].guid.as_str())
     }
+}
+
+/// First file with this name under `dir`, searched depth first.
+fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in &entries {
+        if e.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
+            return Some(e.path());
+        }
+    }
+    entries
+        .iter()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .find_map(|e| find_file(&e.path(), name))
 }
 
 /// Convenience bundle of everything needed to load content.

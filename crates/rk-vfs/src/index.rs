@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 6;
+const CACHE_VERSION: u32 = 7;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +39,39 @@ pub enum MigrationKind {
     MigrateAll,
     /// Forget the old GUID and treat the IDs as game items.
     StripAll,
+}
+
+/// A shader a zipmod offers to MaterialEditor, from its manifest's
+/// `<MaterialEditor><Shader>` entries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeShader {
+    pub name: String,
+    /// Bundle path under `abdata`, normalised.
+    pub bundle: String,
+    /// Asset name inside the bundle; MaterialEditor loads by shader name without one.
+    pub asset: Option<String>,
+    /// Queue the entry forces on materials that switch to it.
+    pub queue: Option<i32>,
+    pub mod_idx: Option<u32>,
+}
+
+/// Reads the MaterialEditor shader entries of a manifest.
+fn me_shaders(root: roxmltree::Node) -> Vec<MeShader> {
+    root.children()
+        .filter(|c| c.has_tag_name("MaterialEditor"))
+        .flat_map(|m| m.children())
+        .filter(|c| c.has_tag_name("Shader"))
+        .filter_map(|c| {
+            let attr = |n: &str| c.attribute(n).map(str::trim).filter(|v| !v.is_empty());
+            Some(MeShader {
+                name: attr("Name")?.to_string(),
+                bundle: norm(attr("AssetBundle")?),
+                asset: attr("Asset").map(str::to_string),
+                queue: attr("RenderQueue").and_then(|q| q.parse().ok()),
+                mod_idx: None,
+            })
+        })
+        .collect()
 }
 
 /// A manifest record redirecting items that used to belong to another mod.
@@ -86,6 +119,9 @@ struct ZipScan {
     /// Loose PNG textures: key (see `png_key`) and entry name.
     #[serde(default)]
     pngs: Vec<(String, String)>,
+    /// Shaders the manifest offers to MaterialEditor.
+    #[serde(default)]
+    shaders: Vec<MeShader>,
     lists: Vec<ListData>,
     migrations: Vec<Migration>,
 }
@@ -115,6 +151,9 @@ pub struct Index {
     /// Loose PNG files in zipmods that stand in for a texture of a bundle,
     /// by `png_key`. The first mod that has one wins, as in Sideloader.
     pub pngs: HashMap<String, BundleLoc>,
+    /// MaterialEditor shaders offered by zipmods, by shader name. A later
+    /// mod replaces an earlier one, as MaterialEditor does.
+    pub me_shaders: HashMap<String, MeShader>,
     /// Lowercase CAB name to the game bundle's virtual path.
     pub cabs: HashMap<String, String>,
     pub lists: Vec<ListData>,
@@ -267,6 +306,7 @@ fn scan_zipmod(path: &Path) -> ZipScan {
         }
         let guid = field("guid");
         anyhow::ensure!(!guid.is_empty(), "manifest has no guid");
+        scan.shaders = me_shaders(root);
         for info in root
             .children()
             .filter(|c| c.has_tag_name("migrationInfo"))
@@ -511,6 +551,10 @@ impl Index {
                     path: entry,
                 });
             }
+            for mut sh in scan.shaders {
+                sh.mod_idx = Some(mod_idx);
+                idx.me_shaders.insert(sh.name.clone(), sh);
+            }
             idx.migrations.extend(scan.migrations);
             for mut l in scan.lists {
                 l.mod_idx = Some(mod_idx);
@@ -524,6 +568,26 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_shaders_are_read() {
+        let xml = r#"<manifest><guid>x</guid><MaterialEditor>
+            <Shader Name="xukmi/HairFrontPlus" AssetBundle="chara/xukmi/shaders/vanillaplus.unity3d" Asset="a_HairFrontPlus">
+              <Property Name="DetailMask" Type="Texture" />
+            </Shader>
+            <Shader Name="Queued" AssetBundle="Chara\q.unity3d" RenderQueue="2450" />
+            <Shader AssetBundle="no_name.unity3d" />
+        </MaterialEditor></manifest>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let got = me_shaders(doc.root_element());
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "xukmi/HairFrontPlus");
+        assert_eq!(got[0].bundle, "chara/xukmi/shaders/vanillaplus.unity3d");
+        assert_eq!(got[0].asset.as_deref(), Some("a_HairFrontPlus"));
+        assert_eq!(got[0].queue, None);
+        assert_eq!(got[1].bundle, "chara/q.unity3d");
+        assert_eq!(got[1].queue, Some(2450));
+    }
 
     #[test]
     fn png_keys_drop_the_bundle_extension() {

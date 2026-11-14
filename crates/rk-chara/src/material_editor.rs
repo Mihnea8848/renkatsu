@@ -5,7 +5,7 @@
 //! textures, shader swaps and renderer switches, addressed by the object
 //! they belong to and a material or renderer name.
 
-use crate::scene::{Image, Scene, TexSlot};
+use crate::scene::{DrawState, Image, MaterialInst, Scene, TexSlot};
 use rk_card::{map_get, ExtData, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,6 +60,45 @@ pub(crate) fn decode(bytes: &[u8], name: String) -> Option<Image> {
     })
 }
 
+/// A shader MaterialEditor can switch to: its draw state and the queue its
+/// XML entry forces, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shader {
+    pub draw: DrawState,
+    pub queue: Option<i32>,
+}
+
+/// Face materials whose queue survives a shader switch.
+const EYE_MATERIALS: [&str; 6] = [
+    "cf_m_eyeline_00_up",
+    "cf_m_eyeline_kage",
+    "cf_m_eyeline_down",
+    "cf_m_sirome_00",
+    "cf_m_hitomi_00",
+    "cf_m_mayuge_00",
+];
+
+/// Switches a material to another shader as MaterialEditor does. A shader it
+/// cannot load leaves the material alone. Otherwise the material takes the
+/// new shader's queue, unless the XML entry sets one or the material is one
+/// of the eye materials, which keep theirs. A queue saved with the entry
+/// wins over all of them.
+fn switch_shader(m: &mut MaterialInst, name: Option<&str>, shader: Option<Shader>, queue: Option<i32>) {
+    if let (Some(name), Some(sh)) = (name, shader) {
+        m.shader = name.to_string();
+        m.draw = Some(sh.draw);
+        if let Some(q) = sh.queue {
+            m.render_queue = q;
+        } else if !EYE_MATERIALS.contains(&m.name.as_str()) {
+            // Assigning a shader drops the material's own queue.
+            m.render_queue = -1;
+        }
+    }
+    if let Some(q) = queue {
+        m.render_queue = q;
+    }
+}
+
 /// Number of overrides applied, for reporting.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Applied {
@@ -70,7 +109,13 @@ pub struct Applied {
     pub renderers: usize,
 }
 
-pub fn apply(scene: &mut Scene, ext: &ExtData, outfit: usize, targets: &Targets) -> Applied {
+pub fn apply(
+    scene: &mut Scene,
+    ext: &ExtData,
+    outfit: usize,
+    targets: &Targets,
+    shaders: &dyn Fn(&str) -> Option<Shader>,
+) -> Applied {
     let mut applied = Applied::default();
     let Some(plugin) = ext.get(KEY) else { return applied };
     let list = |key: &str| -> Vec<Value> {
@@ -120,18 +165,10 @@ pub fn apply(scene: &mut Scene, ext: &ExtData, outfit: usize, targets: &Targets)
     };
 
     for e in list("MaterialShaderList") {
-        let shader = text(&e, "ShaderName").map(str::to_string);
-        let queue = map_get(&e, "RenderQueue").and_then(Value::as_i64);
-        applied.shaders += on_materials(scene, &e, &mut |m| {
-            if let Some(s) = &shader {
-                m.shader = s.clone();
-                // The new shader is named, not loaded, so its state is unknown.
-                m.draw = None;
-            }
-            if let Some(q) = queue {
-                m.render_queue = q as i32;
-            }
-        }) as usize;
+        let name = text(&e, "ShaderName");
+        let shader = name.and_then(shaders);
+        let queue = map_get(&e, "RenderQueue").and_then(Value::as_i64).map(|q| q as i32);
+        applied.shaders += on_materials(scene, &e, &mut |m| switch_shader(m, name, shader, queue)) as usize;
     }
     for e in list("MaterialFloatPropertyList") {
         // Values are stored as text.
@@ -212,4 +249,79 @@ pub fn apply(scene: &mut Scene, ext: &ExtData, outfit: usize, targets: &Targets)
         }
     }
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::Stencil;
+
+    fn state(queue: i32) -> DrawState {
+        DrawState {
+            queue,
+            blend: true,
+            zwrite: true,
+            outline: true,
+            stencil: Stencil::None,
+            stencil_ref: 0,
+        }
+    }
+
+    fn material(name: &str, queue: i32) -> MaterialInst {
+        MaterialInst {
+            name: name.into(),
+            shader: "Shader Forge/main_item".into(),
+            draw: Some(state(2450)),
+            render_queue: queue,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_switch_takes_the_new_shaders_queue() {
+        let mut m = material("hair", 3040);
+        let sh = Shader {
+            draw: state(2475),
+            queue: None,
+        };
+        switch_shader(&mut m, Some("xukmi/HairFrontPlus"), Some(sh), None);
+        assert_eq!(m.shader, "xukmi/HairFrontPlus");
+        assert_eq!(m.draw.map(|d| d.queue), Some(2475));
+        assert_eq!(m.render_queue, -1);
+    }
+
+    #[test]
+    fn eye_materials_keep_their_queue() {
+        let mut m = material("cf_m_hitomi_00", 2474);
+        let sh = Shader {
+            draw: state(3000),
+            queue: None,
+        };
+        switch_shader(&mut m, Some("xukmi/EyePlus"), Some(sh), None);
+        assert_eq!(m.render_queue, 2474);
+    }
+
+    #[test]
+    fn xml_and_saved_queues_win() {
+        let sh = Shader {
+            draw: state(2000),
+            queue: Some(2600),
+        };
+        let mut m = material("a", 3040);
+        switch_shader(&mut m, Some("s"), Some(sh), None);
+        assert_eq!(m.render_queue, 2600);
+        switch_shader(&mut m, Some("s"), Some(sh), Some(3000));
+        assert_eq!(m.render_queue, 3000);
+    }
+
+    #[test]
+    fn an_unknown_shader_changes_nothing() {
+        let mut m = material("a", 3040);
+        switch_shader(&mut m, Some("missing"), None, None);
+        assert_eq!(m.shader, "Shader Forge/main_item");
+        assert_eq!(m.render_queue, 3040);
+        // A saved queue still applies, as MaterialEditor sets it separately.
+        switch_shader(&mut m, Some("missing"), None, Some(2500));
+        assert_eq!(m.render_queue, 2500);
+    }
 }

@@ -511,7 +511,20 @@ fn material_editor_overrides_find_their_materials() {
     targets.insert(Owner::Clothing(2), vec![0]);
     targets.insert(Owner::Hair(1), vec![1]);
 
-    let applied = apply(&mut scene, &ext, 0, &targets);
+    let known = |name: &str| {
+        (name == "Shader Forge/main_alpha").then_some(rk_chara::material_editor::Shader {
+            draw: rk_chara::scene::DrawState {
+                queue: 3040,
+                blend: true,
+                zwrite: true,
+                outline: true,
+                stencil: rk_chara::scene::Stencil::None,
+                stencil_ref: 0,
+            },
+            queue: None,
+        })
+    };
+    let applied = apply(&mut scene, &ext, 0, &targets, &known);
     assert_eq!(
         (
             applied.floats,
