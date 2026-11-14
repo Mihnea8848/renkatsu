@@ -21,6 +21,7 @@ pub mod physics;
 pub mod pushup;
 pub mod scene;
 pub mod shape;
+pub mod slider_unlocker;
 
 pub use build::{build, BuildOptions, Character};
 pub use loader::Loader;

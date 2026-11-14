@@ -234,12 +234,17 @@ impl KeyTable {
         Ok(Self { keys })
     }
 
-    /// Samples a source at `rate` (0..1 across the keys). Values outside the
-    /// range extrapolate along the nearest segment, so unlocked sliders work.
+    /// Samples a source at `rate` (0..1 across the keys), as the game's
+    /// `AnimationKeyInfo.GetInfo` does. Values outside the range follow the
+    /// Slider Unlocker plugin.
     fn sample(&self, name: &str, rate: f32) -> Option<Channels> {
         let list = self.keys.get(name)?;
         if list.len() < 2 {
             return list.first().copied();
+        }
+        if !(0.0..=1.0).contains(&rate) {
+            let clamped = self.sample(name, rate.clamp(0.0, 1.0))?;
+            return Some(crate::slider_unlocker::outside(list, name, rate, clamped));
         }
         let f = (list.len() - 1) as f32 * rate;
         let i = (f.floor() as isize).clamp(0, list.len() as isize - 2) as usize;
