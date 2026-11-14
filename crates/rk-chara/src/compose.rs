@@ -384,6 +384,21 @@ pub fn eye_white(size: u32, main: Option<&Image>, base: Rgba, sub: Rgba) -> Imag
     })
 }
 
+/// Which entries of a part's `colorInfo` feed the three colour slots of a
+/// clothing piece, for a main part (`None`) or a sub-part of a top.
+///
+/// `ChaControl.ChangeCustomClothes`: the third sub-part (`!main && kind ==
+/// 2`) takes the base colour, pattern colour and tiling of its first slot
+/// from `colorInfo[3]`, and its pattern loop runs to four, so
+/// `_PatternMask1` ends up as the pattern of `colorInfo[3]` too. Every
+/// other piece uses entries 0, 1 and 2.
+pub fn color_sources(sub_part: Option<usize>) -> [usize; 3] {
+    match sub_part {
+        Some(2) => [3, 1, 2],
+        _ => [0, 1, 2],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
