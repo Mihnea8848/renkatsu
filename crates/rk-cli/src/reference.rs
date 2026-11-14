@@ -214,6 +214,7 @@ pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()
     println!(
         "  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture"
     );
+    compare_queues(&capture_text, &chara.scene)?;
     compare_bones(&capture_text, &chara.scene)?;
     Ok(())
 }
@@ -302,6 +303,43 @@ fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara:
         }
     }
     count
+}
+
+/// Checks the draw order numbers we set ourselves against the game's.
+fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
+    let v: Value = serde_json::from_str(capture)?;
+    let (mut same, mut differ) = (0, Vec::new());
+    for r in v["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(name) = r["name"].as_str() else { continue };
+        let Some(ours) = scene.renderers.iter().find(|x| x.name == name) else {
+            continue;
+        };
+        for (i, m) in r["materials"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let (Some(game), Some(mine)) = (m["queue"].as_i64(), ours.materials.get(i)) else {
+                continue;
+            };
+            // Only where we set a queue; the rest comes from the shader.
+            if mine.render_queue <= 0 {
+                continue;
+            }
+            if game == mine.render_queue as i64 {
+                same += 1;
+            } else {
+                differ.push(format!("{name}[{i}] game {game}, ours {}", mine.render_queue));
+            }
+        }
+    }
+    println!("  draw order: {same} materials match the game, {} differ", differ.len());
+    for line in differ.iter().take(12) {
+        println!("    {line}");
+    }
+    Ok(())
 }
 
 /// Lists the bones whose place or shape differs most from the capture.
