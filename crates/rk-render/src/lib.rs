@@ -20,6 +20,17 @@ use wgpu::util::DeviceExt;
 /// blending happens on them, and the target stores them as sRGB.
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+/// Submesh and material index pairs a renderer draws: one per submesh, and
+/// each extra material on the last submesh.
+fn submesh_materials(submeshes: usize, materials: usize) -> Vec<(usize, usize)> {
+    if submeshes == 0 {
+        return Vec::new();
+    }
+    (0..submeshes.max(materials))
+        .map(|i| (i.min(submeshes - 1), i))
+        .collect()
+}
+
 /// sRGB to linear for one channel, 0 to 1.
 fn srgb_to_linear(x: f64) -> f64 {
     if x <= 0.04045 {
@@ -682,11 +693,15 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            for (si, sm) in mesh.submeshes.iter().enumerate() {
+            // Unity draws materials beyond the submesh count with the last
+            // submesh again; MaterialEditor's copies rely on this.
+            let pairs = submesh_materials(mesh.submeshes.len(), d.renderer.materials.len());
+            for (si, mi) in pairs {
+                let sm = &mesh.submeshes[si];
                 if sm.topology != 0 || sm.index_count == 0 {
                     continue;
                 }
-                let desc = MaterialDesc::new(d.renderer.materials.get(si));
+                let desc = MaterialDesc::new(d.renderer.materials.get(mi));
                 let bind = self.material_bind_group(&desc);
                 items.push(Item {
                     batch: batches.len(),
@@ -900,6 +915,14 @@ mod tests {
         )
         .validate(&module)
         .expect("toon.wgsl validates");
+    }
+
+    #[test]
+    fn extra_materials_draw_the_last_submesh() {
+        assert_eq!(submesh_materials(2, 1), vec![(0, 0), (1, 1)]);
+        assert_eq!(submesh_materials(1, 2), vec![(0, 0), (0, 1)]);
+        assert_eq!(submesh_materials(2, 4), vec![(0, 0), (1, 1), (1, 2), (1, 3)]);
+        assert!(submesh_materials(0, 3).is_empty());
     }
 
     #[test]

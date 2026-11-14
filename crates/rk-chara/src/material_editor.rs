@@ -99,6 +99,33 @@ fn switch_shader(m: &mut MaterialInst, name: Option<&str>, shader: Option<Shader
     }
 }
 
+/// Adds a copy of the material `name` to a renderer, as MaterialEditor's
+/// `CopyMaterial` does: the copy goes at the end, named `copy`, or
+/// `<name>.MECopy<n+1>` after the highest copy already there. A renderer
+/// that already has a material named `copy` is left alone. Returns whether
+/// the renderer has the material.
+fn copy_material(materials: &mut Vec<MaterialInst>, name: &str, copy: &str) -> bool {
+    let Some(original) = materials.iter().find(|m| m.name == name).cloned() else {
+        return false;
+    };
+    let prefix = format!("{name}.MECopy");
+    if !copy.is_empty() && materials.iter().any(|m| m.name == copy) {
+        return true;
+    }
+    let mut n = 0;
+    for m in materials.iter().filter(|m| m.name.starts_with(&prefix)) {
+        n = m.name[prefix.len()..].parse().unwrap_or(n + 1);
+    }
+    let mut clone = original;
+    clone.name = if copy.is_empty() {
+        format!("{prefix}{}", n + 1)
+    } else {
+        copy.to_string()
+    };
+    materials.push(clone);
+    true
+}
+
 /// Number of overrides applied, for reporting.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Applied {
@@ -107,6 +134,7 @@ pub struct Applied {
     pub textures: usize,
     pub shaders: usize,
     pub renderers: usize,
+    pub copies: usize,
 }
 
 pub fn apply(
@@ -164,6 +192,18 @@ pub fn apply(
         hit
     };
 
+    // Copies come first, so the entries below can address them by name.
+    for e in list("MaterialCopyList") {
+        let (Some(o), Some(name)) = (owner(&e, outfit), text(&e, "MaterialName")) else {
+            continue;
+        };
+        let copy = text(&e, "MaterialCopyName").unwrap_or("");
+        for &ri in renderers_of(o) {
+            if copy_material(&mut scene.renderers[ri].materials, name, copy) {
+                applied.copies += 1;
+            }
+        }
+    }
     for e in list("MaterialShaderList") {
         let name = text(&e, "ShaderName");
         let shader = name.and_then(shaders);
@@ -275,6 +315,24 @@ mod tests {
             render_queue: queue,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn copies_are_added_at_the_end() {
+        let mut mats = vec![material("hair", 3040), material("acc", 2450)];
+        assert!(copy_material(&mut mats, "hair", "hair.MECopy1"));
+        assert_eq!(mats.len(), 3);
+        assert_eq!(mats[2].name, "hair.MECopy1");
+        assert_eq!(mats[2].render_queue, 3040);
+        // The same copy again changes nothing.
+        assert!(copy_material(&mut mats, "hair", "hair.MECopy1"));
+        assert_eq!(mats.len(), 3);
+        // Without a name the next number is used.
+        assert!(copy_material(&mut mats, "hair", ""));
+        assert_eq!(mats[3].name, "hair.MECopy2");
+        // A renderer without the material is not touched.
+        assert!(!copy_material(&mut mats, "missing", "missing.MECopy1"));
+        assert_eq!(mats.len(), 4);
     }
 
     #[test]

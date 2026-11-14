@@ -43,13 +43,15 @@ pub enum ItemShader {
 /// Clothes shader from a Unity shader name. Mod shaders follow the game's
 /// naming (`xukmi/MainAlphaPlus`), so matching is by substring.
 pub fn item_shader(shader: &str) -> ItemShader {
+    // Whole names, since main_item_studio_alpha and main_opaque_low are
+    // other shaders. KKShadersPlus stands in for the two under its own names.
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
-    if name.contains("alpha") {
-        ItemShader::Alpha
-    } else if name.contains("opaque") {
-        ItemShader::Opaque
-    } else {
-        ItemShader::Other
+    match name.as_str() {
+        "main_alpha" => ItemShader::Alpha,
+        "main_opaque" | "main_opaque2" => ItemShader::Opaque,
+        n if n.starts_with("mainalphaplus") => ItemShader::Alpha,
+        n if n.starts_with("mainopaqueplus") => ItemShader::Opaque,
+        _ => ItemShader::Other,
     }
 }
 
@@ -487,6 +489,8 @@ mod tests {
             ("xukmi/MainAlphaPlus", ItemShader::Alpha),
             ("xukmi/MainOpaquePlus", ItemShader::Opaque),
             ("Shader Forge/main_item", ItemShader::Other),
+            ("Shader Forge/main_item_studio_alpha", ItemShader::Other),
+            ("Shader Forge/main_opaque_low", ItemShader::Other),
             ("Standard", ItemShader::Other),
         ] {
             assert_eq!(item_shader(name), shader, "{name}");
