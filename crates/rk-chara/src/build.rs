@@ -56,6 +56,8 @@ struct Builder<'g> {
     scene: Scene,
     skin_overlays: HashMap<i64, Arc<Image>>,
     cloth_overlays: HashMap<String, ClothOverlay>,
+    /// The gloss mask chosen in the card, shared by all hair parts.
+    hair_gloss: Option<TexSlot>,
 }
 
 impl<'g> Builder<'g> {
@@ -263,6 +265,9 @@ impl<'g> Builder<'g> {
         let solid = |c: [f32; 4]| [c[0], c[1], c[2], 1.0];
         for r in self.listed_renderers(inst, "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                if let Some(gloss) = &self.hair_gloss {
+                    m.textures.insert("_HairGloss".into(), gloss.clone());
+                }
                 m.colors.insert("_Color".into(), solid(part.base_color));
                 m.colors.insert("_Color2".into(), solid(part.start_color));
                 m.colors.insert("_Color3".into(), solid(part.end_color));
@@ -905,6 +910,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         scene: Scene::default(),
         skin_overlays: overlays::skin(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
+        hair_gloss: None,
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -1034,6 +1040,22 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
         }
     }
+
+    // One gloss mask is shared by all hair parts.
+    b.hair_gloss = b
+        .item_image(
+            "hair gloss",
+            "ChaFileHair.glossId",
+            cat::MT_HAIRGLOSS,
+            card.hair.gloss_id,
+            "MainTexAB",
+            "MainTex",
+        )
+        .map(|image| TexSlot {
+            image,
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        });
 
     // Hair hangs from the upper face bone and keeps its own bones.
     if let Some(&hair_parent) = head_bones.get("cf_J_FaceUp_ty") {

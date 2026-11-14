@@ -56,6 +56,8 @@ struct Material {
     p2: vec4<f32>,
     // x: 1 when overlay 1 is placed like a nipple, y: its size
     p3: vec4<f32>,
+    // the material's own outline colour (hair)
+    line: vec4<f32>,
     // x: kind, y: flags
     info: vec4<u32>,
 };
@@ -78,6 +80,7 @@ struct VsIn {
     @location(4) uv2: vec2<f32>,
     @location(5) uv3: vec2<f32>,
     @location(6) color: vec4<f32>,
+    @location(7) tangent: vec4<f32>,
 };
 
 struct VsOut {
@@ -89,10 +92,18 @@ struct VsOut {
     @location(4) world: vec3<f32>,
     @location(5) uv3: vec2<f32>,
     @location(6) color: vec4<f32>,
+    @location(7) bitangent: vec3<f32>,
 };
 
 fn has(flag: u32) -> bool {
     return (m.info.y & flag) != 0u;
+}
+
+// Across the surface, at right angles to the tangent (Unity's convention).
+fn bitangent_of(v: VsIn) -> vec3<f32> {
+    let b = cross(v.normal, v.tangent.xyz) * v.tangent.w;
+    let len = length(b);
+    return select(vec3<f32>(0.0, 1.0, 0.0), b / len, len > 1e-6);
 }
 
 @vertex
@@ -106,6 +117,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.uv3 = v.uv3;
     o.color = v.color;
     o.world = v.pos;
+    o.bitangent = bitangent_of(v);
     return o;
 }
 
@@ -120,6 +132,15 @@ fn vs_outline(v: VsIn) -> VsOut {
     if (has(HAS_DETAIL)) {
         width *= 1.0 - textureSampleLevel(detail_tex, samp, v.uv0, 0.0).b;
     }
+    // Hair lines thin out where the strand fades.
+    if (m.info.x == KIND_HAIR) {
+        if (has(HAS_MAIN)) {
+            width *= textureSampleLevel(main_tex, samp, v.uv0 * m.st_main.xy + m.st_main.zw, 0.0).a;
+        }
+        if (has(HAS_ALPHA_MASK)) {
+            width *= textureSampleLevel(alpha_mask_tex, samp, v.uv0 * m.st_alpha.xy + m.st_alpha.zw, 0.0).r;
+        }
+    }
     let pos = v.pos + normalize(v.normal) * width;
     o.clip = g.view_proj * vec4<f32>(pos, 1.0);
     o.normal = v.normal;
@@ -129,6 +150,7 @@ fn vs_outline(v: VsIn) -> VsOut {
     o.uv3 = v.uv3;
     o.color = v.color;
     o.world = pos;
+    o.bitangent = bitangent_of(v);
     return o;
 }
 
@@ -244,6 +266,57 @@ fn light_color() -> vec3<f32> {
     return vec3<f32>(g.params.y * 0.600000024 + g.params.z);
 }
 
+// Overlay blend, per channel.
+fn overlay(base: vec3<f32>, top: vec3<f32>) -> vec3<f32> {
+    let dark = 2.0 * base * top;
+    let bright = 1.0 - (1.0 - 2.0 * (top - 0.5)) * (1.0 - base);
+    return clamp(select(dark, bright, top > vec3<f32>(0.5)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Hair: shade colour from the material, a gloss band that slides along the
+// strands with the view angle, and a rim towards the silhouette.
+fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, lambert: f32, ramp: f32, detail: vec4<f32>) -> vec3<f32> {
+    let view = normalize(g.eye.xyz - i.world);
+    var diffuse = base;
+
+    // Rim tint: the hue of the scene shadow colour, kept faint.
+    let hue = rgb_to_hsv(g.ambient_shadow.rgb).x;
+    let rim_tint = hsv_to_rgb(vec3<f32>(hue, 1.0, 1.0)) * 0.330000013 + 0.330000013;
+    let facing = max(dot(view, n), 0.0);
+    let fresnel = clamp(pow(1.0 - facing, m.p3.x * 9.0 + 1.0) * 5.0 - 1.5, 0.0, 1.0);
+    let rim = min(rim_tint * fresnel, vec3<f32>(0.5));
+
+    // Gloss mask, read twice a little apart along the strand.
+    var gloss_edge = 0.0;
+    var gloss = 0.0;
+    if (has(HAS_OVER1)) {
+        let slide = dot(view, normalize(i.bitangent)) * (m.p3.z - 1.0);
+        let gx = select(lambert * 0.00499999989 + i.uv1.x, lambert * 0.0199999809 + i.uv1.x + 0.99000001, m.p3.w > 0.5);
+        let gz = slide + i.uv1.y;
+        let a = textureSample(over1_tex, samp, vec2<f32>(gx, gz + 0.00800000038)).r;
+        gloss = textureSample(over1_tex, samp, vec2<f32>(gx, gz)).r;
+        gloss_edge = (a - gloss) * 0.5;
+    }
+
+    let shadow = overlay(scene_shadow(), m.shadow.rgb);
+    let edge = gloss_edge * (shadow - 1.0) + 1.0;
+    let dark = diffuse * edge * shadow;
+    diffuse = diffuse * edge - dark;
+
+    var lit = clamp(ramp, 0.0, 1.0);
+    let open = 1.0 - detail.gb;
+    diffuse = lit * open.x * diffuse + dark;
+    lit = max(lit, open.x);
+
+    let gloss_mask = gloss * (ramp * 0.5 + 0.5) * m.over1.a;
+    diffuse = gloss_mask * m.over1.rgb * m.over1.a + clamp(1.0 - gloss_mask, 0.0, 1.0) * diffuse;
+
+    var rgb = clamp(open.x * m.p3.y * open.y * rim + diffuse, vec3<f32>(0.0), vec3<f32>(1.0));
+    lit = max(lit, 1.0 - m.p0.y);
+    rgb *= lit * (1.0 - shadow) + shadow;
+    return clamp(rgb * max(light_color(), g.ambient_shadow.rgb), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let kind = m.info.x;
@@ -292,6 +365,10 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     }
     line.r = mix(line.r, detail.r, m.p0.w);
 
+    if (kind == KIND_HAIR) {
+        return vec4<f32>(hair_color(i, s.diffuse, n, lambert, ramp, detail), 1.0);
+    }
+
     // Shadows painted into the masks, softened by the shadow-extend sliders.
     let extend = m.p0.y * -1.20000005 + 1.0;
     var drawn_shadow = min(1.0 - line.b, 1.0 - detail.g);
@@ -319,6 +396,14 @@ fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
     let s = read_surface(i);
     if (s.alpha < max(m.p0.x, 0.5)) {
         discard;
+    }
+    if (m.info.x == KIND_HAIR) {
+        // Hair: the hair colour overlaid with the material's line colour.
+        let l = m.line.rgb;
+        let dark = 2.0 * s.diffuse * l;
+        let bright = 1.0 - (1.0 - 2.0 * (l - 0.5)) * (1.0 - s.diffuse);
+        let rgb = clamp(select(dark, bright, l > vec3<f32>(0.5)), vec3<f32>(0.0), vec3<f32>(1.0));
+        return vec4<f32>(rgb * light_color(), 1.0);
     }
     let shade = shadow_factor(s.diffuse);
     return vec4<f32>(line_color(s.diffuse * shade, light_color()), 1.0);
