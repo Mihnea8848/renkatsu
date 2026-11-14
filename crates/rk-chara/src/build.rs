@@ -486,14 +486,7 @@ impl<'g> Builder<'g> {
                             m.textures.insert(
                                 "_MainTex".into(),
                                 TexSlot {
-                                    image: Arc::new(Image {
-                                        name: "default_black".into(),
-                                        width: 1,
-                                        height: 1,
-                                        rgba: vec![0, 0, 0, 0],
-                                        srgb: true,
-                                        repeat: true,
-                                    }),
+                                    image: Arc::new(Image::unity_black()),
                                     scale: [1.0, 1.0],
                                     offset: [0.0, 0.0],
                                 },
@@ -869,11 +862,23 @@ impl<'g> Builder<'g> {
                             },
                         );
                     }
-                    // "None" in the maker: nothing is drawn.
-                    None => {
-                        m.textures.remove("_MainTex");
-                        m.floats.insert("_Alpha".into(), 0.0);
-                    }
+                    // "None" in the maker: the game sets a null texture and
+                    // the shader's default shows.
+                    None => match crate::scene::unset_line_texture(&m.shader) {
+                        Some(image) => {
+                            m.textures.insert(
+                                "_MainTex".into(),
+                                TexSlot {
+                                    image: Arc::new(image),
+                                    scale: [1.0, 1.0],
+                                    offset: [0.0, 0.0],
+                                },
+                            );
+                        }
+                        None => {
+                            m.textures.remove("_MainTex");
+                        }
+                    },
                 }
                 if let Some(c) = color {
                     m.colors.insert("_Color".into(), *c);
@@ -907,6 +912,13 @@ impl<'g> Builder<'g> {
                         masks[k] = Some(image);
                     }
                 }
+            }
+        }
+        // KoiClothesOverlayX puts its own mask in place of whatever the game
+        // sets, and the game sets one for each of these while a top exists.
+        if !tops.is_empty() {
+            for (mask, kind) in masks.iter_mut().zip(overlays::MASK_IDS) {
+                *mask = overlays::mask(&self.cloth_overlays, kind, mask.take());
             }
         }
         let [body_mask, bra_mask, inner_mask] = masks;

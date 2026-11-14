@@ -222,6 +222,35 @@ fn skinning_blends_bone_transforms() {
 }
 
 #[test]
+fn a_nose_line_without_texture_shows_unitys_black() {
+    use rk_chara::scene::unset_line_texture;
+    // toon_nose names "black" as the default of _MainTex: clear, so unseen.
+    let nose = unset_line_texture("Shader Forge/toon_nose_lod0").expect("black");
+    assert_eq!(
+        (nose.width, nose.height, nose.rgba.as_slice()),
+        (1, 1, &[0u8, 0, 0, 0][..])
+    );
+    // toon_eyew names "white", the same as having no texture.
+    assert!(unset_line_texture("Shader Forge/toon_eyew_lod0").is_none());
+}
+
+#[test]
+fn vertices_without_weights_collapse_to_one_point() {
+    let (mut scene, _, node) = skinned_scene();
+    scene.nodes[node].local.pos = Vec3::new(0.0, 3.0, 0.0);
+    let mut mesh = (*scene.renderers[0].mesh).clone();
+    for bw in &mut mesh.skin {
+        bw.weights = [0.0; 4];
+    }
+    scene.renderers[0].mesh = Arc::new(mesh);
+    let draws = scene.pose();
+    // All three corners meet, so the triangle has no area.
+    for p in &draws[0].positions {
+        assert!(near(Vec3::from(*p), Vec3::new(0.0, 3.0, 0.0)));
+    }
+}
+
+#[test]
 fn blend_shapes_move_vertices_before_skinning() {
     let (mut scene, bone, _) = skinned_scene();
     let mut mesh = (*scene.renderers[0].mesh).clone();

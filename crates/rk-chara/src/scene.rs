@@ -6,7 +6,7 @@
 //!
 //! Math follows the stored data: left-handed, Y up, metres.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec3, Vec4};
 use rk_unityfs::objects::{Mesh, ShaderPass};
 use rk_vfs::ObjRef;
 use std::collections::HashMap;
@@ -71,6 +71,31 @@ pub struct Image {
     /// False for data textures (masks, normal maps) that must not be gamma-decoded.
     pub srgb: bool,
     pub repeat: bool,
+}
+
+impl Image {
+    /// Unity's built-in "black" texture, which is transparent black. A
+    /// material shows it when the game sets no texture and the shader names
+    /// "black" as the property's default.
+    pub fn unity_black() -> Image {
+        Image {
+            name: "default_black".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 0],
+            srgb: true,
+            repeat: true,
+        }
+    }
+}
+
+/// What a face line's `_MainTex` shows when the maker's choice has no
+/// texture and ChaControl.ChangeTexture sets null. toon_nose declares
+/// "black" as the default, so the nose line vanishes. toon_eyew declares
+/// "white", which is what a material without the texture already gets.
+pub fn unset_line_texture(shader: &str) -> Option<Image> {
+    let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
+    name.starts_with("toon_nose").then(Image::unity_black)
 }
 
 #[derive(Debug, Clone)]
@@ -410,6 +435,12 @@ impl Scene {
                     }
                     let mat = if total > 0.0 {
                         acc * (1.0 / total)
+                    } else if bw.weights.iter().all(|w| *w <= 0.0) {
+                        // Unity sums weight times bone matrix, so a vertex
+                        // without weights gets the zero matrix and lands on
+                        // the origin of the skinned space. Triangles made of
+                        // such vertices have no area and are not drawn.
+                        Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, world[r.node].w_axis)
                     } else {
                         world[r.node]
                     };
