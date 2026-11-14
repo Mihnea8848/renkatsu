@@ -236,13 +236,13 @@ fn read_surface(i: VsOut) -> Surface {
     let kind = m.info.x;
     var tint = vec3<f32>(1.0);
     // Skin has its colours baked into the main texture already.
+    // The colours go where the colour mask's channels say. The shaders'
+    // default mask is black, so without one the texture keeps its colours.
     if (has(HAS_COLOR_MASK) && kind != KIND_SKIN) {
         let mask = textureSample(color_mask_tex, samp, i.uv0);
         tint = mix(tint, m.color1.rgb, mask.r);
         tint = mix(tint, m.color2.rgb, mask.g);
         tint = mix(tint, m.color3.rgb, mask.b);
-    } else if (kind == KIND_HAIR || !has(HAS_MAIN)) {
-        tint = m.color1.rgb;
     }
     s.diffuse = texel.rgb * tint;
 
