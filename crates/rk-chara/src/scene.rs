@@ -103,6 +103,9 @@ pub struct RendererInst {
     pub bones: Vec<Option<usize>>,
     pub enabled: bool,
     pub shadows_only: bool,
+    /// Weight per blend shape of the mesh, 0 to 1. May be shorter than the
+    /// shape list; missing entries count as 0.
+    pub shape_weights: Vec<f32>,
 }
 
 /// Nodes and renderers created by instantiating one prefab.
@@ -113,6 +116,8 @@ pub struct Instance {
     /// Scene renderer for each renderer component of the prefab, so script
     /// fields that point at renderers can be followed.
     pub renderer_keys: HashMap<(usize, i64), usize>,
+    /// Scene node for each game object of the prefab.
+    pub object_nodes: HashMap<(usize, i64), usize>,
     /// Scripts attached to the prefab's objects, by node.
     pub scripts: Vec<(usize, ObjRef)>,
 }
@@ -218,6 +223,25 @@ impl Scene {
             }
             let m = &r.mesh;
             let has_normals = m.normals.len() == m.positions.len();
+            // Blend shapes move vertices before skinning.
+            let mut base_positions = std::borrow::Cow::Borrowed(&m.positions[..]);
+            let mut base_normals = std::borrow::Cow::Borrowed(&m.normals[..]);
+            for (shape, &w) in m.blend_shapes.iter().zip(&r.shape_weights) {
+                if w == 0.0 {
+                    continue;
+                }
+                let w = w * 100.0 / shape.full_weight.max(f32::EPSILON);
+                let (pos, nor) = (base_positions.to_mut(), base_normals.to_mut());
+                for v in &shape.vertices {
+                    let i = v.index as usize;
+                    if let Some(p) = pos.get_mut(i) {
+                        *p = (Vec3::from(*p) + Vec3::from(v.position) * w).to_array();
+                    }
+                    if let Some(n) = nor.get_mut(i) {
+                        *n = (Vec3::from(*n) + Vec3::from(v.normal) * w).to_array();
+                    }
+                }
+            }
             let mut positions = Vec::with_capacity(m.positions.len());
             let mut normals = Vec::with_capacity(m.positions.len());
             if r.skinned && !m.skin.is_empty() && !m.bind_poses.is_empty() {
@@ -227,7 +251,7 @@ impl Scene {
                         Some(world[node] * Mat4::from_cols_array(&m.bind_poses[i]).transpose())
                     })
                     .collect();
-                for (vi, p) in m.positions.iter().enumerate() {
+                for (vi, p) in base_positions.iter().enumerate() {
                     let bw = &m.skin[vi];
                     let mut acc = Mat4::ZERO;
                     let mut total = 0.0;
@@ -249,7 +273,7 @@ impl Scene {
                     positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
                     if has_normals {
                         normals.push(
-                            mat.transform_vector3(Vec3::from(m.normals[vi]))
+                            mat.transform_vector3(Vec3::from(base_normals[vi]))
                                 .normalize_or_zero()
                                 .to_array(),
                         );
@@ -258,11 +282,11 @@ impl Scene {
             } else {
                 let mat = world[r.node];
                 let nmat = mat.inverse().transpose();
-                for (vi, p) in m.positions.iter().enumerate() {
+                for (vi, p) in base_positions.iter().enumerate() {
                     positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
                     if has_normals {
                         normals.push(
-                            nmat.transform_vector3(Vec3::from(m.normals[vi]))
+                            nmat.transform_vector3(Vec3::from(base_normals[vi]))
                                 .normalize_or_zero()
                                 .to_array(),
                         );

@@ -3,3 +3,5 @@ reference/
 renkatsu.toml
 *.png
 !docs/**/*.png
+tools/reference-capture/bin/
+tools/reference-capture/obj/

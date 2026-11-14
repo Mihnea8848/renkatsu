@@ -167,6 +167,7 @@ impl<'a> Loader<'a> {
             nodes: Vec::new(),
             renderers: Vec::new(),
             renderer_keys: HashMap::new(),
+            object_nodes: HashMap::new(),
             scripts: Vec::new(),
         };
 
@@ -192,6 +193,7 @@ impl<'a> Loader<'a> {
             }
             inst.nodes.push(node);
             by_transform.insert(tr_ref.key(), node);
+            inst.object_nodes.insert(go_ref.key(), node);
 
             let (mut renderer, mut filter) = (None, None);
             for c in go.components.iter().filter_map(|p| assets.deref(&go_ref.file, *p)) {
@@ -273,6 +275,7 @@ impl<'a> Loader<'a> {
                 bones,
                 enabled: r.enabled,
                 shadows_only: r.cast_shadows == 3,
+                shape_weights: Vec::new(),
             });
         }
         Ok(inst)
