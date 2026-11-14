@@ -1083,6 +1083,7 @@ dependencies = [
  "anyhow",
  "clap",
  "glam",
+ "rayon",
  "rk-card",
  "rk-chara",
  "rk-core",

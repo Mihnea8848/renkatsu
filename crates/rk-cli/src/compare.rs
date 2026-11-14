@@ -100,7 +100,7 @@ fn sample_cards(cfg: &Config, count: usize) -> Vec<PathBuf> {
     (0..count).map(|i| cards[i * cards.len() / count].clone()).collect()
 }
 
-pub fn compare(cards: Vec<PathBuf>, count: usize, out: &Path) -> Result<()> {
+pub fn compare(cards: Vec<PathBuf>, count: usize, face: bool, out: &Path) -> Result<()> {
     let cfg = Config::load()?;
     let game = Game::open(&cfg)?;
     let cards = if cards.is_empty() {
@@ -151,9 +151,11 @@ pub fn compare(cards: Vec<PathBuf>, count: usize, out: &Path) -> Result<()> {
                 }
             }
             let h = hi.y - lo.y;
+            // Head only with room for the hair, or head to hips.
+            let (below, above) = if face { (0.25, 0.45) } else { (2.4, 0.35) };
             (
-                Vec3::new(-0.01, lo.y - 2.4 * h, lo.z),
-                Vec3::new(0.01, hi.y + 0.35 * h, hi.z),
+                Vec3::new(-0.01, lo.y - below * h, lo.z),
+                Vec3::new(0.01, hi.y + above * h, hi.z),
             )
         };
         let camera = Camera::frame(min, max, CELL_W as f32 / CELL_H as f32, 0.0);
