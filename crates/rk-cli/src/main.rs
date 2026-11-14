@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod audit;
 mod bundle;
 mod card;
 mod compare;
@@ -64,8 +65,19 @@ enum Cmd {
         /// Sample size when no cards are given.
         #[arg(long, default_value_t = 20)]
         count: usize,
+        /// Frame the head only.
+        #[arg(long)]
+        face: bool,
         #[arg(short, long, default_value = "compare.png")]
         out: PathBuf,
+    },
+    /// Build many cards and report failures, warnings and unsupported data.
+    Audit {
+        /// How many cards to sample from the game folder.
+        #[arg(long, default_value_t = 150)]
+        count: usize,
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
     },
     /// Inspect Unity asset bundle files.
     Bundle {
@@ -115,7 +127,13 @@ fn main() -> Result<()> {
             cmd: CardCmd::Dump { path, ext },
         } => card::dump(&path, ext),
         Cmd::Index => vfs::index(),
-        Cmd::Compare { cards, count, out } => compare::compare(cards, count, &out),
+        Cmd::Audit { count, threads } => audit::audit(count, threads),
+        Cmd::Compare {
+            cards,
+            count,
+            face,
+            out,
+        } => compare::compare(cards, count, face, &out),
         Cmd::Render {
             card,
             out,

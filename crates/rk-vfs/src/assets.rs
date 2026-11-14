@@ -132,6 +132,13 @@ impl Assets {
         Ok(lb)
     }
 
+    /// Drops every loaded bundle. Zipmod bundles are held in memory, so
+    /// long runs over many characters call this between them.
+    pub fn clear(&self) {
+        self.loaded.lock().clear();
+        self.by_cab.lock().clear();
+    }
+
     /// All sources of a virtual bundle path, zipmods first. A bundle that
     /// fails to open is skipped.
     pub fn bundles(&self, vpath: &str) -> Vec<Arc<LoadedBundle>> {

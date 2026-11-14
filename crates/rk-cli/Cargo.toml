@@ -21,3 +21,4 @@ rk-vfs.workspace = true
 rk-chara.workspace = true
 rk-render.workspace = true
 glam.workspace = true
+rayon.workspace = true
