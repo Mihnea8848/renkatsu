@@ -29,6 +29,39 @@ fn rgb(c: Rgba) -> [f32; 3] {
     [c[0], c[1], c[2]]
 }
 
+/// sRGB to linear for one channel. The game renders in linear colour space,
+/// so Unity hands colours and sRGB textures to shaders this way.
+fn to_linear(x: f32) -> f32 {
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear to sRGB for one channel: how an sRGB render target stores a value.
+fn to_srgb(x: f32) -> f32 {
+    if x <= 0.0031308 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The colour channels of a sample as the shader sees them: decoded when
+/// the texture is marked sRGB, and never above one.
+fn linear_rgb(img: &Image, c: Rgba) -> [f32; 3] {
+    let f = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        if img.srgb {
+            to_linear(x)
+        } else {
+            x
+        }
+    };
+    [f(c[0]), f(c[1]), f(c[2])]
+}
+
 /// Bilinear sample at a UV coordinate, wrapping or clamping as the image asks.
 pub fn sample(img: &Image, u: f32, v: f32) -> Rgba {
     let (w, h) = (img.width as i64, img.height as i64);
@@ -260,27 +293,34 @@ pub struct ClothColor<'a> {
 }
 
 impl ClothColor<'_> {
+    /// The area's colour at a point, in linear values.
     fn at(&self, uv: [f32; 2]) -> [f32; 3] {
         // The pattern colour shows where the pattern texture is dark.
         let pat = match self.pattern {
-            Some(p) => sample(
-                p,
-                uv[0] * (20.0 - 19.0 * self.tiling[0]),
-                uv[1] * (20.0 - 19.0 * self.tiling[1]),
-            )[0],
+            Some(p) => {
+                let t = sample(
+                    p,
+                    uv[0] * (20.0 - 19.0 * self.tiling[0]),
+                    uv[1] * (20.0 - 19.0 * self.tiling[1]),
+                );
+                linear_rgb(p, t)[0]
+            }
             None => 1.0,
         };
         mix3(
-            rgb(self.pattern_color),
-            rgb(self.base),
+            rgb(self.pattern_color).map(to_linear),
+            rgb(self.base).map(to_linear),
             pat.max(1.0 - self.pattern_color[3]),
         )
     }
 }
 
 /// Clothing texture: the base texture tinted by up to three colours, each
-/// with an optional pattern, placed by the colour mask's channels. The
-/// alpha of the base texture is kept, since clothes use it for cut-outs.
+/// with an optional pattern, placed by the colour mask's channels.
+///
+/// The game draws this (shader create_topN) on linear values into a cleared
+/// sRGB texture, blending with the base texture's alpha. So the colour comes
+/// out multiplied by that alpha and the stored alpha is its square.
 pub fn clothes(main: &Image, mask: &Image, colors: &[ClothColor; 3]) -> Image {
     render(main.width, main.height, "clothes_composed", |uv| {
         let m = sample(mask, uv[0], uv[1]);
@@ -289,8 +329,9 @@ pub fn clothes(main: &Image, mask: &Image, colors: &[ClothColor; 3]) -> Image {
             tint = mix3(tint, c.at(uv), m[k]);
         }
         let t = sample(main, uv[0], uv[1]);
-        let c = mul3(tint, [t[0].clamp(0.0, 1.0), t[1].clamp(0.0, 1.0), t[2].clamp(0.0, 1.0)]);
-        [c[0], c[1], c[2], t[3]]
+        let a = t[3].clamp(0.0, 1.0);
+        let c = mul3(tint, linear_rgb(main, t)).map(|x| to_srgb(x * a));
+        [c[0], c[1], c[2], a * a]
     })
 }
 
@@ -488,11 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn clothes_colours_follow_the_mask_and_keep_alpha() {
+    fn clothes_colours_follow_the_mask_and_blend_by_alpha() {
         let main = solid([128, 255, 255, 64]);
         let red_mask = solid([255, 0, 0, 255]);
         let plain = ClothColor {
-            base: [1.0, 0.5, 0.0, 1.0],
+            base: [1.0, 0.6, 0.0, 1.0],
             pattern: None,
             pattern_color: [0.0, 0.0, 1.0, 1.0],
             tiling: [0.0; 2],
@@ -505,7 +546,16 @@ mod tests {
         };
         let out = clothes(&main, &red_mask, &[plain, unused, unused]);
         assert_eq!((out.width, out.height), (2, 2));
-        assert_eq!(px(&out, 0, 0), [128, 128, 0, 64]);
+        // Alpha 64 of 255 is about a quarter. Red: 128 of 255 is 0.2158 in
+        // linear, times the alpha 0.0542, stored as sRGB 65.8. Green: 0.6 is
+        // 0.3185 in linear, times the alpha 0.0799, stored as 79.9.
+        assert_eq!(px(&out, 0, 0), [66, 80, 0, 16]);
+        // A solid base texture keeps colour and alpha.
+        let solid_main = solid([128, 255, 255, 255]);
+        assert_eq!(
+            px(&clothes(&solid_main, &red_mask, &[plain, unused, unused]), 0, 0),
+            [128, 153, 0, 255]
+        );
 
         // A dark pattern texture switches the area to the pattern colour.
         let dark = solid([0, 0, 0, 255]);
@@ -514,13 +564,13 @@ mod tests {
             ..plain
         };
         assert_eq!(
-            px(&clothes(&main, &red_mask, &[patterned, unused, unused]), 0, 0)[..3],
+            px(&clothes(&solid_main, &red_mask, &[patterned, unused, unused]), 0, 0)[..3],
             [0, 0, 255]
         );
         // With no mask coverage the base texture is left as it is.
         let none = solid([0, 0, 0, 255]);
         assert_eq!(
-            px(&clothes(&main, &none, &[plain, unused, unused]), 0, 0)[..3],
+            px(&clothes(&solid_main, &none, &[plain, unused, unused]), 0, 0)[..3],
             [128, 255, 255]
         );
     }

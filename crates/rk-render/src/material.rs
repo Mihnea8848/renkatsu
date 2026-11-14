@@ -28,6 +28,32 @@ pub const HAS_OVER1: u32 = 32;
 pub const HAS_OVER2: u32 = 64;
 pub const BLENDED: u32 = 128;
 pub const HAS_OVER3: u32 = 256;
+/// The main texture holds sRGB values.
+pub const MAIN_SRGB: u32 = 512;
+
+/// Which of the game's clothes shaders an item follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemShader {
+    /// main_item and everything unknown.
+    Other = 0,
+    /// main_opaque
+    Opaque = 1,
+    /// main_alpha
+    Alpha = 2,
+}
+
+/// Clothes shader from a Unity shader name. Mod shaders follow the game's
+/// naming (`xukmi/MainAlphaPlus`), so matching is by substring.
+pub fn item_shader(shader: &str) -> ItemShader {
+    let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
+    if name.contains("alpha") {
+        ItemShader::Alpha
+    } else if name.contains("opaque") {
+        ItemShader::Opaque
+    } else {
+        ItemShader::Other
+    }
+}
 
 /// Texture slots in bind order.
 pub const SLOTS: [(&str, u32); 8] = [
@@ -156,6 +182,14 @@ impl MaterialDesc {
         let kind = classify(&mat.shader);
         let state = mat.draw.unwrap_or_else(|| state_for_name(&mat.shader, kind));
         let blended = state.blend;
+        // The clothes shaders have their own defaults and texture slots.
+        let item = if kind == Kind::Item {
+            item_shader(&mat.shader)
+        } else {
+            ItemShader::Other
+        };
+        let cloth = item != ItemShader::Other;
+        let sheer = item == ItemShader::Alpha;
         let color = |name: &str, default: [f32; 4]| mat.colors.get(name).copied().unwrap_or(default);
         let float = |name: &str, default: f32| mat.floats.get(name).copied().unwrap_or(default);
 
@@ -167,16 +201,22 @@ impl MaterialDesc {
         let mut st_over = [st_main; 2];
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
-            let name = if kind == Kind::Hair && *name == "_overtex1" {
-                &"_HairGloss"
-            } else {
-                name
+            // Clothes have none either; their normal map and second ramp
+            // take the first two.
+            let name = match *name {
+                "_overtex1" if kind == Kind::Hair => "_HairGloss",
+                "_overtex1" if cloth => "_NormalMap",
+                "_overtex2" if cloth => "_AnotherRamp",
+                other => other,
             };
-            if let Some(slot) = mat.textures.get(*name) {
+            if let Some(slot) = mat.textures.get(name) {
                 textures[i] = Some(slot.image.clone());
                 flags |= flag;
+                if name == "_MainTex" && slot.image.srgb {
+                    flags |= MAIN_SRGB;
+                }
                 let st = [slot.scale[0], slot.scale[1], slot.offset[0], slot.offset[1]];
-                match *name {
+                match name {
                     "_MainTex" => st_main = st,
                     "_AlphaMask" => st_alpha = st,
                     "_HairGloss" => st_gloss = st,
@@ -197,6 +237,8 @@ impl MaterialDesc {
             // The hair shaders cut at one half even when they blend.
             Kind::Hair => 0.5,
             _ if blended => 0.05,
+            // main_opaque cuts at one half whatever the material says.
+            _ if cloth => 0.5,
             _ => float("_Cutoff", 0.5).clamp(0.01, 1.0),
         };
         let uniform = MaterialUniform {
@@ -227,24 +269,44 @@ impl MaterialDesc {
                 Kind::Eye | Kind::Overlay => color("_shadowcolor", [0.628, 0.628, 0.628, 1.0]),
                 _ => color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
             },
-            over1: color("_overcolor1", [1.0; 4]),
+            over1: if cloth {
+                color("_SpecularColor", [1.0, 1.0, 1.0, 0.0])
+            } else {
+                color("_overcolor1", [1.0; 4])
+            },
             // Hair: scale and offset of the gloss mask.
             over2: if kind == Kind::Hair {
                 st_gloss
+            } else if cloth {
+                [
+                    float("_SpeclarHeight", if sheer { 0.985 } else { 0.98 }),
+                    float("_SpecularPower", 0.0),
+                    float("_SpecularPowerNail", 0.0),
+                    float("_notusetexspecular", 0.0),
+                ]
             } else {
                 color("_overcolor2", [1.0; 4])
             },
-            over3: color("_overcolor3", [1.0; 4]),
+            over3: if cloth {
+                [
+                    float("_rimpower", 0.5),
+                    float("_rimV", if sheer { 0.75 } else { 0.5 }),
+                    float("_outline", 1.0),
+                    0.0,
+                ]
+            } else {
+                color("_overcolor3", [1.0; 4])
+            },
             st_main,
             st_alpha,
             p0: [
                 cutoff,
-                float("_ShadowExtend", 1.0),
-                float("_ShadowExtendAnother", 1.0),
+                float("_ShadowExtend", if sheer { 0.5 } else { 1.0 }),
+                float("_ShadowExtendAnother", if cloth { 0.0 } else { 1.0 }),
                 float("_DetailRLineR", 0.0),
             ],
             p1: [
-                float("_DetailBLineG", 0.0),
+                float(if sheer { "_DetailBLineGA" } else { "_DetailBLineG" }, 0.0),
                 float("_LineWidthS", 1.0),
                 float("_Alpha", 1.0),
                 0.0,
@@ -278,7 +340,7 @@ impl MaterialDesc {
             } else {
                 color("_LineColor", [0.5, 0.5, 0.5, 1.0])
             },
-            info: [kind as u32, flags, 0, 0],
+            info: [kind as u32, flags, item as u32, 0],
         };
         Self {
             kind,
@@ -403,6 +465,97 @@ mod tests {
         assert_eq!(set.color2, [0.8, 0.7, 0.6, 0.5]);
         assert_eq!(set.color3, [0.9, 0.3, 0.4, 0.25]);
         assert_eq!(set.line, [0.0, 1.0, 0.7, 1.0]);
+    }
+
+    #[test]
+    fn clothes_follow_their_game_shader() {
+        for (name, shader) in [
+            ("Shader Forge/main_alpha", ItemShader::Alpha),
+            ("Shader Forge/main_opaque", ItemShader::Opaque),
+            ("xukmi/MainAlphaPlus", ItemShader::Alpha),
+            ("xukmi/MainOpaquePlus", ItemShader::Opaque),
+            ("Shader Forge/main_item", ItemShader::Other),
+            ("Standard", ItemShader::Other),
+        ] {
+            assert_eq!(item_shader(name), shader, "{name}");
+        }
+        let image = |srgb| {
+            Arc::new(Image {
+                name: "t".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb,
+                repeat: false,
+            })
+        };
+        let slot = |srgb| rk_chara::TexSlot {
+            image: image(srgb),
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        };
+
+        // Without values: the defaults each shader declares.
+        let mut sheer = MaterialInst {
+            shader: "Shader Forge/main_alpha".into(),
+            ..Default::default()
+        };
+        let u = MaterialDesc::new(Some(&sheer)).uniform;
+        assert_eq!(u.info[2], ItemShader::Alpha as u32);
+        assert_eq!(u.over1, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(u.over2, [0.985, 0.0, 0.0, 0.0]);
+        assert_eq!(u.over3, [0.5, 0.75, 1.0, 0.0]);
+        assert_eq!(u.p0, [0.05, 0.5, 0.0, 0.0]);
+        let solid = MaterialInst {
+            shader: "Shader Forge/main_opaque".into(),
+            ..Default::default()
+        };
+        let u = MaterialDesc::new(Some(&solid)).uniform;
+        assert_eq!(u.info[2], ItemShader::Opaque as u32);
+        assert_eq!(u.over2, [0.98, 0.0, 0.0, 0.0]);
+        assert_eq!(u.over3, [0.5, 0.5, 1.0, 0.0]);
+        assert_eq!(u.p0, [0.5, 1.0, 0.0, 0.0]);
+
+        // Material values and textures reach the shader.
+        sheer.colors.insert("_SpecularColor".into(), [0.9, 0.8, 0.7, 0.3]);
+        for (name, value) in [
+            ("_SpeclarHeight", 0.96),
+            ("_SpecularPower", 0.2),
+            ("_rimpower", 0.4),
+            ("_rimV", 0.2),
+            ("_outline", 0.0),
+            ("_ShadowExtend", 0.8),
+            ("_DetailBLineGA", 1.0),
+            ("_DetailBLineG", 0.5),
+        ] {
+            sheer.floats.insert(name.into(), value);
+        }
+        sheer.textures.insert("_MainTex".into(), slot(true));
+        sheer.textures.insert("_NormalMap".into(), slot(false));
+        sheer.textures.insert("_AnotherRamp".into(), slot(false));
+        // Not a property of the shader: left out.
+        sheer.textures.insert("_overtex1".into(), slot(false));
+        let d = MaterialDesc::new(Some(&sheer));
+        assert_eq!(d.uniform.over1, [0.9, 0.8, 0.7, 0.3]);
+        assert_eq!(d.uniform.over2, [0.96, 0.2, 0.0, 0.0]);
+        assert_eq!(d.uniform.over3, [0.4, 0.2, 0.0, 0.0]);
+        assert_eq!((d.uniform.p0[1], d.uniform.p1[0]), (0.8, 1.0));
+        assert_eq!(
+            d.uniform.info[1],
+            BLENDED | HAS_MAIN | MAIN_SRGB | HAS_OVER1 | HAS_OVER2
+        );
+        assert!(d.textures[5].is_some() && d.textures[6].is_some() && d.textures[7].is_none());
+
+        // Other items keep their layer colours and ignore the normal map.
+        let mut other = MaterialInst {
+            shader: "Shader Forge/main_item".into(),
+            ..Default::default()
+        };
+        other.textures.insert("_NormalMap".into(), slot(false));
+        other.textures.insert("_MainTex".into(), slot(false));
+        let d = MaterialDesc::new(Some(&other));
+        assert_eq!((d.uniform.info[1], d.uniform.info[2]), (HAS_MAIN, 0));
+        assert_eq!(d.uniform.over1, [1.0; 4]);
     }
 
     #[test]

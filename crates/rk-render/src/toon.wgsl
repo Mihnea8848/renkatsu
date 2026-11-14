@@ -1,9 +1,12 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Koikatsu reference shading. Colour maths stays in gamma space, as the
-// game's own shaders work. One module serves every material kind; the kind
-// is a uniform so the pipeline count stays small.
+// Koikatsu reference shading. One module serves every material kind; the kind
+// is a uniform so the pipeline count stays small. The game renders in linear
+// colour space: the target is sRGB, so blending happens on linear values as
+// in the game. The clothes shaders (main_opaque, main_alpha) work on linear
+// values throughout. The older branches still do their maths on gamma values
+// and are converted on the way out.
 
 struct Globals {
     view_proj: mat4x4<f32>,
@@ -13,7 +16,8 @@ struct Globals {
     ambient_shadow: vec4<f32>,
     // rgb unused by the game, a: 1 - line depth
     line_color: vec4<f32>,
-    // x: line width, y: light intensity, z: ambient light
+    // x: line width, y: light intensity, z: ambient light,
+    // w: 1 when the ramp texture holds sRGB values
     params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -35,6 +39,15 @@ const HAS_OVER1: u32 = 32u;
 const HAS_OVER2: u32 = 64u;
 const BLENDED: u32 = 128u;
 const HAS_OVER3: u32 = 256u;
+const MAIN_SRGB: u32 = 512u;
+// Clothes materials bind their normal map and second ramp in the first two
+// layer slots.
+const HAS_NORMAL: u32 = 32u;
+const HAS_ANOTHER_RAMP: u32 = 64u;
+
+// Which game shader an item follows (info.z).
+const ITEM_OPAQUE: u32 = 1u;
+const ITEM_ALPHA: u32 = 2u;
 
 struct Material {
     color1: vec4<f32>,
@@ -58,7 +71,7 @@ struct Material {
     p3: vec4<f32>,
     // the material's own outline colour (hair)
     line: vec4<f32>,
-    // x: kind, y: flags
+    // x: kind, y: flags, z: item shader
     info: vec4<u32>,
 };
 @group(1) @binding(0) var<uniform> m: Material;
@@ -388,8 +401,8 @@ fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4
     return mix(line_rgb, body, keep);
 }
 
-@fragment
-fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+// Every kind except the clothes shaders; the result is in gamma space.
+fn shade(i: VsOut, front: bool) -> vec4<f32> {
     let kind = m.info.x;
 
     if (kind == KIND_OVERLAY) {
@@ -491,8 +504,7 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     return vec4<f32>(rgb, select(1.0, s.alpha * m.p1.z, blended));
 }
 
-@fragment
-fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
+fn outline_color(i: VsOut) -> vec4<f32> {
     let s = read_surface(i);
     if (s.alpha < max(m.p0.x, 0.5)) {
         discard;
@@ -507,4 +519,233 @@ fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
     }
     let shade = shadow_factor(s.diffuse);
     return vec4<f32>(line_color(s.diffuse * shade, light_color()), 1.0);
+}
+
+// sRGB to linear, as Unity converts colours and textures in linear colour space.
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    let low = x / 12.9200001;
+    let high = pow((x + 0.0549999997) / 1.05499995, vec3<f32>(2.4000001));
+    return select(high, low, x <= vec3<f32>(0.0404499993));
+}
+
+// Clothes (main_opaque, main_alpha): everything below works on linear values.
+
+// The main texture; the game bakes the card's colours into it.
+fn item_main(i: VsOut) -> vec4<f32> {
+    if (!has(HAS_MAIN)) {
+        return vec4<f32>(1.0);
+    }
+    let t = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
+    return vec4<f32>(select(t.rgb, to_linear(t.rgb), has(MAIN_SRGB)), t.a);
+}
+
+// Body-side cut-outs: each channel of the mask can be switched off.
+fn item_mask(i: VsOut) -> f32 {
+    if (!has(HAS_ALPHA_MASK)) {
+        return 1.0;
+    }
+    let am = textureSample(alpha_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw);
+    return min(max(1.0 - m.p2.x, am.r), max(1.0 - m.p2.y, am.g));
+}
+
+// Surface normal from the normal map (x in alpha, y in green).
+fn item_normal(i: VsOut, front: bool) -> vec3<f32> {
+    var t = vec3<f32>(0.0, 0.0, 1.0);
+    if (has(HAS_NORMAL)) {
+        let nm = textureSample(over1_tex, samp, i.uv0);
+        let xy = nm.ag * 2.0 - 1.0;
+        t = vec3<f32>(xy, sqrt(1.0 - min(dot(xy, xy), 1.0)));
+    }
+    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    return normalize(t.x * i.tangent + t.y * i.bitangent + t.z * n);
+}
+
+// The scene ramp at a light amount.
+fn item_ramp(x: f32) -> f32 {
+    let v = textureSample(ramp_tex, ramp_samp, vec2<f32>(x, x)).r;
+    return select(v, to_linear(vec3<f32>(v)).x, g.params.w > 0.5);
+}
+
+// The material's own ramp; white when it has none. The lookup stops at the
+// outermost texels, as a clamped texture does.
+fn item_another_ramp(x: f32) -> f32 {
+    if (!has(HAS_ANOTHER_RAMP)) {
+        return 1.0;
+    }
+    let half = 0.5 / vec2<f32>(textureDimensions(over2_tex));
+    return textureSample(over2_tex, samp, clamp(vec2<f32>(x, x), half, 1.0 - half)).r;
+}
+
+// Shine painted in the detail mask's red channel, read where the view
+// shifts it to. `depth` is the shader's own factor on the height slider.
+fn item_shine(i: VsOut, view: vec3<f32>, depth: f32) -> f32 {
+    if (!has(HAS_DETAIL)) {
+        return 0.0;
+    }
+    let shift = (m.over2.x - 1.0) * depth;
+    let uv = shift * vec2<f32>(dot(i.tangent, view), dot(i.bitangent, view)) + i.uv0;
+    return textureSample(detail_tex, samp, uv).r;
+}
+
+// Multiplier for the unlit side: shadow_factor() on linear values.
+fn item_shadow_factor(base: vec3<f32>) -> vec3<f32> {
+    let hsv = rgb_to_hsv(base * to_linear(m.shadow.rgb));
+    let tint = hsv_to_rgb(vec3<f32>(hsv.x, hsv.y * 0.5, 1.0));
+    let a = g.ambient_shadow.a;
+    let rgb = to_linear(g.ambient_shadow.rgb);
+    let deep = 1.0 - (1.0 - a) * (1.0 - rgb);
+    let shallow = (a + 1.0) * rgb;
+    let scene = clamp(select(shallow, deep, a > 0.0), vec3<f32>(0.0), vec3<f32>(1.0));
+    let dark = tint * scene * 1.79999995;
+    let light = 1.0 - (1.0 - 2.0 * (tint * 0.899999976 - 0.5)) * (1.0 - scene);
+    return clamp(select(dark, light, tint > vec3<f32>(0.555555582)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Drawn lines: `base` pulled toward black or white by the scene's line depth.
+fn item_lines(base: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
+    let w = g.line_color.a;
+    let toward_white = 1.0 - (1.0 - 2.0 * (w - 0.5)) * (1.0 - base);
+    let toward_black = base * (w * 2.0);
+    return clamp(select(toward_black, toward_white, w > 0.5), vec3<f32>(0.0), vec3<f32>(1.0)) * light;
+}
+
+// The highlight both shaders share: pow(n.h, 256 p) * p.
+fn item_highlight(ndh: f32, power: f32) -> f32 {
+    if (power <= 0.0) {
+        return 0.0;
+    }
+    return pow(max(ndh, 0.0), power * 256.0) * power;
+}
+
+// See-through cloth, after the game's main_alpha pixel shader (forward base
+// pass without the shadow map; liquid layers left out).
+fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
+    let main = item_main(i);
+    let alpha = min(item_mask(i), main.a);
+    // With the outline switch on, the inside of the cloth is not drawn.
+    let side = select(1.0 - m.over3.z, 1.0, front);
+    if (min(side, alpha * 10.0) < 0.5) {
+        discard;
+    }
+    let n = item_normal(i, front);
+    let l = normalize(g.light_dir.xyz);
+    let view = normalize(g.eye.xyz - i.world);
+    let ndl = dot(l, n);
+    let ndh = dot(n, normalize(view + l));
+    let ndv = dot(n, view);
+
+    var dm = vec4<f32>(0.0);
+    if (has(HAS_DETAIL)) {
+        dm = textureSample(detail_tex, samp, i.uv0);
+    }
+    let shine = item_shine(i, view, 0.899999976);
+    let specular = min(shine * shine, 1.0) * to_linear(m.over1.rgb)
+        + clamp(item_highlight(ndh, m.over2.y), 0.0, 1.0);
+
+    let ramp = clamp(min(item_another_ramp(ndv), item_ramp(ndl)), 0.0, 1.0);
+    let open = 1.0 - dm.g;
+    let lit = ramp * open;
+    let diffuse = clamp(specular * (1.0 - (1.0 - lit) * 0.5) + main.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let factor = item_shadow_factor(main.rgb);
+    var rgb = mix(diffuse * factor, diffuse, lit);
+
+    // Rim towards the silhouette, tinted by the hue of the scene shadow.
+    let fresnel = max(1.0 - max(ndv, 0.0), 1e-6);
+    let rim = clamp(pow(fresnel, m.over3.x * 9.0 + 1.0) * 2.5 - 0.5, 0.0, 1.0);
+    let hue = rgb_to_hsv(to_linear(g.ambient_shadow.rgb)).x;
+    let rim_rgb = min(rim * (hsv_to_rgb(vec3<f32>(hue, 1.0, 1.0)) * 0.330000013 + 0.330000013), vec3<f32>(0.5));
+    rgb = clamp(open * m.over3.y * (1.0 - dm.b) * rim_rgb + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let extend = max(1.0 - m.p0.y, max(ramp, open));
+    rgb *= mix(factor, vec3<f32>(1.0), extend);
+    rgb *= select(0.660000026, 1.0, front);
+
+    let light = light_color();
+    let lines = item_lines(main.rgb * to_linear(g.line_color.rgb) * factor, light);
+    let keep = pow((1.0 - g.params.x) * 0.889999986 + 0.00999999978, dm.b * m.p1.x);
+    let out = mix(lines, rgb * max(light, to_linear(g.ambient_shadow.rgb)), keep);
+    return vec4<f32>(out, alpha);
+}
+
+// Solid cloth, after the game's main_opaque pixel shader (forward base pass
+// without the shadow map; liquid layers left out).
+fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
+    let main = item_main(i);
+    if (min(item_mask(i), main.a) < 0.5) {
+        discard;
+    }
+    let n = item_normal(i, front);
+    let l = normalize(g.light_dir.xyz);
+    let view = normalize(g.eye.xyz - i.world);
+    let ndl = dot(l, n);
+    let ndh = dot(n, normalize(view + l));
+    let fresnel = max(1.0 - max(dot(n, view), 0.0), 1e-6);
+
+    var dm = vec4<f32>(0.0);
+    if (has(HAS_DETAIL)) {
+        dm = textureSample(detail_tex, samp, i.uv0);
+    }
+    var lm = vec4<f32>(0.0);
+    if (has(HAS_LINE)) {
+        lm = textureSample(line_tex, samp, i.uv0);
+    }
+    let spec_rgb = to_linear(m.over1.rgb);
+    let power = m.over2.y;
+
+    // Light amount: the scene ramp, the material's own ramp where the line
+    // mask says so, and the shadows painted into the masks.
+    let line_r = mix(lm.r, dm.r, m.p0.w);
+    let scene_ramp = item_ramp(ndl);
+    let ramp = mix(scene_ramp, item_another_ramp(abs(ndh)), line_r);
+    let extend = m.p0.y * -1.20000005 + 1.0;
+    let drawn = min(1.0 - lm.b, 1.0 - dm.g) * (1.0 - extend) + extend;
+    let lit = ramp * drawn;
+
+    let factor = item_shadow_factor(main.rgb);
+    let shade = clamp(max(1.0 - line_r, 1.0 - m.p0.z) * factor, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Shine from the detail mask, and the darkening that goes with it.
+    let shine = item_shine(i, view, 0.800000012);
+    let gloss = min(shine * shine, 1.0);
+    var deepen = min(clamp(shine - gloss, 0.0, 1.0), power);
+    deepen = min(min(deepen, lit), dot(spec_rgb, vec3<f32>(0.300000012, 0.589999974, 0.109999999)));
+    let highlight = clamp(item_highlight(ndh, power) * m.over1.a, 0.0, 1.0);
+    let painted = min(max(dm.a, m.over2.z), min(gloss, max(1.0 - dm.a, power)));
+    let with_mask = main.rgb * (1.0 + deepen * (shade * 2.0 - 2.0))
+        + (highlight * (1.0 - dm.r) + painted) * spec_rgb;
+    let without_mask = spec_rgb * ((1.0 - dm.r) * highlight) + main.rgb;
+    let diffuse = clamp(mix(with_mask, without_mask, m.over2.w), vec3<f32>(0.0), vec3<f32>(1.0));
+    var rgb = mix(diffuse * shade, diffuse, lit);
+
+    // Rim in the specular colour, kept off the drawn lines.
+    let rim = clamp(((1.0 - dm.b) * 2.77777791 - 1.77777803) * pow(fresnel, m.over3.x * 9.0 + 1.0), 0.0, 0.600000024);
+    rgb = clamp(rim * spec_rgb * m.over3.y * (1.0 - dm.g) + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let light = light_color();
+    rgb *= max(light, to_linear(g.ambient_shadow.rgb));
+    rgb *= select(0.660000026, 1.0, front);
+    rgb *= drawn * (1.0 - shade) + shade;
+
+    let lines = item_lines(main.rgb * shade * 0.5, light);
+    let keep = pow((1.0 - g.params.x) * 0.889999986 + 0.00999999978, mix(lm.g, dm.b, m.p1.x));
+    return vec4<f32>(mix(lines, rgb, keep), 1.0);
+}
+
+@fragment
+fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_ALPHA) {
+        return item_alpha(i, front);
+    }
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_OPAQUE) {
+        return item_opaque(i, front);
+    }
+    let c = shade(i, front);
+    return vec4<f32>(to_linear(c.rgb), c.a);
+}
+
+@fragment
+fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
+    let c = outline_color(i);
+    return vec4<f32>(to_linear(c.rgb), c.a);
 }

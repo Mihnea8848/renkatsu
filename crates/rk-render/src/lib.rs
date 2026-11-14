@@ -16,7 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The game renders in linear colour space: shaders write linear values,
+/// blending happens on them, and the target stores them as sRGB.
+const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// sRGB to linear for one channel, 0 to 1.
+fn srgb_to_linear(x: f64) -> f64 {
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 const SAMPLES: u32 = 4;
 
@@ -572,7 +583,17 @@ impl Renderer {
                 1.0 - env.shadow_depth,
             ],
             line_color: [0.5, 0.5, 0.5, 1.0 - env.line_depth],
-            params: [env.line_width, env.light_intensity, env.ambient, 0.0],
+            params: [
+                env.line_width,
+                env.light_intensity,
+                env.ambient,
+                // Tells the clothes shaders to decode the ramp.
+                if env.ramp.as_ref().is_some_and(|r| r.srgb) {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
         };
         let globals_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globals"),
@@ -723,9 +744,9 @@ impl Renderer {
                     resolve_target: Some(&target_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background[0],
-                            g: background[1],
-                            b: background[2],
+                            r: srgb_to_linear(background[0]),
+                            g: srgb_to_linear(background[1]),
+                            b: srgb_to_linear(background[2]),
                             a: background[3],
                         }),
                         store: wgpu::StoreOp::Store,
@@ -868,6 +889,14 @@ mod tests {
         )
         .validate(&module)
         .expect("toon.wgsl validates");
+    }
+
+    #[test]
+    fn background_is_cleared_in_linear() {
+        assert_eq!(srgb_to_linear(0.0), 0.0);
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-12);
+        assert!((srgb_to_linear(0.5) - 0.2140411).abs() < 1e-6);
+        assert!((srgb_to_linear(0.04) - 0.04 / 12.92).abs() < 1e-12);
     }
 
     #[test]
