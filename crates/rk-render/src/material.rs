@@ -164,6 +164,7 @@ impl MaterialDesc {
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
+        let mut st_over = [st_main; 2];
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
             let name = if kind == Kind::Hair && *name == "_overtex1" {
@@ -179,6 +180,8 @@ impl MaterialDesc {
                     "_MainTex" => st_main = st,
                     "_AlphaMask" => st_alpha = st,
                     "_HairGloss" => st_gloss = st,
+                    "_overtex1" => st_over[0] = st,
+                    "_overtex2" => st_over[1] = st,
                     _ => {}
                 }
             }
@@ -198,8 +201,18 @@ impl MaterialDesc {
         };
         let uniform = MaterialUniform {
             color1,
-            color2: color("_Color2", [1.0; 4]),
-            color3: color("_Color3", [1.0; 4]),
+            // The iris has no second and third colour; these hold the scale
+            // and offset of its two highlights.
+            color2: if kind == Kind::Eye {
+                st_over[0]
+            } else {
+                color("_Color2", [1.0; 4])
+            },
+            color3: if kind == Kind::Eye {
+                st_over[1]
+            } else {
+                color("_Color3", [1.0; 4])
+            },
             // The face layer shaders spell it in lower case.
             shadow: match kind {
                 Kind::Eye | Kind::Overlay => color("_shadowcolor", [0.628, 0.628, 0.628, 1.0]),

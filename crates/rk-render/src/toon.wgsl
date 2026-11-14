@@ -351,10 +351,10 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
         let iris = textureSample(main_tex, samp, uv * m.st_main.xy + m.st_main.zw);
         var over = vec4<f32>(0.0);
         if (has(HAS_OVER1)) {
-            over = textureSample(over1_tex, samp, i.uv1).a * m.over1;
+            over = textureSample(over1_tex, samp, i.uv1 * m.color2.xy + m.color2.zw).a * m.over1;
         }
         if (has(HAS_OVER2)) {
-            over = max(over, textureSample(over2_tex, samp, i.uv2).a * m.over2);
+            over = max(over, textureSample(over2_tex, samp, i.uv2 * m.color3.xy + m.color3.zw).a * m.over2);
         }
         let highlight = over.a * m.p3.x;
         let base = mix(iris.rgb, over.rgb, highlight);
