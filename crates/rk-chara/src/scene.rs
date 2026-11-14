@@ -135,13 +135,39 @@ impl ShadowCasting {
     }
 }
 
+/// How a pass mixes its colour with what is behind, from the pass's blend
+/// factors. The forward passes of the game's character shaders use these
+/// three pairs and no others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Blend {
+    /// One, Zero: the pixel replaces what is behind.
+    #[default]
+    Off,
+    /// SrcAlpha, OneMinusSrcAlpha.
+    Alpha,
+    /// One, OneMinusSrcAlpha: the shader scales its colour itself
+    /// (toon_glasses). main_skin, main_item, main_opaque and main_emblem
+    /// have these factors too.
+    Premultiplied,
+}
+
+impl Blend {
+    /// From Unity's `BlendMode` numbers of the source and destination factor.
+    pub fn from_unity(src: i32, dst: i32) -> Self {
+        match (src, dst) {
+            (5, 10) => Self::Alpha,
+            (1, 10) => Self::Premultiplied,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// When and how a material is drawn, taken from its shader's forward pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawState {
     /// Unity render queue: lower draws first.
     pub queue: i32,
-    /// Blends with what is behind by its alpha.
-    pub blend: bool,
+    pub blend: Blend,
     pub zwrite: bool,
     /// The shader has an outline pass.
     pub outline: bool,
@@ -164,8 +190,7 @@ impl DrawState {
             .or_else(|| passes.iter().find(|p| !helper(p)))?;
         Some(Self {
             queue: main.queue.unwrap_or(2000),
-            // Source alpha with one minus source alpha.
-            blend: main.src_blend == 5 && main.dst_blend == 10,
+            blend: Blend::from_unity(main.src_blend, main.dst_blend),
             zwrite: main.zwrite,
             outline: passes.iter().any(|p| p.name.eq_ignore_ascii_case("OUTLINE")),
             stencil: match (main.stencil_comp, main.stencil_pass) {

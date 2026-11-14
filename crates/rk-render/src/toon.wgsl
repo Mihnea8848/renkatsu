@@ -23,6 +23,8 @@ struct Globals {
     // front of the near plane are flattened onto it, z: 1 when surfaces read
     // the shadow mask, w: how far the fallback's caster moves inwards
     shadow: vec4<f32>,
+    // rgb: the scene's ambient light
+    ambient_light: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
@@ -57,6 +59,7 @@ const HAS_ANOTHER_RAMP: u32 = 64u;
 const ITEM_OPAQUE: u32 = 1u;
 const ITEM_ALPHA: u32 = 2u;
 const ITEM_STUDIO_ALPHA: u32 = 3u;
+const ITEM_GLASSES: u32 = 4u;
 
 struct Material {
     color1: vec4<f32>,
@@ -841,8 +844,68 @@ fn item_studio_alpha(i: VsOut, front: bool) -> vec4<f32> {
     return vec4<f32>(rgb, alpha);
 }
 
+// The lens of glasses, after the game's toon_glasses_lod0 pixel shader
+// (forward base pass; all its variants are one program, without shadows).
+// The colour comes out scaled by the alpha, for One with OneMinusSrcAlpha.
+// m.color1: _Color, m.color2: _Color4, m.over1: colour inverse, colour sort,
+// rim power. m.over2 places the normal map and m.st_alpha the ramp.
+fn item_glasses(i: VsOut, front: bool) -> vec4<f32> {
+    // The pass culls back faces.
+    if (!front) {
+        discard;
+    }
+    var t = vec2<f32>(0.0);
+    if (has(HAS_NORMAL)) {
+        t = textureSample(over1_tex, samp, i.uv0 * m.over2.xy + m.over2.zw).ag * 2.0 - 1.0;
+    }
+    let n = normalize(sqrt(1.0 - min(dot(t, t), 1.0)) * normalize(i.normal) + t.x * i.tangent + t.y * i.bitangent);
+    let view = normalize(g.eye.xyz - i.world);
+    let l = normalize(g.light_dir.xyz);
+    let h = normalize(view + l);
+    let ndl = dot(n, l);
+
+    // The ramp, read along its diagonal by how the mirrored view meets the
+    // half vector. Without a texture the shader reads black.
+    var ramp = vec3<f32>(0.0);
+    if (has(HAS_ANOTHER_RAMP)) {
+        let x = abs(dot(reflect(-view, n), h)) * (n.x + n.y + n.z) * 0.5 + 0.5;
+        ramp = textureSample(over2_tex, samp, vec2<f32>(x, x) * m.st_alpha.xy + m.st_alpha.zw).rgb;
+    }
+    let rim = clamp(pow(1.0 - max(dot(n, view), 0.0), m.over1.z) * 2.0 - 1.0, 0.0, 1.0);
+    let glint = clamp(abs(dot(n, h)) * 3.99999905 - 3.79999900, 0.0, 1.0);
+
+    // The two colours, mixed one way for the lens and the other for what
+    // it mirrors.
+    let spread = (m.color1.rgb - m.color2.rgb) * (1.0 - m.over1.y);
+    let main = item_main(i);
+    let base = main.rgb * (m.over1.x * spread + m.color2.rgb);
+    let mirror = (1.0 - m.over1.x) * spread + m.color2.rgb;
+
+    // Scene shadow colour and depth, overlaid with the material's shadow
+    // colour; it fades out towards the light and away from it.
+    let a = g.ambient_shadow;
+    let scene = clamp(
+        select(a.rgb * (a.a + a.a), 1.0 - (1.0 - (a.a - 0.5) * 2.0) * (1.0 - a.rgb), a.a > 0.5),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let shade = mix(overlay(scene, m.shadow.rgb), vec3<f32>(1.0), abs(ndl));
+    let dark = base * shade;
+
+    var rgb = (glint + ramp + rim) * mirror + rim * a.rgb + dark;
+    rgb *= max(light_color(), a.rgb);
+    rgb = clamp(rgb * m.color2.a + dark, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Light: the directional light and the scene's ambient light.
+    rgb *= max(ndl, 0.0) * g.params.y + g.ambient_light.rgb;
+    let alpha = main.a * m.color2.a;
+    return vec4<f32>(rgb * alpha, alpha);
+}
+
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_GLASSES) {
+        return item_glasses(i, front);
+    }
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_STUDIO_ALPHA) {
         return item_studio_alpha(i, front);
     }

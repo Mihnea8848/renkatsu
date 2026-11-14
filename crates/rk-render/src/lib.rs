@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use material::{MaterialDesc, MaterialUniform};
-use rk_chara::{DrawMesh, Image, ShadowCasting, Stencil};
+use rk_chara::{Blend, DrawMesh, Image, ShadowCasting, Stencil};
 use shadow::{ShadowSettings, CASCADES};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,6 +115,7 @@ struct Globals {
     line_color: [f32; 4],
     params: [f32; 4],
     shadow: [f32; 4],
+    ambient_light: [f32; 4],
 }
 
 /// What the shadow mask pass reads; `Shadow` in `shadow.wgsl`.
@@ -144,6 +145,9 @@ pub struct Environment {
     pub line_width: f32,
     pub light_intensity: f32,
     pub ambient: f32,
+    /// Unity's ambient light (`RenderSettings.ambientLight`), as stored.
+    /// Only the lens of glasses reads the scene's ambient light.
+    pub ambient_light: [f32; 3],
     /// Unit vector pointing from the scene to the light. `None` puts the
     /// light at the camera's upper left.
     pub light_dir: Option<[f32; 3]>,
@@ -162,6 +166,8 @@ impl Default for Environment {
             light_intensity: 1.0,
             // The game's shaders compute light * 0.6 + 0.4.
             ambient: 0.4,
+            // Unity's default ambient colour for a new scene.
+            ambient_light: [0.212, 0.227, 0.259],
             light_dir: None,
             shadows: ShadowSettings::default(),
         }
@@ -261,7 +267,7 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 struct PipelineKey {
     /// The outline pass: back faces pushed outward.
     outline: bool,
-    blend: bool,
+    blend: Blend,
     zwrite: bool,
     stencil: Stencil,
 }
@@ -270,7 +276,7 @@ impl PipelineKey {
     fn surface(desc: &MaterialDesc) -> Self {
         Self {
             outline: false,
-            blend: desc.blended,
+            blend: desc.blend,
             zwrite: desc.zwrite,
             stencil: desc.stencil,
         }
@@ -281,13 +287,23 @@ impl PipelineKey {
     fn outline(desc: &MaterialDesc) -> Self {
         Self {
             outline: true,
-            blend: false,
+            blend: Blend::Off,
             zwrite: true,
             stencil: match desc.stencil {
                 Stencil::SkipEqual => Stencil::SkipEqual,
                 _ => Stencil::None,
             },
         }
+    }
+}
+
+/// The colour blend of a pass. The picture's own alpha is kept as coverage:
+/// one, with one minus source alpha.
+fn blend_state(blend: Blend) -> Option<wgpu::BlendState> {
+    match blend {
+        Blend::Off => None,
+        Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+        Blend::Premultiplied => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
     }
 }
 
@@ -527,7 +543,7 @@ impl Renderer {
                 entry_point: Some(fs),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: COLOR_FORMAT,
-                    blend: key.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: blend_state(key.blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -551,7 +567,7 @@ impl Renderer {
                 },
                 // Layers that do not write depth lie on the surface they
                 // decorate and must win against it.
-                bias: if key.blend && !key.zwrite {
+                bias: if key.blend != Blend::Off && !key.zwrite {
                     wgpu::DepthBiasState {
                         constant: -8,
                         slope_scale: -1.0,
@@ -774,6 +790,8 @@ impl Renderer {
             ]),
             line_color: material::linear([0.5, 0.5, 0.5, 1.0 - env.line_depth]),
             params: [env.line_width, env.light_intensity, env.ambient, 0.0],
+            // A colour, which Unity hands to shaders linearised.
+            ambient_light: material::linear([env.ambient_light[0], env.ambient_light[1], env.ambient_light[2], 1.0]),
             shadow: [0.0; 4],
         };
         let ramp = match &env.ramp {
@@ -1323,6 +1341,29 @@ mod tests {
     }
 
     #[test]
+    fn passes_blend_with_their_factors() {
+        use wgpu::BlendFactor::{One, OneMinusSrcAlpha, SrcAlpha};
+        assert_eq!(blend_state(Blend::Off), None);
+        let factors = |b| {
+            let s = blend_state(b).unwrap();
+            (
+                s.color.src_factor,
+                s.color.dst_factor,
+                s.alpha.src_factor,
+                s.alpha.dst_factor,
+            )
+        };
+        assert_eq!(
+            factors(Blend::Alpha),
+            (SrcAlpha, OneMinusSrcAlpha, One, OneMinusSrcAlpha)
+        );
+        assert_eq!(
+            factors(Blend::Premultiplied),
+            (One, OneMinusSrcAlpha, One, OneMinusSrcAlpha)
+        );
+    }
+
+    #[test]
     fn background_is_cleared_in_linear() {
         assert_eq!(srgb_to_linear(0.0), 0.0);
         assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-12);
@@ -1354,8 +1395,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and five vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 160);
+        // WGSL: mat4x4 and seven vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 176);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);
