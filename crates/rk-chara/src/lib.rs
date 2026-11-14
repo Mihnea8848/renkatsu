@@ -10,6 +10,7 @@ pub mod compose;
 pub mod expression;
 pub mod eyelook;
 pub mod foreground;
+pub mod hair_accessories;
 pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;

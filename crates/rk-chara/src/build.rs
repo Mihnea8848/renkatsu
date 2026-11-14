@@ -263,8 +263,23 @@ impl<'g> Builder<'g> {
     /// Scene renderers a clothing prefab lists under one of its fields
     /// (`rendNormal01`...). The lists live in a script on the prefab root.
     fn listed_renderers(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
+        self.listed_renderers_in(inst, None, field)
+    }
+
+    /// Class name of a script, from its MonoScript.
+    fn script_class(&self, script: &rk_vfs::ObjRef) -> Option<String> {
+        let p = script.read().ok()?.get("m_Script")?.as_pptr()?;
+        let ms = self.game.assets.deref(&script.file, p)?.read().ok()?;
+        ms.get("m_ClassName")?.as_str().map(str::to_string)
+    }
+
+    /// Like `listed_renderers`, limited to scripts of one class when given.
+    fn listed_renderers_in(&mut self, inst: &Instance, class: Option<&str>, field: &str) -> Vec<usize> {
         let mut out = Vec::new();
         for (_, script) in &inst.scripts {
+            if class.is_some_and(|c| self.script_class(script).as_deref() != Some(c)) {
+                continue;
+            }
             let Ok(obj) = script.read() else { continue };
             let entries: Vec<rk_unityfs::PPtr> = match obj.get(field) {
                 Some(rk_unityfs::UValue::Array(a)) => a.iter().filter_map(|v| v.as_pptr()).collect(),
@@ -460,7 +475,13 @@ impl<'g> Builder<'g> {
     }
 
     /// Accessory colours, for the colour slots the accessory says it uses.
-    fn color_accessory(&mut self, inst: &Instance, acc: &rk_card::AccessoryPart, hair_root: [f32; 4]) {
+    fn color_accessory(
+        &mut self,
+        inst: &Instance,
+        acc: &rk_card::AccessoryPart,
+        hair: Option<&rk_card::HairPart>,
+        settings: Option<crate::hair_accessories::HairAccessory>,
+    ) {
         let uses = |b: &Self, field: &str| b.script_field(inst, field).and_then(|v| v.as_bool()).unwrap_or(false);
         let slots = [
             (uses(self, "useColor01"), "_Color"),
@@ -485,11 +506,70 @@ impl<'g> Builder<'g> {
                 }
             }
         }
-        // Hair-like accessories follow the hair's root colour.
-        for r in self.listed_renderers(inst, "rendHair") {
+        // The accessory component's own hair renderers follow the hair's
+        // root colour. The strands of a hair component are not among them.
+        for r in self.listed_renderers_in(inst, Some("ChaAccessoryComponent"), "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for name in ["_Color", "_Color2", "_Color3"] {
-                    m.colors.insert(name.into(), hair_root);
+                    m.colors
+                        .insert(name.into(), hair.map(|h| h.start_color).unwrap_or([1.0; 4]));
+                }
+            }
+        }
+        if let Some(settings) = settings {
+            self.hair_accessory(inst, hair, settings);
+        }
+    }
+
+    /// Hair Accessory Customizer's settings on an accessory with a hair
+    /// component, applied after the game's colours as the plugin does.
+    fn hair_accessory(
+        &mut self,
+        inst: &Instance,
+        hair: Option<&rk_card::HairPart>,
+        settings: crate::hair_accessories::HairAccessory,
+    ) {
+        const HAIR: &str = "ChaCustomHairComponent";
+        if !inst
+            .scripts
+            .iter()
+            .any(|(_, s)| self.script_class(s).as_deref() == Some(HAIR))
+        {
+            return;
+        }
+        let gloss = self.hair_gloss.clone();
+        for r in self.listed_renderers_in(inst, Some(HAIR), "rendHair") {
+            let Some(m) = self.scene.renderers[r].materials.first_mut() else {
+                continue;
+            };
+            if let (true, Some(h)) = (settings.color_match, hair) {
+                m.colors.insert("_Color".into(), h.base_color);
+                m.colors.insert("_Color2".into(), h.start_color);
+                m.colors.insert("_Color3".into(), h.end_color);
+            }
+            match (&gloss, settings.hair_gloss) {
+                (Some(g), true) => {
+                    let mut slot = g.clone();
+                    if let Some(st) = m.tex_st.get("_HairGloss") {
+                        slot.scale = [st[0], st[1]];
+                        slot.offset = [st[2], st[3]];
+                    }
+                    m.textures.insert("_HairGloss".into(), slot);
+                }
+                _ => {
+                    m.textures.remove("_HairGloss");
+                }
+            }
+            let outline = match (settings.color_match, hair) {
+                (true, Some(h)) => h.outline_color,
+                _ => settings.outline_color,
+            };
+            m.colors.insert("_LineColor".into(), outline);
+        }
+        for r in self.listed_renderers_in(inst, Some(HAIR), "rendAccessory") {
+            if let Some(m) = self.scene.renderers[r].materials.first_mut() {
+                for name in ["_Color", "_Color2", "_Color3"] {
+                    m.colors.insert(name.into(), settings.accessory_color);
                 }
             }
         }
@@ -1327,6 +1407,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 
     let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
     let mut accessory_nodes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    let hair_settings = crate::hair_accessories::for_outfit(&card.ext, outfit);
     if let Some(co) = card.coordinates.get(outfit) {
         if opts.clothes {
             // What the top (and its sub-parts) and the bra say about the
@@ -1462,8 +1543,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     }
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
-                let hair_root = card.hair.parts.first().map(|p| p.start_color).unwrap_or([1.0; 4]);
-                b.color_accessory(&inst, acc, hair_root);
+                b.color_accessory(&inst, acc, card.hair.parts.first(), hair_settings.get(&i).copied());
                 for (k, name) in ["N_move", "N_move2"].iter().enumerate() {
                     let Some(node) = b.scene.find(inst.root, name) else {
                         continue;
