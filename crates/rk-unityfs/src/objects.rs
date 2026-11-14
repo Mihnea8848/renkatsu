@@ -85,6 +85,7 @@ pub struct Renderer {
     pub enabled: bool,
     /// 0 off, 1 on, 2 two-sided, 3 shadows only (the mesh itself is not drawn).
     pub cast_shadows: i32,
+    pub receive_shadows: bool,
     pub materials: Vec<PPtr>,
     /// Skinned renderers only.
     pub mesh: PPtr,
@@ -100,6 +101,7 @@ impl Renderer {
             game_object: o.pptr("m_GameObject").ok_or_else(|| missing("m_GameObject"))?,
             enabled: o.bool("m_Enabled").unwrap_or(true),
             cast_shadows: o.i64("m_CastShadows").unwrap_or(1) as i32,
+            receive_shadows: o.bool("m_ReceiveShadows").unwrap_or(true),
             materials: pptrs(o, "m_Materials"),
             mesh: o.pptr("m_Mesh").unwrap_or_default(),
             bones: pptrs(o, "m_Bones"),
@@ -486,6 +488,8 @@ pub struct ShaderPass {
     pub light_mode: String,
     /// Render queue from the `QUEUE` tag of the pass or its subshader.
     pub queue: Option<i32>,
+    /// Faces left out: 0 none, 1 front, 2 back.
+    pub cull: i32,
     pub zwrite: bool,
     pub src_blend: i32,
     pub dst_blend: i32,
@@ -494,6 +498,16 @@ pub struct ShaderPass {
     pub stencil_comp: i32,
     /// Operation when the pixel is drawn: 0 keeps, 2 replaces with the reference.
     pub stencil_pass: i32,
+    /// Not a pass of the shader itself: the shadow caster pass that its
+    /// fallback shader brings.
+    pub from_fallback: bool,
+}
+
+/// Whether a `Fallback` name leads to a shader with a shadow caster pass.
+/// `Diffuse` falls back to `VertexLit`, which has one; `Unlit/Texture` has
+/// none.
+pub fn fallback_casts_shadows(fallback: &str) -> bool {
+    matches!(fallback.rsplit('/').next().unwrap_or(fallback), "Diffuse" | "VertexLit")
 }
 
 /// Render queue number for a `QUEUE` tag such as `Transparent+40`.
@@ -516,7 +530,8 @@ pub fn parse_queue(tag: &str) -> Option<i32> {
     Some(base + offset)
 }
 
-/// Passes of the first subshader of a Shader object.
+/// Passes of the first subshader of a Shader object, and the shadow caster
+/// pass of its fallback when it has none of its own.
 pub fn shader_passes(o: &UObject) -> Vec<ShaderPass> {
     fn tag(tags: Option<&UValue>, key: &str) -> Option<String> {
         tags?
@@ -558,12 +573,31 @@ pub fn shader_passes(o: &UObject) -> Vec<ShaderPass> {
             queue: tag(tags, "QUEUE")
                 .or_else(|| sub_queue.clone())
                 .and_then(|q| parse_queue(&q)),
+            cull: num("culling"),
             zwrite: num("zWrite") != 0,
             src_blend: num("rtBlend0.srcBlend"),
             dst_blend: num("rtBlend0.destBlend"),
             stencil_ref: num("stencilRef"),
             stencil_comp: num("stencilOp.comp"),
             stencil_pass: num("stencilOp.pass"),
+            from_fallback: false,
+        });
+    }
+    // Unity takes a pass the shader lacks from its fallback. The only one
+    // that matters here is the shadow caster of Legacy Shaders/VertexLit:
+    // back faces left out, nothing cut out.
+    let has_caster = out.iter().any(|p| p.light_mode == "SHADOWCASTER");
+    let fallback = o.path("m_ParsedForm.m_FallbackName").and_then(UValue::as_str);
+    if !has_caster && !out.is_empty() && fallback.is_some_and(fallback_casts_shadows) {
+        out.push(ShaderPass {
+            name: "SHADOWCASTER".to_string(),
+            light_mode: "SHADOWCASTER".to_string(),
+            queue: sub_queue.as_deref().and_then(parse_queue),
+            cull: 2,
+            zwrite: true,
+            src_blend: 1,
+            from_fallback: true,
+            ..Default::default()
         });
     }
     out

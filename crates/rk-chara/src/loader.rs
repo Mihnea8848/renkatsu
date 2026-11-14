@@ -4,7 +4,7 @@
 //! Turns Unity prefabs into scene nodes and renderers, with caches for the
 //! meshes and textures they share.
 
-use crate::scene::{DrawState, Image, Instance, MaterialInst, Part, RendererInst, Scene, TexSlot, Trs};
+use crate::scene::{DrawState, Image, Instance, MaterialInst, Part, RendererInst, Scene, ShadowCasting, TexSlot, Trs};
 use anyhow::{anyhow, Context, Result};
 use glam::{Quat, Vec3};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
@@ -301,7 +301,8 @@ impl<'a> Loader<'a> {
                 skinned,
                 bones,
                 enabled: r.enabled,
-                shadows_only: r.cast_shadows == 3,
+                cast_shadows: ShadowCasting::from_unity(r.cast_shadows),
+                receive_shadows: r.receive_shadows,
                 shape_weights: Vec::new(),
             });
         }

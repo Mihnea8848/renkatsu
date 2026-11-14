@@ -450,3 +450,68 @@ fn uncompressed_texture_formats_decode() {
     assert!(texture(4, 2, 2).decode_rgba8(&[0; 15]).is_err());
     assert!(texture(9999, 1, 1).decode_rgba8(&[0; 16]).is_err());
 }
+
+/// A Shader object with one subshader and the given passes (name, light
+/// mode, culling) and fallback.
+fn shader(passes: &[(&str, &str, f64)], fallback: &str) -> UObject {
+    let val = |v: f64| obj(vec![("val", UValue::Float(v))]);
+    let passes = passes
+        .iter()
+        .map(|(name, mode, cull)| {
+            let tag = obj(vec![
+                ("first", UValue::Str("LIGHTMODE".into())),
+                ("second", UValue::Str((*mode).into())),
+            ]);
+            obj(vec![(
+                "m_State",
+                obj(vec![
+                    ("m_Name", UValue::Str((*name).into())),
+                    ("m_Tags", obj(vec![("tags", UValue::Array(vec![tag]))])),
+                    ("culling", val(*cull)),
+                    ("zWrite", val(1.0)),
+                ]),
+            )])
+        })
+        .collect();
+    let sub = obj(vec![("m_Passes", UValue::Array(passes))]);
+    root(vec![(
+        "m_ParsedForm",
+        obj(vec![
+            ("m_SubShaders", UValue::Array(vec![sub])),
+            ("m_FallbackName", UValue::Str(fallback.into())),
+        ]),
+    )])
+}
+
+#[test]
+fn shadow_caster_pass_comes_from_the_shader_or_its_fallback() {
+    use rk_unityfs::objects::{fallback_casts_shadows, shader_passes};
+    // Its own pass, with the culling it states.
+    let own = shader_passes(&shader(
+        &[("FORWARD", "ForwardBase", 0.0), ("SHADOWCASTER", "ShadowCaster", 2.0)],
+        "Unlit/Texture",
+    ));
+    let caster: Vec<_> = own.iter().filter(|p| p.light_mode == "SHADOWCASTER").collect();
+    assert_eq!(caster.len(), 1);
+    assert_eq!((caster[0].cull, caster[0].from_fallback), (2, false));
+    assert_eq!(own[0].cull, 0);
+
+    // None of its own: Diffuse brings VertexLit's.
+    let lent = shader_passes(&shader(&[("FORWARD", "ForwardBase", 2.0)], "Diffuse"));
+    assert_eq!(lent.len(), 2);
+    assert_eq!(
+        (lent[1].light_mode.as_str(), lent[1].cull, lent[1].from_fallback),
+        ("SHADOWCASTER", 2, true)
+    );
+    // Unlit/Texture has none to lend, and an own pass is never doubled.
+    assert_eq!(
+        shader_passes(&shader(&[("FORWARD", "ForwardBase", 2.0)], "Unlit/Texture")).len(),
+        1
+    );
+    assert_eq!(
+        shader_passes(&shader(&[("SHADOWCASTER", "ShadowCaster", 0.0)], "Diffuse")).len(),
+        1
+    );
+    assert!(fallback_casts_shadows("Legacy Shaders/VertexLit"));
+    assert!(!fallback_casts_shadows(""));
+}

@@ -4,7 +4,7 @@
 //! Maps Unity materials to Renkatsu's material kinds and render settings.
 
 use bytemuck::{Pod, Zeroable};
-use rk_chara::{DrawState, Image, MaterialInst, Stencil};
+use rk_chara::{DrawState, Image, MaterialInst, ShadowPass, Stencil};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub const HAS_OVER1: u32 = 32;
 pub const HAS_OVER2: u32 = 64;
 pub const BLENDED: u32 = 128;
 pub const HAS_OVER3: u32 = 256;
+/// The shadow caster pass is the fallback shader's: nothing is cut out.
+pub const CASTER_FALLBACK: u32 = 512;
 
 /// Which of the game's clothes shaders an item follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +101,8 @@ pub struct MaterialDesc {
     pub zwrite: bool,
     pub stencil: Stencil,
     pub stencil_ref: u8,
+    /// The shader's shadow caster pass.
+    pub shadow: ShadowPass,
     pub uniform: MaterialUniform,
     pub textures: [Option<Arc<Image>>; 8],
 }
@@ -133,21 +137,31 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
         outline: true,
         stencil: Stencil::None,
         stencil_ref: 0,
+        shadow: ShadowPass::TwoSided,
     };
+    // toon_nose, toon_eye and toon_glasses have no shadow pass of their own
+    // and take the one of their fallback.
     let layer = DrawState {
         queue: 3000,
         blend: true,
         zwrite: false,
         outline: false,
+        shadow: ShadowPass::Fallback,
         ..solid
     };
     match kind {
         // toon_nose
         Kind::Overlay if name.contains("nose") => layer,
-        // toon_eye and toon_eyew mark their pixels with 2.
+        // toon_eye and toon_eyew mark their pixels with 2. The shadow pass
+        // of toon_eyew leaves back faces out.
         Kind::Eye | Kind::Overlay => DrawState {
             stencil: Stencil::Write,
             stencil_ref: 2,
+            shadow: if kind == Kind::Eye {
+                ShadowPass::Fallback
+            } else {
+                ShadowPass::CullBack
+            },
             ..layer
         },
         // main_hair_front leaves pixels marked 2 alone.
@@ -165,6 +179,7 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
             queue: 4010,
             blend: true,
             outline: false,
+            shadow: ShadowPass::Fallback,
             ..solid
         },
         // main_alpha
@@ -216,6 +231,9 @@ impl MaterialDesc {
         let float = |name: &str, default: f32| mat.floats.get(name).copied().unwrap_or(default);
 
         let mut flags = if blended { BLENDED } else { 0 };
+        if state.shadow == ShadowPass::Fallback {
+            flags |= CASTER_FALLBACK;
+        }
         let mut textures: [Option<Arc<Image>>; 8] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
@@ -388,6 +406,7 @@ impl MaterialDesc {
             zwrite: state.zwrite,
             stencil: state.stencil,
             stencil_ref: state.stencil_ref,
+            shadow: state.shadow,
             uniform,
             textures,
         }
@@ -460,12 +479,24 @@ mod tests {
             outline: false,
             stencil: Stencil::Write,
             stencil_ref: 7,
+            shadow: ShadowPass::CullBack,
         });
         let d = MaterialDesc::new(Some(&read));
         assert_eq!(
             (d.queue, d.blended, d.zwrite, d.outline, d.stencil, d.stencil_ref),
             (3100, true, false, false, Stencil::Write, 7)
         );
+        assert_eq!(
+            (d.shadow, d.uniform.info[1] & CASTER_FALLBACK),
+            (ShadowPass::CullBack, 0)
+        );
+        // Guessed from the name: the game shader's own pass, or its fallback's.
+        assert_eq!(skin.shadow, ShadowPass::TwoSided);
+        assert_eq!(iris.shadow, ShadowPass::Fallback);
+        assert_eq!(iris.uniform.info[1] & CASTER_FALLBACK, CASTER_FALLBACK);
+        assert_eq!(nose.shadow, ShadowPass::Fallback);
+        let brow = MaterialDesc::new(Some(&mat("Shader Forge/toon_eyew_lod0", -1)));
+        assert_eq!(brow.shadow, ShadowPass::CullBack);
         let none = MaterialDesc::new(None);
         assert_eq!((none.kind, none.uniform.info[1]), (Kind::Item, 0));
     }

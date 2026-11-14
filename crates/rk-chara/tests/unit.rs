@@ -7,7 +7,9 @@
 use glam::{Quat, Vec3};
 use rk_card::{ExtData, PluginData, Value};
 use rk_chara::loader::assign_weights;
-use rk_chara::scene::{euler_deg, DrawState, Instance, Part, RendererInst, Scene, Stencil, Trs};
+use rk_chara::scene::{
+    euler_deg, DrawState, Instance, Part, RendererInst, Scene, ShadowCasting, ShadowPass, Stencil, Trs,
+};
 use rk_chara::shape::{Rules, ShapeSet, BODY_RULES, HEAD_RULES};
 use rk_unityfs::objects::{parse_queue, BlendShape, BlendShapeVertex, BoneWeight, Mesh, ShaderPass};
 use std::collections::HashMap;
@@ -186,7 +188,8 @@ fn skinned_scene() -> (Scene, usize, usize) {
         skinned: true,
         bones: vec![Some(bone), Some(root)],
         enabled: true,
-        shadows_only: false,
+        cast_shadows: ShadowCasting::On,
+        receive_shadows: true,
         shape_weights: Vec::new(),
     });
     (scene, bone, node)
@@ -210,12 +213,12 @@ fn skinning_blends_bone_transforms() {
     assert!(near(Vec3::from(draws[0].positions[1]), Vec3::new(1.0, 0.0, 2.0)));
     drop(draws);
 
-    // Hidden and shadow-only renderers are not drawn.
+    // Hidden renderers are not posed. Shadow-only ones are: they cast.
     scene.nodes[node].active = false;
     assert!(scene.pose().is_empty());
     scene.nodes[node].active = true;
-    scene.renderers[0].shadows_only = true;
-    assert!(scene.pose().is_empty());
+    scene.renderers[0].cast_shadows = ShadowCasting::ShadowsOnly;
+    assert_eq!(scene.pose().len(), 1);
 }
 
 #[test]
@@ -283,7 +286,8 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         skinned: true,
         bones: vec![Some(own_hips), Some(extra), None],
         enabled: true,
-        shadows_only: false,
+        cast_shadows: ShadowCasting::On,
+        receive_shadows: true,
         shape_weights: Vec::new(),
     });
     let inst = Instance {
@@ -473,14 +477,32 @@ fn material_editor_overrides_find_their_materials() {
     );
     plugin.data.insert(
         "RendererPropertyList".into(),
-        pack(&Value::Array(vec![entry(vec![
-            ("ObjectType", 1.into()),
-            ("CoordinateIndex", 0.into()),
-            ("Slot", 2.into()),
-            ("RendererName", "cloth_mesh".into()),
-            ("Property", 0.into()),
-            ("Value", "0".into()),
-        ])])),
+        pack(&Value::Array(vec![
+            entry(vec![
+                ("ObjectType", 1.into()),
+                ("CoordinateIndex", 0.into()),
+                ("Slot", 2.into()),
+                ("RendererName", "cloth_mesh".into()),
+                ("Property", 0.into()),
+                ("Value", "0".into()),
+            ]),
+            entry(vec![
+                ("ObjectType", 3.into()),
+                ("CoordinateIndex", 0.into()),
+                ("Slot", 1.into()),
+                ("RendererName", "hair_mesh".into()),
+                ("Property", 1.into()),
+                ("Value", "0".into()),
+            ]),
+            entry(vec![
+                ("ObjectType", 3.into()),
+                ("CoordinateIndex", 0.into()),
+                ("Slot", 1.into()),
+                ("RendererName", "hair_mesh".into()),
+                ("Property", 2.into()),
+                ("Value", "0".into()),
+            ]),
+        ])),
     );
     let mut ext = ExtData::new();
     ext.insert(KEY.into(), plugin);
@@ -504,7 +526,8 @@ fn material_editor_overrides_find_their_materials() {
             skinned: false,
             bones: Vec::new(),
             enabled: true,
-            shadows_only: false,
+            cast_shadows: ShadowCasting::On,
+            receive_shadows: true,
             shape_weights: Vec::new(),
         });
     }
@@ -521,6 +544,7 @@ fn material_editor_overrides_find_their_materials() {
                 outline: true,
                 stencil: rk_chara::scene::Stencil::None,
                 stencil_ref: 0,
+                shadow: rk_chara::scene::ShadowPass::TwoSided,
             },
             queue: None,
         })
@@ -534,7 +558,7 @@ fn material_editor_overrides_find_their_materials() {
             applied.shaders,
             applied.renderers
         ),
-        (1, 1, 1, 1, 1)
+        (1, 1, 1, 1, 3)
     );
     let cloth = &scene.renderers[0].materials[0];
     assert_eq!(cloth.floats["_Cutoff"], 0.25);
@@ -544,6 +568,10 @@ fn material_editor_overrides_find_their_materials() {
         (&[255u8, 0, 0, 255][..], [2.0, 3.0])
     );
     assert!(!scene.renderers[0].enabled);
+    // The shadow settings of the hair changed; the others kept theirs.
+    let shadows = |i: usize| (scene.renderers[i].cast_shadows, scene.renderers[i].receive_shadows);
+    assert_eq!(shadows(1), (ShadowCasting::Off, false));
+    assert_eq!(shadows(0), (ShadowCasting::On, true));
     let hair = &scene.renderers[1].materials[0];
     assert_eq!(
         (hair.shader.as_str(), hair.render_queue),
@@ -619,6 +647,7 @@ fn draw_state_comes_from_the_forward_pass() {
             outline: true,
             stencil: Stencil::SkipEqual,
             stencil_ref: 2,
+            shadow: ShadowPass::TwoSided,
         })
     );
 
@@ -633,6 +662,27 @@ fn draw_state_comes_from_the_forward_pass() {
     assert_eq!(
         (state.queue, state.zwrite, state.outline, state.stencil),
         (2000, false, false, Stencil::Write)
+    );
+    // No shadow pass: the shader does not cast. One that leaves back faces
+    // out is told apart.
+    assert_eq!(state.shadow, ShadowPass::None);
+    let mut caster = pass("SHADOWCASTER", "SHADOWCASTER");
+    caster.cull = 2;
+    let state = DrawState::from_passes(&[pass("FORWARD", "FORWARDBASE"), caster]).unwrap();
+    assert_eq!(state.shadow, ShadowPass::CullBack);
+    let mut inherited = pass("SHADOWCASTER", "SHADOWCASTER");
+    inherited.from_fallback = true;
+    let state = DrawState::from_passes(&[pass("FORWARD", "FORWARDBASE"), inherited]).unwrap();
+    assert_eq!(state.shadow, ShadowPass::Fallback);
+    // Unity's ShadowCastingMode numbers.
+    assert_eq!(
+        [0, 1, 2, 3].map(ShadowCasting::from_unity),
+        [
+            ShadowCasting::Off,
+            ShadowCasting::On,
+            ShadowCasting::TwoSided,
+            ShadowCasting::ShadowsOnly
+        ]
     );
 
     // Without a tagged forward pass the first pass that draws a surface is used.

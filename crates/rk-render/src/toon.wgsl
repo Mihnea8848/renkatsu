@@ -19,10 +19,17 @@ struct Globals {
     // x: line width, y: light intensity, z: ambient light,
     // w: 1 when the ramp texture holds sRGB values
     params: vec4<f32>,
+    // x: what the shadow caster adds to clip depth, y: 1 when casters in
+    // front of the near plane are flattened onto it, z: 1 when surfaces read
+    // the shadow mask, w: how far the fallback's caster moves inwards
+    shadow: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
 @group(0) @binding(2) var ramp_samp: sampler;
+// The light's shadows over the picture (Unity's screen-space
+// _ShadowMapTexture): 1 lit, down to one minus the shadow strength.
+@group(0) @binding(3) var shadow_mask_tex: texture_2d<f32>;
 
 const KIND_ITEM: u32 = 1u;
 const KIND_SKIN: u32 = 2u;
@@ -39,6 +46,8 @@ const HAS_OVER1: u32 = 32u;
 const HAS_OVER2: u32 = 64u;
 const BLENDED: u32 = 128u;
 const HAS_OVER3: u32 = 256u;
+// The shadow caster pass is the fallback shader's (Legacy Shaders/VertexLit).
+const CASTER_FALLBACK: u32 = 512u;
 // Clothes materials bind their normal map and second ramp in the first two
 // layer slots.
 const HAS_NORMAL: u32 = 32u;
@@ -71,7 +80,8 @@ struct Material {
     p3: vec4<f32>,
     // the material's own outline colour (hair)
     line: vec4<f32>,
-    // x: kind, y: flags, z: item shader
+    // x: kind, y: flags, z: item shader, w: 1 when the renderer receives
+    // shadows
     info: vec4<u32>,
 };
 @group(1) @binding(0) var<uniform> m: Material;
@@ -111,6 +121,16 @@ struct VsOut {
 
 fn has(flag: u32) -> bool {
     return (m.info.y & flag) != 0u;
+}
+
+// The shadow mask at this pixel, as the shaders' shadow variants sample it
+// with their screen position. Without shadows the game runs the variants
+// that do not have the term.
+fn shadow_mask(i: VsOut) -> f32 {
+    if (g.shadow.z == 0.0 || m.info.w == 0u) {
+        return 1.0;
+    }
+    return textureLoad(shadow_mask_tex, vec2<i32>(i.clip.xy), 0).r;
 }
 
 // Across the surface, at right angles to the tangent (Unity's convention).
@@ -329,7 +349,7 @@ fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, light: f32, ramp: f32, de
     let dark = base * edge * shadow;
     var diffuse = base * edge - dark;
 
-    var lit = clamp(ramp, 0.0, 1.0);
+    var lit = clamp(ramp, 0.0, 1.0) * shadow_mask(i);
     let open = 1.0 - detail.gb;
     diffuse = lit * open.x * diffuse + dark;
     lit = max(lit, open.x);
@@ -343,8 +363,8 @@ fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, light: f32, ramp: f32, de
 }
 
 // Skin, after the game's main_skin pixel shader. Left out: the two normal
-// maps, the liquid layers, the shadow map and the face normal and face
-// shadow switches, which the game leaves at zero.
+// maps, the liquid layers and the face normal and face shadow switches,
+// which the game leaves at zero.
 // m.color2: specular colour. m.color3: specular height, specular power,
 // nail (or lip) specular power, detail strength. m.line: line switch, plain
 // specular switch, nipple shine, layer mask switch.
@@ -360,7 +380,13 @@ fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4
     let strength = m.color3.w;
     let extend = m.p0.y * -1.20000005 + 1.0;
     let drawn = min(1.0 - lm.b * strength, 1.0 - dm.g) * (1.0 - extend) + extend;
-    let lit = lit_ramp * drawn;
+    // The shadow variant takes max(face shadow, mask * 2 - 1); the face
+    // shadow switch is zero.
+    var shadowed = 1.0;
+    if (g.shadow.z != 0.0 && m.info.w != 0u) {
+        shadowed = clamp(shadow_mask(i) * 2.0 - 1.0, 0.0, 1.0);
+    }
+    let lit = lit_ramp * shadowed * drawn;
 
     // Shine from the detail mask's red channel, shifted with the view.
     let hsv = rgb_to_hsv(diffuse);
@@ -486,6 +512,7 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
     let extend = m.p0.y * -1.20000005 + 1.0;
     var drawn_shadow = min(1.0 - line.b, 1.0 - detail.g);
     drawn_shadow = drawn_shadow * (1.0 - extend) + extend;
+    ramp *= shadow_mask(i);
     ramp *= drawn_shadow;
 
     let factor = shadow_factor(s.diffuse);
@@ -535,10 +562,14 @@ fn item_main(i: VsOut) -> vec4<f32> {
 
 // Body-side cut-outs: each channel of the mask can be switched off.
 fn item_mask(i: VsOut) -> f32 {
+    return body_mask(i.uv0);
+}
+
+fn body_mask(uv0: vec2<f32>) -> f32 {
     if (!has(HAS_ALPHA_MASK)) {
         return 1.0;
     }
-    let am = textureSample(alpha_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw);
+    let am = textureSample(alpha_mask_tex, samp, uv0 * m.st_alpha.xy + m.st_alpha.zw);
     return min(max(1.0 - m.p2.x, am.r), max(1.0 - m.p2.y, am.g));
 }
 
@@ -611,7 +642,7 @@ fn item_highlight(ndh: f32, power: f32) -> f32 {
 }
 
 // See-through cloth, after the game's main_alpha pixel shader (forward base
-// pass without the shadow map; liquid layers left out).
+// pass; liquid layers left out).
 fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
     let alpha = min(item_mask(i), main.a);
@@ -635,7 +666,7 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let specular = min(shine * shine, 1.0) * m.over1.rgb
         + clamp(item_highlight(ndh, m.over2.y), 0.0, 1.0);
 
-    let ramp = clamp(min(item_another_ramp(ndv), item_ramp(ndl)), 0.0, 1.0);
+    let ramp = clamp(min(item_another_ramp(ndv), item_ramp(ndl)), 0.0, 1.0) * shadow_mask(i);
     let open = 1.0 - dm.g;
     let lit = ramp * open;
     let diffuse = clamp(specular * (1.0 - (1.0 - lit) * 0.5) + main.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -660,8 +691,8 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     return vec4<f32>(out, alpha);
 }
 
-// Solid cloth, after the game's main_opaque pixel shader (forward base pass
-// without the shadow map; liquid layers left out).
+// Solid cloth, after the game's main_opaque pixel shader (forward base pass;
+// liquid layers left out).
 fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
     if (min(item_mask(i), main.a) < 0.5) {
@@ -689,7 +720,7 @@ fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     // mask says so, and the shadows painted into the masks.
     let line_r = mix(lm.r, dm.r, m.p0.w);
     let scene_ramp = item_ramp(ndl);
-    let ramp = mix(scene_ramp, item_another_ramp(abs(ndh)), line_r);
+    let ramp = mix(scene_ramp, item_another_ramp(abs(ndh)), line_r) * shadow_mask(i);
     let extend = m.p0.y * -1.20000005 + 1.0;
     let drawn = min(1.0 - lm.b, 1.0 - dm.g) * (1.0 - extend) + extend;
     let lit = ramp * drawn;
@@ -725,7 +756,7 @@ fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
 }
 
 // Studio item, after MaterialEditor's main_item_studio_alpha pixel shader
-// (forward base pass without the shadow map). Left out: the three pattern
+// (forward base pass). Left out: the three pattern
 // masks, read as the white the shader defaults to, and the scale and offset
 // of every texture but the main one.
 // m.over1: second ramp everywhere, emission power, scene shadow off, alpha.
@@ -771,7 +802,7 @@ fn item_studio_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let shade = factor * (clamp(2.0 - m.p0.z - another, 0.0, 1.0) * 0.670000017 + 0.330000013);
 
     // Light amount, with the shadows painted into the masks.
-    let ramp = mix(item_ramp(ndl), item_another_ramp(ndh), another);
+    let ramp = mix(item_ramp(ndl), item_another_ramp(ndh), another) * shadow_mask(i);
     let extend = m.p0.y * -1.20000005 + 1.0;
     let drawn = min(1.0 - dm.g, 1.0 - lm.b) * (1.0 - extend) + extend;
     var rgb = mix(base * shade, base, ramp * drawn);
@@ -827,4 +858,79 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
     return outline_color(i);
+}
+
+// Shadow caster pass. The game draws it into the light's shadow map and,
+// seen from the camera, into the depth texture the shadow mask is built
+// from.
+struct CasterOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv0: vec2<f32>,
+};
+
+// After the shaders' SHADOWCASTER vertex programs (UnityApplyLinearShadowBias;
+// they apply no normal bias). Depth here grows away from the light, where
+// the game's shrinks.
+@vertex
+fn vs_caster(v: VsIn) -> CasterOut {
+    var o: CasterOut;
+    var pos = v.pos;
+    if (has(CASTER_FALLBACK)) {
+        // VertexLit's pass also shrinks the mesh along its normals
+        // (UnityClipSpaceShadowCasterPos), most where the light grazes.
+        let n = normalize(v.normal);
+        let c = dot(n, normalize(g.light_dir.xyz));
+        pos -= n * (g.shadow.w * sqrt(max(1.0 - c * c, 0.0)));
+    }
+    var clip = g.view_proj * vec4<f32>(pos, 1.0);
+    clip.z += clamp(g.shadow.x / clip.w, 0.0, 1.0);
+    clip.z = mix(clip.z, max(clip.z, 0.0), g.shadow.y);
+    o.clip = clip;
+    o.uv0 = v.uv0;
+    return o;
+}
+
+// What each shader's SHADOWCASTER pixel program keeps: at least one half.
+@fragment
+fn fs_caster(i: CasterOut, @builtin(front_facing) front: bool) {
+    let kind = m.info.x;
+    let item = m.info.z;
+    var main_a = 1.0;
+    if (has(HAS_MAIN)) {
+        main_a = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw).a;
+    }
+    var keep = 1.0;
+    if (has(CASTER_FALLBACK)) {
+        // Legacy Shaders/VertexLit cuts nothing out.
+        keep = 1.0;
+    } else if (kind == KIND_SKIN) {
+        // main_skin: the body masks only.
+        keep = body_mask(i.uv0);
+    } else if (kind == KIND_HAIR) {
+        // main_hair, main_hair_front: alpha mask times texture alpha.
+        var mask = 1.0;
+        if (has(HAS_ALPHA_MASK)) {
+            mask = textureSample(alpha_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw).r;
+        }
+        keep = mask * main_a;
+    } else if (kind == KIND_ITEM && item == ITEM_ALPHA) {
+        // main_alpha: as its forward pass, without the inside when the
+        // outline switch is on.
+        let side = select(1.0 - m.over3.z, 1.0, front);
+        keep = min(side, min(body_mask(i.uv0), main_a) * 10.0);
+    } else if (kind == KIND_ITEM && item == ITEM_OPAQUE) {
+        keep = min(body_mask(i.uv0), main_a);
+    } else if (kind == KIND_ITEM && item == ITEM_STUDIO_ALPHA) {
+        // main_item_studio_alpha: anything not fully clear.
+        keep = select(1.0, 0.0, main_a * m.over1.w * 0.500999987 - 0.000999987125 < 0.0);
+    } else if (kind == KIND_ITEM) {
+        // main_item: twice the texture alpha.
+        keep = clamp(main_a + main_a, 0.0, 1.0);
+    } else {
+        // toon_eyew.
+        keep = main_a;
+    }
+    if (keep - 0.5 < 0.0) {
+        discard;
+    }
 }

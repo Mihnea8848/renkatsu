@@ -5,6 +5,7 @@ use anyhow::Result;
 use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_core::Config;
+use rk_render::shadow::ShadowSettings;
 use rk_render::{bounds, save_png, Camera, Environment, Renderer};
 use rk_vfs::Game;
 use std::path::Path;
@@ -22,6 +23,8 @@ pub struct Args<'a> {
     pub outdoor_shoes: bool,
     pub no_physics: bool,
     pub list: bool,
+    /// Draw the light's real-time shadows.
+    pub shadows: bool,
 }
 
 pub fn render(a: Args) -> Result<()> {
@@ -42,7 +45,14 @@ pub fn render(a: Args) -> Result<()> {
     if a.list {
         for d in &draws {
             let r = d.renderer;
-            println!("{:?} {} ({} verts)", r.part, r.name, d.positions.len());
+            println!(
+                "{:?} {} ({} verts, casts {:?}, receives {})",
+                r.part,
+                r.name,
+                d.positions.len(),
+                r.cast_shadows,
+                r.receive_shadows
+            );
             for m in &r.materials {
                 let mut tex: Vec<_> = m
                     .textures
@@ -59,6 +69,10 @@ pub fn render(a: Args) -> Result<()> {
     let mut renderer = Renderer::new()?;
     let env = Environment {
         ramp: chara.ramp.clone(),
+        shadows: ShadowSettings {
+            enabled: a.shadows,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, [0.93, 0.93, 0.95, 1.0])?;

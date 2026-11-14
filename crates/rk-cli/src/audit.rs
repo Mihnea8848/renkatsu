@@ -85,56 +85,54 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
         blank: Vec<String>,
         unbound: usize,
     }
-    let summarise = |path: &PathBuf| -> std::result::Result<Summary, String> {
-        let card = Card::load(path).map_err(|e| format!("card: {e}"))?;
-        let t = Instant::now();
-        let chara = rk_chara::build(&game, &card, &BuildOptions::default()).map_err(|e| format!("build: {e:#}"))?;
-        let mut s = Summary {
-            seconds: t.elapsed().as_secs_f32(),
-            warnings: chara.warnings.iter().map(|w| category(w)).collect(),
-            plugins: card
-                .ext
-                .keys()
-                .filter(|k| !HANDLED.contains(&k.as_str()))
-                .cloned()
-                .collect(),
-            shaders: Vec::new(),
-            blank: Vec::new(),
-            unbound: 0,
-        };
-        let (_, active) = chara.scene.world();
-        for rend in chara
-            .scene
-            .renderers
-            .iter()
-            .filter(|x| x.enabled && !x.shadows_only && active[x.node])
-        {
-            if rend.skinned && !rend.bones.is_empty() && rend.bones.iter().all(Option::is_none) {
-                s.unbound += 1;
-            }
-            for m in &rend.materials {
-                let kind = classify(&m.shader);
-                s.shaders.push(format!(
-                    "{:?} <- {}",
-                    kind,
-                    if m.shader.is_empty() { "(none)" } else { &m.shader }
-                ));
-                let textured = m.textures.contains_key("_MainTex") || m.textures.contains_key("_ColorMask");
-                let colored = m.colors.get("_Color").is_some_and(|c| c[..3] != [1.0, 1.0, 1.0]);
-                if matches!(kind, Kind::Item | Kind::Skin) && !textured && !colored {
-                    let part = match rend.part {
-                        Part::Body => "body",
-                        Part::Head => "head",
-                        Part::Hair(_) => "hair",
-                        Part::Clothes(_) => "clothes",
-                        Part::Accessory(_) => "accessory",
-                    };
-                    s.blank.push(format!("{part} [{}]", m.shader));
+    let summarise =
+        |path: &PathBuf| -> std::result::Result<Summary, String> {
+            let card = Card::load(path).map_err(|e| format!("card: {e}"))?;
+            let t = Instant::now();
+            let chara = rk_chara::build(&game, &card, &BuildOptions::default()).map_err(|e| format!("build: {e:#}"))?;
+            let mut s = Summary {
+                seconds: t.elapsed().as_secs_f32(),
+                warnings: chara.warnings.iter().map(|w| category(w)).collect(),
+                plugins: card
+                    .ext
+                    .keys()
+                    .filter(|k| !HANDLED.contains(&k.as_str()))
+                    .cloned()
+                    .collect(),
+                shaders: Vec::new(),
+                blank: Vec::new(),
+                unbound: 0,
+            };
+            let (_, active) = chara.scene.world();
+            for rend in chara.scene.renderers.iter().filter(|x| {
+                x.enabled && x.cast_shadows != rk_chara::scene::ShadowCasting::ShadowsOnly && active[x.node]
+            }) {
+                if rend.skinned && !rend.bones.is_empty() && rend.bones.iter().all(Option::is_none) {
+                    s.unbound += 1;
+                }
+                for m in &rend.materials {
+                    let kind = classify(&m.shader);
+                    s.shaders.push(format!(
+                        "{:?} <- {}",
+                        kind,
+                        if m.shader.is_empty() { "(none)" } else { &m.shader }
+                    ));
+                    let textured = m.textures.contains_key("_MainTex") || m.textures.contains_key("_ColorMask");
+                    let colored = m.colors.get("_Color").is_some_and(|c| c[..3] != [1.0, 1.0, 1.0]);
+                    if matches!(kind, Kind::Item | Kind::Skin) && !textured && !colored {
+                        let part = match rend.part {
+                            Part::Body => "body",
+                            Part::Head => "head",
+                            Part::Hair(_) => "hair",
+                            Part::Clothes(_) => "clothes",
+                            Part::Accessory(_) => "accessory",
+                        };
+                        s.blank.push(format!("{part} [{}]", m.shader));
+                    }
                 }
             }
-        }
-        Ok(s)
-    };
+            Ok(s)
+        };
 
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
     let mut r = Report::default();

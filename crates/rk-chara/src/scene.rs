@@ -93,6 +93,48 @@ pub enum Stencil {
     SkipEqual,
 }
 
+/// The shadow caster pass of a shader. The game also draws the camera's
+/// depth texture with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadowPass {
+    /// The shader has no such pass: it neither casts nor shows in the
+    /// depth texture.
+    #[default]
+    None,
+    /// Both faces cast.
+    TwoSided,
+    /// Front faces cast.
+    CullBack,
+    /// The pass comes from the shader's fallback (Legacy Shaders/VertexLit):
+    /// front faces cast, nothing is cut out, and the vertices move inwards
+    /// by the light's normal bias.
+    Fallback,
+}
+
+/// Unity's `ShadowCastingMode` of a renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadowCasting {
+    Off,
+    #[default]
+    On,
+    /// Casts with both faces whatever the shader's pass says.
+    TwoSided,
+    /// Casts, and is not drawn itself.
+    ShadowsOnly,
+}
+
+impl ShadowCasting {
+    /// From the number Unity stores in `m_CastShadows`.
+    pub fn from_unity(mode: i32) -> Self {
+        match mode {
+            0 => Self::Off,
+            2 => Self::TwoSided,
+            3 => Self::ShadowsOnly,
+            _ => Self::On,
+        }
+    }
+}
+
 /// When and how a material is drawn, taken from its shader's forward pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawState {
@@ -105,6 +147,7 @@ pub struct DrawState {
     pub outline: bool,
     pub stencil: Stencil,
     pub stencil_ref: u8,
+    pub shadow: ShadowPass,
 }
 
 impl DrawState {
@@ -131,6 +174,12 @@ impl DrawState {
                 _ => Stencil::None,
             },
             stencil_ref: main.stencil_ref.clamp(0, 255) as u8,
+            shadow: match passes.iter().find(|p| p.light_mode == "SHADOWCASTER") {
+                None => ShadowPass::None,
+                Some(p) if p.from_fallback => ShadowPass::Fallback,
+                Some(p) if p.cull == 2 => ShadowPass::CullBack,
+                Some(_) => ShadowPass::TwoSided,
+            },
         })
     }
 }
@@ -163,7 +212,8 @@ pub struct RendererInst {
     /// Scene node per mesh bone; `None` when the bone could not be found.
     pub bones: Vec<Option<usize>>,
     pub enabled: bool,
-    pub shadows_only: bool,
+    pub cast_shadows: ShadowCasting,
+    pub receive_shadows: bool,
     /// Weight per blend shape of the mesh, 0 to 1. May be shorter than the
     /// shape list; missing entries count as 0.
     pub shape_weights: Vec<f32>,
@@ -278,12 +328,13 @@ pub struct DrawMesh<'a> {
 }
 
 impl Scene {
-    /// Applies skinning (or the node transform) to every visible renderer.
+    /// Applies skinning (or the node transform) to every visible renderer,
+    /// and to the ones that only cast shadows.
     pub fn pose(&self) -> Vec<DrawMesh<'_>> {
         let (world, active) = self.world();
         let mut out = Vec::new();
         for r in &self.renderers {
-            if !r.enabled || r.shadows_only || !active[r.node] || r.mesh.positions.is_empty() {
+            if !r.enabled || !active[r.node] || r.mesh.positions.is_empty() {
                 continue;
             }
             let m = &r.mesh;
