@@ -20,6 +20,8 @@ pub struct HairAccessory {
     pub outline_color: [f32; 4],
     /// Colour of the renderers in the hair component's `rendAccessory`.
     pub accessory_color: [f32; 4],
+    /// Length rate given to the hair component.
+    pub hair_length: f32,
 }
 
 /// The plugin's defaults for keys missing from an entry.
@@ -30,6 +32,7 @@ impl Default for HairAccessory {
             hair_gloss: true,
             outline_color: [0.0, 0.0, 0.0, 1.0],
             accessory_color: [1.0, 0.0, 0.0, 1.0],
+            hair_length: 0.0,
         }
     }
 }
@@ -59,6 +62,9 @@ fn entry(v: &Value) -> HairAccessory {
         accessory_color: map_get(v, "AccessoryColor")
             .and_then(color)
             .unwrap_or(d.accessory_color),
+        hair_length: map_get(v, "HairLength")
+            .and_then(Value::as_f64)
+            .map_or(d.hair_length, |f| f as f32),
     }
 }
 
@@ -99,6 +105,7 @@ mod tests {
             ("ColorMatch".into(), false.into()),
             ("HairGloss".into(), false.into()),
             ("OutlineColor".into(), silver.clone()),
+            ("HairLength".into(), 0.25.into()),
         ]);
         let table = map(vec![(
             Value::from(0),
@@ -109,6 +116,7 @@ mod tests {
         let a = got[&3];
         assert!(!a.color_match && !a.hair_gloss);
         assert!((a.outline_color[2] - 0.9).abs() < 1e-6);
+        assert_eq!(a.hair_length, 0.25);
         // Missing keys take the plugin's defaults.
         assert_eq!(a.accessory_color, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(got[&5], HairAccessory::default());

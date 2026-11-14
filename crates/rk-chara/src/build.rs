@@ -674,6 +674,47 @@ impl<'g> Builder<'g> {
         }
     }
 
+    /// Hair length, as `ChaCustomHairComponent.Update` sets it every frame:
+    /// each bone in `trfLength` sits at its stored base height plus
+    /// `addLength` times the length rate. `rate` is the card's or plugin's
+    /// value; without one the prefab's own rate stays.
+    fn hair_length(&mut self, inst: &Instance, rate: Option<f32>) {
+        let Some(script) = inst
+            .scripts
+            .iter()
+            .map(|(_, s)| s)
+            .find(|s| self.script_class(s).as_deref() == Some("ChaCustomHairComponent"))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(obj) = script.read() else { return };
+        let float = |v: Option<&rk_unityfs::UValue>| v.and_then(|v| v.as_f32());
+        let add = float(obj.get("addLength")).unwrap_or(0.0);
+        let rate = rate.or_else(|| float(obj.get("lengthRate"))).unwrap_or(0.0);
+        let (Some(rk_unityfs::UValue::Array(bones)), Some(rk_unityfs::UValue::Array(base))) =
+            (obj.get("trfLength"), obj.get("baseLength"))
+        else {
+            return;
+        };
+        // Mathf.Lerp clamps its rate.
+        let extra = add * rate.clamp(0.0, 1.0);
+        for (bone, base) in bones.iter().zip(base) {
+            let (Some(p), Some(base)) = (bone.as_pptr(), base.as_f32()) else {
+                continue;
+            };
+            let Some(node) = self
+                .game
+                .assets
+                .deref(&script.file, p)
+                .and_then(|o| inst.transform_nodes.get(&o.key()).copied())
+            else {
+                continue;
+            };
+            self.scene.nodes[node].local.pos.y = base + extra;
+        }
+    }
+
     /// Hair Accessory Customizer's settings on an accessory with a hair
     /// component, applied after the game's colours as the plugin does.
     fn hair_accessory(
@@ -1560,6 +1601,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         }
                     }
                     b.color_hair(&inst, hp);
+                    b.hair_length(&inst, Some(hp.length));
                     b.physics_source(&inst, true, false, !hp.no_shake);
                 }
             }
@@ -1764,6 +1806,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     source.slot = Some(i);
                 }
                 b.color_accessory(&inst, acc, card.hair.parts.first(), hair_settings.get(&i).copied());
+                b.hair_length(&inst, hair_settings.get(&i).map(|h| h.hair_length));
                 for (k, name) in ["N_move", "N_move2"].iter().enumerate() {
                     let Some(node) = b.scene.find(inst.root, name) else {
                         continue;
