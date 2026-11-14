@@ -292,6 +292,7 @@ fn weights_rebind_by_name_and_extra_bones_are_grafted() {
         renderers: vec![0],
         renderer_keys: HashMap::new(),
         object_nodes: HashMap::new(),
+        transform_nodes: HashMap::new(),
         scripts: Vec::new(),
     };
 

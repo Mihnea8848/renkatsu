@@ -20,6 +20,7 @@ pub struct Args<'a> {
     pub no_clothes: bool,
     pub no_accessories: bool,
     pub outdoor_shoes: bool,
+    pub no_physics: bool,
     pub list: bool,
 }
 
@@ -32,6 +33,8 @@ pub fn render(a: Args) -> Result<()> {
         clothes: !a.no_clothes,
         accessories: !a.no_accessories,
         outdoor_shoes: a.outdoor_shoes,
+        physics: !a.no_physics,
+        ..Default::default()
     };
     let chara = rk_chara::build(&game, &card, &opts)?;
     let t_build = t.elapsed();

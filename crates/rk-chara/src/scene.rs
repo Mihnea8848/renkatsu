@@ -179,6 +179,8 @@ pub struct Instance {
     pub renderer_keys: HashMap<(usize, i64), usize>,
     /// Scene node for each game object of the prefab.
     pub object_nodes: HashMap<(usize, i64), usize>,
+    /// Scene node for each transform of the prefab.
+    pub transform_nodes: HashMap<(usize, i64), usize>,
     /// Scripts attached to the prefab's objects, by node.
     pub scripts: Vec<(usize, ObjRef)>,
 }

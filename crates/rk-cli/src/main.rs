@@ -58,6 +58,9 @@ enum Cmd {
         /// Wear the outdoor shoes; the game starts with the indoor ones.
         #[arg(long)]
         outdoor_shoes: bool,
+        /// Keep hair, skirts and the bust in their rest pose.
+        #[arg(long)]
+        no_physics: bool,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -83,6 +86,15 @@ enum Cmd {
         capture: PathBuf,
         #[arg(short, long, default_value = "reference.png")]
         out: PathBuf,
+        /// Keep hair, skirts and the bust in their rest pose.
+        #[arg(long)]
+        no_physics: bool,
+        /// Frames of physics to run; the capture waits 90.
+        #[arg(long)]
+        settle_frames: Option<u32>,
+        /// Also list the bones whose name contains one of these texts.
+        #[arg(long)]
+        bones: Vec<String>,
     },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
@@ -140,7 +152,23 @@ fn main() -> Result<()> {
             cmd: CardCmd::Dump { path, ext },
         } => card::dump(&path, ext),
         Cmd::Index => vfs::index(),
-        Cmd::Reference { card, capture, out } => reference::reference(&card, &capture, &out),
+        Cmd::Reference {
+            card,
+            capture,
+            out,
+            no_physics,
+            settle_frames,
+            bones,
+        } => {
+            let mut opts = rk_chara::BuildOptions {
+                physics: !no_physics,
+                ..Default::default()
+            };
+            if let Some(frames) = settle_frames {
+                opts.settle_frames = frames;
+            }
+            reference::reference(&card, &capture, &out, &opts, &bones)
+        }
         Cmd::Audit { count, threads } => audit::audit(count, threads),
         Cmd::Compare {
             cards,
@@ -158,6 +186,7 @@ fn main() -> Result<()> {
             no_clothes,
             no_accessories,
             outdoor_shoes,
+            no_physics,
             list,
         } => render::render(render::Args {
             card: &card,
@@ -169,6 +198,7 @@ fn main() -> Result<()> {
             no_clothes,
             no_accessories,
             outdoor_shoes,
+            no_physics,
             list,
         }),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),

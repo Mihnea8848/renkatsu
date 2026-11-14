@@ -29,6 +29,13 @@ pub struct BuildOptions {
     /// Wear the outdoor shoes instead of the indoor ones. The game loads
     /// cards without their saved status, so it starts with indoor shoes.
     pub outdoor_shoes: bool,
+    /// Let hair, skirts, ribbons and the bust settle as the game's
+    /// DynamicBone physics does.
+    pub physics: bool,
+    /// Frames of physics to run before the pose is taken.
+    pub settle_frames: u32,
+    /// Seconds per settle frame.
+    pub frame_time: f32,
 }
 
 impl Default for BuildOptions {
@@ -38,6 +45,9 @@ impl Default for BuildOptions {
             clothes: true,
             accessories: true,
             outdoor_shoes: false,
+            physics: true,
+            settle_frames: crate::physics::SETTLE_FRAMES,
+            frame_time: crate::physics::FRAME_TIME,
         }
     }
 }
@@ -52,6 +62,9 @@ pub struct Character {
     pub ramp: Option<std::sync::Arc<crate::scene::Image>>,
     /// How many MaterialEditor overrides found their material.
     pub material_edits: crate::material_editor::Applied,
+    /// The DynamicBone components, already settled when the build ran them.
+    /// `Physics::step` moves them on by one frame.
+    pub physics: crate::physics::Physics,
     pub warnings: Vec<String>,
 }
 
@@ -64,6 +77,23 @@ struct Builder<'g> {
     cloth_overlays: HashMap<String, ClothOverlay>,
     /// The gloss mask chosen in the card, shared by all hair parts.
     hair_gloss: Option<TexSlot>,
+    /// Scripts of every loaded prefab, for the physics step.
+    physics_sources: Vec<PhysicsSource>,
+}
+
+/// The scripts of one prefab and how the game treats its DynamicBones.
+struct PhysicsSource {
+    scripts: Vec<(usize, rk_vfs::ObjRef)>,
+    transforms: HashMap<(usize, i64), usize>,
+    /// Loaded through `ChaControl.LoadCharaFbxData`: its bones collide with
+    /// every collider of the body skeleton instead of their own list.
+    part: bool,
+    /// `copyDynamicBone`: roots are looked up by name in the body skeleton.
+    copy: bool,
+    /// False when the card switches the part's shaking off.
+    shake: bool,
+    /// Accessory slot, for the Dynamic Bone Editor's settings.
+    slot: Option<usize>,
 }
 
 impl<'g> Builder<'g> {
@@ -81,6 +111,18 @@ impl<'g> Builder<'g> {
                 None
             }
         }
+    }
+
+    /// Remembers a prefab's scripts for the physics step.
+    fn physics_source(&mut self, inst: &Instance, part: bool, copy: bool, shake: bool) {
+        self.physics_sources.push(PhysicsSource {
+            scripts: inst.scripts.clone(),
+            transforms: inst.transform_nodes.clone(),
+            part,
+            copy,
+            shake,
+            slot: None,
+        });
     }
 
     /// Instantiates an item's main prefab; `None` for empty slots.
@@ -273,6 +315,101 @@ impl<'g> Builder<'g> {
         ms.get("m_ClassName")?.as_str().map(str::to_string)
     }
 
+    /// Collects the DynamicBone components and colliders of everything
+    /// loaded, set up the way `ChaControl.LoadCharaFbxData` leaves them.
+    fn read_physics(
+        &self,
+        top: usize,
+        bones: &HashMap<String, usize>,
+        edits: &[crate::dynamic_bone_editor::Edit],
+    ) -> crate::physics::Physics {
+        use crate::physics::{self, Bone, DynamicBone, Resolve, Ver01, Ver02};
+        let assets = &self.game.assets;
+        let scene = &self.scene;
+        // Bones of parts whose skeleton was merged away no longer exist.
+        let alive = |node: usize| {
+            let mut n = node;
+            while let Some(p) = scene.nodes[n].parent {
+                n = p;
+            }
+            n == top
+        };
+        let classes: Vec<Vec<Option<String>>> = self
+            .physics_sources
+            .iter()
+            .map(|s| s.scripts.iter().map(|(_, script)| self.script_class(script)).collect())
+            .collect();
+
+        let mut out = physics::Physics::default();
+        // Colliders first, so bones can refer to them.
+        let mut collider_ids: HashMap<(usize, i64), usize> = HashMap::new();
+        let mut body_colliders = Vec::new();
+        for (source, classes) in self.physics_sources.iter().zip(&classes) {
+            for ((node, script), class) in source.scripts.iter().zip(classes) {
+                if class.as_deref() != Some("DynamicBoneCollider") {
+                    continue;
+                }
+                let Ok(obj) = script.read() else { continue };
+                collider_ids.insert(script.key(), out.colliders.len());
+                if !source.part {
+                    body_colliders.push(out.colliders.len());
+                }
+                out.colliders.push(physics::read_collider(&obj, *node));
+            }
+        }
+
+        for (source, classes) in self.physics_sources.iter().zip(&classes) {
+            for ((node, script), class) in source.scripts.iter().zip(classes) {
+                let Some(class) = class.as_deref() else { continue };
+                if !matches!(class, "DynamicBone" | "DynamicBone_Ver01" | "DynamicBone_Ver02") {
+                    continue;
+                }
+                let Ok(obj) = script.read() else { continue };
+                let node_of = |p: rk_unityfs::PPtr| {
+                    let n = *source.transforms.get(&assets.deref(&script.file, p)?.key())?;
+                    // copyDynamicBone: the body's bone of the same name.
+                    let n = match bones.get(&scene.nodes[n].name) {
+                        Some(&body) if source.copy => body,
+                        _ => n,
+                    };
+                    alive(n).then_some(n)
+                };
+                let collider_of =
+                    |p: rk_unityfs::PPtr| collider_ids.get(&assets.deref(&script.file, p)?.key()).copied();
+                let resolve = Resolve {
+                    node: &node_of,
+                    collider: &collider_of,
+                };
+                let on = source.shake && alive(*node);
+                match class {
+                    "DynamicBone" => {
+                        let mut def = physics::read_dynamic_bone(&obj, *node, &resolve);
+                        def.enabled &= on;
+                        if source.part {
+                            def.colliders = body_colliders.clone();
+                        }
+                        physics::colliders_plugin_off(&mut def, scene);
+                        if let (Some(slot), Some(root)) = (source.slot, def.root) {
+                            crate::dynamic_bone_editor::apply(edits, slot, &scene.nodes[root].name, &mut def);
+                        }
+                        out.bones.push(Bone::Dynamic(DynamicBone::new(def)));
+                    }
+                    "DynamicBone_Ver01" => {
+                        let mut def = physics::read_ver01(&obj, *node, &resolve);
+                        def.enabled &= on;
+                        out.bones.push(Bone::Ver01(Ver01::new(def)));
+                    }
+                    _ => {
+                        let mut def = physics::read_ver02(&obj, *node, &resolve);
+                        def.enabled &= on;
+                        out.bones.push(Bone::Ver02(Ver02::new(def)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Like `listed_renderers`, limited to scripts of one class when given.
     fn listed_renderers_in(&mut self, inst: &Instance, class: Option<&str>, field: &str) -> Vec<usize> {
         let mut out = Vec::new();
@@ -337,9 +474,25 @@ impl<'g> Builder<'g> {
                                 },
                             );
                         }
-                        // No emblem: the game sets no texture.
+                        // No emblem: the game sets no texture, so the shader's
+                        // default applies. main_emblem's is "black", which Unity
+                        // makes transparent black, and its cutoff hides it.
                         None => {
-                            m.textures.remove("_MainTex");
+                            m.textures.insert(
+                                "_MainTex".into(),
+                                TexSlot {
+                                    image: Arc::new(Image {
+                                        name: "default_black".into(),
+                                        width: 1,
+                                        height: 1,
+                                        rgba: vec![0, 0, 0, 0],
+                                        srgb: true,
+                                        repeat: true,
+                                    }),
+                                    scale: [1.0, 1.0],
+                                    offset: [0.0, 0.0],
+                                },
+                            );
                         }
                     }
                 }
@@ -1236,6 +1389,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         skin_overlays: overlays::skin(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         hair_gloss: None,
+        physics_sources: Vec::new(),
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -1249,6 +1403,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .find(anim.root, "cf_j_root")
         .context("skeleton has no cf_j_root")?;
     let mut bones = b.scene.name_map(body_root);
+    b.physics_source(&anim, false, false, true);
 
     // Head bones hang from the neck end.
     let head_parent = *bones.get("cf_s_head").context("skeleton has no cf_s_head")?;
@@ -1261,6 +1416,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         Part::Head,
     )?;
     let head_bones = b.scene.name_map(head_bone.root);
+    b.physics_source(&head_bone, false, false, true);
 
     // Body mesh.
     let body_name = if female { "p_cf_body_00" } else { "p_cm_body_00" };
@@ -1268,6 +1424,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .loader
         .load_prefab(&mut b.scene, BASE, body_name, None, Some(top), Part::Body)?;
     assign_weights(&mut b.scene, &body, &bones, "cf_j_root");
+    b.physics_source(&body, false, false, true);
 
     b.skin_body(card, &body, female);
 
@@ -1314,6 +1471,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     // Head: its prefab carries the bone layout for this face type.
     if let Some(item) = b.item("head", "ChaFileFace.headId", cat::BO_HEAD, card.face.head_id) {
         if let Some(head) = b.part("head", item, None, Part::Head) {
+            b.physics_source(&head, true, false, true);
             let src = b.scene.name_map(head.root);
             for (name, &dst) in &head_bones {
                 if let Some(&s) = src.get(name) {
@@ -1402,6 +1560,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         }
                     }
                     b.color_hair(&inst, hp);
+                    b.physics_source(&inst, true, false, !hp.no_shake);
                 }
             }
         }
@@ -1410,6 +1569,12 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
     let mut accessory_nodes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let hair_settings = crate::hair_accessories::for_outfit(&card.ext, outfit);
+    // Bust size, softness and weight in effect; Pushup may replace them.
+    let mut bust = crate::pushup::BodyData::from_body(
+        &card.body.shape_value_body,
+        card.body.bust_softness,
+        card.body.bust_weight,
+    );
     if let Some(co) = card.coordinates.get(outfit) {
         if opts.clothes {
             // What the top (and its sub-parts) and the bra say about the
@@ -1436,6 +1601,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 let inst = b.part(&label, item, Some(top), Part::Clothes(i as u8));
                 let pattern_prop = format!("outfit{outfit}.ChaFileClothes.{}Pattern", cat::CLOTHES_PROPS[i]);
                 if let Some(inst) = &inst {
+                    // The game copies DynamicBone roots onto the body
+                    // skeleton for tops and bottoms only.
+                    b.physics_source(inst, true, i < 2, true);
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root");
                     hide_undressed_states(&mut b.scene, inst);
                     b.dress(inst, item, &cp.color_info, &pattern_prop, overlays::MAIN_IDS[i]);
@@ -1509,6 +1677,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             _ => {}
                         }
                         if let Some(inst) = b.part(&sub_label, sub, Some(top), Part::Clothes(0)) {
+                            b.physics_source(&inst, true, true, true);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root");
                             hide_undressed_states(&mut b.scene, &inst);
                             // Sub-parts share the top's colours. The third
@@ -1528,11 +1697,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             b.hide_under_top(&body, &top_items, &top_insts, bra.as_ref());
 
             // Pushup: the bust of a worn top or bra replaces the card's.
-            let base = crate::pushup::BodyData::from_body(
-                &card.body.shape_value_body,
-                card.body.bust_softness,
-                card.body.bust_weight,
-            );
+            let base = bust;
             let pushed = crate::pushup::for_outfit(&card.ext, outfit, &base)
                 .and_then(|o| crate::pushup::bust(&base, &o, kinds.top_kind(), kinds.bra_kind()));
             if let (Some(pushed), Some(set)) = (pushed, body_set.as_mut()) {
@@ -1540,6 +1705,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     set.set(crate::pushup::SHAPE_FIRST + i, v);
                 }
                 set.apply_named(&mut b.scene, &body_bones, &body_rules, corrections.as_deref());
+                bust = pushed;
             }
         }
 
@@ -1593,6 +1759,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     }
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
+                b.physics_source(&inst, true, false, !acc.no_shake);
+                if let Some(source) = b.physics_sources.last_mut() {
+                    source.slot = Some(i);
+                }
                 b.color_accessory(&inst, acc, card.hair.parts.first(), hair_settings.get(&i).copied());
                 for (k, name) in ["N_move", "N_move2"].iter().enumerate() {
                     let Some(node) = b.scene.find(inst.root, name) else {
@@ -1645,6 +1815,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     };
     let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
 
+    // Physics runs on the finished skeleton, as the game's does once a
+    // character is loaded.
+    let bone_edits = crate::dynamic_bone_editor::for_outfit(&card.ext, outfit);
+    let mut physics = b.read_physics(top, &bones, &bone_edits);
+    if opts.physics {
+        physics.start(&mut b.scene);
+        physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
+        physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
+    }
+
     let ramp = ramp_image(&mut b.loader, DEFAULT_RAMP);
     if ramp.is_none() {
         b.loader.warn("shading ramp not found, using a hard edge");
@@ -1655,6 +1835,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         bones,
         ramp,
         material_edits,
+        physics,
         warnings: b.loader.warnings,
     })
 }
