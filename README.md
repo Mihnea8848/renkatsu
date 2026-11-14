@@ -1,5 +1,11 @@
 # Renkatsu
 
+[![CI](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml/badge.svg)](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Mihnea8848/renkatsu)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-wgpu-b7410e?logo=rust&logoColor=white)](#how-it-works)
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mihnea8848)
+
 Renkatsu is a game engine for Koikatsu content, written from scratch in Rust
 on wgpu. It reads character cards, zipmods and the data that plugins save into
 cards, and draws the characters with its own renderer. It does not use Unity
@@ -22,29 +28,41 @@ attempt at one.
 
 ## Status
 
-Early. A card goes in and an image comes out, but the image does not look like
-the game yet.
+Early, but characters now look close to the game. Every change is checked
+against pictures taken in CharaStudio with the same camera and light, and the
+formulas come from the game's own code and shaders, not from tuning.
 
 ## What works
 
 - Reading character cards and coordinate files
 - Reading Unity asset bundle files. This is a file format reader, no Unity
   code is involved
-- Indexing the game's `abdata` folder and all zipmods, with the item lists
-- Finding the game or mod item for every ID in a card, the way Sideloader
-  does, including items that moved between mods
-- Building the character: skeleton, body, head, hair, clothes and accessories
-- Body and face sliders
-- Bone edits saved by ABMX
-- Rendering to a PNG file with simple shading
+- Indexing the game's `abdata` folder and all zipmods, with the item lists and
+  loose textures, the way Sideloader does
+- Finding the game or mod item for every ID in a card, including items that
+  moved between mods
+- Building the character: skeleton, body, head, hair, clothes and accessories,
+  with body and face sliders
+- The game's shaders for skin, hair, eyes, face lines and clothes, in linear
+  colour like the game, with the scene's ramp, shadow and line settings
+- Card colours, makeup, skin and clothes textures, patterns and emblems
+- Clothes that hide what is under them
+- Eyes and brows drawn in front of or behind the hair as the game does, with
+  Better Repack's defaults
+- Expressions, gaze and iris size from the card
+- Plugin data: overlays, MaterialEditor (properties, textures, shader swaps,
+  material copies), MoreAccessories, ABMX bone edits, Hair Accessory
+  Customizer and Pushup
+- Rendering to a PNG file, and side by side comparisons with captures from
+  the game
 
 ## Known problems
 
-- The Koikatsu shaders are not implemented. Colours from the card, makeup,
-  skin and clothes textures are missing or wrong
-- Clothes do not hide the body or underwear below them
-- Overlays, MaterialEditor, MoreAccessories and other plugin data are ignored
-- The character stands in a T-pose. Nothing moves
+- No physics yet: hair, skirts and ribbons stay in their rest pose (in
+  progress)
+- No shadow map, so hair does not shade the face
+- Accessories use an approximate shader, and clothes outlines the old one
+- The character stands in a T-pose
 - There is no editor and no window, only command line tools
 - Koikatsu Sunshine content is not supported
 
@@ -94,7 +112,15 @@ Render a card:
 cargo run --release -p rk-cli -- render path/to/card.png -o out.png
 ```
 
-`--outfit 2` picks another outfit and `--yaw 30` turns the camera.
+`--outfit 2` picks another outfit, `--yaw 30` turns the camera and
+`--outdoor-shoes` puts on the outdoor shoes.
+
+Compare a card with a capture made in CharaStudio by the reference capture
+plugin in `tools/reference-capture`:
+
+```sh
+cargo run --release -p rk-cli -- reference path/to/card.png capture.json -o compare.png
+```
 
 ## How it works
 
@@ -121,7 +147,7 @@ Renkatsu Character Maker with everything the Koikatsu maker can do.
 3. Import of existing CharaStudio scenes
 4. The Ren'Py link: baked images and video that are rendered again when a
    character changes
-5. Animation and dynamic bones
+5. Animation
 6. Maps from glTF and FBX files, and a Renkatsu map format for sharing
 7. The character maker
 8. Games in real 3D for desktop and Android
@@ -135,8 +161,16 @@ than the game has.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Test results with your own cards and
 mods help a lot, because I can only test with what I have installed.
 
+If this project is useful to you and you want to support it, you can buy me a
+coffee on [Ko-fi](https://ko-fi.com/mihnea8848).
+
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE). The plugin behaviour that Renkatsu
+Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848). Free software under the GNU
+General Public License, version 3 or later: you can use, change and share it,
+and anything you distribute based on it must stay under the same license, with
+source code. See [LICENSE](LICENSE).
+
+The plugin behaviour that Renkatsu
 reimplements comes from GPL-3.0 community plugins (BepisPlugins, ABMX,
 KK_Plugins).
