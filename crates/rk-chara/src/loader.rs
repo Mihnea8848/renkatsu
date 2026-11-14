@@ -86,6 +86,8 @@ impl<'a> Loader<'a> {
             ..Default::default()
         };
         for (k, t) in &m.textures {
+            inst.tex_st
+                .insert(k.clone(), [t.scale[0], t.scale[1], t.offset[0], t.offset[1]]);
             if let Some(tex) = self.game.assets.deref(&obj.file, t.texture) {
                 if tex.class_id() != class::TEXTURE2D {
                     continue;

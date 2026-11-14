@@ -88,6 +88,9 @@ pub struct MaterialInst {
     pub keywords: String,
     pub render_queue: i32,
     pub textures: HashMap<String, TexSlot>,
+    /// Scale and offset of every texture property, also the ones with no
+    /// texture assigned: the game fills some in later and keeps the placement.
+    pub tex_st: HashMap<String, [f32; 4]>,
     pub floats: HashMap<String, f32>,
     pub colors: HashMap<String, [f32; 4]>,
 }

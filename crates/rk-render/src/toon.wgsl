@@ -273,11 +273,12 @@ fn overlay(base: vec3<f32>, top: vec3<f32>) -> vec3<f32> {
     return clamp(select(dark, bright, top > vec3<f32>(0.5)), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Hair: shade colour from the material, a gloss band that slides along the
-// strands with the view angle, and a rim towards the silhouette.
-fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, lambert: f32, ramp: f32, detail: vec4<f32>) -> vec3<f32> {
+// Hair, after the game's main_hair pixel shader: shade colour from the
+// material, a gloss mask that slides along the strand with the view angle and
+// is added on top, and a rim towards the silhouette. `light` is the unclamped
+// cosine between normal and light.
+fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, light: f32, ramp: f32, detail: vec4<f32>, front: bool) -> vec3<f32> {
     let view = normalize(g.eye.xyz - i.world);
-    var diffuse = base;
 
     // Rim tint: the hue of the scene shadow colour, kept faint.
     let hue = rgb_to_hsv(g.ambient_shadow.rgb).x;
@@ -290,31 +291,31 @@ fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, lambert: f32, ramp: f32, 
     var gloss_edge = 0.0;
     var gloss = 0.0;
     if (has(HAS_OVER1)) {
-        let slide = dot(view, normalize(i.bitangent)) * (m.p3.z - 1.0);
-        let gx = select(lambert * 0.00499999989 + i.uv1.x, lambert * 0.0199999809 + i.uv1.x + 0.99000001, m.p3.w > 0.5);
+        let slide = dot(view, i.bitangent) * (m.p3.z - 1.0);
+        let gx = select(light * 0.00499999989 + i.uv1.x, light * 0.0199999809 + i.uv1.x + 0.99000001, m.p3.w > 0.5);
         let gz = slide + i.uv1.y;
-        let a = textureSample(over1_tex, samp, vec2<f32>(gx, gz + 0.00800000038)).r;
-        gloss = textureSample(over1_tex, samp, vec2<f32>(gx, gz)).r;
+        let st = m.over2;
+        let a = textureSample(over1_tex, samp, vec2<f32>(gx, gz + 0.00800000038) * st.xy + st.zw).r;
+        gloss = textureSample(over1_tex, samp, vec2<f32>(gx, gz) * st.xy + st.zw).r;
         gloss_edge = (a - gloss) * 0.5;
     }
 
     let shadow = overlay(scene_shadow(), m.shadow.rgb);
     let edge = gloss_edge * (shadow - 1.0) + 1.0;
-    let dark = diffuse * edge * shadow;
-    diffuse = diffuse * edge - dark;
+    let dark = base * edge * shadow;
+    var diffuse = base * edge - dark;
 
     var lit = clamp(ramp, 0.0, 1.0);
     let open = 1.0 - detail.gb;
     diffuse = lit * open.x * diffuse + dark;
     lit = max(lit, open.x);
-
-    let gloss_mask = gloss * (ramp * 0.5 + 0.5) * m.over1.a;
-    diffuse = gloss_mask * m.over1.rgb * m.over1.a + clamp(1.0 - gloss_mask, 0.0, 1.0) * diffuse;
+    diffuse += gloss * (ramp * 0.5 + 0.5);
 
     var rgb = clamp(open.x * m.p3.y * open.y * rim + diffuse, vec3<f32>(0.0), vec3<f32>(1.0));
     lit = max(lit, 1.0 - m.p0.y);
     rgb *= lit * (1.0 - shadow) + shadow;
-    return clamp(rgb * max(light_color(), g.ambient_shadow.rgb), vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb *= select(0.660000026, 1.0, front);
+    return rgb * max(light_color(), g.ambient_shadow.rgb);
 }
 
 @fragment
@@ -366,7 +367,7 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     line.r = mix(line.r, detail.r, m.p0.w);
 
     if (kind == KIND_HAIR) {
-        return vec4<f32>(hair_color(i, s.diffuse, n, lambert, ramp, detail), 1.0);
+        return vec4<f32>(hair_color(i, s.diffuse, n, dot(n, normalize(g.light_dir.xyz)), ramp, detail, front), 1.0);
     }
 
     // Shadows painted into the masks, softened by the shadow-extend sliders.

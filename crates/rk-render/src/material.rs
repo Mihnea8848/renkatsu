@@ -107,6 +107,7 @@ impl MaterialDesc {
         let mut textures: [Option<Arc<Image>>; 8] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
+        let mut st_gloss = st_main;
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
             let name = if kind == Kind::Hair && *name == "_overtex1" {
@@ -121,6 +122,7 @@ impl MaterialDesc {
                 match *name {
                     "_MainTex" => st_main = st,
                     "_AlphaMask" => st_alpha = st,
+                    "_HairGloss" => st_gloss = st,
                     _ => {}
                 }
             }
@@ -141,12 +143,13 @@ impl MaterialDesc {
             color2: color("_Color2", [1.0; 4]),
             color3: color("_Color3", [1.0; 4]),
             shadow: color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
-            over1: if kind == Kind::Hair {
-                color("_GlossColor", [1.0; 4])
+            over1: color("_overcolor1", [1.0; 4]),
+            // Hair: scale and offset of the gloss mask.
+            over2: if kind == Kind::Hair {
+                st_gloss
             } else {
-                color("_overcolor1", [1.0; 4])
+                color("_overcolor2", [1.0; 4])
             },
-            over2: color("_overcolor2", [1.0; 4]),
             over3: color("_overcolor3", [1.0; 4]),
             st_main,
             st_alpha,
