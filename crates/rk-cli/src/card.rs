@@ -85,6 +85,11 @@ pub fn dump(path: &Path, full_ext: bool) -> Result<()> {
         "face": {"headId": c.face.head_id, "skinId": c.face.skin_id, "detailId": c.face.detail_id,
                  "eyebrowId": c.face.eyebrow_id, "noseId": c.face.nose_id,
                  "pupil": c.face.pupil.iter().map(|p| p.id).collect::<Vec<_>>(),
+                 "pupilDetail": c.face.pupil.iter().map(|p| json!({
+                     "baseColor": p.base_color, "subColor": p.sub_color, "gradMaskId": p.grad_mask_id,
+                     "gradBlend": p.grad_blend, "gradOffsetY": p.grad_offset_y, "gradScale": p.grad_scale,
+                 })).collect::<Vec<_>>(),
+                 "whiteBaseColor": c.face.white_base_color, "whiteSubColor": c.face.white_sub_color,
                  "shapes": c.face.shape_value_face},
         "body": {"skinId": c.body.skin_id, "detailId": c.body.detail_id, "skinMainColor": c.body.skin_main_color,
                  "shapes": c.body.shape_value_body},
