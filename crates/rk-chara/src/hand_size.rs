@@ -12,7 +12,7 @@
 //! ABMX applies after it, so a hand with an ABMX scale modifier keeps
 //! corrected scale times modifier.
 
-use crate::abmx::{self, BoneModifier};
+use crate::abmx::BoneModifier;
 use crate::scene::Scene;
 use glam::Vec3;
 use std::collections::HashMap;
@@ -32,13 +32,18 @@ pub fn correct(scene: &mut Scene, bones: &HashMap<String, usize>) {
     }
 }
 
-/// Studio's `PVCopy`: a hand ABMX does not scale takes the scale of its pose
-/// target. Run after ABMX.
-pub fn studio_copy(scene: &mut Scene, bones: &HashMap<String, usize>, mods: &[BoneModifier], outfit: usize) {
+/// Studio's `PVCopy` copies each hand's pose target onto it every frame.
+/// The targets keep the asset's scale of 1, which undoes the correction,
+/// unless ABMX has modifiers: then its baseline step
+/// (`BoneController.CollectBaselineCo`) turns the copy off, records the
+/// corrected hands and writes them into the targets, so the copy keeps the
+/// correction and the modifiers multiply it. With no modifiers at all ABMX
+/// returns before that step. Run after ABMX.
+pub fn studio_copy(scene: &mut Scene, bones: &HashMap<String, usize>, mods: &[BoneModifier]) {
+    if !mods.is_empty() {
+        return;
+    }
     for (hand, target) in HANDS {
-        if abmx::scales(mods, outfit, hand) {
-            continue;
-        }
         if let (Some(&node), Some(&from)) = (bones.get(hand), bones.get(target)) {
             scene.nodes[node].local.scale = scene.nodes[from].local.scale;
         }
@@ -48,7 +53,7 @@ pub fn studio_copy(scene: &mut Scene, bones: &HashMap<String, usize>, mods: &[Bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abmx::Modifier;
+    use crate::abmx::{self, Modifier};
     use crate::scene::Trs;
 
     fn skeleton() -> (Scene, HashMap<String, usize>) {
@@ -96,23 +101,15 @@ mod tests {
     }
 
     #[test]
-    fn studio_keeps_only_hands_abmx_scales() {
+    fn any_abmx_modifier_keeps_the_correction_in_studio() {
         let (mut scene, bones) = skeleton();
-        // A modifier that leaves scale alone does not stop the copy.
-        let mods = [
-            hand_modifier("cf_j_hand_L", Vec3::splat(1.02)),
-            hand_modifier("cf_j_hand_R", Vec3::ONE),
-        ];
+        // A modifier on another bone: both hands stay corrected.
+        let mods = [hand_modifier("cf_j_head", Vec3::splat(1.1))];
         correct(&mut scene, &bones);
         abmx::apply(&mut scene, &mods, 0, &bones, &HashMap::new());
-        studio_copy(&mut scene, &bones, &mods, 0);
-        assert!(
-            (scale(&scene, &bones, "cf_j_hand_L") - Vec3::new(1.02, 0.918, 0.918))
-                .abs()
-                .max_element()
-                < 1e-6
-        );
-        assert_eq!(scale(&scene, &bones, "cf_j_hand_R"), Vec3::ONE);
+        studio_copy(&mut scene, &bones, &mods);
+        assert_eq!(scale(&scene, &bones, "cf_j_hand_L"), SCALE);
+        assert_eq!(scale(&scene, &bones, "cf_j_hand_R"), SCALE);
     }
 
     #[test]
@@ -120,7 +117,7 @@ mod tests {
         let (mut scene, bones) = skeleton();
         scene.nodes[bones["cf_pv_hand_L"]].local.scale = Vec3::new(1.0, 0.5, 0.5);
         correct(&mut scene, &bones);
-        studio_copy(&mut scene, &bones, &[], 0);
+        studio_copy(&mut scene, &bones, &[]);
         assert_eq!(scale(&scene, &bones, "cf_j_hand_L"), Vec3::new(1.0, 0.5, 0.5));
         assert_eq!(scale(&scene, &bones, "cf_j_hand_R"), Vec3::ONE);
     }

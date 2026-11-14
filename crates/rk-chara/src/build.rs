@@ -1858,7 +1858,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         crate::abmx::apply(&mut b.scene, &mods, outfit, &bones, &accessory_nodes);
     }
     if female && opts.studio {
-        crate::hand_size::studio_copy(&mut b.scene, &bones, &mods, outfit);
+        crate::hand_size::studio_copy(&mut b.scene, &bones, &mods);
     }
     // MaterialEditor overrides come last, so they win over everything the
     // card's own settings produced.
