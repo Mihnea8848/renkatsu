@@ -193,6 +193,7 @@ impl<'a> Loader<'a> {
             renderers: Vec::new(),
             renderer_keys: HashMap::new(),
             object_nodes: HashMap::new(),
+            transform_nodes: HashMap::new(),
             scripts: Vec::new(),
         };
 
@@ -218,6 +219,7 @@ impl<'a> Loader<'a> {
             }
             inst.nodes.push(node);
             by_transform.insert(tr_ref.key(), node);
+            inst.transform_nodes.insert(tr_ref.key(), node);
             inst.object_nodes.insert(go_ref.key(), node);
 
             let (mut renderer, mut filter) = (None, None);

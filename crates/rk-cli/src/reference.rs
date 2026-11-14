@@ -131,13 +131,19 @@ pub fn difference(a: &[u8], b: &[u8], background: [u8; 3]) -> Difference {
     }
 }
 
-pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()> {
+pub fn reference(
+    card_path: &Path,
+    capture_path: &Path,
+    out: &Path,
+    opts: &BuildOptions,
+    watch: &[String],
+) -> Result<()> {
     let capture_text = std::fs::read_to_string(capture_path)?;
     let cap = Capture::parse(&capture_text)?;
     let (w, h) = (cap.width, cap.height);
     let game = Game::open(&Config::load()?)?;
     let card = Card::load(card_path)?;
-    let mut chara = rk_chara::build(&game, &card, &BuildOptions::default())?;
+    let mut chara = rk_chara::build(&game, &card, opts)?;
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
     let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene);
     let draws = chara.scene.pose();
@@ -215,7 +221,7 @@ pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()
         "  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture"
     );
     compare_queues(&capture_text, &chara.scene)?;
-    compare_bones(&capture_text, &chara.scene)?;
+    compare_bones(&capture_text, &chara.scene, watch)?;
     Ok(())
 }
 
@@ -357,7 +363,7 @@ fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
 }
 
 /// Lists the bones whose place or shape differs most from the capture.
-fn compare_bones(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
+fn compare_bones(capture: &str, scene: &rk_chara::Scene, watch: &[String]) -> Result<()> {
     let v: Value = serde_json::from_str(capture)?;
     let (world, _) = scene.world();
     let mut ours = std::collections::HashMap::new();
@@ -391,6 +397,9 @@ fn compare_bones(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
     println!("  largest differences (position in units, rotation and scale as matrix distance):");
     for (moved, shape, name) in rows.iter().take(40) {
         println!("    {name:<28} moved {moved:.4}  turned or scaled {shape:.3}");
+    }
+    for (moved, shape, name) in rows.iter().filter(|r| watch.iter().any(|w| r.2.contains(w.as_str()))) {
+        println!("    watched {name:<28} moved {moved:.4}  turned or scaled {shape:.3}");
     }
     let off = rows.iter().filter(|r| r.0 > 0.002 || r.1 > 0.02).count();
     println!("  {off} of {} bones differ noticeably", rows.len());

@@ -7,6 +7,7 @@
 pub mod abmx;
 pub mod build;
 pub mod compose;
+pub mod dynamic_bone_editor;
 pub mod expression;
 pub mod eyelook;
 pub mod foreground;
@@ -15,6 +16,7 @@ pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;
 pub mod overlays;
+pub mod physics;
 pub mod pushup;
 pub mod scene;
 pub mod shape;
