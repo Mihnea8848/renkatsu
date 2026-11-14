@@ -27,7 +27,7 @@ using UnityEngine;
 
 namespace Renkatsu
 {
-    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.3.0")]
+    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.4.0")]
     [BepInProcess("CharaStudio")]
     public class ReferenceCapture : BaseUnityPlugin
     {
@@ -248,7 +248,9 @@ namespace Renkatsu
             return box;
         }
 
-        // Enabled components on the camera that post-process the picture.
+        // Enabled components on the camera that post-process the picture:
+        // those with OnRenderImage, and Amplify Occlusion, which works from a
+        // command buffer set up in OnPreRender and removed in OnDisable.
         private static List<Behaviour> ImageEffects(Camera cam)
         {
             List<Behaviour> found = new List<Behaviour>();
@@ -260,6 +262,11 @@ namespace Renkatsu
                 }
                 for (Type t = b.GetType(); t != null && t != typeof(MonoBehaviour); t = t.BaseType)
                 {
+                    if (t.Name.StartsWith("AmplifyOcclusion"))
+                    {
+                        found.Add(b);
+                        break;
+                    }
                     if (t.GetMethod("OnRenderImage", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly) != null)
                     {
                         found.Add(b);
