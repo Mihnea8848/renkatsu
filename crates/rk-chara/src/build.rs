@@ -266,7 +266,13 @@ impl<'g> Builder<'g> {
         for r in self.listed_renderers(inst, "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 if let Some(gloss) = &self.hair_gloss {
-                    m.textures.insert("_HairGloss".into(), gloss.clone());
+                    // The material keeps where the mask sits on the strands.
+                    let mut slot = gloss.clone();
+                    if let Some(st) = m.tex_st.get("_HairGloss") {
+                        slot.scale = [st[0], st[1]];
+                        slot.offset = [st[2], st[3]];
+                    }
+                    m.textures.insert("_HairGloss".into(), slot);
                 }
                 m.colors.insert("_Color".into(), solid(part.base_color));
                 m.colors.insert("_Color2".into(), solid(part.start_color));
