@@ -27,7 +27,8 @@ using UnityEngine;
 
 namespace Renkatsu
 {
-    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.4.0")]
+    // Carries Renkatsu's own version (Cargo.toml), not a separate number.
+    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.1.0")]
     [BepInProcess("CharaStudio")]
     public class ReferenceCapture : BaseUnityPlugin
     {
