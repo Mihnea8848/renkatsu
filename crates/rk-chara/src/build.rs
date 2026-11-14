@@ -36,6 +36,10 @@ pub struct BuildOptions {
     pub settle_frames: u32,
     /// Seconds per settle frame.
     pub frame_time: f32,
+    /// Pose the character as Studio does instead of the game proper:
+    /// Studio's pose targets overwrite the hand size correction. On by
+    /// default, since Renkatsu stands in for CharaStudio.
+    pub studio: bool,
 }
 
 impl Default for BuildOptions {
@@ -48,6 +52,7 @@ impl Default for BuildOptions {
             physics: true,
             settle_frames: crate::physics::SETTLE_FRAMES,
             frame_time: crate::physics::FRAME_TIME,
+            studio: true,
         }
     }
 }
@@ -1831,9 +1836,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     }
 
     // Plugin bone edits go on top of the slider result.
+    // The game narrows the hands first, so ABMX builds on that.
+    if female {
+        crate::hand_size::correct(&mut b.scene, &bones);
+    }
     let mods = crate::abmx::read(&card.ext);
     if !mods.is_empty() {
         crate::abmx::apply(&mut b.scene, &mods, outfit, &bones, &accessory_nodes);
+    }
+    if female && opts.studio {
+        crate::hand_size::studio_copy(&mut b.scene, &bones, &mods, outfit);
     }
     // MaterialEditor overrides come last, so they win over everything the
     // card's own settings produced.
