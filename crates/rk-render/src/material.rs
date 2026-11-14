@@ -205,11 +205,20 @@ impl MaterialDesc {
             // and offset of its two highlights.
             color2: if kind == Kind::Eye {
                 st_over[0]
+            } else if kind == Kind::Skin {
+                color("_SpecularColor", [0.0; 4])
             } else {
                 color("_Color2", [1.0; 4])
             },
             color3: if kind == Kind::Eye {
                 st_over[1]
+            } else if kind == Kind::Skin {
+                [
+                    float("_SpeclarHeight", 0.98),
+                    float("_SpecularPower", 0.0),
+                    float("_SpecularPowerNail", 0.0),
+                    float("_DetailNormalMapScale", 1.0),
+                ]
             } else {
                 color("_Color3", [1.0; 4])
             },
@@ -259,7 +268,16 @@ impl MaterialDesc {
             } else {
                 [float("_nip", 0.0), float("_nipsize", 0.5), 0.0, 0.0]
             },
-            line: color("_LineColor", [0.5, 0.5, 0.5, 1.0]),
+            line: if kind == Kind::Skin {
+                [
+                    float("_linetexon", 1.0),
+                    float("_notusetexspecular", 0.0),
+                    float("_nip_specular", 0.5),
+                    float("_tex1mask", 0.0),
+                ]
+            } else {
+                color("_LineColor", [0.5, 0.5, 0.5, 1.0])
+            },
             info: [kind as u32, flags, 0, 0],
         };
         Self {
@@ -354,6 +372,37 @@ mod tests {
         );
         let none = MaterialDesc::new(None);
         assert_eq!((none.kind, none.uniform.info[1]), (Kind::Item, 0));
+    }
+
+    #[test]
+    fn skin_carries_its_shine_and_detail_values() {
+        let mut mat = MaterialInst {
+            shader: "Shader Forge/main_skin".into(),
+            ..Default::default()
+        };
+        // Without values: no shine, lines on, full detail strength.
+        let plain = MaterialDesc::new(Some(&mat)).uniform;
+        assert_eq!(plain.color2, [0.0; 4]);
+        assert_eq!(plain.color3, [0.98, 0.0, 0.0, 1.0]);
+        assert_eq!(plain.line, [1.0, 0.0, 0.5, 0.0]);
+
+        mat.colors.insert("_SpecularColor".into(), [0.8, 0.7, 0.6, 0.5]);
+        for (name, value) in [
+            ("_SpeclarHeight", 0.9),
+            ("_SpecularPower", 0.3),
+            ("_SpecularPowerNail", 0.4),
+            ("_DetailNormalMapScale", 0.25),
+            ("_linetexon", 0.0),
+            ("_notusetexspecular", 1.0),
+            ("_nip_specular", 0.7),
+            ("_tex1mask", 1.0),
+        ] {
+            mat.floats.insert(name.into(), value);
+        }
+        let set = MaterialDesc::new(Some(&mat)).uniform;
+        assert_eq!(set.color2, [0.8, 0.7, 0.6, 0.5]);
+        assert_eq!(set.color3, [0.9, 0.3, 0.4, 0.25]);
+        assert_eq!(set.line, [0.0, 1.0, 0.7, 1.0]);
     }
 
     #[test]

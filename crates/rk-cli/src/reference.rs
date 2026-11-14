@@ -39,6 +39,13 @@ pub struct Capture {
     /// From the scene towards the first directional light.
     pub light_dir: Option<[f32; 3]>,
     pub light_intensity: f32,
+    /// Number of the shading ramp the scene used.
+    pub ramp: Option<i32>,
+    /// Scene shadow colour, and how deep shadows are (0 to 1).
+    pub shadow: Option<([f32; 3], f32)>,
+    /// How dark and how wide lines are.
+    pub line_depth: Option<f32>,
+    pub line_width: Option<f32>,
 }
 
 impl Capture {
@@ -75,6 +82,13 @@ impl Capture {
             background: floats(&cam["background"])?,
             light_dir,
             light_intensity,
+            ramp: v["studio"]["ramp_g"].as_i64().map(|n| n as i32),
+            // The game stores depth as one minus the value in alpha.
+            shadow: floats::<4>(&v["globals"]["_ambientshadowG"])
+                .ok()
+                .map(|c| ([c[0], c[1], c[2]], 1.0 - c[3])),
+            line_depth: floats::<4>(&v["globals"]["_LineColorG"]).ok().map(|c| 1.0 - c[3]),
+            line_width: v["globals"]["_linewidthG"].as_f64().map(|n| n as f32),
         })
     }
 }
@@ -127,12 +141,25 @@ pub fn reference(card_path: &Path, capture_path: &Path, out: &Path) -> Result<()
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
     let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene);
     let draws = chara.scene.pose();
+    let defaults = Environment::default();
+    let (shadow_color, shadow_depth) = cap.shadow.unwrap_or((defaults.shadow_color, defaults.shadow_depth));
     let env = Environment {
-        ramp: chara.ramp.clone(),
+        ramp: cap
+            .ramp
+            .and_then(|id| rk_chara::build::ramp(&game, id))
+            .or_else(|| chara.ramp.clone()),
+        shadow_color,
+        shadow_depth,
+        line_depth: cap.line_depth.unwrap_or(defaults.line_depth),
+        line_width: cap.line_width.unwrap_or(defaults.line_width),
         light_dir: cap.light_dir,
         light_intensity: cap.light_intensity,
-        ..Default::default()
+        ..defaults
     };
+    println!(
+        "  scene: ramp {:?}, shadow depth {:.2}, line depth {:.2}, line width {:.3}",
+        cap.ramp, env.shadow_depth, env.line_depth, env.line_width
+    );
     let back = cap.background.map(f64::from);
     let back8 = [0, 1, 2].map(|c| (cap.background[c] * 255.0 + 0.5) as u8);
     let mut renderer = Renderer::new()?;
@@ -327,6 +354,8 @@ mod tests {
         "camera": {"fov": 23, "background": [0.5, 0.5, 0.5, 1]},
         "views": [{"name": "body", "position": [0, 1, 8], "rotation": [0, 1, 0, 0]},
                   {"name": "face", "position": [0, 1.5, 2], "rotation": [0, 1, 0, 0]}],
+        "studio": {"ramp_g": 2},
+        "globals": {"_ambientshadowG": [0.5, 0.4, 0.3, 0.74], "_LineColorG": [0.5, 0.5, 0.5, 0], "_linewidthG": 0.307},
         "lights": [
             {"type": "Point", "direction": [1, 0, 0], "intensity": 3},
             {"type": "Directional", "direction": [0, -0.6, -0.8], "intensity": 2}
@@ -347,6 +376,12 @@ mod tests {
         let l = c.light_dir.unwrap();
         assert!((Vec3::from(l) - Vec3::new(0.0, 0.6, 0.8)).length() < 1e-6);
         assert_eq!(c.light_intensity, 2.0);
+        assert_eq!(c.ramp, Some(2));
+        let (color, depth) = c.shadow.unwrap();
+        assert_eq!(color, [0.5, 0.4, 0.3]);
+        assert!((depth - 0.26).abs() < 1e-6);
+        assert_eq!(c.line_depth, Some(1.0));
+        assert_eq!(c.line_width, Some(0.307));
     }
 
     #[test]

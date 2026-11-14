@@ -93,6 +93,7 @@ struct VsOut {
     @location(5) uv3: vec2<f32>,
     @location(6) color: vec4<f32>,
     @location(7) bitangent: vec3<f32>,
+    @location(8) tangent: vec3<f32>,
 };
 
 fn has(flag: u32) -> bool {
@@ -118,6 +119,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.color = v.color;
     o.world = v.pos;
     o.bitangent = bitangent_of(v);
+    o.tangent = v.tangent.xyz;
     return o;
 }
 
@@ -151,6 +153,7 @@ fn vs_outline(v: VsIn) -> VsOut {
     o.color = v.color;
     o.world = pos;
     o.bitangent = bitangent_of(v);
+    o.tangent = v.tangent.xyz;
     return o;
 }
 
@@ -185,7 +188,11 @@ fn scene_shadow() -> vec3<f32> {
 
 // Multiplier applied to the unlit side of a surface.
 fn shadow_factor(diffuse: vec3<f32>) -> vec3<f32> {
-    let tint = shade_tint(diffuse);
+    return shadow_factor_of(shade_tint(diffuse));
+}
+
+// The same for a shade tint that is already known.
+fn shadow_factor_of(tint: vec3<f32>) -> vec3<f32> {
     let scene = scene_shadow();
     let dark = tint * scene * 1.79999995;
     let light = 1.0 - (1.0 - 2.0 * (tint * 0.899999976 - 0.5)) * (1.0 - scene);
@@ -235,8 +242,12 @@ fn read_surface(i: VsOut) -> Surface {
             let ring = clamp(length(i.uv1 - 0.5) * 16.6666698 - 1.0, 0.0, 1.0);
             let scale = m.p3.y * vec2<f32>(-1.39999998, 0.699999988) + vec2<f32>(2.0, -0.5);
             let grown = (ring * (i.uv1 * scale.x + scale.y - i.uv1) + i.uv1) * i.color.r;
-            let t = textureSample(over1_tex, samp, mix(plain, grown, m.p3.x)) * m.over1;
-            s.diffuse = mix(s.diffuse, t.rgb, t.a);
+            let t = textureSample(over1_tex, samp, mix(plain, grown, m.p3.x));
+            // With the mask switch on, red is the layer's strength and green a shine.
+            let flat = t.rgb * m.over1.rgb;
+            let shiny = t.r * (m.over1.rgb + t.g * m.line.z * 0.330000013);
+            let layer = mix(flat, shiny, clamp(m.line.w, 0.0, 1.0));
+            s.diffuse = mix(s.diffuse, layer, t.a * m.over1.a);
         }
         if (has(HAS_OVER2)) {
             let t = textureSample(over2_tex, samp, i.uv2 * i.color.b);
@@ -318,6 +329,65 @@ fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, light: f32, ramp: f32, de
     return rgb * max(light_color(), g.ambient_shadow.rgb);
 }
 
+// Skin, after the game's main_skin pixel shader. Left out: the two normal
+// maps, the liquid layers, the shadow map and the face normal and face
+// shadow switches, which the game leaves at zero.
+// m.color2: specular colour. m.color3: specular height, specular power,
+// nail (or lip) specular power, detail strength. m.line: line switch, plain
+// specular switch, nipple shine, layer mask switch.
+fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4<f32>) -> vec3<f32> {
+    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    let view = normalize(g.eye.xyz - i.world);
+    let l = normalize(g.light_dir.xyz);
+    let lambert = max(dot(l, n), 0.0);
+    let lit_ramp = textureSample(ramp_tex, ramp_samp, vec2<f32>(lambert, 0.5)).r;
+
+    // Shadows and lines painted into the masks. The detail strength scales
+    // the ones that come with the chosen face or body detail.
+    let strength = m.color3.w;
+    let extend = m.p0.y * -1.20000005 + 1.0;
+    let drawn = min(1.0 - lm.b * strength, 1.0 - dm.g) * (1.0 - extend) + extend;
+    let lit = lit_ramp * drawn;
+
+    // Shine from the detail mask's red channel, shifted with the view.
+    let hsv = rgb_to_hsv(diffuse);
+    let shift = (m.color3.x - 1.0) * 0.800000012;
+    var shine = 0.0;
+    if (has(HAS_DETAIL)) {
+        let uv = shift * vec2<f32>(dot(i.tangent, view), dot(i.bitangent, view)) + i.uv0;
+        shine = clamp(textureSample(detail_tex, samp, uv).r * 1.66666698, 0.0, 1.0);
+    }
+    let core = shine * shine * shine;
+    let power = max(dm.a * m.color3.y, (1.0 - dm.a) * m.color3.z);
+    let glow = power * core * m.color2.rgb;
+    var soft = min(dot(m.color2.rgb, vec3<f32>(0.300000012, 0.589999974, 0.109999999)), (shine - core) * power);
+    soft = min(min(lit, soft), dm.a);
+    let warm = hsv_to_rgb(vec3<f32>(hsv.x - 0.0799999982, 0.400000006, 1.0)) * 0.970000029 - 1.0;
+    let textured = diffuse * (soft * warm + 1.0) + glow;
+
+    // Plain highlight, used when the material switches the textured one off.
+    let half_dir = normalize(view + l);
+    let facing = max(dot(n, half_dir), 0.0);
+    let plain_power = clamp(pow(facing, m.color3.y * 256.0) * m.color3.y * m.color2.a, 0.0, 1.0);
+    let plain = m.color2.rgb * plain_power + diffuse;
+    let base = clamp(mix(textured, plain, m.line.y), vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Skin shade: the skin's own hue at two thirds of its saturation.
+    let shade = shadow_factor_of(hsv_to_rgb(vec3<f32>(hsv.x, hsv.y * 0.660000026, 1.0)));
+    let light = light_color();
+    let body = mix(base * shade, base, lit) * max(light, g.ambient_shadow.rgb) * mix(shade, vec3<f32>(1.0), drawn);
+
+    // Lines painted into the masks.
+    let ink = diffuse * g.line_color.rgb * shade * ((1.0 - dm.g) * 0.5 + 0.5);
+    let w = g.line_color.a;
+    let toward_white = 1.0 - (1.0 - 2.0 * (w - 0.5)) * (1.0 - ink);
+    let line_rgb = clamp(select(ink * (w * 2.0), toward_white, w > 0.5), vec3<f32>(0.0), vec3<f32>(1.0)) * light;
+    var keep = pow((1.0 - g.params.x) * 0.800000012 + 0.200000003, lm.g);
+    keep = min((1.0 - lm.r * strength) * 0.5 + 0.5, keep);
+    keep = m.line.x * (keep - 1.0) + 1.0;
+    return mix(line_rgb, body, keep);
+}
+
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let kind = m.info.x;
@@ -389,6 +459,10 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
         line = textureSample(line_tex, samp, i.uv0);
     }
     line.r = mix(line.r, detail.r, m.p0.w);
+
+    if (kind == KIND_SKIN) {
+        return vec4<f32>(skin_color(i, s.diffuse, front, detail, line), 1.0);
+    }
 
     if (kind == KIND_HAIR) {
         let rgb = hair_color(i, s.diffuse, n, dot(n, normalize(g.light_dir.xyz)), ramp, detail, front);
