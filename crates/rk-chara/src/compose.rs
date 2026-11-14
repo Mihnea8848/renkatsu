@@ -62,6 +62,29 @@ fn linear_rgb(img: &Image, c: Rgba) -> [f32; 3] {
     [f(c[0]), f(c[1]), f(c[2])]
 }
 
+/// A sample as the shader sees it: `sample` with the colour channels decoded.
+fn sample_linear(img: &Image, u: f32, v: f32) -> Rgba {
+    let t = sample(img, u, v);
+    let c = linear_rgb(img, t);
+    [c[0], c[1], c[2], t[3]]
+}
+
+/// A card colour as the shader sees it. The create shaders declare their
+/// colours as Color properties, which Unity decodes in linear colour space.
+fn linear_color(c: Rgba) -> [f32; 3] {
+    rgb(c).map(to_linear)
+}
+
+/// What an sRGB render target stores for a linear colour.
+fn stored(c: [f32; 3]) -> Rgba {
+    [
+        to_srgb(c[0].clamp(0.0, 1.0)),
+        to_srgb(c[1].clamp(0.0, 1.0)),
+        to_srgb(c[2].clamp(0.0, 1.0)),
+        1.0,
+    ]
+}
+
 /// Bilinear sample at a UV coordinate, wrapping or clamping as the image asks.
 pub fn sample(img: &Image, u: f32, v: f32) -> Rgba {
     let (w, h) = (img.width as i64, img.height as i64);
@@ -141,10 +164,15 @@ impl<'a> Decal<'a> {
         }
     }
 
+    /// `base` and the result are linear values.
     fn apply(&self, base: [f32; 3], uv: [f32; 2], strength: f32) -> [f32; 3] {
         let Some(img) = self.image else { return base };
-        let p = sample(img, uv[0], uv[1]);
-        mix3(base, mul3(rgb(p), rgb(self.color)), p[3] * self.color[3] * strength)
+        let p = sample_linear(img, uv[0], uv[1]);
+        mix3(
+            base,
+            mul3(rgb(p), linear_color(self.color)),
+            p[3] * self.color[3] * strength,
+        )
     }
 }
 
@@ -169,10 +197,6 @@ fn render(width: u32, height: u32, name: &str, pixel: impl Fn([f32; 2]) -> Rgba 
         srgb: true,
         repeat: false,
     }
-}
-
-fn opaque(c: [f32; 3]) -> Rgba {
-    [c[0], c[1], c[2], 1.0]
 }
 
 /// Paints `over` onto `base` by its alpha. The result is as large as the
@@ -220,26 +244,30 @@ pub struct BodyInputs<'a> {
 }
 
 /// Body skin texture.
+///
+/// The game draws this (shader create_body) on linear values into an sRGB
+/// texture: `CustomTextureCreate` turns `GL.sRGBWrite` on for the blit, the
+/// colours are Color properties and the textures are decoded when sampled.
 pub fn body(i: &BodyInputs) -> Image {
     render(i.size, i.size, "body_composed", |uv| {
         // Sunburn replaces the skin colour where its texture is dark.
-        let sun = i.sunburn.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
+        let sun = i.sunburn.map(|t| sample_linear(t, uv[0], uv[1])[0]).unwrap_or(1.0);
         let skin = mix3(
-            rgb(i.sunburn_color),
-            rgb(i.skin_main),
+            linear_color(i.sunburn_color),
+            linear_color(i.skin_main),
             sun.max(1.0 - i.sunburn_color[3]),
         );
-        let main = i.main.map(|t| sample(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
-        let mask = i.color_mask.map(|t| sample(t, uv[0], uv[1])).unwrap_or([0.0; 4]);
+        let main = i.main.map(|t| sample_linear(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
+        let mask = i.color_mask.map(|t| sample_linear(t, uv[0], uv[1])).unwrap_or([0.0; 4]);
         // Green marks the areas tinted by the secondary skin colour.
-        let tint = mix3([1.0; 3], rgb(i.skin_sub), mask[1] * i.skin_sub[3]);
+        let tint = mix3([1.0; 3], linear_color(i.skin_sub), mask[1] * i.skin_sub[3]);
         let mut base = mul3(skin, mul3(rgb(main), tint));
-        let paint_mask = i.paint_mask.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
+        let paint_mask = i.paint_mask.map(|t| sample_linear(t, uv[0], uv[1])[0]).unwrap_or(1.0);
         for p in &i.paints {
             base = p.apply(base, paint_uv(uv, p.layout, true), paint_mask);
         }
         // Blue marks the nails.
-        opaque(mix3(base, mul3(rgb(i.nail), base), mask[2]))
+        stored(mix3(base, mul3(linear_color(i.nail), base), mask[2]))
     })
 }
 
@@ -257,28 +285,28 @@ pub struct FaceInputs<'a> {
     pub mole: Decal<'a>,
 }
 
-/// Face skin texture.
+/// Face skin texture (shader create_head), on linear values like `body`.
 pub fn face(i: &FaceInputs) -> Image {
     render(i.size, i.size, "face_composed", |uv| {
-        let mask = i.color_mask.map(|t| sample(t, uv[0], uv[1])).unwrap_or([0.0; 4]);
+        let mask = i.color_mask.map(|t| sample_linear(t, uv[0], uv[1])).unwrap_or([0.0; 4]);
         // Red takes the skin colour, green the secondary colour, and blue
         // areas stay untinted.
         let mut tint = mul3(
-            mix3([1.0; 3], rgb(i.skin_main), mask[0]),
-            mix3([1.0; 3], rgb(i.skin_sub), mask[1]),
+            mix3([1.0; 3], linear_color(i.skin_main), mask[0]),
+            mix3([1.0; 3], linear_color(i.skin_sub), mask[1]),
         );
         for t in tint.iter_mut() {
             *t = t.max(mask[2]);
         }
-        let main = i.main.map(|t| sample(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
+        let main = i.main.map(|t| sample_linear(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
         let mut base = mul3(tint, rgb(main));
         base = i.cheek.apply(base, offset_uv(uv, i.cheek.layout), 1.0);
         base = i.lip_line.apply(base, offset_uv(uv, i.lip_line.layout), 1.0);
-        let paint_mask = i.paint_mask.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
+        let paint_mask = i.paint_mask.map(|t| sample_linear(t, uv[0], uv[1])[0]).unwrap_or(1.0);
         for p in &i.paints {
             base = p.apply(base, paint_uv(uv, p.layout, true), paint_mask);
         }
-        opaque(i.mole.apply(base, paint_uv(uv, i.mole.layout, false), 1.0))
+        stored(i.mole.apply(base, paint_uv(uv, i.mole.layout, false), 1.0))
     })
 }
 
@@ -350,37 +378,48 @@ pub struct EyeInputs<'a> {
 }
 
 /// Iris texture: a two-colour gradient overlaid on the iris drawing.
+///
+/// Shader create_eye, on linear values into an sRGB texture like `body`.
+/// The offset and scale go through `Mathf.Lerp` in
+/// `ChaControl.ChangeSettingEye`, which clamps them to 0..1; the blend is
+/// passed as it is and can be above one.
 pub fn eye(i: &EyeInputs) -> Image {
-    let y = -0.5 + i.gradient_offset_y;
-    let s = 1.0 - (-1.0 + 2.0 * i.gradient_scale);
+    let y = -0.5 + i.gradient_offset_y.clamp(0.0, 1.0);
+    let s = 1.0 - (-1.0 + 2.0 * i.gradient_scale.clamp(0.0, 1.0));
+    let (base, sub) = (linear_color(i.base), linear_color(i.sub));
     render(i.size, i.size, "eye_composed", |uv| {
         let g = match i.gradient {
-            Some(t) => sample(t, uv[0] * (2.0 * s) + (0.5 - s), (uv[1] + y) * (2.0 * s) + (0.5 - s))[0],
+            Some(t) => sample_linear(t, uv[0] * (2.0 * s) + (0.5 - s), (uv[1] + y) * (2.0 * s) + (0.5 - s))[0],
             None => 1.0,
         };
-        let col = mix3(rgb(i.sub), rgb(i.base), g);
-        let t = i.main.map(|t| sample(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
+        let col = mix3(sub, base, g);
+        let t = i.main.map(|t| sample_linear(t, uv[0], uv[1])).unwrap_or([1.0; 4]);
         let m = t[0];
-        let mut out = [0.0; 4];
+        let mut out = [0.0; 3];
         for k in 0..3 {
             // Overlay blend of the colour with the drawing's brightness.
+            // A division by zero gives an infinity that the shader's
+            // saturate brings back into range (NaN becomes 0).
             let over = if m > 0.5 {
                 col[k] / (2.0 * (1.0 - m))
             } else {
                 1.0 - (1.0 - col[k]) * 0.5 / m
             };
-            out[k] = col[k] * m + i.blend * (over.clamp(0.0, 1.0) - m * col[k]);
+            let over = if over.is_nan() { 0.0 } else { over.clamp(0.0, 1.0) };
+            out[k] = col[k] * m + i.blend * (over - m * col[k]);
         }
+        let mut out = stored(out);
         out[3] = t[3] * i.base[3];
         out
     })
 }
 
-/// Eye white: the drawing's red channel blends between two colours.
+/// Eye white (shader create_eyewhite): the drawing's red channel blends
+/// between two colours, on linear values like `body`.
 pub fn eye_white(size: u32, main: Option<&Image>, base: Rgba, sub: Rgba) -> Image {
     render(size, size, "eyewhite_composed", |uv| {
-        let m = main.map(|t| sample(t, uv[0], uv[1])[0]).unwrap_or(1.0);
-        opaque(mix3(rgb(sub), rgb(base), m))
+        let m = main.map(|t| sample_linear(t, uv[0], uv[1])[0]).unwrap_or(1.0);
+        stored(mix3(linear_color(sub), linear_color(base), m))
     })
 }
 
@@ -460,7 +499,10 @@ mod tests {
         i.main = Some(&main);
         let out = body(&i);
         let p = px(&out, 1, 1);
-        assert_eq!((p[0], p[1], p[2], p[3]), (128, 102, 77, 255));
+        // The product is taken on linear values: 0.8 is 0.6038 and 128 of
+        // 255 is 0.2158, their product 0.1303 is stored as 101. A product of
+        // the stored values would give 102, and 77 instead of 74 for blue.
+        assert_eq!((p[0], p[1], p[2], p[3]), (128, 101, 74, 255));
     }
 
     #[test]
@@ -469,9 +511,11 @@ mod tests {
         let blue = solid([0, 0, 255, 255]);
         let mut i = body_inputs();
         i.color_mask = Some(&green);
-        assert_eq!(px(&body(&i), 0, 0)[..3], [255, 102, 77]);
+        assert_eq!(px(&body(&i), 0, 0)[..3], [255, 101, 74]);
         i.color_mask = Some(&blue);
-        assert_eq!(px(&body(&i), 0, 0)[..3], [128, 102, 153]);
+        // Red is the nail's 0.5 exactly, which is 127.5 of 255.
+        let p = px(&body(&i), 0, 0);
+        assert!((127..=128).contains(&p[0]) && p[1] == 101 && p[2] == 153, "{p:?}");
     }
 
     #[test]
@@ -499,9 +543,10 @@ mod tests {
             layout: [0.0, 0.0, 0.0, 0.5],
         };
         let p = px(&body(&i), 2, 2);
-        // Half-transparent red over the skin colour.
+        // Half-transparent red over the skin colour, mixed on linear values:
+        // green 0.6038 times (1 - 128/255) is 0.3007, stored as 149.
         assert!(
-            (p[0] as i32 - 255).abs() <= 1 && (p[1] as i32 - 102).abs() <= 1 && (p[2] as i32 - 76).abs() <= 2,
+            (p[0] as i32 - 255).abs() <= 1 && (p[1] as i32 - 149).abs() <= 1 && (p[2] as i32 - 111).abs() <= 1,
             "{p:?}"
         );
         let none = solid([255, 255, 255, 255]);
@@ -531,6 +576,35 @@ mod tests {
         assert_eq!(px(&face(&i), 0, 0)[..3], [255, 204, 153]);
         i.color_mask = Some(&blue);
         assert_eq!(px(&face(&i), 0, 0)[..3], [255, 255, 255], "blue keeps the area white");
+    }
+
+    #[test]
+    fn face_layers_blend_on_linear_values() {
+        // A half-transparent red cheek over an untinted white face. The
+        // shader mixes linear values: green and blue become 1 - 128/255 =
+        // 0.498, stored as 187. Mixing the stored values would give 127.
+        let red = solid([255, 0, 0, 128]);
+        let i = FaceInputs {
+            size: 2,
+            main: None,
+            color_mask: None,
+            skin_main: [1.0, 0.8, 0.6, 1.0],
+            skin_sub: [1.0, 1.0, 1.0, 1.0],
+            cheek: Decal {
+                image: Some(&red),
+                color: [1.0, 1.0, 1.0, 1.0],
+                layout: [0.0; 4],
+            },
+            lip_line: Decal::none(),
+            paint_mask: None,
+            paints: [Decal::none(), Decal::none()],
+            mole: Decal::none(),
+        };
+        let p = px(&face(&i), 0, 0);
+        assert!(
+            p[0] == 255 && (p[1] as i32 - 187).abs() <= 1 && (p[2] as i32 - 187).abs() <= 1,
+            "{p:?}"
+        );
     }
 
     #[test]
@@ -611,17 +685,70 @@ mod tests {
             [255, 0, 0],
             "dark gradient picks the second colour"
         );
-        // Half-bright drawing: plain multiply without blend.
-        let grey = solid([128, 128, 128, 128]);
+        // Grey drawing: plain multiply without blend, on linear values.
+        // 200 of 255 is 0.5776 and 0.8 is 0.6038; the product is stored as 159.
+        let grey = solid([200, 200, 200, 128]);
         i.gradient = None;
         i.main = Some(&grey);
         let p = px(&eye(&i), 0, 0);
         assert!(
-            (p[2] as i32 - 102).abs() <= 1 && (p[3] as i32 - 128).abs() <= 1,
+            (p[0] as i32 - 38).abs() <= 1
+                && (p[1] as i32 - 78).abs() <= 1
+                && (p[2] as i32 - 159).abs() <= 1
+                && (p[3] as i32 - 128).abs() <= 1,
             "{p:?}"
         );
+        // Blend 1: the overlay colour/(2(1-m)) replaces the product.
         i.blend = 1.0;
-        assert!(px(&eye(&i), 0, 0)[2] > p[2], "overlay brightens the colour");
+        let p = px(&eye(&i), 0, 0);
+        assert!(
+            (p[0] as i32 - 56).abs() <= 1 && (p[1] as i32 - 110).abs() <= 1 && (p[2] as i32 - 220).abs() <= 1,
+            "{p:?}"
+        );
+        // The game passes the blend unclamped, so mods can go above one.
+        i.blend = 2.0;
+        let p = px(&eye(&i), 0, 0);
+        assert!(
+            (p[0] as i32 - 69).abs() <= 1 && (p[1] as i32 - 134).abs() <= 1 && p[2] == 255,
+            "{p:?}"
+        );
+        // A dark drawing takes the other branch, 1 - (1-colour)/(2m), which
+        // darkens: 128 of 255 gives 81 for blue instead of the product's 101.
+        let dark_grey = solid([128, 128, 128, 255]);
+        i.main = Some(&dark_grey);
+        i.blend = 1.0;
+        assert!((px(&eye(&i), 0, 0)[2] as i32 - 81).abs() <= 1);
+    }
+
+    #[test]
+    fn eye_gradient_placement_is_clamped_like_mathf_lerp() {
+        // Gradient: dark lower half, bright upper half.
+        let gradient = Image {
+            name: "g".into(),
+            width: 1,
+            height: 2,
+            rgba: vec![0, 0, 0, 255, 255, 255, 255, 255],
+            srgb: true,
+            repeat: false,
+        };
+        let inputs = |offset_y: f32, scale: f32| EyeInputs {
+            size: 8,
+            main: None,
+            gradient: Some(&gradient),
+            base: [1.0, 1.0, 1.0, 1.0],
+            sub: [0.0, 0.0, 0.0, 1.0],
+            blend: 0.0,
+            gradient_offset_y: offset_y,
+            gradient_scale: scale,
+        };
+        // Values outside 0..1 (slider unlocking mods) act as the nearest end.
+        assert_eq!(eye(&inputs(0.5, -0.2)).rgba, eye(&inputs(0.5, 0.0)).rgba);
+        assert_eq!(eye(&inputs(0.5, 1.3)).rgba, eye(&inputs(0.5, 1.0)).rgba);
+        assert_eq!(eye(&inputs(-0.4, 0.5)).rgba, eye(&inputs(0.0, 0.5)).rgba);
+        assert_eq!(eye(&inputs(1.7, 0.5)).rgba, eye(&inputs(1.0, 0.5)).rgba);
+        // And the ends differ from the middle, so the test means something.
+        assert_ne!(eye(&inputs(0.5, 0.0)).rgba, eye(&inputs(0.5, 0.5)).rgba);
+        assert_ne!(eye(&inputs(0.0, 0.5)).rgba, eye(&inputs(0.5, 0.5)).rgba);
     }
 
     #[test]
@@ -629,6 +756,11 @@ mod tests {
         let half = solid([128, 0, 0, 255]);
         let out = eye_white(2, Some(&half), [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(px(&out, 1, 1), [128, 128, 128, 255]);
+        // The blend is on linear values: from 0.5 (0.2140) a share of 0.2158
+        // towards white gives 0.3836, stored as 166. On stored values it
+        // would be 191.
+        let out = eye_white(2, Some(&half), [1.0, 1.0, 1.0, 1.0], [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(px(&out, 1, 1), [166, 166, 166, 255]);
     }
 
     #[test]
