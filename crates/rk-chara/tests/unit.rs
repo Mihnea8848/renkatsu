@@ -7,9 +7,9 @@
 use glam::{Quat, Vec3};
 use rk_card::{ExtData, PluginData, Value};
 use rk_chara::loader::assign_weights;
-use rk_chara::scene::{euler_deg, Instance, Part, RendererInst, Scene, Trs};
+use rk_chara::scene::{euler_deg, DrawState, Instance, Part, RendererInst, Scene, Stencil, Trs};
 use rk_chara::shape::{Rules, ShapeSet, BODY_RULES, HEAD_RULES};
-use rk_unityfs::objects::{BlendShape, BlendShapeVertex, BoneWeight, Mesh};
+use rk_unityfs::objects::{parse_queue, BlendShape, BlendShapeVertex, BoneWeight, Mesh, ShaderPass};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -564,4 +564,94 @@ fn old_more_accessories_xml_is_read() {
     assert_eq!((first.hide_category, first.no_shake), (1, true));
     assert!(sets[&0][1].is_empty());
     assert!(rk_chara::more_accessories::read(&ExtData::new()).is_empty());
+}
+
+#[test]
+fn queue_tags_become_numbers() {
+    assert_eq!(parse_queue("Geometry"), Some(2000));
+    assert_eq!(parse_queue("AlphaTest-100"), Some(2350));
+    assert_eq!(parse_queue("Transparent+40"), Some(3040));
+    assert_eq!(parse_queue(" transparent + 1010 "), Some(4010));
+    assert_eq!(parse_queue("Overlay"), Some(4000));
+    assert_eq!(parse_queue("Nonsense"), None);
+    assert_eq!(parse_queue("Transparent+x"), None);
+}
+
+#[test]
+fn draw_state_comes_from_the_forward_pass() {
+    let pass = |name: &str, mode: &str| ShaderPass {
+        name: name.into(),
+        light_mode: mode.into(),
+        queue: Some(3040),
+        zwrite: true,
+        src_blend: 1,
+        dst_blend: 0,
+        ..Default::default()
+    };
+    // Front hair: outline, a blended forward pass that skips pixels marked 2,
+    // and a shadow pass that must not be picked.
+    let mut forward = pass("FORWARD", "FORWARDBASE");
+    forward.src_blend = 5;
+    forward.dst_blend = 10;
+    forward.stencil_ref = 2;
+    forward.stencil_comp = 6;
+    let passes = [pass("OUTLINE", ""), forward, pass("SHADOWCASTER", "SHADOWCASTER")];
+    assert_eq!(
+        DrawState::from_passes(&passes),
+        Some(DrawState {
+            queue: 3040,
+            blend: true,
+            zwrite: true,
+            outline: true,
+            stencil: Stencil::SkipEqual,
+            stencil_ref: 2,
+        })
+    );
+
+    // Eye layer: no depth write, marks its pixels.
+    let mut eye = pass("FORWARD", "FORWARDBASE");
+    eye.queue = None;
+    eye.zwrite = false;
+    eye.stencil_ref = 2;
+    eye.stencil_comp = 8;
+    eye.stencil_pass = 2;
+    let state = DrawState::from_passes(&[eye]).unwrap();
+    assert_eq!(
+        (state.queue, state.zwrite, state.outline, state.stencil),
+        (2000, false, false, Stencil::Write)
+    );
+
+    // Without a tagged forward pass the first pass that draws a surface is used.
+    let plain = DrawState::from_passes(&[pass("OUTLINE", ""), pass("BASE", "")]).unwrap();
+    assert_eq!(
+        (plain.blend, plain.stencil, plain.outline),
+        (false, Stencil::None, true)
+    );
+    assert_eq!(DrawState::from_passes(&[pass("SHADOWCASTER", "SHADOWCASTER")]), None);
+    assert_eq!(DrawState::from_passes(&[]), None);
+}
+
+#[test]
+fn head_types_look_in_the_twin_bundle_first() {
+    use rk_chara::build::head_variant;
+    assert_eq!(
+        head_variant("chara/mt_eyeline_down_00.unity3d", "cf_t_eyeline_down_03", 0),
+        None
+    );
+    assert_eq!(
+        head_variant("chara/mt_eyeline_down_00.unity3d", "cf_t_eyeline_down_03", 1),
+        Some((
+            "chara/mt_eyeline_down_50.unity3d".to_string(),
+            "cf_t_eyeline_down_03_1".to_string()
+        ))
+    );
+    // A mod bundle with any name gets the same treatment.
+    assert_eq!(
+        head_variant("mods/lash.unity3d", "lash", 2),
+        Some(("mods/la50.unity3d".to_string(), "lash_2".to_string()))
+    );
+    assert_eq!(
+        head_variant("a.unity3d", "t", 1),
+        Some(("50.unity3d".to_string(), "t_1".to_string()))
+    );
 }

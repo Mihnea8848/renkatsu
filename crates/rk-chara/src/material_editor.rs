@@ -125,6 +125,8 @@ pub fn apply(scene: &mut Scene, ext: &ExtData, outfit: usize, targets: &Targets)
         applied.shaders += on_materials(scene, &e, &mut |m| {
             if let Some(s) = &shader {
                 m.shader = s.clone();
+                // The new shader is named, not loaded, so its state is unknown.
+                m.draw = None;
             }
             if let Some(q) = queue {
                 m.render_queue = q as i32;

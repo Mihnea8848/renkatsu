@@ -4,7 +4,7 @@
 //! Maps Unity materials to Renkatsu's material kinds and render settings.
 
 use bytemuck::{Pod, Zeroable};
-use rk_chara::{Image, MaterialInst};
+use rk_chara::{DrawState, Image, MaterialInst, Stencil};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,9 @@ pub struct MaterialDesc {
     pub queue: i32,
     pub blended: bool,
     pub outline: bool,
+    pub zwrite: bool,
+    pub stencil: Stencil,
+    pub stencil_ref: u8,
     pub uniform: MaterialUniform,
     pub textures: [Option<Arc<Image>>; 8],
 }
@@ -89,9 +92,61 @@ pub fn classify(shader: &str) -> Kind {
     }
 }
 
-fn is_blended(shader: &str, kind: Kind) -> bool {
+/// Draw state for a shader that could not be read, guessed from its name.
+/// Plugins carry their shaders inside their own files and name them after
+/// the game shader they stand in for, so each guess is the state of that
+/// game shader.
+pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
-    matches!(kind, Kind::Eye | Kind::Overlay) || name.contains("alpha") || name.contains("glass")
+    let solid = DrawState {
+        queue: 2450,
+        blend: false,
+        zwrite: true,
+        outline: true,
+        stencil: Stencil::None,
+        stencil_ref: 0,
+    };
+    let layer = DrawState {
+        queue: 3000,
+        blend: true,
+        zwrite: false,
+        outline: false,
+        ..solid
+    };
+    match kind {
+        // toon_nose
+        Kind::Overlay if name.contains("nose") => layer,
+        // toon_eye and toon_eyew mark their pixels with 2.
+        Kind::Eye | Kind::Overlay => DrawState {
+            stencil: Stencil::Write,
+            stencil_ref: 2,
+            ..layer
+        },
+        // main_hair_front leaves pixels marked 2 alone.
+        Kind::Hair if name.contains("front") => DrawState {
+            queue: 3040,
+            blend: true,
+            stencil: Stencil::SkipEqual,
+            stencil_ref: 2,
+            ..solid
+        },
+        // main_skin
+        Kind::Skin => DrawState { queue: 2350, ..solid },
+        // toon_glasses
+        _ if name.contains("glass") => DrawState {
+            queue: 4010,
+            blend: true,
+            outline: false,
+            ..solid
+        },
+        // main_alpha
+        _ if name.contains("alpha") => DrawState {
+            queue: 3040,
+            blend: true,
+            ..solid
+        },
+        _ => solid,
+    }
 }
 
 impl MaterialDesc {
@@ -99,7 +154,8 @@ impl MaterialDesc {
         let empty = MaterialInst::default();
         let mat = mat.unwrap_or(&empty);
         let kind = classify(&mat.shader);
-        let blended = is_blended(&mat.shader, kind);
+        let state = mat.draw.unwrap_or_else(|| state_for_name(&mat.shader, kind));
+        let blended = state.blend;
         let color = |name: &str, default: [f32; 4]| mat.colors.get(name).copied().unwrap_or(default);
         let float = |name: &str, default: f32| mat.floats.get(name).copied().unwrap_or(default);
 
@@ -135,14 +191,20 @@ impl MaterialDesc {
         }
         let cutoff = match kind {
             Kind::Overlay | Kind::Eye => 0.02,
-            _ if blended => 0.02,
+            // The hair shaders cut at one half even when they blend.
+            Kind::Hair => 0.5,
+            _ if blended => 0.05,
             _ => float("_Cutoff", 0.5).clamp(0.01, 1.0),
         };
         let uniform = MaterialUniform {
             color1,
             color2: color("_Color2", [1.0; 4]),
             color3: color("_Color3", [1.0; 4]),
-            shadow: color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
+            // The face layer shaders spell it in lower case.
+            shadow: match kind {
+                Kind::Eye | Kind::Overlay => color("_shadowcolor", [0.628, 0.628, 0.628, 1.0]),
+                _ => color("_ShadowColor", [0.628, 0.628, 0.628, 1.0]),
+            },
             over1: color("_overcolor1", [1.0; 4]),
             // Hair: scale and offset of the gloss mask.
             over2: if kind == Kind::Hair {
@@ -174,28 +236,31 @@ impl MaterialDesc {
                     float("_SpeclarHeight", 0.85),
                     if front { 1.0 } else { 0.0 },
                 ]
+            } else if kind == Kind::Eye {
+                // The game switches highlights on unless the character hides
+                // them; the stored value is not used.
+                [1.0, float("_rotation", 0.0), 0.0, 0.0]
+            } else if kind == Kind::Overlay {
+                let nose = mat.shader.to_lowercase().contains("nose");
+                [if nose { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]
             } else {
                 [float("_nip", 0.0), float("_nipsize", 0.5), 0.0, 0.0]
             },
             line: color("_LineColor", [0.5, 0.5, 0.5, 1.0]),
             info: [kind as u32, flags, 0, 0],
         };
-        let default_queue = match kind {
-            Kind::Skin => 2350,
-            Kind::Overlay => 2999,
-            Kind::Eye => 3000,
-            _ if blended => 3040,
-            _ => 2450,
-        };
         Self {
             kind,
             queue: if mat.render_queue > 0 {
                 mat.render_queue
             } else {
-                default_queue
+                state.queue
             },
             blended,
-            outline: !blended && matches!(kind, Kind::Item | Kind::Skin | Kind::Hair),
+            outline: state.outline && matches!(kind, Kind::Item | Kind::Skin | Kind::Hair),
+            zwrite: state.zwrite,
+            stencil: state.stencil,
+            stencil_ref: state.stencil_ref,
             uniform,
             textures,
         }
@@ -241,7 +306,39 @@ mod tests {
         let brow = MaterialDesc::new(Some(&mat("Shader Forge/toon_eyew_lod0", 2460)));
         assert_eq!((brow.queue, brow.blended, brow.outline), (2460, true, false));
         let sheer = MaterialDesc::new(Some(&mat("Shader Forge/main_alpha", -1)));
-        assert_eq!((sheer.queue, sheer.blended, sheer.outline), (3040, true, false));
+        // The game's see-through cloth shader has an outline pass and writes depth.
+        assert_eq!(
+            (sheer.queue, sheer.blended, sheer.outline, sheer.zwrite),
+            (3040, true, true, true)
+        );
+        let fringe = MaterialDesc::new(Some(&mat("xukmi/HairFrontPlus", -1)));
+        assert_eq!(
+            (fringe.queue, fringe.blended, fringe.stencil, fringe.stencil_ref),
+            (3040, true, Stencil::SkipEqual, 2)
+        );
+        let iris = MaterialDesc::new(Some(&mat("Shader Forge/toon_eye_lod0", -1)));
+        assert_eq!(
+            (iris.queue, iris.zwrite, iris.stencil, iris.stencil_ref),
+            (3000, false, Stencil::Write, 2)
+        );
+        let nose = MaterialDesc::new(Some(&mat("Shader Forge/toon_nose_lod0", -1)));
+        assert_eq!((nose.stencil, nose.uniform.p3[0]), (Stencil::None, 1.0));
+
+        // A state read from the shader wins over the name.
+        let mut read = mat("Shader Forge/main_opaque", -1);
+        read.draw = Some(DrawState {
+            queue: 3100,
+            blend: true,
+            zwrite: false,
+            outline: false,
+            stencil: Stencil::Write,
+            stencil_ref: 7,
+        });
+        let d = MaterialDesc::new(Some(&read));
+        assert_eq!(
+            (d.queue, d.blended, d.zwrite, d.outline, d.stencil, d.stencil_ref),
+            (3100, true, false, false, Stencil::Write, 7)
+        );
         let none = MaterialDesc::new(None);
         assert_eq!((none.kind, none.uniform.info[1]), (Kind::Item, 0));
     }

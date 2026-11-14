@@ -4,7 +4,7 @@
 //! Turns Unity prefabs into scene nodes and renderers, with caches for the
 //! meshes and textures they share.
 
-use crate::scene::{Image, Instance, MaterialInst, Part, RendererInst, Scene, TexSlot, Trs};
+use crate::scene::{DrawState, Image, Instance, MaterialInst, Part, RendererInst, Scene, TexSlot, Trs};
 use anyhow::{anyhow, Context, Result};
 use glam::{Quat, Vec3};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
@@ -17,6 +17,8 @@ pub struct Loader<'a> {
     pub game: &'a Game,
     meshes: HashMap<(usize, i64), Arc<Mesh>>,
     images: HashMap<(usize, i64), Option<Arc<Image>>>,
+    /// Loose PNG textures from mods, by their key.
+    pngs: HashMap<String, Option<Arc<Image>>>,
     /// Problems that did not stop loading (missing assets, bad textures).
     pub warnings: Vec<String>,
 }
@@ -27,6 +29,7 @@ impl<'a> Loader<'a> {
             game,
             meshes: HashMap::new(),
             images: HashMap::new(),
+            pngs: HashMap::new(),
             warnings: Vec::new(),
         }
     }
@@ -72,15 +75,35 @@ impl<'a> Loader<'a> {
 
     /// Loads a texture asset by bundle path and name.
     pub fn image_by_name(&mut self, vpath: &str, name: &str, prefer_mod: Option<u32>) -> Option<Arc<Image>> {
+        // A loose PNG in a mod wins over any bundle, as in Sideloader.
+        let key = rk_vfs::png_key(vpath, name);
+        if let Some(image) = self.pngs.get(&key) {
+            return image.clone();
+        }
+        if let Some(bytes) = self.game.assets.png(vpath, name) {
+            let image = crate::material_editor::decode(&bytes, name.to_string()).map(|mut image| {
+                // Sideloader takes the wrap mode from the file's path.
+                if key.contains("clamp") {
+                    image.repeat = false;
+                }
+                Arc::new(image)
+            });
+            self.pngs.insert(key, image.clone());
+            if image.is_some() {
+                return image;
+            }
+        }
         let obj = self.game.assets.find(vpath, name, Some(class::TEXTURE2D), prefer_mod)?;
         self.image(&obj)
     }
 
     pub fn material(&mut self, obj: &ObjRef) -> Result<MaterialInst> {
         let m = Material::read(&obj.read()?)?;
+        let (shader, passes) = self.game.assets.shader_info(&obj.file, m.shader).unwrap_or_default();
         let mut inst = MaterialInst {
             name: m.name.clone(),
-            shader: self.game.assets.shader_name(&obj.file, m.shader).unwrap_or_default(),
+            shader,
+            draw: DrawState::from_passes(&passes),
             keywords: m.keywords.clone(),
             render_queue: m.render_queue,
             ..Default::default()

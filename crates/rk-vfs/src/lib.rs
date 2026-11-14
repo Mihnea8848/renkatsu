@@ -10,7 +10,7 @@ pub mod items;
 pub mod resolve;
 
 pub use assets::{AssetFile, Assets, Game, LoadedBundle, ObjRef};
-pub use index::{Index, ModInfo};
+pub use index::{png_key, Index, ModInfo};
 pub use items::{resolve_infos, Item, ItemDb, Lookup, ResolveInfo};
 
 /// Item list categories (`ChaListDefine.CategoryNo` in the game).

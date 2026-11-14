@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,6 +83,9 @@ struct ZipScan {
     info: Option<ModInfo>,
     skipped: Option<String>,
     bundles: Vec<(String, String)>,
+    /// Loose PNG textures: key (see `png_key`) and entry name.
+    #[serde(default)]
+    pngs: Vec<(String, String)>,
     lists: Vec<ListData>,
     migrations: Vec<Migration>,
 }
@@ -109,6 +112,9 @@ pub struct Index {
     /// Virtual path under `abdata` (lowercase, forward slashes) to its
     /// sources, zipmods first.
     pub bundles: HashMap<String, Vec<BundleLoc>>,
+    /// Loose PNG files in zipmods that stand in for a texture of a bundle,
+    /// by `png_key`. The first mod that has one wins, as in Sideloader.
+    pub pngs: HashMap<String, BundleLoc>,
     /// Lowercase CAB name to the game bundle's virtual path.
     pub cabs: HashMap<String, String>,
     pub lists: Vec<ListData>,
@@ -139,6 +145,15 @@ fn rel(root: &Path, p: &Path) -> String {
 
 pub fn norm(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches('/').to_lowercase()
+}
+
+/// Key of a loose PNG that Sideloader serves in place of the texture `name`
+/// in the bundle `vpath`: the bundle path without its extension, a slash and
+/// the texture name, all lower case.
+pub fn png_key(vpath: &str, name: &str) -> String {
+    let dir = norm(vpath);
+    let dir = dir.strip_suffix(".unity3d").unwrap_or(&dir);
+    format!("{dir}/{}", name.to_lowercase())
 }
 
 /// `ChaListData` as the game stores it in list bundles (MessagePack).
@@ -307,6 +322,8 @@ fn scan_zipmod(path: &Path) -> ZipScan {
             };
             if lower.ends_with(".unity3d") {
                 scan.bundles.push((inner.to_string(), name.clone()));
+            } else if let Some(key) = inner.strip_suffix(".png") {
+                scan.pngs.push((key.to_string(), name.clone()));
             } else if inner.starts_with("list/characustom/") && lower.ends_with(".csv") {
                 let mut text = String::new();
                 if zip.by_name(&name)?.read_to_string(&mut text).is_ok() {
@@ -488,6 +505,12 @@ impl Index {
                     },
                 );
             }
+            for (key, entry) in scan.pngs {
+                idx.pngs.entry(key).or_insert(BundleLoc {
+                    mod_idx: Some(mod_idx),
+                    path: entry,
+                });
+            }
             idx.migrations.extend(scan.migrations);
             for mut l in scan.lists {
                 l.mod_idx = Some(mod_idx);
@@ -501,6 +524,16 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_keys_drop_the_bundle_extension() {
+        assert_eq!(
+            png_key("Sideloader/mt_eyeline_down_00.unity3d", "Madevil_Mai"),
+            "sideloader/mt_eyeline_down_00/madevil_mai"
+        );
+        assert_eq!(png_key("\\chara\\a.unity3d", "t"), "chara/a/t");
+        assert_eq!(png_key("chara/noext", "t"), "chara/noext/t");
+    }
 
     #[test]
     fn csv_list_follows_sideloader_layout() {

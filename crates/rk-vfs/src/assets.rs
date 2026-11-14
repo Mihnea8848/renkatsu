@@ -243,6 +243,30 @@ impl Assets {
         rk_unityfs::objects::shader_name(&v)
     }
 
+    /// Bytes of a loose PNG a zipmod ships in place of a bundle texture.
+    /// Sideloader looks for these before it looks in any bundle.
+    pub fn png(&self, vpath: &str, name: &str) -> Option<Vec<u8>> {
+        let loc = self.index.pngs.get(&crate::index::png_key(vpath, name))?;
+        let zip_path = self.index.game_dir.join(&self.index.mods[loc.mod_idx? as usize].path);
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(zip_path).ok()?).ok()?;
+        let mut entry = zip.by_name(&loc.path).ok()?;
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    /// Name and passes of the shader a material uses.
+    pub fn shader_info(
+        &self,
+        from: &Arc<AssetFile>,
+        shader: PPtr,
+    ) -> Option<(String, Vec<rk_unityfs::objects::ShaderPass>)> {
+        let obj = self.deref(from, shader)?;
+        let v = obj.file.sf.read_until(&obj.info, "m_ParsedForm").ok()?;
+        let name = rk_unityfs::objects::shader_name(&v)?;
+        Some((name, rk_unityfs::objects::shader_passes(&v)))
+    }
+
     pub fn mod_guid(&self, mod_idx: Option<u32>) -> Option<&str> {
         mod_idx.map(|m| self.index.mods[m as usize].guid.as_str())
     }

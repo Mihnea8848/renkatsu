@@ -324,14 +324,31 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 
     if (kind == KIND_OVERLAY) {
         let t = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
-        if (t.a < m.p0.x) {
+        if (m.p3.x > 0.5) {
+            // Nose line (toon_nose): red is the line, green a highlight.
+            return vec4<f32>(m.color1.rgb * (1.0 - t.r) + t.g, t.a * m.color1.a);
+        }
+        // Brows, lashes and eye whites (toon_eyew): only pixels at least half
+        // solid are kept, lit through the ramp with the material's shade.
+        if (t.a < 0.5) {
             discard;
         }
-        return vec4<f32>(t.rgb * m.color1.rgb, t.a * m.p1.z);
+        let shade = overlay(scene_shadow(), m.shadow.rgb);
+        let base = t.rgb * m.color1.rgb;
+        let dark = shade * base;
+        let lit = textureSample(ramp_tex, ramp_samp, vec2<f32>(dot(normalize(g.light_dir.xyz), normalize(i.normal)), 0.5)).r;
+        let rgb = lit * (base - dark) + dark;
+        return vec4<f32>(rgb * max(light_color(), g.ambient_shadow.rgb), t.a);
     }
 
     if (kind == KIND_EYE) {
-        let iris = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
+        // Iris (toon_eye): the drawing turned by the material's rotation, the
+        // two highlights on top, shaded by the light unless a highlight
+        // covers the pixel.
+        let turn = m.p3.y * 6.28318548;
+        let d = i.uv0 - 0.5;
+        let uv = vec2<f32>(dot(d, vec2<f32>(cos(turn), sin(turn))), dot(d, vec2<f32>(-sin(turn), cos(turn)))) + 0.5;
+        let iris = textureSample(main_tex, samp, uv * m.st_main.xy + m.st_main.zw);
         var over = vec4<f32>(0.0);
         if (has(HAS_OVER1)) {
             over = textureSample(over1_tex, samp, i.uv1).a * m.over1;
@@ -339,8 +356,15 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
         if (has(HAS_OVER2)) {
             over = max(over, textureSample(over2_tex, samp, i.uv2).a * m.over2);
         }
-        let rgb = mix(iris.rgb, over.rgb, over.a);
-        return vec4<f32>(rgb, max(over.a, iris.a));
+        let highlight = over.a * m.p3.x;
+        let base = mix(iris.rgb, over.rgb, highlight);
+        let shade = overlay(scene_shadow(), m.shadow.rgb);
+        let dark = shade * base;
+        let lambert = max(dot(normalize(g.light_dir.xyz), normalize(i.normal)), 0.0);
+        let lit = clamp(highlight + lambert, 0.0, 1.0);
+        let rgb = lit * (base - dark) + dark;
+        let out = clamp(rgb * max(light_color(), g.ambient_shadow.rgb), vec3<f32>(0.0), vec3<f32>(1.0));
+        return vec4<f32>(out, max(iris.a, highlight));
     }
 
     let s = read_surface(i);
@@ -367,7 +391,8 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     line.r = mix(line.r, detail.r, m.p0.w);
 
     if (kind == KIND_HAIR) {
-        return vec4<f32>(hair_color(i, s.diffuse, n, dot(n, normalize(g.light_dir.xyz)), ramp, detail, front), 1.0);
+        let rgb = hair_color(i, s.diffuse, n, dot(n, normalize(g.light_dir.xyz)), ramp, detail, front);
+        return vec4<f32>(rgb, select(1.0, s.alpha, blended));
     }
 
     // Shadows painted into the masks, softened by the shadow-extend sliders.
