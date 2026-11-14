@@ -10,13 +10,14 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use material::{MaterialDesc, MaterialUniform};
+use rk_chara::Stencil;
 use rk_chara::{DrawMesh, Image};
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 const SAMPLES: u32 = 4;
 
 #[derive(Debug, Clone, Copy)]
@@ -120,9 +121,10 @@ impl Default for Environment {
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    opaque: wgpu::RenderPipeline,
-    blend: wgpu::RenderPipeline,
-    outline: wgpu::RenderPipeline,
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    /// One pipeline per combination of draw settings in use.
+    pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     globals_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     sampler_repeat: wgpu::Sampler,
@@ -199,11 +201,70 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Pass {
-    Opaque,
-    Blend,
-    Outline,
+/// The draw settings a pipeline is built for.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct PipelineKey {
+    /// The outline pass: back faces pushed outward.
+    outline: bool,
+    blend: bool,
+    zwrite: bool,
+    stencil: Stencil,
+}
+
+impl PipelineKey {
+    fn surface(desc: &MaterialDesc) -> Self {
+        Self {
+            outline: false,
+            blend: desc.blended,
+            zwrite: desc.zwrite,
+            stencil: desc.stencil,
+        }
+    }
+
+    /// Outlines are solid and write depth. They respect marked pixels the
+    /// way their surface does, and never mark any themselves.
+    fn outline(desc: &MaterialDesc) -> Self {
+        Self {
+            outline: true,
+            blend: false,
+            zwrite: true,
+            stencil: match desc.stencil {
+                Stencil::SkipEqual => Stencil::SkipEqual,
+                _ => Stencil::None,
+            },
+        }
+    }
+}
+
+/// One thing to draw, in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Step {
+    item: usize,
+    outline: bool,
+}
+
+/// Draw order after the game: surfaces up to the last solid queue, then
+/// their outlines, then everything later in queue order, each with its
+/// outline first. `items` holds (queue, has outline) and is sorted by queue.
+fn draw_order(items: &[(i32, bool)]) -> Vec<Step> {
+    const LAST_SOLID_QUEUE: i32 = 2500;
+    let solid = |i: &usize| items[*i].0 <= LAST_SOLID_QUEUE;
+    let mut steps = Vec::new();
+    let all = 0..items.len();
+    steps.extend(all.clone().filter(solid).map(|item| Step { item, outline: false }));
+    steps.extend(
+        all.clone()
+            .filter(solid)
+            .filter(|i| items[*i].1)
+            .map(|item| Step { item, outline: true }),
+    );
+    for item in all.filter(|i| !solid(i)) {
+        if items[item].1 {
+            steps.push(Step { item, outline: true });
+        }
+        steps.push(Step { item, outline: false });
+    }
+    steps
 }
 
 impl Renderer {
@@ -262,60 +323,6 @@ impl Renderer {
             bind_group_layouts: &[&globals_layout, &material_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = |pass: Pass| {
-            let (vs, fs) = if pass == Pass::Outline {
-                ("vs_outline", "fs_outline")
-            } else {
-                ("vs_main", "fs_main")
-            };
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(fs),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some(vs),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4, 7 => Float32x4],
-                    }],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fs),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: COLOR_FORMAT,
-                        blend: (pass == Pass::Blend).then_some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Cw,
-                    // The outline is the mesh's back faces, pushed outward.
-                    cull_mode: (pass == Pass::Outline).then_some(wgpu::Face::Front),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: pass != Pass::Blend,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: Default::default(),
-                    // Blended layers lie on top of the surface they decorate.
-                    bias: if pass == Pass::Blend {
-                        wgpu::DepthBiasState { constant: -8, slope_scale: -1.0, clamp: 0.0 }
-                    } else {
-                        Default::default()
-                    },
-                }),
-                multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
-                multiview: None,
-                cache: None,
-            })
-        };
-        let (opaque, blend, outline) = (pipeline(Pass::Opaque), pipeline(Pass::Blend), pipeline(Pass::Outline));
         let sampler = |mode| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: mode,
@@ -338,9 +345,9 @@ impl Renderer {
         Ok(Self {
             device,
             queue,
-            opaque,
-            blend,
-            outline,
+            shader,
+            layout,
+            pipelines: HashMap::new(),
             globals_layout,
             material_layout,
             sampler_repeat,
@@ -348,6 +355,89 @@ impl Renderer {
             white,
             hard_ramp,
             textures: HashMap::new(),
+        })
+    }
+
+    fn make_pipeline(&self, key: PipelineKey) -> wgpu::RenderPipeline {
+        let (vs, fs) = if key.outline {
+            ("vs_outline", "fs_outline")
+        } else {
+            ("vs_main", "fs_main")
+        };
+        let face = match key.stencil {
+            Stencil::None => wgpu::StencilFaceState::IGNORE,
+            Stencil::Write => wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Always,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Replace,
+            },
+            Stencil::SkipEqual => wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::NotEqual,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+        };
+        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(fs),
+            layout: Some(&self.layout),
+            vertex: wgpu::VertexState {
+                module: &self.shader,
+                entry_point: Some(vs),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4, 7 => Float32x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &self.shader,
+                entry_point: Some(fs),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: key.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Cw,
+                // The outline is the mesh's back faces, pushed outward.
+                cull_mode: key.outline.then_some(wgpu::Face::Front),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: key.zwrite,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask: 0xff,
+                    write_mask: 0xff,
+                },
+                // Layers that do not write depth lie on the surface they
+                // decorate and must win against it.
+                bias: if key.blend && !key.zwrite {
+                    wgpu::DepthBiasState {
+                        constant: -8,
+                        slope_scale: -1.0,
+                        clamp: 0.0,
+                    }
+                } else {
+                    Default::default()
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLES,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
         })
     }
 
@@ -521,8 +611,10 @@ impl Renderer {
             first: u32,
             count: u32,
             queue: i32,
-            blended: bool,
             outline: bool,
+            surface_key: PipelineKey,
+            outline_key: PipelineKey,
+            stencil_ref: u32,
             bind: wgpu::BindGroup,
         }
         let mut batches = Vec::new();
@@ -569,8 +661,10 @@ impl Renderer {
                     first: sm.first_index,
                     count: sm.index_count,
                     queue: desc.queue,
-                    blended: desc.blended,
                     outline: desc.outline,
+                    surface_key: PipelineKey::surface(&desc),
+                    outline_key: PipelineKey::outline(&desc),
+                    stencil_ref: desc.stencil_ref as u32,
                     bind,
                 });
             }
@@ -578,6 +672,20 @@ impl Renderer {
         }
         // Unity order: by render queue, ties in submission order.
         items.sort_by_key(|i| i.queue);
+        let order: Vec<(i32, bool)> = items.iter().map(|i| (i.queue, i.outline)).collect();
+        let steps = draw_order(&order);
+        for step in &steps {
+            let item = &items[step.item];
+            let key = if step.outline {
+                item.outline_key
+            } else {
+                item.surface_key
+            };
+            if !self.pipelines.contains_key(&key) {
+                let pipeline = self.make_pipeline(key);
+                self.pipelines.insert(key, pipeline);
+            }
+        }
 
         let size = wgpu::Extent3d {
             width,
@@ -629,34 +737,33 @@ impl Renderer {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Discard,
                     }),
-                    stencil_ops: None,
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &globals_bg, &[]);
-            // Solid surfaces, their outlines, then blended layers on top.
-            for which in [Pass::Opaque, Pass::Outline, Pass::Blend] {
-                pass.set_pipeline(match which {
-                    Pass::Opaque => &self.opaque,
-                    Pass::Outline => &self.outline,
-                    Pass::Blend => &self.blend,
-                });
-                for item in &items {
-                    let wanted = match which {
-                        Pass::Opaque => !item.blended,
-                        Pass::Outline => item.outline,
-                        Pass::Blend => item.blended,
-                    };
-                    if !wanted {
-                        continue;
-                    }
-                    let b = &batches[item.batch];
-                    pass.set_vertex_buffer(0, b.vb.slice(..));
-                    pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_bind_group(1, &item.bind, &[]);
-                    pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
+            let mut current = None;
+            for step in &steps {
+                let item = &items[step.item];
+                let key = if step.outline {
+                    item.outline_key
+                } else {
+                    item.surface_key
+                };
+                if current != Some(key) {
+                    pass.set_pipeline(&self.pipelines[&key]);
+                    current = Some(key);
                 }
+                pass.set_stencil_reference(item.stencil_ref);
+                let b = &batches[item.batch];
+                pass.set_vertex_buffer(0, b.vb.slice(..));
+                pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(1, &item.bind, &[]);
+                pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
             }
         }
 
@@ -761,6 +868,28 @@ mod tests {
         )
         .validate(&module)
         .expect("toon.wgsl validates");
+    }
+
+    #[test]
+    fn draw_order_follows_the_queues() {
+        let step = |item, outline| Step { item, outline };
+        // Skin, cloth with outline, eye layer, fringe with outline.
+        let items = [(2350, true), (2450, true), (3000, false), (3040, true)];
+        assert_eq!(
+            draw_order(&items),
+            vec![
+                // Solid surfaces first, then their outlines.
+                step(0, false),
+                step(1, false),
+                step(0, true),
+                step(1, true),
+                // Later queues one at a time, outline before surface.
+                step(2, false),
+                step(3, true),
+                step(3, false),
+            ]
+        );
+        assert!(draw_order(&[]).is_empty());
     }
 
     #[test]

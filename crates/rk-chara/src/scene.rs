@@ -7,7 +7,7 @@
 //! Math follows the stored data: left-handed, Y up, metres.
 
 use glam::{Mat4, Quat, Vec3};
-use rk_unityfs::objects::Mesh;
+use rk_unityfs::objects::{Mesh, ShaderPass};
 use rk_vfs::ObjRef;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,11 +80,69 @@ pub struct TexSlot {
     pub offset: [f32; 2],
 }
 
+/// How a shader uses the stencil buffer. The game's eye and brow shaders
+/// mark their pixels, and front hair leaves marked pixels alone, which is
+/// what keeps eyes visible through a fringe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Stencil {
+    #[default]
+    None,
+    /// Writes the reference value where it draws.
+    Write,
+    /// Does not draw where the buffer holds the reference value.
+    SkipEqual,
+}
+
+/// When and how a material is drawn, taken from its shader's forward pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawState {
+    /// Unity render queue: lower draws first.
+    pub queue: i32,
+    /// Blends with what is behind by its alpha.
+    pub blend: bool,
+    pub zwrite: bool,
+    /// The shader has an outline pass.
+    pub outline: bool,
+    pub stencil: Stencil,
+    pub stencil_ref: u8,
+}
+
+impl DrawState {
+    /// State of the pass that draws the lit surface, or `None` when the
+    /// shader has no such pass.
+    pub fn from_passes(passes: &[ShaderPass]) -> Option<Self> {
+        let helper = |p: &ShaderPass| {
+            let name = p.name.to_ascii_uppercase();
+            name == "OUTLINE" || matches!(p.light_mode.as_str(), "SHADOWCASTER" | "META" | "FORWARDADD")
+        };
+        let main = passes
+            .iter()
+            .find(|p| p.light_mode == "FORWARDBASE")
+            .or_else(|| passes.iter().find(|p| !helper(p)))?;
+        Some(Self {
+            queue: main.queue.unwrap_or(2000),
+            // Source alpha with one minus source alpha.
+            blend: main.src_blend == 5 && main.dst_blend == 10,
+            zwrite: main.zwrite,
+            outline: passes.iter().any(|p| p.name.eq_ignore_ascii_case("OUTLINE")),
+            stencil: match (main.stencil_comp, main.stencil_pass) {
+                (6, _) => Stencil::SkipEqual,
+                (8, 2) => Stencil::Write,
+                _ => Stencil::None,
+            },
+            stencil_ref: main.stencil_ref.clamp(0, 255) as u8,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MaterialInst {
     pub name: String,
     /// Unity shader name, e.g. `Shader Forge/main_skin`.
     pub shader: String,
+    /// Draw state read from the shader. `None` when the shader could not be
+    /// read, as with shaders that plugins carry inside their own files.
+    pub draw: Option<DrawState>,
     pub keywords: String,
     pub render_queue: i32,
     pub textures: HashMap<String, TexSlot>,

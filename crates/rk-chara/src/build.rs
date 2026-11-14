@@ -96,6 +96,18 @@ impl<'g> Builder<'g> {
     }
 }
 
+/// Bundle and texture name the game tries first for a head type other than
+/// the first: the bundle name with its last two characters replaced by `50`,
+/// and the texture name with `_<head>` appended.
+pub fn head_variant(bundle: &str, texture: &str, head_id: i32) -> Option<(String, String)> {
+    if head_id == 0 {
+        return None;
+    }
+    let stem = bundle.replace(".unity3d", "");
+    let cut = stem.char_indices().rev().nth(1).map(|(i, _)| i).unwrap_or(0);
+    Some((format!("{}50.unity3d", &stem[..cut]), format!("{texture}_{head_id}")))
+}
+
 /// Clothing prefabs hold a fully worn variant and half-off variants; only
 /// the worn one is shown.
 fn hide_undressed_states(scene: &mut Scene, inst: &Instance) {
@@ -145,6 +157,37 @@ impl<'g> Builder<'g> {
         let item = self.item(label, property, category, id)?;
         self.loader
             .image_by_name(item.get(ab_key)?, item.get(tex_key)?, item.mod_idx)
+    }
+
+    /// Texture of a face item that can have a variant per head type. For a
+    /// head other than the first, the game looks in the item bundle's `50`
+    /// twin, first for `<texture>_<head>` and then for the plain name. When
+    /// that finds nothing the plain lookup is used, which is what the
+    /// community's modded-head fix adds and mods rely on.
+    fn head_image(
+        &mut self,
+        label: &str,
+        property: &str,
+        category: i32,
+        id: i32,
+        tex_key: &str,
+        head_id: i32,
+    ) -> Option<Arc<Image>> {
+        let item = self.item(label, property, category, id)?;
+        let (ab, tex) = (item.get("MainAB")?, item.get(tex_key)?);
+        if ab == "0" || tex == "0" {
+            return None;
+        }
+        if let Some((twin, variant)) = head_variant(ab, tex, head_id) {
+            let found = self
+                .loader
+                .image_by_name(&twin, &variant, item.mod_idx)
+                .or_else(|| self.loader.image_by_name(&twin, tex, item.mod_idx));
+            if found.is_some() {
+                return found;
+            }
+        }
+        self.loader.image_by_name(ab, tex, item.mod_idx)
     }
 
     /// Puts a composed texture on a renderer, swapping in the material the
@@ -334,29 +377,29 @@ impl<'g> Builder<'g> {
     /// Eyebrows, eyeliner and the nose line: texture and colour per mesh.
     fn face_lines(&mut self, card: &Card, inst: &Instance) {
         let face = &card.face;
-        let up = self.item_image(
+        let up = self.head_image(
             "eyeline",
             "ChaFileFace.eyelineUpId",
             cat::MT_EYELINE_UP,
             face.eyeline_up_id,
-            "MainAB",
             "EyelineUpTex",
+            face.head_id,
         );
-        let up_shadow = self.item_image(
+        let up_shadow = self.head_image(
             "eyeline",
             "ChaFileFace.eyelineUpId",
             cat::MT_EYELINE_UP,
             face.eyeline_up_id,
-            "MainAB",
             "EyelineShadowTex",
+            face.head_id,
         );
-        let down = self.item_image(
+        let down = self.head_image(
             "eyeline",
             "ChaFileFace.eyelineDownId",
             cat::MT_EYELINE_DOWN,
             face.eyeline_down_id,
-            "MainAB",
             "EyelineDownTex",
+            face.head_id,
         );
         let brow = self.item_image(
             "eyebrow",

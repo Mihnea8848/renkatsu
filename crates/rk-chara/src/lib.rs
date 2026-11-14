@@ -17,4 +17,4 @@ pub mod shape;
 
 pub use build::{build, BuildOptions, Character};
 pub use loader::Loader;
-pub use scene::{DrawMesh, Image, MaterialInst, Part, RendererInst, Scene, TexSlot, Trs};
+pub use scene::{DrawMesh, DrawState, Image, MaterialInst, Part, RendererInst, Scene, Stencil, TexSlot, Trs};

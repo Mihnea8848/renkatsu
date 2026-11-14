@@ -477,6 +477,98 @@ pub fn shader_name(o: &UObject) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Render state of one shader pass, as far as Renkatsu uses it. Values are
+/// Unity's enum numbers.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShaderPass {
+    pub name: String,
+    /// The `LIGHTMODE` tag, upper case, e.g. `FORWARDBASE`.
+    pub light_mode: String,
+    /// Render queue from the `QUEUE` tag of the pass or its subshader.
+    pub queue: Option<i32>,
+    pub zwrite: bool,
+    pub src_blend: i32,
+    pub dst_blend: i32,
+    pub stencil_ref: i32,
+    /// Compare function: 6 is not equal, 8 is always.
+    pub stencil_comp: i32,
+    /// Operation when the pixel is drawn: 0 keeps, 2 replaces with the reference.
+    pub stencil_pass: i32,
+}
+
+/// Render queue number for a `QUEUE` tag such as `Transparent+40`.
+pub fn parse_queue(tag: &str) -> Option<i32> {
+    let tag = tag.trim();
+    let split = tag.find(['+', '-']).unwrap_or(tag.len());
+    let base = match tag[..split].trim().to_ascii_lowercase().as_str() {
+        "background" => 1000,
+        "geometry" => 2000,
+        "alphatest" => 2450,
+        "geometrylast" => 2500,
+        "transparent" => 3000,
+        "overlay" => 4000,
+        _ => return None,
+    };
+    let offset = match tag[split..].trim() {
+        "" => 0,
+        rest => rest.replace(' ', "").parse::<i32>().ok()?,
+    };
+    Some(base + offset)
+}
+
+/// Passes of the first subshader of a Shader object.
+pub fn shader_passes(o: &UObject) -> Vec<ShaderPass> {
+    fn tag(tags: Option<&UValue>, key: &str) -> Option<String> {
+        tags?
+            .get("tags")?
+            .as_array()?
+            .iter()
+            .filter_map(UValue::as_object)
+            .find(|t| t.str("first").is_some_and(|k| k.eq_ignore_ascii_case(key)))
+            .and_then(|t| t.str("second"))
+            .map(str::to_string)
+    }
+    let Some(sub) = o
+        .path("m_ParsedForm.m_SubShaders")
+        .and_then(UValue::as_array)
+        .and_then(|s| s.first())
+        .and_then(UValue::as_object)
+    else {
+        return Vec::new();
+    };
+    let sub_queue = tag(sub.get("m_Tags"), "QUEUE");
+    let mut out = Vec::new();
+    for pass in sub.array("m_Passes").unwrap_or_default() {
+        let Some(state) = pass.get("m_State").and_then(UValue::as_object) else {
+            continue;
+        };
+        // Each state value is a number with the name of a material property
+        // that can replace it. The game's own shaders use plain numbers.
+        let num = |path: &str| {
+            state
+                .path(path)
+                .and_then(|v| v.get("val"))
+                .and_then(UValue::as_f32)
+                .unwrap_or(0.0) as i32
+        };
+        let tags = state.get("m_Tags");
+        out.push(ShaderPass {
+            name: state.str("m_Name").unwrap_or_default().to_string(),
+            light_mode: tag(tags, "LIGHTMODE").unwrap_or_default().to_ascii_uppercase(),
+            queue: tag(tags, "QUEUE")
+                .or_else(|| sub_queue.clone())
+                .and_then(|q| parse_queue(&q)),
+            zwrite: num("zWrite") != 0,
+            src_blend: num("rtBlend0.srcBlend"),
+            dst_blend: num("rtBlend0.destBlend"),
+            stencil_ref: num("stencilRef"),
+            stencil_comp: num("stencilOp.comp"),
+            stencil_pass: num("stencilOp.pass"),
+        });
+    }
+    out
+}
+
 // ------------------------------------------------------------------ texture
 
 #[derive(Debug, Clone)]
