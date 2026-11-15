@@ -6,6 +6,7 @@
 //! shows which kind of mistake affects how many cards.
 
 use crate::reference::{run, Summary};
+use crate::ui;
 use anyhow::Result;
 use rk_chara::BuildOptions;
 use rk_core::Config;
@@ -54,16 +55,23 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
     let opts = BuildOptions::default();
     let mut summaries = Vec::new();
-    for line in std::fs::read_to_string(list)?.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+    let lines: Vec<String> = std::fs::read_to_string(list)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    let started = std::time::Instant::now();
+    crate::ui::status("Comparing", format!("{} cards with their captures", lines.len()));
+    let bar = ui::bar("Comparing", lines.len() as u64);
+    for line in &lines {
         let card = root.join(line);
         let stem = card.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        bar.set_message(stem.clone());
         let capture = captures.join(format!("{stem}.json"));
         if !capture.exists() {
-            println!("{stem}: no capture");
+            bar.println(format!("{} {stem}: no capture", ui::dim(format!("{:>12}", "skipped"))));
+            bar.inc(1);
             continue;
         }
         let out = out_dir.join(format!("{stem}.png"));
@@ -72,25 +80,49 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
                 let views: Vec<String> = s
                     .views
                     .iter()
-                    .map(|(n, mean, outline)| format!("{n} {mean:.1} ({:.1}%)", outline * 100.0))
+                    .map(|(n, mean, outline)| {
+                        format!(
+                            "{} {} {}",
+                            ui::dim(n),
+                            ui::mean(*mean),
+                            ui::dim(format!("({:.1}%)", outline * 100.0))
+                        )
+                    })
                     .collect();
-                println!(
-                    "{:<40} {}  order {}  data {}  warnings {}",
-                    s.name.chars().take(40).collect::<String>(),
+                bar.println(format!(
+                    "{:<36} {}  order {}  data {}  warnings {}",
+                    s.name.chars().take(36).collect::<String>(),
                     views.join("  "),
-                    s.queues_differ,
-                    s.state.differences(),
-                    s.warnings.len()
-                );
+                    ui::count(s.queues_differ),
+                    ui::count(s.state.differences()),
+                    ui::count(s.warnings.len())
+                ));
                 summaries.push(s);
             }
-            Err(e) => println!("{stem}: failed: {e:#}"),
+            Err(e) => bar.println(format!(
+                "{} {stem}: {e:#}",
+                console::style(format!("{:>12}", "failed")).red().bold()
+            )),
         }
+        bar.inc(1);
         game.assets.clear();
     }
+    bar.finish_and_clear();
+    ui::status(
+        "Finished",
+        format!(
+            "{} cards in {:.1} min, pictures in {}",
+            summaries.len(),
+            started.elapsed().as_secs_f32() / 60.0,
+            out_dir.display()
+        ),
+    );
     let counts = tally(&summaries);
     if !counts.is_empty() {
-        println!("\ndata differences across {} cards (cards affected):", summaries.len());
+        ui::heading(format!(
+            "Data differences across {} cards (cards affected)",
+            summaries.len()
+        ));
         let mut rows: Vec<_> = counts.into_iter().collect();
         rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         for ((kind, subject), n) in rows.iter().take(40) {
@@ -108,7 +140,7 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
         }
     }
     if !warnings.is_empty() {
-        println!("\nwarnings (times seen):");
+        ui::heading("Warnings (times seen)");
         for (w, n) in warnings {
             println!("  {n:>4}  {w}");
         }

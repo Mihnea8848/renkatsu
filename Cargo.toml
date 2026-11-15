@@ -17,6 +17,8 @@ rmp-serde = "1"
 toml = "1.2"
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
+indicatif = "0.18"
+console = "0.16"
 rk-core = { path = "crates/rk-core" }
 rk-card = { path = "crates/rk-card" }
 rk-unityfs = { path = "crates/rk-unityfs" }

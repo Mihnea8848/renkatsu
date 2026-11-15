@@ -13,6 +13,7 @@ mod compare;
 mod reference;
 mod render;
 mod state;
+mod ui;
 mod vfs;
 
 #[derive(Parser)]
