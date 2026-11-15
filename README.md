@@ -152,6 +152,9 @@ Renkatsu Character Maker with everything the Koikatsu maker can do.
 7. The character maker
 8. Games in real 3D for desktop and Android
 9. Koikatsu Sunshine content
+10. Renkatsu's own shading: a modern anime look in the spirit of games such
+    as Arknights: Endfield, offered beside the Koikatsu look. This comes
+    last, once the engine, the editor and the main features are done
 
 The default look will stay anime style, with real shadows and better lighting
 than the game has.
