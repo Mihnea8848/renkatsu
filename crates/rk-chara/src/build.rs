@@ -501,7 +501,13 @@ impl<'g> Builder<'g> {
             // Studio draws the full-detail texture, without the `_low` suffix.
             let image = self.item_image(
                 "emblem",
-                &format!("{property}Emblem{k}"),
+                // Sideloader's resolver names them ClothesTopEmblem and
+                // ClothesTopEmblem2.
+                &if k == 0 {
+                    format!("{property}Emblem")
+                } else {
+                    format!("{property}Emblem2")
+                },
                 cat::MT_EMBLEM,
                 id,
                 "MainTexAB",
@@ -1809,7 +1815,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             // Sub-parts share the top's colours.
                             let sources = compose::color_sources(Some(k));
                             b.dress(&inst, sub, &cp.color_info, sources, &pattern_prop, overlays::SUB_IDS[k]);
-                            b.emblems(&inst, cp, &sub_prop);
+                            // Their emblems are the top's, under the top's name.
+                            let top_prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[0]);
+                            b.emblems(&inst, cp, &top_prop);
                             top_insts.push(inst);
                         }
                         top_items.push(sub);
