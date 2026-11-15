@@ -63,14 +63,17 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
         .collect();
     let started = std::time::Instant::now();
     crate::ui::status("Comparing", format!("{} cards with their captures", lines.len()));
-    let bar = ui::bar("Comparing", lines.len() as u64);
+    let bar = ui::bar(lines.len() as u64);
     for line in &lines {
         let card = root.join(line);
         let stem = card.file_stem().unwrap_or_default().to_string_lossy().to_string();
         bar.set_message(stem.clone());
         let capture = captures.join(format!("{stem}.json"));
         if !capture.exists() {
-            bar.println(format!("{} {stem}: no capture", ui::dim(format!("{:>12}", "skipped"))));
+            crate::ui::above(
+                &bar,
+                format!("{} {stem}: no capture", ui::dim(format!("{:>12}", "skipped"))),
+            );
             bar.inc(1);
             continue;
         }
@@ -89,20 +92,29 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
                         )
                     })
                     .collect();
-                bar.println(format!(
-                    "{:<36} {}  order {}  data {}  warnings {}",
-                    s.name.chars().take(36).collect::<String>(),
-                    views.join("  "),
-                    ui::count(s.queues_differ),
-                    ui::count(s.state.differences()),
-                    ui::count(s.warnings.len())
-                ));
+                crate::ui::above(
+                    &bar,
+                    ui::line(
+                        "Compared",
+                        &format!(
+                            "{:<32} {}  order {}  data {}  warnings {}",
+                            s.name.chars().take(32).collect::<String>(),
+                            views.join("  "),
+                            ui::count(s.queues_differ),
+                            ui::count(s.state.differences()),
+                            ui::count(s.warnings.len())
+                        ),
+                    ),
+                );
                 summaries.push(s);
             }
-            Err(e) => bar.println(format!(
-                "{} {stem}: {e:#}",
-                console::style(format!("{:>12}", "failed")).red().bold()
-            )),
+            Err(e) => crate::ui::above(
+                &bar,
+                format!(
+                    "{} {stem}: {e:#}",
+                    console::style(format!("{:>12}", "failed")).red().bold()
+                ),
+            ),
         }
         bar.inc(1);
         game.assets.clear();

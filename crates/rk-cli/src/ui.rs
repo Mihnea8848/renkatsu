@@ -7,7 +7,7 @@
 //! is not a terminal, so logs and pipes stay plain text.
 
 use console::{style, StyledObject};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -21,7 +21,17 @@ pub fn status(verb: &str, msg: impl Display) {
 
 /// A failure line, red.
 pub fn fail(msg: impl Display) {
-    println!("{} {msg}", style(format!("{:>VERB$}", "error")).red().bold());
+    println!("{}", line_fail(&msg.to_string()));
+}
+
+/// A status line as text, for printing above a progress bar.
+pub fn line(verb: &str, msg: &str) -> String {
+    format!("{} {msg}", style(format!("{verb:>VERB$}")).green().bold())
+}
+
+/// A failure line as text, for printing above a progress bar.
+pub fn line_fail(msg: &str) -> String {
+    format!("{} {msg}", style(format!("{:>VERB$}", "error")).red().bold())
 }
 
 /// A section heading.
@@ -29,21 +39,31 @@ pub fn heading(text: impl Display) {
     println!("\n{}", style(text).bold().underlined());
 }
 
-/// A progress bar with a verb, count, elapsed time and time left. Lines
-/// printed through `bar.println` appear above it.
-pub fn bar(verb: &str, len: u64) -> ProgressBar {
-    let bar = ProgressBar::new(len);
-    let template = format!(
-        "{{prefix:>{VERB}.cyan.bold}} [{{bar:32.cyan/blue}}] {{pos}}/{{len}} {{elapsed_precise}} (left {{eta}}) {{wide_msg}}"
-    );
+/// A progress bar pinned to the bottom line, in apt's layout:
+/// `Progress: [ 37%] [#####.....] 12/32  0:01:10 left 0:02:00  card`.
+/// Lines printed through `bar.println` scroll above it.
+pub fn bar(len: u64) -> ProgressBar {
+    // On standard output, with the status lines, so the two never mix.
+    let bar = ProgressBar::with_draw_target(Some(len), ProgressDrawTarget::stdout());
+    let template = "{prefix:.black.on_green} [{percent:>3}%] [{bar:40.green}] {pos}/{len}  {elapsed_precise} left {eta_precise}  {wide_msg:.dim}";
     bar.set_style(
-        ProgressStyle::with_template(&template)
+        ProgressStyle::with_template(template)
             .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("=> "),
+            .progress_chars("#."),
     );
-    bar.set_prefix(verb.to_string());
+    bar.set_prefix("Progress:");
     bar.enable_steady_tick(Duration::from_millis(200));
     bar
+}
+
+/// Prints a line above the bar, or plainly when the bar is hidden (output
+/// is not a terminal), where indicatif would drop it.
+pub fn above(bar: &ProgressBar, text: String) {
+    if bar.is_hidden() {
+        println!("{text}");
+    } else {
+        bar.println(text);
+    }
 }
 
 /// A mean colour difference, coloured: green when close to the game,

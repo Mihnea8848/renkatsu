@@ -252,7 +252,7 @@ pub fn run(
     let card = Card::load(card_path)?;
     let mut chara = rk_chara::build(game, &card, opts)?;
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
-    let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene);
+    let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene, verbose);
     let draws = chara.scene.pose();
     let defaults = Environment::default();
     let (shadow_color, shadow_depth) = cap.shadow.unwrap_or((defaults.shadow_color, defaults.shadow_depth));
@@ -429,7 +429,7 @@ pub fn capture_iris(capture: &str) -> Result<Vec<(String, [f32; 4])>> {
 
 /// Puts the captured scale and offset on the iris textures. The highlights
 /// keep their distance from the iris. Returns how many eyes were set.
-fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara::Scene) -> usize {
+fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara::Scene, verbose: bool) -> usize {
     let mut count = 0;
     for (name, st) in placements {
         for r in scene.renderers.iter_mut().filter(|r| &r.name == name) {
@@ -438,10 +438,12 @@ fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara:
                 continue;
             };
             // The scale does not depend on the gaze, so it checks our own rule.
-            println!(
-                "  iris {name}: scale from the card {:.4} x {:.4}, in the game {:.4} x {:.4}",
-                old_scale[0], old_scale[1], st[0], st[1]
-            );
+            if verbose {
+                println!(
+                    "  iris {name}: scale from the card {:.4} x {:.4}, in the game {:.4} x {:.4}",
+                    old_scale[0], old_scale[1], st[0], st[1]
+                );
+            }
             for (key, slot) in m.textures.iter_mut() {
                 if !matches!(key.as_str(), "_MainTex" | "_overtex1" | "_overtex2") {
                     continue;

@@ -145,7 +145,7 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
     let mut r = Report::default();
     let started = Instant::now();
-    let bar = crate::ui::bar("Building", cards.len() as u64);
+    let bar = crate::ui::bar(cards.len() as u64);
     // Small batches, with the bundle cache emptied in between.
     for batch in cards.chunks(threads.max(1) * 2) {
         if let Some(name) = batch.last().and_then(|p| p.file_stem()) {
@@ -154,15 +154,27 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
         let results: Vec<_> = pool.install(|| batch.par_iter().map(&summarise).collect());
         game.assets.clear();
         bar.inc(batch.len() as u64);
-        for res in results {
+        for (path, res) in batch.iter().zip(results) {
             r.cards += 1;
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
             let s = match res {
                 Ok(s) => s,
                 Err(e) => {
+                    crate::ui::above(&bar, crate::ui::line_fail(&format!("{name}: {e}")));
                     *r.failed.entry(e.chars().take(90).collect()).or_default() += 1;
                     continue;
                 }
             };
+            crate::ui::above(
+                &bar,
+                crate::ui::line(
+                    "Built",
+                    &format!(
+                        "{name} {}",
+                        crate::ui::dim(format!("{:.1}s, {} warnings", s.seconds, s.warnings.len()))
+                    ),
+                ),
+            );
             r.seconds.push(s.seconds);
             r.cards_with_warnings += !s.warnings.is_empty() as usize;
             r.cards_with_blank += !s.blank.is_empty() as usize;
