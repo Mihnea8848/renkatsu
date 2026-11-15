@@ -17,13 +17,16 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Plugin data keys that the builder reads.
-const HANDLED: [&str; 6] = [
+const HANDLED: [&str; 9] = [
     rk_vfs::items::RESOLVER_KEY,
     rk_chara::abmx::KEY,
     rk_chara::material_editor::KEY,
     rk_chara::more_accessories::KEY,
     rk_chara::overlays::SKIN_KEY,
     rk_chara::overlays::CLOTHES_KEY,
+    rk_chara::pushup::KEY,
+    rk_chara::hair_accessories::KEY,
+    rk_chara::dynamic_bone_editor::KEY,
 ];
 
 #[derive(Default)]
@@ -112,8 +115,13 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
                 }
                 for m in &rend.materials {
                     let kind = classify(&m.shader);
+                    let ported = if rk_render::material::PORTED.contains(&m.shader.as_str()) {
+                        "ported     "
+                    } else {
+                        "approximate"
+                    };
                     s.shaders.push(format!(
-                        "{:?} <- {}",
+                        "{ported} {:?} <- {}",
                         kind,
                         if m.shader.is_empty() { "(none)" } else { &m.shader }
                     ));
@@ -192,7 +200,7 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
     for (w, n) in top(&r.warnings, 25) {
         println!("  {n:>5}  {w}");
     }
-    println!("\nmaterials by kind and shader:");
+    println!("\nmaterials by shader (ported from the game's code, or approximate):");
     for (s, n) in top(&r.shaders, 40) {
         println!("  {n:>5}  {s}");
     }

@@ -65,6 +65,24 @@ pub fn item_shader(shader: &str) -> ItemShader {
     }
 }
 
+/// Shaders whose pixel program is ported from the game's own disassembly.
+/// Everything else goes through an approximation; `rk audit` reports how
+/// many materials that leaves.
+pub const PORTED: [&str; 12] = [
+    "Shader Forge/main_skin",
+    "Shader Forge/main_hair",
+    "Shader Forge/main_hair_front",
+    "Shader Forge/toon_eye_lod0",
+    "Shader Forge/toon_eyew_lod0",
+    "Shader Forge/toon_nose_lod0",
+    "Shader Forge/main_opaque",
+    "Shader Forge/main_opaque2",
+    "Shader Forge/main_alpha",
+    "Shader Forge/main_item",
+    "Shader Forge/main_item_studio_alpha",
+    "Shader Forge/toon_glasses_lod0",
+];
+
 /// Texture slots in bind order.
 pub const SLOTS: [(&str, u32); 8] = [
     ("_MainTex", HAS_MAIN),

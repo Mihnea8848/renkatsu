@@ -105,7 +105,8 @@ enum Cmd {
     },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
-        /// How many cards to sample from the game folder.
+        /// How many cards to sample from the game folder; a number above the
+        /// total takes every card.
         #[arg(long, default_value_t = 150)]
         count: usize,
         #[arg(long, default_value_t = 4)]
