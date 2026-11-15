@@ -920,8 +920,13 @@ impl Renderer {
             // Unity draws materials beyond the submesh count with the last
             // submesh again; MaterialEditor's copies rely on this.
             let materials = &d.renderer.materials;
+            // An empty slot is not drawn, but Unity fills it with its default
+            // material once something reads the renderer's materials (as
+            // MaterialEditor does), and that material still casts: a
+            // shadow-only mesh with an empty slot casts in the game.
+            let shadow_only = d.renderer.cast_shadows == ShadowCasting::ShadowsOnly;
             let pairs = submesh_materials(mesh.submeshes.len(), materials.len(), |i| {
-                materials.get(i).is_some_and(|m| m.absent)
+                !shadow_only && materials.get(i).is_some_and(|m| m.absent)
             });
             let mut receives = false;
             for (si, mi) in pairs {

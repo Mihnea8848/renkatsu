@@ -1320,6 +1320,12 @@ impl<'g> Builder<'g> {
                         offset: [place.offset[0], place.offset[1] + shift_y],
                     };
                     m.textures.insert("_MainTex".into(), placed(iris.clone(), 0.0));
+                    // ChangeSettingEyeTilt: face slider 33 tilts the irises,
+                    // Lerp(0.02, -0.02, v) on the left and the mirror on the right.
+                    let tilt = face.shape_value_face.get(33).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+                    let rotation = 0.02 - 0.04 * tilt;
+                    m.floats
+                        .insert("_rotation".into(), if side == 1 { -rotation } else { rotation });
                     for (tex, color, image, value, shift) in [
                         (
                             "_overtex1",
@@ -2133,6 +2139,14 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     }
     if female && opts.studio {
         crate::hand_size::studio_copy(&mut b.scene, &bones, &mods);
+    }
+    // ChaControl.UpdateVisible: tongue state 0, where Studio starts since it
+    // loads cards without their status, shows the face's tongue (S_TongueF)
+    // and hides the body's (S_TongueB, shown only in state 1).
+    for r in b.scene.renderers.iter_mut() {
+        if r.name == "o_tang" && r.part == Part::Body {
+            r.enabled = false;
+        }
     }
     // MaterialEditor overrides come last, so they win over everything the
     // card's own settings produced.

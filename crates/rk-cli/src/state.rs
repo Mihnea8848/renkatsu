@@ -60,7 +60,8 @@ fn bare(name: &str) -> &str {
 pub fn renderer_for<'a>(r: &Value, scene: &'a Scene) -> Option<&'a rk_chara::RendererInst> {
     let name = r["name"].as_str()?;
     let first = bare(r["materials"][0]["name"].as_str().unwrap_or(""));
-    let mut same_name = scene.renderers.iter().filter(|x| x.name == name);
+    // The game only lists renderers that are switched on.
+    let mut same_name = scene.renderers.iter().filter(|x| x.name == name && x.enabled);
     same_name
         .clone()
         .find(|x| x.materials.first().is_some_and(|m| m.name == first))
@@ -127,7 +128,10 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
             let at = format!("{rname}[{i}]");
             if let Some(shader) = m["shader"].as_str() {
                 rep.compared += 1;
-                if shader != mine.shader {
+                // Unity fills an empty slot with its default material when the
+                // renderer's materials are read; ours stays empty.
+                let placeholder = mine.absent && shader == "Standard";
+                if shader != mine.shader && !placeholder {
                     rep.differ("shader", format!("{at}: game {shader}, ours {}", mine.shader));
                 }
             }
