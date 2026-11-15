@@ -116,8 +116,14 @@ pub fn placement(look: &EyeLook, right: bool, pupil: Pupil, gaze: [f32; 2]) -> P
 }
 
 /// How far a highlight sits above or below the iris, from its slider.
-pub fn highlight_shift(slider: f32) -> f32 {
-    lerp(0.1, -0.1, slider)
+/// Slider Unlocker swaps the game's Mathf.Lerp for LerpUnclamped in
+/// ChangeSettingEyeHLUpPosY and ChangeSettingEyeHLDownPosY.
+pub fn highlight_shift(slider: f32, unclamped: bool) -> f32 {
+    if unclamped {
+        0.1 - 0.2 * slider
+    } else {
+        lerp(0.1, -0.1, slider)
+    }
 }
 
 #[cfg(test)]
@@ -177,8 +183,11 @@ mod tests {
 
     #[test]
     fn highlight_slider_is_centred_at_half() {
-        assert_eq!(highlight_shift(0.5), 0.0);
-        assert!((highlight_shift(0.0) - 0.1).abs() < 1e-6);
-        assert!((highlight_shift(2.0) + 0.1).abs() < 1e-6);
+        assert_eq!(highlight_shift(0.5, false), 0.0);
+        assert!((highlight_shift(0.0, false) - 0.1).abs() < 1e-6);
+        assert!((highlight_shift(2.0, false) + 0.1).abs() < 1e-6);
+        // With Slider Unlocker a value past the end keeps going.
+        assert!((highlight_shift(2.0, true) + 0.3).abs() < 1e-6);
+        assert!((highlight_shift(0.5, true)).abs() < 1e-6);
     }
 }

@@ -50,6 +50,9 @@ pub struct BuildOptions {
     pub clothing_unlocker: bool,
     /// Run the Eye Control plugin: the card limits how far the eyes open.
     pub eye_control: bool,
+    /// Run Slider Unlocker: highlight positions follow slider values set
+    /// outside 0 to 1 instead of stopping at the ends.
+    pub slider_unlocker: bool,
     /// Run the Pregnancy plugin: the body grows with the stored week.
     pub pregnancy: bool,
     /// Run the Accessory States plugin: accessories bound to clothes
@@ -79,6 +82,7 @@ impl Default for BuildOptions {
             invisible_body: true,
             clothing_unlocker: true,
             eye_control: true,
+            slider_unlocker: true,
             pregnancy: true,
             accessory_states: true,
             uncensor_selector: true,
@@ -1287,7 +1291,7 @@ impl<'g> Builder<'g> {
     }
 
     /// Builds iris and eye-white textures and sets the eye highlights.
-    fn eyes(&mut self, card: &Card, inst: &Instance) {
+    fn eyes(&mut self, card: &Card, inst: &Instance, unclamped_highlights: bool) {
         let face = &card.face;
         let white = self.item_image(
             "eye white",
@@ -1402,14 +1406,14 @@ impl<'g> Builder<'g> {
                             "_overcolor1",
                             &hl_up,
                             face.hl_up_color,
-                            eyelook::highlight_shift(face.hl_up_y),
+                            eyelook::highlight_shift(face.hl_up_y, unclamped_highlights),
                         ),
                         (
                             "_overtex2",
                             "_overcolor2",
                             &hl_down,
                             face.hl_down_color,
-                            eyelook::highlight_shift(face.hl_down_y),
+                            eyelook::highlight_shift(face.hl_down_y, unclamped_highlights),
                         ),
                     ] {
                         match image {
@@ -1874,7 +1878,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 _ => &card.face.base_makeup,
             };
             b.skin_face(card, makeup, &head, item);
-            b.eyes(card, &head);
+            b.eyes(card, &head, opts.slider_unlocker);
             b.face_lines(card, &head);
             let mut hidden = vec![
                 "cf_O_namida_S",
