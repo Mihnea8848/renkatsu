@@ -2203,6 +2203,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         Some(crate::material_editor::Shader {
             draw: crate::scene::DrawState::from_passes(&info.passes)?,
             queue: info.queue,
+            defaults: info
+                .defaults
+                .iter()
+                .filter_map(|(n, kind, v)| Some((n.clone(), crate::material_editor::ShaderDefault::parse(kind, v)?)))
+                .collect(),
         })
     };
     let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);

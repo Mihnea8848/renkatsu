@@ -60,12 +60,40 @@ pub(crate) fn decode(bytes: &[u8], name: String) -> Option<Image> {
     })
 }
 
-/// A shader MaterialEditor can switch to: its draw state and the queue its
-/// XML entry forces, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A shader MaterialEditor can switch to: its draw state, the queue its
+/// XML entry forces, if any, and the values the entry sets on a switch.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Shader {
     pub draw: DrawState,
     pub queue: Option<i32>,
+    pub defaults: Vec<(String, ShaderDefault)>,
+}
+
+/// A `DefaultValue` from a shader's XML entry. Texture and keyword defaults
+/// are not applied yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShaderDefault {
+    Float(f32),
+    Color([f32; 4]),
+}
+
+impl ShaderDefault {
+    /// Reads a value as MaterialEditor does: a float, or a colour written as
+    /// comma-separated components.
+    pub fn parse(kind: &str, value: &str) -> Option<ShaderDefault> {
+        match kind {
+            "Float" => value.trim().parse().ok().map(ShaderDefault::Float),
+            "Color" => {
+                let v: Vec<f32> = value.split(',').map(|x| x.trim().parse().ok()).collect::<Option<_>>()?;
+                match v[..] {
+                    [r, g, b] => Some(ShaderDefault::Color([r, g, b, 1.0])),
+                    [r, g, b, a, ..] => Some(ShaderDefault::Color([r, g, b, a])),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Face materials whose queue survives a shader switch.
@@ -82,11 +110,23 @@ const EYE_MATERIALS: [&str; 6] = [
 /// cannot load leaves the material alone. Otherwise the material takes the
 /// new shader's queue, unless the XML entry sets one or the material is one
 /// of the eye materials, which keep theirs. A queue saved with the entry
-/// wins over all of them.
-fn switch_shader(m: &mut MaterialInst, name: Option<&str>, shader: Option<Shader>, queue: Option<i32>) {
+/// wins over all of them. The entry's default values are set last, as
+/// MaterialAPI.SetShader does; the card's own values come after.
+fn switch_shader(m: &mut MaterialInst, name: Option<&str>, shader: Option<&Shader>, queue: Option<i32>) {
     if let (Some(name), Some(sh)) = (name, shader) {
         m.shader = name.to_string();
         m.draw = Some(sh.draw);
+        for (prop, value) in &sh.defaults {
+            let key = format!("_{prop}");
+            match *value {
+                ShaderDefault::Float(f) => {
+                    m.floats.insert(key, f);
+                }
+                ShaderDefault::Color(c) => {
+                    m.colors.insert(key, c);
+                }
+            }
+        }
         if let Some(q) = sh.queue {
             m.render_queue = q;
         } else if !EYE_MATERIALS.contains(&m.name.as_str()) {
@@ -208,7 +248,7 @@ pub fn apply(
         let name = text(&e, "ShaderName");
         let shader = name.and_then(shaders);
         let queue = map_get(&e, "RenderQueue").and_then(Value::as_i64).map(|q| q as i32);
-        applied.shaders += on_materials(scene, &e, &mut |m| switch_shader(m, name, shader, queue)) as usize;
+        applied.shaders += on_materials(scene, &e, &mut |m| switch_shader(m, name, shader.as_ref(), queue)) as usize;
     }
     for e in list("MaterialFloatPropertyList") {
         // Values are stored as text.
@@ -356,8 +396,9 @@ mod tests {
         let sh = Shader {
             draw: state(2475),
             queue: None,
+            defaults: vec![],
         };
-        switch_shader(&mut m, Some("xukmi/HairFrontPlus"), Some(sh), None);
+        switch_shader(&mut m, Some("xukmi/HairFrontPlus"), Some(&sh), None);
         assert_eq!(m.shader, "xukmi/HairFrontPlus");
         assert_eq!(m.draw.map(|d| d.queue), Some(2475));
         assert_eq!(m.render_queue, -1);
@@ -369,8 +410,9 @@ mod tests {
         let sh = Shader {
             draw: state(3000),
             queue: None,
+            defaults: vec![],
         };
-        switch_shader(&mut m, Some("xukmi/EyePlus"), Some(sh), None);
+        switch_shader(&mut m, Some("xukmi/EyePlus"), Some(&sh), None);
         assert_eq!(m.render_queue, 2474);
     }
 
@@ -379,12 +421,35 @@ mod tests {
         let sh = Shader {
             draw: state(2000),
             queue: Some(2600),
+            defaults: vec![],
         };
         let mut m = material("a", 3040);
-        switch_shader(&mut m, Some("s"), Some(sh), None);
+        switch_shader(&mut m, Some("s"), Some(&sh), None);
         assert_eq!(m.render_queue, 2600);
-        switch_shader(&mut m, Some("s"), Some(sh), Some(3000));
+        switch_shader(&mut m, Some("s"), Some(&sh), Some(3000));
         assert_eq!(m.render_queue, 3000);
+    }
+
+    #[test]
+    fn a_switch_sets_the_xml_defaults() {
+        let sh = Shader {
+            draw: state(2450),
+            queue: None,
+            defaults: vec![
+                ("Cutoff".into(), ShaderDefault::parse("Float", "0.1").unwrap()),
+                (
+                    "LineColor".into(),
+                    ShaderDefault::parse("Color", "0.5, 0.5, 0.5").unwrap(),
+                ),
+            ],
+        };
+        let mut m = material("cf_m_bra_01", 2450);
+        m.floats.insert("_Cutoff".into(), 0.5);
+        switch_shader(&mut m, Some("xukmi/MainAlphaPlus"), Some(&sh), None);
+        assert_eq!(m.floats["_Cutoff"], 0.1);
+        assert_eq!(m.colors["_LineColor"], [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(ShaderDefault::parse("Texture", "x"), None);
+        assert_eq!(ShaderDefault::parse("Color", "1,2"), None);
     }
 
     #[test]

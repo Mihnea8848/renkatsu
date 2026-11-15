@@ -73,6 +73,8 @@ pub struct MeShaderInfo {
     pub passes: Vec<ShaderPass>,
     /// Queue MaterialEditor forces on the material, from the shader's XML entry.
     pub queue: Option<i32>,
+    /// Defaults from the XML entry: name, type and value, as written.
+    pub defaults: Vec<(String, String, String)>,
 }
 
 /// Where a source of a bundle path stands when an asset is looked for:
@@ -388,11 +390,13 @@ impl Assets {
                 passes.map(|passes| MeShaderInfo {
                     passes,
                     queue: entry.queue,
+                    defaults: entry.defaults.clone(),
                 })
             }
             None => self.me_builtin().get(name).map(|p| MeShaderInfo {
                 passes: p.clone(),
                 queue: None,
+                defaults: Vec::new(),
             }),
         };
         self.me_shaders.lock().insert(name.to_string(), found.clone());

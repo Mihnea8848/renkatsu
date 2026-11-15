@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 7;
+const CACHE_VERSION: u32 = 8;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -53,6 +53,10 @@ pub struct MeShader {
     /// Queue the entry forces on materials that switch to it.
     pub queue: Option<i32>,
     pub mod_idx: Option<u32>,
+    /// Values MaterialEditor sets when a material switches to the shader:
+    /// property name without the underscore, type and value, as written.
+    #[serde(default)]
+    pub defaults: Vec<(String, String, String)>,
 }
 
 /// Reads the MaterialEditor shader entries of a manifest.
@@ -69,6 +73,18 @@ fn me_shaders(root: roxmltree::Node) -> Vec<MeShader> {
                 asset: attr("Asset").map(str::to_string),
                 queue: attr("RenderQueue").and_then(|q| q.parse().ok()),
                 mod_idx: None,
+                defaults: c
+                    .children()
+                    .filter(|p| p.has_tag_name("Property"))
+                    .filter_map(|p| {
+                        let attr = |n: &str| p.attribute(n).map(str::trim).filter(|v| !v.is_empty());
+                        Some((
+                            attr("Name")?.to_string(),
+                            attr("Type")?.to_string(),
+                            attr("DefaultValue")?.to_string(),
+                        ))
+                    })
+                    .collect(),
             })
         })
         .collect()
