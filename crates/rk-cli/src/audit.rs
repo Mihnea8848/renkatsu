@@ -144,10 +144,16 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
 
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
     let mut r = Report::default();
+    let started = Instant::now();
+    let bar = crate::ui::bar("Building", cards.len() as u64);
     // Small batches, with the bundle cache emptied in between.
     for batch in cards.chunks(threads.max(1) * 2) {
+        if let Some(name) = batch.last().and_then(|p| p.file_stem()) {
+            bar.set_message(name.to_string_lossy().to_string());
+        }
         let results: Vec<_> = pool.install(|| batch.par_iter().map(&summarise).collect());
         game.assets.clear();
+        bar.inc(batch.len() as u64);
         for res in results {
             r.cards += 1;
             let s = match res {
@@ -174,15 +180,19 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
         }
     }
 
+    bar.finish_and_clear();
     let built = r.seconds.len();
-    println!(
-        "cards: {} sampled, {} built, {} failed",
-        r.cards,
-        built,
-        r.cards - built
+    crate::ui::status(
+        "Built",
+        format!(
+            "{built} of {} cards in {:.1} min, {} failed",
+            r.cards,
+            started.elapsed().as_secs_f32() / 60.0,
+            crate::ui::count(r.cards - built)
+        ),
     );
     for (e, n) in top(&r.failed, 8) {
-        println!("  failed {n}: {e}");
+        crate::ui::fail(format!("{n} cards: {e}"));
     }
     r.seconds.sort_by(|a, b| a.total_cmp(b));
     if built > 0 {
@@ -193,26 +203,34 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
             r.seconds[built - 1]
         );
     }
-    println!(
-        "\nwarnings: {} of {} built cards have at least one",
-        r.cards_with_warnings, built
-    );
+    crate::ui::heading(format!(
+        "Warnings: {} of {built} built cards have at least one",
+        r.cards_with_warnings
+    ));
     for (w, n) in top(&r.warnings, 25) {
         println!("  {n:>5}  {w}");
     }
-    println!("\nmaterials by shader (ported from the game's code, or approximate):");
+    crate::ui::heading("Materials by shader (ported from the game's code, or approximate)");
     for (s, n) in top(&r.shaders, 40) {
-        println!("  {n:>5}  {s}");
+        let line = if s.starts_with("ported") {
+            console::style(s.as_str()).green()
+        } else {
+            console::style(s.as_str()).yellow()
+        };
+        println!("  {n:>5}  {line}");
     }
-    println!(
-        "\nmaterials that draw plain white (no texture, no colour): {} cards affected",
+    crate::ui::heading(format!(
+        "Materials that draw plain white (no texture, no colour): {} cards affected",
         r.cards_with_blank
-    );
+    ));
     for (s, n) in top(&r.blank, 15) {
         println!("  {n:>5}  {s}");
     }
-    println!("\nskinned meshes with no bone found: {}", r.unbound);
-    println!("\nplugin data in cards that nothing reads yet (cards carrying it):");
+    crate::ui::heading(format!(
+        "Skinned meshes with no bone found: {}",
+        crate::ui::count(r.unbound)
+    ));
+    crate::ui::heading("Plugin data in cards that nothing reads yet (cards carrying it)");
     for (k, n) in top(&r.plugins, 40) {
         println!("  {n:>5}  {k}");
     }

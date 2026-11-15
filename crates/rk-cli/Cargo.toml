@@ -22,3 +22,5 @@ rk-chara.workspace = true
 rk-render.workspace = true
 glam.workspace = true
 rayon.workspace = true
+indicatif.workspace = true
+console.workspace = true
