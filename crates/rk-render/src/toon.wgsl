@@ -4,7 +4,7 @@
 // Koikatsu reference shading. One module serves every material kind; the kind
 // is a uniform so the pipeline count stays small. The game renders in linear
 // colour space: the target is sRGB, so blending happens on linear values as
-// in the game. The clothes shaders (main_opaque, main_alpha) and
+// in the game. The clothes shaders (main_opaque, main_alpha), main_item and
 // main_item_studio_alpha work on linear values throughout. The older branches still do their maths on gamma values
 // and are converted on the way out.
 
@@ -60,6 +60,7 @@ const ITEM_OPAQUE: u32 = 1u;
 const ITEM_ALPHA: u32 = 2u;
 const ITEM_STUDIO_ALPHA: u32 = 3u;
 const ITEM_GLASSES: u32 = 4u;
+const ITEM_MAIN: u32 = 5u;
 
 struct Material {
     color1: vec4<f32>,
@@ -168,7 +169,11 @@ fn vs_outline(v: VsIn) -> VsOut {
     let dist = length(g.eye.xyz - v.pos);
     var width = (dist * 0.0999999866 + 0.300000012) * g.params.x * 0.00499999989 * m.p1.y;
     if (has(HAS_DETAIL)) {
-        width *= 1.0 - textureSampleLevel(detail_tex, samp, v.uv0, 0.0).b;
+        var uv = v.uv0;
+        if (m.info.x == KIND_ITEM && m.info.z == ITEM_MAIN) {
+            uv = uv * m.p2.xy + m.p2.zw;
+        }
+        width *= 1.0 - textureSampleLevel(detail_tex, samp, uv, 0.0).b;
     }
     // Hair lines thin out where the strand fades.
     if (m.info.x == KIND_HAIR) {
@@ -901,10 +906,143 @@ fn item_glasses(i: VsOut, front: bool) -> vec4<f32> {
     return vec4<f32>(rgb * alpha, alpha);
 }
 
+// Accessory, after the game's main_item pixel shaders. What the forward base
+// and outline passes share: the cut at half of twice the texture alpha and
+// the base colour (the three colours placed by the colour mask, darkened by
+// the line mask's blue channel). Returns the base colour and twice the alpha.
+// m.st_alpha, m.p2, m.p3 and m.line place the colour mask, detail mask, line
+// mask and normal map. Left out: the turn _Clock gives the line mask over
+// time (the picture is taken at an angle of zero), and the scale and offset
+// of the two ramps.
+fn item_main_base(i: VsOut) -> vec4<f32> {
+    var main = vec4<f32>(1.0);
+    if (has(HAS_MAIN)) {
+        main = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
+    }
+    let a = clamp(main.a + main.a, 0.0, 1.0);
+    if (a - 0.5 < 0.0) {
+        discard;
+    }
+    var tint = vec3<f32>(1.0);
+    if (has(HAS_COLOR_MASK)) {
+        let cm = textureSample(color_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw);
+        tint = mix(mix(cm.r * (m.color1.rgb - 1.0) + 1.0, m.color2.rgb, cm.g), m.color3.rgb, cm.b);
+    }
+    var base = main.rgb * tint;
+    if (has(HAS_LINE)) {
+        base *= 1.0 - textureSample(line_tex, samp, i.uv0 * m.p3.xy + m.p3.zw).b;
+    }
+    return vec4<f32>(base, a);
+}
+
+// How far the unlit side goes: the shadow factor, weakened where the
+// material's own ramp is in use. Returns the factor on the base colour and,
+// in w, the share of the second ramp.
+fn item_main_shade(base: vec3<f32>, dm: vec4<f32>, lm: vec4<f32>) -> vec4<f32> {
+    let line_r = mix(lm.r, dm.r, m.p0.w);
+    let another = mix(line_r, 1.0, m.over1.x);
+    let shade = item_shadow_factor(base) * (clamp(2.0 - m.p0.z - another, 0.0, 1.0) * 0.670000017 + 0.330000013);
+    return vec4<f32>(shade, another);
+}
+
+// Forward base pass of main_item (programs 2 and 10, which differ by the
+// shadow mask only). The colour is not scaled by the alpha it is blended
+// with (One, OneMinusSrcAlpha), so the rim of a cut-out adds to what is
+// behind it.
+// m.over1.x: second ramp everywhere. m.over2: shine height, specular power,
+// unused, no shine texture. m.over3: rim power, rim strength.
+fn item_main_forward(i: VsOut, front: bool) -> vec4<f32> {
+    let ba = item_main_base(i);
+    let base = ba.rgb;
+
+    var dm = vec4<f32>(0.0);
+    if (has(HAS_DETAIL)) {
+        dm = textureSample(detail_tex, samp, i.uv0 * m.p2.xy + m.p2.zw);
+    }
+    var lm = vec4<f32>(0.0);
+    if (has(HAS_LINE)) {
+        lm = textureSample(line_tex, samp, i.uv0 * m.p3.xy + m.p3.zw);
+    }
+    let sa = item_main_shade(base, dm, lm);
+    let shade = sa.rgb;
+
+    var t = vec2<f32>(0.0);
+    if (has(HAS_NORMAL)) {
+        t = textureSample(over1_tex, samp, i.uv0 * m.line.xy + m.line.zw).ag * 2.0 - 1.0;
+    }
+    let face = normalize(i.normal) * select(-1.0, 1.0, front);
+    let n = normalize(sqrt(1.0 - min(dot(t, t), 1.0)) * face + t.x * i.tangent + t.y * i.bitangent);
+    let l = normalize(g.light_dir.xyz);
+    let view = normalize(g.eye.xyz - i.world);
+    let ndl = dot(l, n);
+    let ndh = max(dot(n, normalize(view + l)), 0.0);
+    let ndv = dot(n, view);
+
+    // Light amount: the scene ramp, the material's own where asked, and the
+    // shadow mask.
+    let ramp = mix(item_ramp(ndl), item_another_ramp(ndh), sa.w) * shadow_mask(i);
+    var rgb = mix(base * shade, base, ramp);
+
+    // Highlight: the shine painted in the detail mask, or a plain one.
+    var shine = 0.0;
+    if (has(HAS_DETAIL)) {
+        let shift = (m.over2.x - 1.0) * 0.899999976;
+        let uv = shift * vec2<f32>(dot(i.tangent, view), dot(i.bitangent, view)) + i.uv0;
+        shine = textureSample(detail_tex, samp, uv * m.p2.xy + m.p2.zw).r;
+    }
+    let power = m.over2.y;
+    var glint = 0.0;
+    if (power > 0.0) {
+        glint = (pow(ndh, power * 256.0) * 5.0 - 4.0) * power;
+    }
+    let textured = clamp(glint + min(shine * shine, 1.0), 0.0, 1.0);
+    let plain = clamp(glint, 0.0, 1.0) * dm.r;
+    rgb += mix(textured, plain, m.over2.w);
+
+    // Rim towards the silhouette, tinted by the hue of the scene shadow.
+    let fresnel = max(1.0 - max(ndv, 0.0), 1e-6);
+    let rim = clamp(pow(fresnel, m.over3.x * 9.0 + 1.0) * 2.5 - 0.5, 0.0, 1.0) * m.over3.y
+        * ((1.0 - dm.b) * 9.99999809 - 8.99999809);
+    let hue = rgb_to_hsv(g.ambient_shadow.rgb).x;
+    let rim_rgb = rim * (hsv_to_rgb(vec3<f32>(hue, 1.0, 1.0)) * 0.400000006 + 0.300000012);
+    rgb += clamp((1.0 - dm.g) * rim_rgb, vec3<f32>(0.0), vec3<f32>(0.5));
+
+    rgb *= max(light_color(), g.ambient_shadow.rgb);
+    // Shadows painted into the detail mask.
+    let extend = m.p0.y * -1.20000005 + 1.0;
+    let drawn = (1.0 - dm.g) * (1.0 - extend) + extend;
+    rgb *= drawn * (1.0 - shade) + shade;
+    rgb *= select(0.660000026, 1.0, front);
+
+    // Lines painted into the masks; the light does not reach them.
+    let lines = item_lines(base * g.line_color.rgb * shade, vec3<f32>(1.0));
+    rgb = mix(rgb, lines, mix(lm.g, dm.b, m.p1.x));
+    return vec4<f32>(rgb, ba.a * 2.0 - 1.0);
+}
+
+// Outline pass of main_item (programs 5 and 6): the shaded base colour
+// pulled toward black or white by the scene's line depth.
+fn item_main_outline(i: VsOut) -> vec4<f32> {
+    let base = item_main_base(i).rgb;
+    var dm = vec4<f32>(0.0);
+    if (has(HAS_DETAIL)) {
+        dm = textureSample(detail_tex, samp, i.uv0 * m.p2.xy + m.p2.zw);
+    }
+    var lm = vec4<f32>(0.0);
+    if (has(HAS_LINE)) {
+        lm = textureSample(line_tex, samp, i.uv0 * m.p3.xy + m.p3.zw);
+    }
+    let shade = item_main_shade(base, dm, lm).rgb;
+    return vec4<f32>(item_lines(base * shade, vec3<f32>(1.0)), 1.0);
+}
+
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_GLASSES) {
         return item_glasses(i, front);
+    }
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_MAIN) {
+        return item_main_forward(i, front);
     }
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_STUDIO_ALPHA) {
         return item_studio_alpha(i, front);
@@ -920,6 +1058,9 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_MAIN) {
+        return item_main_outline(i);
+    }
     return outline_color(i);
 }
 
