@@ -43,6 +43,25 @@ pub struct BuildOptions {
     /// Run the Accessory Clothes plugin: accessories made for it are bound
     /// to the body skeleton like clothes.
     pub accessory_clothes: bool,
+    /// Run the Invisible Body plugin: a card can hide its body.
+    pub invisible_body: bool,
+    /// Run the Clothing Unlocker plugin: an unlocked outfit keeps the
+    /// bottom, bra and shorts that its top or bra would remove.
+    pub clothing_unlocker: bool,
+    /// Run the Eye Control plugin: the card limits how far the eyes open.
+    pub eye_control: bool,
+    /// Run the Pregnancy plugin: the body grows with the stored week.
+    pub pregnancy: bool,
+    /// Run the Accessory States plugin: accessories bound to clothes
+    /// states or groups are hidden outside their states.
+    pub accessory_states: bool,
+    /// Run the Uncensor Selector plugin: the body mesh and its base
+    /// textures come from the body the card names, or from a seeded pick
+    /// among the installed ones.
+    pub uncensor_selector: bool,
+    /// Run the Colliders plugin: floor, arm and leg colliders where the
+    /// card switches them on, and its changes to skirts and the bust.
+    pub colliders: bool,
 }
 
 impl Default for BuildOptions {
@@ -57,6 +76,13 @@ impl Default for BuildOptions {
             frame_time: crate::physics::FRAME_TIME,
             studio: true,
             accessory_clothes: true,
+            invisible_body: true,
+            clothing_unlocker: true,
+            eye_control: true,
+            pregnancy: true,
+            accessory_states: true,
+            uncensor_selector: true,
+            colliders: true,
         }
     }
 }
@@ -88,6 +114,10 @@ struct Builder<'g> {
     hair_gloss: Option<TexSlot>,
     /// Scripts of every loaded prefab, for the physics step.
     physics_sources: Vec<PhysicsSource>,
+    /// The outfit is unlocked by the Clothing Unlocker plugin.
+    unlocked: bool,
+    /// `ChaFileStatus.eyesOpenMax` as set when the character is added.
+    eyes_open_max: f32,
 }
 
 /// The scripts of one prefab and how the game treats its DynamicBones.
@@ -106,6 +136,12 @@ struct PhysicsSource {
 }
 
 impl<'g> Builder<'g> {
+    /// A list column of a clothing item as the game reads it while the
+    /// clothes are put on: the Clothing Unlocker plugin answers for some.
+    fn list_int(&self, item: &Item, key: &str) -> Option<i32> {
+        crate::clothing_unlocker::info_int(self.unlocked, key, item.int(key))
+    }
+
     fn item(&mut self, label: &str, property: &str, category: i32, id: i32) -> Option<&'g Item> {
         match self.game.items.lookup(&self.infos, property, category, id) {
             Lookup::Found(item) => Some(item),
@@ -356,6 +392,7 @@ impl<'g> Builder<'g> {
         top: usize,
         bones: &HashMap<String, usize>,
         edits: &[crate::dynamic_bone_editor::Edit],
+        colliders: Option<(crate::colliders::Settings, f32)>,
     ) -> crate::physics::Physics {
         use crate::physics::{self, Bone, DynamicBone, Resolve, Ver01, Ver02};
         let assets = &self.game.assets;
@@ -392,6 +429,11 @@ impl<'g> Builder<'g> {
             }
         }
 
+        // The Colliders plugin: its switches, the card's bust size and the
+        // colliders it created.
+        let plugin =
+            colliders.map(|(settings, bust)| (settings, bust, crate::colliders::add(&mut out.colliders, bones)));
+
         for (source, classes) in self.physics_sources.iter().zip(&classes) {
             for ((node, script), class) in source.scripts.iter().zip(classes) {
                 let Some(class) = class.as_deref() else { continue };
@@ -422,7 +464,9 @@ impl<'g> Builder<'g> {
                         if source.part {
                             def.colliders = body_colliders.clone();
                         }
-                        physics::colliders_plugin_off(&mut def, scene);
+                        if let Some((settings, _, added)) = &plugin {
+                            crate::colliders::dynamic_bone(&mut def, scene, *settings, added);
+                        }
                         if let (Some(slot), Some(root)) = (source.slot, def.root) {
                             crate::dynamic_bone_editor::apply(edits, slot, &scene.nodes[root].name, &mut def);
                         }
@@ -436,6 +480,9 @@ impl<'g> Builder<'g> {
                     _ => {
                         let mut def = physics::read_ver02(&obj, *node, &resolve);
                         def.enabled &= on;
+                        if let Some((settings, bust, added)) = &plugin {
+                            crate::colliders::ver02(&mut def, *settings, added, *bust);
+                        }
                         out.bones.push(Bone::Ver02(Ver02::new(def)));
                     }
                 }
@@ -620,13 +667,22 @@ impl<'g> Builder<'g> {
         for (_, script) in &inst.scripts {
             let Ok(obj) = script.read() else { continue };
             for (field, open) in expression::REST {
-                let Some(ctrl) = obj
+                let Some(mut ctrl) = obj
                     .get(field)
                     .and_then(rk_unityfs::UValue::as_object)
                     .and_then(expression::Controller::read)
                 else {
                     continue;
                 };
+                if field == expression::EYES {
+                    // The game replaces the prefab's limit when the head
+                    // is loaded and again every frame.
+                    let up_correct = obj
+                        .get("EyeLookUpCorrect")
+                        .and_then(rk_unityfs::UValue::as_f32)
+                        .unwrap_or(crate::eye_control::EYE_LOOK_UP_CORRECT);
+                    ctrl.open_max = crate::eye_control::open_limit(self.eyes_open_max, up_correct);
+                }
                 for target in &ctrl.targets {
                     let Some(node) = self
                         .game
@@ -978,7 +1034,7 @@ impl<'g> Builder<'g> {
         ];
         let mut no_bra = false;
         for item in tops {
-            no_bra |= item.int("NotBra") == Some(1);
+            no_bra |= self.list_int(item, "NotBra") == Some(1);
             for (k, (ab, tex)) in columns.iter().enumerate() {
                 if let (Some(ab), Some(tex)) = (item.get(ab), item.get(tex)) {
                     if let Some(image) = self.loader.image_by_name(ab, tex, item.mod_idx) {
@@ -1029,7 +1085,7 @@ impl<'g> Builder<'g> {
                 self.scene.nodes[inst.root].active = false;
             } else if let Some(image) = &bra_mask {
                 // One-piece bras use the lower half of a taller mask.
-                let (scale, offset) = if item.int("Coordinate") == Some(2) {
+                let (scale, offset) = if self.list_int(item, "Coordinate") == Some(2) {
                     ([1.0, 2.0], [0.0, -1.0])
                 } else {
                     ([1.0, 1.0], [0.0, 0.0])
@@ -1294,13 +1350,28 @@ impl<'g> Builder<'g> {
     }
 
     /// Builds the body skin texture from the card.
-    fn skin_body(&mut self, card: &Card, inst: &Instance, female: bool) {
+    /// `uncensor` is the body the Uncensor Selector plugin put in place:
+    /// its bundles and asset names stand in for the game's
+    /// (`CreateBodyTexture` and `InitBaseCustomTextureBody` transpilers).
+    fn skin_body(&mut self, card: &Card, inst: &Instance, female: bool, uncensor: Option<&rk_vfs::uncensor::Body>) {
+        use rk_vfs::uncensor::{defaults, Body};
+        let game_body;
+        let source = match uncensor {
+            Some(data) => data,
+            None => {
+                game_body = Body::builtin(u8::from(female), "", "");
+                &game_body
+            }
+        };
+        let oo_base = rk_vfs::index::norm(&source.oo_base);
+        let mm_base = rk_vfs::index::norm(&source.mm_base);
+        // A mod's own bundle is asked from that mod.
+        let oo_mod = source.mod_idx.filter(|_| oo_base != defaults::OO_BASE);
+        let mm_mod = source.mod_idx.filter(|_| mm_base != defaults::MM_BASE);
         let body = &card.body;
-        let main = self.loader.image_by_name(BASE, "cf_body_00_t", None);
-        let mask = self
-            .loader
-            .image_by_name(BASE, if female { "cf_body_00_mc" } else { "cm_body_00_mc" }, None);
-        let create = self.loader.material_by_name(MATERIALS, "cf_m_body_create", None);
+        let main = self.loader.image_by_name(&oo_base, &source.main_tex, oo_mod);
+        let mask = self.loader.image_by_name(&oo_base, &source.color_mask, oo_mod);
+        let create = self.loader.material_by_name(&mm_base, &source.material_create, mm_mod);
         let paint_mask = create
             .as_ref()
             .and_then(|m| m.textures.get("_paintmask"))
@@ -1354,9 +1425,7 @@ impl<'g> Builder<'g> {
             paint_mask: paint_mask.as_deref(),
             paints: [decal(0), decal(1)],
         });
-        let draw = self
-            .loader
-            .material_by_name(MATERIALS, if female { "cf_m_body" } else { "cm_m_body" }, None);
+        let draw = self.loader.material_by_name(&mm_base, &source.material, mm_mod);
         let image = self.over(kind::BODY_OVER, image);
         self.set_skin(inst, "o_body_a", draw, image);
         // Body detail: painted lines and their strength, and the shine sliders.
@@ -1544,6 +1613,13 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         hair_gloss: None,
         physics_sources: Vec::new(),
+        unlocked: opts.clothing_unlocker
+            && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
+        eyes_open_max: if opts.eye_control {
+            crate::eye_control::read(&card.ext).eye_open_max
+        } else {
+            crate::eye_control::Settings::default().eye_open_max
+        },
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -1576,13 +1652,64 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 
     // Body mesh.
     let body_name = if female { "p_cf_body_00" } else { "p_cm_body_00" };
-    let body = b
+    let mut body = b
         .loader
         .load_prefab(&mut b.scene, BASE, body_name, None, Some(top), Part::Body)?;
     assign_weights(&mut b.scene, &body, &bones, "cf_j_root", hips);
     b.physics_source(&body, false, false, true);
 
-    b.skin_body(card, &body, female);
+    // Uncensor Selector: another body's meshes on the same renderers.
+    let mut uncensor = None;
+    if opts.uncensor_selector {
+        use crate::uncensor_selector as us;
+        let uncensors = game.assets.uncensors();
+        let guid = us::stored_body(&card.ext, uncensors);
+        let voice_rate = rk_card::map_get(&card.parameter, "voiceRate")
+            .and_then(rk_card::Value::as_f64)
+            .unwrap_or(0.5) as f32;
+        // Slider Unlocker is part of every setup this engine stands for.
+        let seed = us::seed(
+            card.param_int("birthDay").unwrap_or(1),
+            card.param_int("personality").unwrap_or(0),
+            us::voice_pitch(voice_rate, true),
+        );
+        if let Some(data) = us::select(uncensors, guid.as_deref(), u8::from(female), seed) {
+            let vpath = rk_vfs::index::norm(&data.oo_base);
+            if vpath != BASE || data.asset != body_name {
+                match b
+                    .loader
+                    .load_prefab(&mut b.scene, &vpath, &data.asset, data.mod_idx, Some(top), Part::Body)
+                {
+                    Ok(donor) => {
+                        // Mod Bone Implantor: bones the prefab asks to
+                        // have moved into the skeleton.
+                        let mut pairs = Vec::new();
+                        for (_, script) in &donor.scripts {
+                            if b.script_class(script).as_deref() != Some(us::IMPLANT_SCRIPT) {
+                                continue;
+                            }
+                            let Ok(obj) = script.read() else { continue };
+                            let node = |field: &str| {
+                                let target = game.assets.deref(&script.file, obj.pptr(field)?)?;
+                                donor.transform_nodes.get(&target.key()).copied()
+                            };
+                            pairs.push((node("trfSrc"), node("trfDst")));
+                        }
+                        let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        us::swap_meshes(&mut b.scene, &mut body, &donor, data, uncensors, implants.as_ref());
+                    }
+                    Err(e) => b.loader.warn(format!("uncensor body {}: {e:#}", data.guid)),
+                }
+            }
+            for part in us::unsupported(data) {
+                b.loader
+                    .warn(format!("uncensor body {}: {part} is not applied", data.guid));
+            }
+            uncensor = Some(data);
+        }
+    }
+
+    b.skin_body(card, &body, female, uncensor);
 
     // Parts the game only shows in special states.
     for name in [
@@ -1768,7 +1895,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
                     b.emblems(inst, cp, &prop);
                 }
-                let one_piece = item.int("Coordinate") == Some(2);
+                let one_piece = b.list_int(item, "Coordinate") == Some(2);
                 let has_top = inst
                     .as_ref()
                     .is_some_and(|inst| inst.nodes.iter().any(|&n| b.scene.nodes[n].name == "n_top_a"));
@@ -1776,7 +1903,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 match i {
                     0 => {
                         kinds.top = state;
-                        kinds.not_bra = item.int("NotBra") == Some(1);
+                        kinds.not_bra = b.list_int(item, "NotBra") == Some(1);
                     }
                     1 => {
                         kinds.bottom = state;
@@ -1830,7 +1957,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         };
                         // ChangeClothesTopParts: the first sailor part, or
                         // either of the first two jacket parts, decides notBra.
-                        let sub_no_bra = sub.int("NotBra") == Some(1);
+                        let sub_no_bra = b.list_int(sub, "NotBra") == Some(1);
                         match (kind, k) {
                             (1, 0) => kinds.not_bra = sub_no_bra,
                             (2, 0) => kinds.not_bra = sub_no_bra,
@@ -1889,6 +2016,13 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 .iter()
                 .take(20.max(co.accessory.parts.len()))
                 .chain(extra.iter());
+            let slot_count = 20.max(co.accessory.parts.len()) + extra.len();
+            let states_off = if opts.accessory_states {
+                let bound = crate::accessory_states::coordinate(&card.ext, outfit, card.coordinates.len());
+                crate::accessory_states::hidden(&bound, opts.outdoor_shoes as u8, slot_count)
+            } else {
+                Vec::new()
+            };
             for (i, acc) in slots.enumerate() {
                 if acc.is_empty() {
                     continue;
@@ -1919,6 +2053,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 }
                 if opts.accessory_clothes {
                     b.accessory_clothes(&inst, &bones, hips);
+                }
+                if states_off.contains(&i) {
+                    // `SetAccessoryState(slot, false)`: the object is
+                    // switched off, not removed.
+                    b.scene.nodes[inst.root].active = false;
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
                 b.physics_source(&inst, true, false, !acc.no_shake);
@@ -1956,7 +2095,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     if female {
         crate::hand_size::correct(&mut b.scene, &bones);
     }
-    let mods = crate::abmx::read(&card.ext);
+    let mut mods = crate::abmx::read(&card.ext);
+    if opts.pregnancy {
+        crate::pregnancy::combine(&mut mods, &crate::pregnancy::effects(&card.ext));
+    }
     if !mods.is_empty() {
         crate::abmx::apply(&mut b.scene, &mods, outfit, &bones, &accessory_nodes);
     }
@@ -1989,11 +2131,24 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     // Physics runs on the finished skeleton, as the game's does once a
     // character is loaded.
     let bone_edits = crate::dynamic_bone_editor::for_outfit(&card.ext, outfit);
-    let mut physics = b.read_physics(top, &bones, &bone_edits);
+    let collider_plugin = opts.colliders.then(|| {
+        let bust = card
+            .body
+            .shape_value_body
+            .get(crate::colliders::BREAST_SIZE)
+            .copied()
+            .unwrap_or(0.0);
+        (crate::colliders::read(&card.ext), bust)
+    });
+    let mut physics = b.read_physics(top, &bones, &bone_edits, collider_plugin);
     if opts.physics {
         physics.start(&mut b.scene);
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
+    }
+
+    if opts.invisible_body && !crate::invisible_body::visible(&card.ext) {
+        crate::invisible_body::hide(&mut b.scene, top);
     }
 
     let ramp = ramp_image(&mut b.loader, DEFAULT_RAMP);

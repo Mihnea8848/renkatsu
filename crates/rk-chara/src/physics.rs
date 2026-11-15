@@ -1726,29 +1726,6 @@ pub fn read_ver02(obj: &UObject, node: usize, r: &Resolve) -> Ver02Def {
 }
 
 // ---------------------------------------------------------------------------
-// The Colliders plugin (KK_Colliders).
-
-/// What the Colliders plugin does to a skirt bone when its skirt colliders
-/// are off, which is its default for characters added in Studio: the front
-/// chain of a bottom (`ct_clothesBot`, root `cf_j_sk_00_*`) loses its
-/// frozen axis. Its arm, leg and floor colliders are then not in use.
-pub fn colliders_plugin_off(def: &mut DynamicBoneDef, scene: &Scene) {
-    if scene.nodes[def.node].name != "ct_clothesBot" {
-        return;
-    }
-    let Some(root) = def.root else { return };
-    if scene.nodes[root]
-        .name
-        .split('_')
-        .nth(3)
-        .and_then(|p| p.parse::<i32>().ok())
-        == Some(0)
-    {
-        def.freeze_axis = 0;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The whole character.
 
 #[derive(Debug, Clone)]
@@ -2356,29 +2333,5 @@ mod tests {
         // A world position lands in the mirrored local space.
         set_position(&mut scene, child, Vec3::new(0.3, 0.2, 0.1));
         assert!(close(position(&scene, child), Vec3::new(0.3, 0.2, 0.1), 1e-6));
-    }
-
-    #[test]
-    fn colliders_plugin_frees_only_the_front_skirt_chain() {
-        let mut scene = Scene::default();
-        let bot = scene.add_node("ct_clothesBot", None, Trs::default());
-        let front = scene.add_node("cf_j_sk_00_00", Some(bot), Trs::default());
-        let side = scene.add_node("cf_j_sk_02_00", Some(bot), Trs::default());
-        let top = scene.add_node("ct_clothesTop", None, Trs::default());
-        let frozen = |node, root| DynamicBoneDef {
-            node,
-            root: Some(root),
-            freeze_axis: 1,
-            ..Default::default()
-        };
-        let mut def = frozen(bot, front);
-        colliders_plugin_off(&mut def, &scene);
-        assert_eq!(def.freeze_axis, 0);
-        let mut def = frozen(bot, side);
-        colliders_plugin_off(&mut def, &scene);
-        assert_eq!(def.freeze_axis, 1);
-        let mut def = frozen(top, front);
-        colliders_plugin_off(&mut def, &scene);
-        assert_eq!(def.freeze_axis, 1);
     }
 }

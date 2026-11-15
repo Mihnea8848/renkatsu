@@ -63,14 +63,80 @@ fn bytes<'a>(plugin: &'a PluginData, key: &str) -> Option<&'a [u8]> {
     plugin.bytes(key).filter(|b| !b.is_empty())
 }
 
+/// Data of the retired KK_CharaOverlaysBasedOnCoordinate plugin, which the
+/// overlay plugin imports for cards that have none of its own.
+pub const COBOC_KEY: &str = "com.jim60105.kk.charaoverlaysbasedoncoordinate";
+
+/// `KoiSkinOverlayController.TryImportCOBOC`: the PNG of each overlay
+/// kind for `outfit`. `AllCharaOverlayTable` maps outfit and kind to an
+/// index into `AllCharaResources`; a kind an outfit lacks is taken from
+/// the first outfit stored. `None` when the data is not there or broken,
+/// in which case the plugin does not import.
+pub fn coboc(ext: &ExtData, outfit: usize) -> Option<HashMap<i64, Vec<u8>>> {
+    let plugin = ext.get(COBOC_KEY)?;
+    let Value::Map(table) = plugin.data.get("AllCharaOverlayTable")? else {
+        return None;
+    };
+    let Value::Array(resources) = plugin.nested("AllCharaResources")? else {
+        return None;
+    };
+    let kinds_of = |entry: &Value| -> Option<HashMap<i64, Vec<u8>>> {
+        let Value::Map(kinds) = entry else { return None };
+        kinds
+            .iter()
+            .map(|(k, id)| {
+                let Value::Binary(png) = resources.get(id.as_u64()? as usize)? else {
+                    return None;
+                };
+                Some((k.as_i64()?, png.clone()))
+            })
+            .collect()
+    };
+    // Every outfit is converted, and one bad entry fails the import.
+    let mut first: Option<HashMap<i64, Vec<u8>>> = None;
+    let mut wanted = HashMap::new();
+    for (k, entry) in table {
+        let mut kinds = kinds_of(entry)?;
+        match &first {
+            None => first = Some(kinds.clone()),
+            Some(first) => {
+                for (kind, png) in first {
+                    kinds.entry(*kind).or_insert_with(|| png.clone());
+                }
+            }
+        }
+        if k.as_u64() == Some(outfit as u64) {
+            wanted = kinds;
+        }
+    }
+    Some(wanted)
+}
+
 /// Skin overlays for an outfit, by kind.
 pub fn skin(ext: &ExtData, outfit: usize) -> HashMap<i64, Arc<Image>> {
     let mut out = HashMap::new();
-    let Some(plugin) = ext.get(SKIN_KEY) else { return out };
     let mut put = |kind: i64, data: &[u8]| {
         if let Some(image) = decode(data, format!("skin_overlay_{kind}")) {
             out.insert(kind, Arc::new(image));
         }
+    };
+    // Without data of its own, or with data in the legacy layout, the
+    // plugin first tries the other plugin's.
+    let own = ext.get(SKIN_KEY);
+    let imported = if own.is_none_or(|p| p.version <= 1) {
+        coboc(ext, outfit)
+    } else {
+        None
+    };
+    if let Some(imported) = &imported {
+        for (kind, png) in imported {
+            if !png.is_empty() {
+                put(*kind, png);
+            }
+        }
+    }
+    let Some(plugin) = own.filter(|_| imported.is_none()) else {
+        return both_eyes(out);
     };
     match plugin.nested("Lookup") {
         // Current layout: outfit -> kind -> texture id, textures stored apart.
@@ -98,7 +164,11 @@ pub fn skin(ext: &ExtData, outfit: usize) -> HashMap<i64, Arc<Image>> {
             }
         }
     }
-    // "Both eyes" entries stand in for the per-eye ones.
+    both_eyes(out)
+}
+
+/// "Both eyes" entries stand in for the per-eye ones.
+fn both_eyes(mut out: HashMap<i64, Arc<Image>>) -> HashMap<i64, Arc<Image>> {
     for (both, sides) in [
         (kind::EYE_UNDER, [kind::EYE_UNDER_L, kind::EYE_UNDER_R]),
         (kind::EYE_OVER, [kind::EYE_OVER_L, kind::EYE_OVER_R]),
@@ -185,6 +255,60 @@ pub fn clothes(ext: &ExtData, outfit: usize) -> HashMap<String, ClothOverlay> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_plugins_overlays_are_imported() {
+        use rk_card::PluginData;
+        let table = |pairs: Vec<(i64, Vec<(i64, i64)>)>| {
+            Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(outfit, kinds)| {
+                        let kinds = kinds.into_iter().map(|(k, id)| (k.into(), id.into())).collect();
+                        (outfit.into(), Value::Map(kinds))
+                    })
+                    .collect(),
+            )
+        };
+        let ext = |table: Value| {
+            let resources = Value::Array(vec![
+                Value::Binary(Vec::new()),
+                Value::Binary(vec![1]),
+                Value::Binary(vec![2]),
+            ]);
+            let mut bytes = Vec::new();
+            rmpv::encode::write_value(&mut bytes, &resources).unwrap();
+            let mut p = PluginData::default();
+            p.data.insert("AllCharaOverlayTable".into(), table);
+            p.data.insert("AllCharaResources".into(), Value::Binary(bytes));
+            let mut ext = ExtData::new();
+            ext.insert(COBOC_KEY.into(), p);
+            ext
+        };
+        let e = ext(table(vec![(0, vec![(1, 1), (2, 0)]), (1, vec![(1, 2)])]));
+        let first = coboc(&e, 0).unwrap();
+        assert_eq!(first[&1], vec![1]);
+        assert!(first[&2].is_empty());
+        // The second outfit lacks kind 2 and takes the first outfit's.
+        let second = coboc(&e, 1).unwrap();
+        assert_eq!(second[&1], vec![2]);
+        assert!(second.contains_key(&2));
+        // An outfit that is not stored has nothing.
+        assert!(coboc(&e, 5).unwrap().is_empty());
+        // An index past the resources fails the import as a whole.
+        assert!(coboc(&ext(table(vec![(0, vec![(1, 1)]), (1, vec![(1, 9)])])), 0).is_none());
+        assert!(coboc(&ExtData::new(), 0).is_none());
+        // With current data of its own the plugin does not import.
+        let mut both = e.clone();
+        both.insert(
+            SKIN_KEY.into(),
+            PluginData {
+                version: 2,
+                ..Default::default()
+            },
+        );
+        assert!(skin(&both, 0).is_empty());
+    }
 
     #[test]
     fn a_saved_mask_replaces_the_games() {

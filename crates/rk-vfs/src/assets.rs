@@ -63,6 +63,8 @@ pub struct Assets {
     me_shaders: Mutex<HashMap<String, Option<MeShaderInfo>>>,
     /// Shaders in MaterialEditor's own embedded bundles, read once.
     me_builtin: std::sync::OnceLock<HashMap<String, Vec<ShaderPass>>>,
+    /// Bodies offered to the Uncensor Selector plugin, read on first use.
+    uncensors: std::sync::OnceLock<crate::uncensor::Uncensors>,
 }
 
 /// A shader MaterialEditor can switch a material to.
@@ -147,6 +149,7 @@ impl Assets {
             by_cab: Default::default(),
             me_shaders: Default::default(),
             me_builtin: Default::default(),
+            uncensors: Default::default(),
         }
     }
 
@@ -401,6 +404,12 @@ impl Assets {
             }
             out
         })
+    }
+
+    /// The bodies zipmods offer to the Uncensor Selector plugin.
+    pub fn uncensors(&self) -> &crate::uncensor::Uncensors {
+        self.uncensors
+            .get_or_init(|| crate::uncensor::Uncensors::load(&self.index))
     }
 
     pub fn mod_guid(&self, mod_idx: Option<u32>) -> Option<&str> {

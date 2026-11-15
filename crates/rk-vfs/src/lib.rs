@@ -8,6 +8,7 @@ pub mod assets;
 pub mod index;
 pub mod items;
 pub mod resolve;
+pub mod uncensor;
 
 pub use assets::{AssetFile, Assets, Game, LoadedBundle, ObjRef};
 pub use index::{png_key, Index, ModInfo};

@@ -305,6 +305,26 @@ pub struct RendererInst {
     pub root_bone: Option<usize>,
 }
 
+/// A renderer with an empty mesh, for tests.
+#[cfg(test)]
+pub(crate) fn test_renderer(name: &str, node: usize) -> RendererInst {
+    RendererInst {
+        name: name.into(),
+        node,
+        part: Part::Body,
+        mesh: Arc::new(Mesh::default()),
+        materials: Vec::new(),
+        skinned: false,
+        bones: Vec::new(),
+        enabled: true,
+        cast_shadows: ShadowCasting::On,
+        receive_shadows: true,
+        shape_weights: Vec::new(),
+        bounds: None,
+        root_bone: None,
+    }
+}
+
 /// Nodes and renderers created by instantiating one prefab.
 pub struct Instance {
     pub root: usize,

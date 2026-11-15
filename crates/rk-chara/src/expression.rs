@@ -74,7 +74,10 @@ impl Controller {
 
 /// How open each controller is on a character at rest: eyes and eyebrows
 /// open, mouth closed.
-pub const REST: [(&str, f32); 3] = [("EyebrowCtrl", 1.0), ("EyesCtrl", 1.0), ("MouthCtrl", 0.0)];
+pub const REST: [(&str, f32); 3] = [("EyebrowCtrl", 1.0), (EYES, 1.0), ("MouthCtrl", 0.0)];
+
+/// The eye controller's field on the head's `FaceBlendShape` script.
+pub const EYES: &str = "EyesCtrl";
 
 #[cfg(test)]
 mod tests {

@@ -103,8 +103,8 @@ pub struct BundleLoc {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileStamp {
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FileStamp {
     size: u64,
     mtime: u64,
 }
@@ -161,7 +161,7 @@ pub struct Index {
     pub skipped: Vec<(String, String)>,
 }
 
-fn stamp(p: &Path) -> FileStamp {
+pub(crate) fn stamp(p: &Path) -> FileStamp {
     let Ok(md) = p.metadata() else {
         return FileStamp::default();
     };
@@ -391,6 +391,11 @@ fn version_key(v: &str) -> Vec<u64> {
 }
 
 fn cache_path(game_dir: &Path) -> PathBuf {
+    cache_file(game_dir, "index")
+}
+
+/// A cache file for this game folder: `<kind>-<hash of the path>.bin`.
+pub(crate) fn cache_file(game_dir: &Path, kind: &str) -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
@@ -401,7 +406,7 @@ fn cache_path(game_dir: &Path) -> PathBuf {
     for b in game_dir.to_string_lossy().bytes() {
         h = (h ^ b as u64).wrapping_mul(0x100000001b3);
     }
-    base.join("renkatsu").join(format!("index-{h:016x}.bin"))
+    base.join("renkatsu").join(format!("{kind}-{h:016x}.bin"))
 }
 
 impl Index {
