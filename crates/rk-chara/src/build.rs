@@ -569,8 +569,36 @@ impl<'g> Builder<'g> {
 
     /// Like `listed_renderers`, limited to scripts of one class when given.
     fn listed_renderers_in(&mut self, inst: &Instance, class: Option<&str>, field: &str) -> Vec<usize> {
+        self.listed(inst, class, field, false)
+    }
+
+    /// Renderers a field of the hair part's ChaCustomHairComponent lists.
+    /// The game takes the component with `GetComponent` on the part's root
+    /// object, so components further down the prefab are not used.
+    fn hair_listed(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
+        self.listed(inst, Some("ChaCustomHairComponent"), field, true)
+    }
+
+    /// Renderers a field of the accessory's ChaAccessoryComponent lists; the
+    /// game's `cusAcsCmp` is the component on the accessory's root object.
+    fn accessory_listed(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
+        self.listed(inst, Some("ChaAccessoryComponent"), field, true)
+    }
+
+    /// A field of the script of class `class` on the part's root object.
+    fn root_field(&self, inst: &Instance, class: &str, field: &str) -> Option<rk_unityfs::UValue> {
+        inst.scripts
+            .iter()
+            .filter(|(node, s)| *node == inst.root && self.script_class(s).as_deref() == Some(class))
+            .find_map(|(_, s)| s.read().ok()?.get(field).cloned())
+    }
+
+    fn listed(&mut self, inst: &Instance, class: Option<&str>, field: &str, root_only: bool) -> Vec<usize> {
         let mut out = Vec::new();
-        for (_, script) in &inst.scripts {
+        for (node, script) in &inst.scripts {
+            if root_only && *node != inst.root {
+                continue;
+            }
             if class.is_some_and(|c| self.script_class(script).as_deref() != Some(c)) {
                 continue;
             }
@@ -760,7 +788,7 @@ impl<'g> Builder<'g> {
     /// colours on ornaments that are part of the hair style.
     fn color_hair(&mut self, inst: &Instance, part: &rk_card::HairPart) {
         let solid = |c: [f32; 4]| [c[0], c[1], c[2], 1.0];
-        for r in self.listed_renderers(inst, "rendHair") {
+        for r in self.hair_listed(inst, "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 if let Some(gloss) = &self.hair_gloss {
                     // The material keeps where the mask sits on the strands.
@@ -781,7 +809,7 @@ impl<'g> Builder<'g> {
             Some(rk_unityfs::UValue::Array(a)) => a.len().min(3),
             _ => 0,
         };
-        for r in self.listed_renderers(inst, "rendAccessory") {
+        for r in self.hair_listed(inst, "rendAccessory") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for (j, name) in ["_Color", "_Color2", "_Color3"].iter().enumerate().take(count) {
                     if let Some(c) = part.acs_color.get(j) {
@@ -800,13 +828,17 @@ impl<'g> Builder<'g> {
         hair: Option<&rk_card::HairPart>,
         settings: Option<crate::hair_accessories::HairAccessory>,
     ) {
-        let uses = |b: &Self, field: &str| b.script_field(inst, field).and_then(|v| v.as_bool()).unwrap_or(false);
+        let uses = |b: &Self, field: &str| {
+            b.root_field(inst, "ChaAccessoryComponent", field)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
         let slots = [
             (uses(self, "useColor01"), "_Color"),
             (uses(self, "useColor02"), "_Color2"),
             (uses(self, "useColor03"), "_Color3"),
         ];
-        for r in self.listed_renderers(inst, "rendNormal") {
+        for r in self.accessory_listed(inst, "rendNormal") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for (k, (used, name)) in slots.iter().enumerate() {
                     if let (true, Some(c)) = (*used, acc.color.get(k)) {
@@ -816,7 +848,7 @@ impl<'g> Builder<'g> {
             }
         }
         if let Some(c) = acc.color.get(3) {
-            for r in self.listed_renderers(inst, "rendAlpha") {
+            for r in self.accessory_listed(inst, "rendAlpha") {
                 // A fully transparent fourth colour switches the part off.
                 self.scene.renderers[r].enabled &= c[3] != 0.0;
                 if let Some(m) = self.scene.renderers[r].materials.first_mut() {
@@ -826,7 +858,7 @@ impl<'g> Builder<'g> {
         }
         // The accessory component's own hair renderers follow the hair's
         // root colour. The strands of a hair component are not among them.
-        for r in self.listed_renderers_in(inst, Some("ChaAccessoryComponent"), "rendHair") {
+        for r in self.accessory_listed(inst, "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for name in ["_Color", "_Color2", "_Color3"] {
                     m.colors

@@ -585,6 +585,7 @@ fn material_editor_overrides_find_their_materials() {
                 shadow: rk_chara::scene::ShadowPass::TwoSided,
             },
             queue: None,
+            defaults: vec![],
         })
     };
     let applied = apply(&mut scene, &ext, 0, &targets, &known);
