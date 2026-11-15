@@ -17,7 +17,7 @@ mod ui;
 mod vfs;
 
 #[derive(Parser)]
-#[command(name = "rk", about = "Renkatsu command-line tools")]
+#[command(name = "rk", version, about = "Renkatsu command-line tools: read Koikatsu cards, build and render characters, and compare them with the game")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

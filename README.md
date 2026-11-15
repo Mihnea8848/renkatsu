@@ -28,9 +28,12 @@ attempt at one.
 
 ## Status
 
-Early, but characters now look close to the game. Every change is checked
-against pictures taken in CharaStudio with the same camera and light, and the
-formulas come from the game's own code and shaders, not from tuning.
+Version 0.1.0 covers character import. Renkatsu builds a character from a card
+the way Koikatsu and its plugins do, and draws it with the game's shaders. On
+41 reference cards, pictures match CharaStudio at about 99.1% for the full body
+and 99.3% for the face, counting colour error per pixel. Every change is
+checked against captures made in CharaStudio with the same camera and light,
+and the formulas come from the game's own code and shaders, not from tuning.
 
 ## What works
 
@@ -38,31 +41,38 @@ formulas come from the game's own code and shaders, not from tuning.
 - Reading Unity asset bundle files. This is a file format reader, no Unity
   code is involved
 - Indexing the game's `abdata` folder and all zipmods, with the item lists and
-  loose textures, the way Sideloader does
+  loose textures, the way Sideloader does, including which mod wins when
+  several replace the same file
 - Finding the game or mod item for every ID in a card, including items that
   moved between mods
 - Building the character: skeleton, body, head, hair, clothes and accessories,
   with body and face sliders
-- The game's shaders for skin, hair, eyes, face lines and clothes, in linear
-  colour like the game, with the scene's ramp, shadow and line settings
-- Card colours, makeup, skin and clothes textures, patterns and emblems
+- The game's shaders for skin, hair, eyes, face lines, clothes and items, and
+  xukmi's Vanilla Plus shaders, in linear colour like the game, with the
+  scene's ramp, shadow and line settings
+- Real-time shadows from the key light, and hair, skirt, ribbon and bust
+  physics as the game's DynamicBone runs them
+- Card colours, makeup, skin and clothes textures, normal maps, liquid layers,
+  patterns and emblems
 - Clothes that hide what is under them
 - Eyes and brows drawn in front of or behind the hair as the game does, with
   Better Repack's defaults
-- Expressions, gaze and iris size from the card
-- Plugin data: overlays, MaterialEditor (properties, textures, shader swaps,
+- Expressions, gaze, iris size and tilt from the card
+- Plugin data: overlays,
+  MaterialEditor (properties, textures, shader swaps with their defaults,
   material copies), MoreAccessories, ABMX bone edits, Hair Accessory
-  Customizer and Pushup
-- Rendering to a PNG file, and side by side comparisons with captures from
-  the game
+  Customizer, Pushup, Uncensor Selector, Clothing Unlocker, Accessory States,
+  Accessory Clothes, Eye Control, Pregnancy, Colliders, Invisible Body,
+  Dynamic Bone Editor and Slider Unlocker
+- Rendering to a PNG file, side by side comparisons with captures from the
+  game, and a bench that compares a whole list of cards at once
 
 ## Known problems
 
-- No physics yet: hair, skirts and ribbons stay in their rest pose (in
-  progress)
-- No shadow map, so hair does not shade the face
-- Accessories use an approximate shader, and clothes outlines the old one
-- The character stands in a T-pose
+- `rk render` draws the character in a T-pose. Poses only come from captures
+  for now
+- CharaStudio's screen effects (ambient occlusion, bloom, vignette, colour
+  filter) are not drawn yet
 - There is no editor and no window, only command line tools
 - Koikatsu Sunshine content is not supported
 
@@ -78,8 +88,12 @@ formulas come from the game's own code and shaders, not from tuning.
 ```sh
 git clone https://github.com/Mihnea8848/renkatsu.git
 cd renkatsu
-cargo build --release
+cargo install --path crates/rk-cli
 ```
+
+This builds the `rk` command and puts it in Cargo's bin folder
+(`~/.cargo/bin`). While working on Renkatsu itself, `cargo build --release`
+and `./target/release/rk` do the same without installing.
 
 ## Configuration
 
@@ -94,22 +108,22 @@ You can also set the `RENKATSU_GAME_DIR` environment variable.
 ## Usage
 
 Scan the game folder and the mods, and print a summary. The first run takes a
-few seconds, later runs use a cache:
+while, later runs use a cache:
 
 ```sh
-cargo run --release -p rk-cli -- index
+rk index
 ```
 
 Show which game or mod item each part of a card uses, and what is missing:
 
 ```sh
-cargo run --release -p rk-cli -- resolve path/to/card.png
+rk resolve path/to/card.png
 ```
 
 Render a card:
 
 ```sh
-cargo run --release -p rk-cli -- render path/to/card.png -o out.png
+rk render path/to/card.png -o out.png
 ```
 
 `--outfit 2` picks another outfit, `--yaw 30` turns the camera and
@@ -119,7 +133,29 @@ Compare a card with a capture made in CharaStudio by the reference capture
 plugin in `tools/reference-capture`:
 
 ```sh
-cargo run --release -p rk-cli -- reference path/to/card.png capture.json -o compare.png
+rk reference path/to/card.png capture.json -o compare.png
+```
+
+It prints how much each view matches the game, in percent, and every value
+that differs from the game's: material properties, textures, shadow flags and
+skinning bones.
+
+Compare a whole list of cards with their captures. The list holds card paths
+relative to `UserData/chara/female`, one per line:
+
+```sh
+rk bench cards.txt --captures captures/
+```
+
+Each card gets one line with its match percentages, and the run ends with the
+averages and the differences grouped by what they are about. `--show _Color`
+also prints each card's differences of that kind.
+
+Build many cards and report failures, warnings and plugin data that is not
+supported yet:
+
+```sh
+rk audit --count 200 --threads 2
 ```
 
 ## How it works
