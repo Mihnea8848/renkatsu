@@ -88,7 +88,7 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
                             "{} {} {}",
                             ui::dim(n),
                             ui::mean(*mean),
-                            ui::dim(format!("({:.1}%)", outline * 100.0))
+                            ui::dim(format!("outline {:.1}% off", outline * 100.0))
                         )
                     })
                     .collect();
@@ -132,6 +132,24 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
             out_dir.display()
         ),
     );
+    let mut views: BTreeMap<&str, (f32, f32, usize)> = BTreeMap::new();
+    for s in &summaries {
+        for (name, mean, outline) in &s.views {
+            let v = views.entry(name.as_str()).or_default();
+            *v = (v.0 + mean, v.1 + outline, v.2 + 1);
+        }
+    }
+    for (name, (mean, outline, n)) in views {
+        let n = n as f32;
+        ui::status(
+            "Average",
+            format!(
+                "{name} {} match, outline {:.1}% off",
+                ui::mean(mean / n).to_string().trim_start(),
+                100.0 * outline / n
+            ),
+        );
+    }
     let counts = tally(&summaries);
     if !counts.is_empty() {
         ui::heading(format!(

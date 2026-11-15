@@ -329,7 +329,11 @@ pub fn run(
             "    outline mismatch: {:.1}% of them are character in only one picture",
             100.0 * diff.outline_mismatch
         );
-        say!("    mean colour difference: {:.1} of 255", diff.mean);
+        say!(
+            "    match: {:.1}% (mean colour difference {:.1} of 255)",
+            crate::ui::match_percent(diff.mean),
+            diff.mean
+        );
         views.push((name.clone(), diff.mean, diff.outline_mismatch));
         if env.shadows.enabled {
             let plain_env = Environment {

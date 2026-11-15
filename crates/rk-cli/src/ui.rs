@@ -66,10 +66,17 @@ pub fn above(bar: &ProgressBar, text: String) {
     }
 }
 
-/// A mean colour difference, coloured: green when close to the game,
-/// yellow when noticeable, red when something is clearly wrong.
+/// How much a picture matches the game, in percent, from the mean colour
+/// difference per pixel on the 0 to 255 scale: 2.55 is 1% off, a 99% match.
+pub fn match_percent(mean: f32) -> f32 {
+    100.0 - mean / 2.55
+}
+
+/// A match percentage from a mean colour difference, coloured: green when
+/// close to the game (under 3 of 255 off), yellow when noticeable (under 6),
+/// red when something is clearly wrong.
 pub fn mean(v: f32) -> StyledObject<String> {
-    let text = format!("{v:>4.1}");
+    let text = format!("{:>5.1}%", match_percent(v));
     if v < 3.0 {
         style(text).green()
     } else if v < 6.0 {
@@ -100,7 +107,8 @@ mod tests {
     #[test]
     fn colours_follow_the_thresholds() {
         console::set_colors_enabled(false);
-        assert_eq!(mean(2.4).to_string(), " 2.4");
+        assert_eq!(mean(2.55).to_string(), " 99.0%");
+        assert_eq!(match_percent(0.0), 100.0);
         assert_eq!(count(0).to_string(), "0");
         assert_eq!(dim("x").to_string(), "x");
     }
