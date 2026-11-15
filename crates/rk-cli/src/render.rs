@@ -60,6 +60,10 @@ pub fn render(a: Args) -> Result<()> {
                     .map(|(k, v)| format!("{k}={}", v.image.name))
                     .collect();
                 tex.sort();
+                if m.absent {
+                    println!("    (no material, not drawn)");
+                    continue;
+                }
                 println!("    {} [{}] {}", m.name, m.shader, tex.join(" "));
             }
         }

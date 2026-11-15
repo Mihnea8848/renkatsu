@@ -22,12 +22,20 @@ use wgpu::util::DeviceExt;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Submesh and material index pairs a renderer draws: one per submesh, and
-/// each extra material on the last submesh.
-fn submesh_materials(submeshes: usize, materials: usize) -> Vec<(usize, usize)> {
+/// each extra material on the last submesh. `absent` tells which material
+/// slots are null references; those are left out.
+///
+/// The game does draw such a slot: MaterialEditor reads `renderer.materials`
+/// (`MaterialAPI.GetMaterials`), which makes Unity fill it with a material
+/// of the Standard shader at queue 2000. That is before every character
+/// shader, so the slot's own submesh drawn again by a real material covers
+/// it. We have no Standard shader and draw nothing instead.
+fn submesh_materials(submeshes: usize, materials: usize, absent: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
     if submeshes == 0 {
         return Vec::new();
     }
     (0..submeshes.max(materials))
+        .filter(|&i| !absent(i))
         .map(|i| (i.min(submeshes - 1), i))
         .collect()
 }
@@ -905,7 +913,10 @@ impl Renderer {
             });
             // Unity draws materials beyond the submesh count with the last
             // submesh again; MaterialEditor's copies rely on this.
-            let pairs = submesh_materials(mesh.submeshes.len(), d.renderer.materials.len());
+            let materials = &d.renderer.materials;
+            let pairs = submesh_materials(mesh.submeshes.len(), materials.len(), |i| {
+                materials.get(i).is_some_and(|m| m.absent)
+            });
             let mut receives = false;
             for (si, mi) in pairs {
                 let sm = &mesh.submeshes[si];
@@ -1373,10 +1384,19 @@ mod tests {
 
     #[test]
     fn extra_materials_draw_the_last_submesh() {
-        assert_eq!(submesh_materials(2, 1), vec![(0, 0), (1, 1)]);
-        assert_eq!(submesh_materials(1, 2), vec![(0, 0), (0, 1)]);
-        assert_eq!(submesh_materials(2, 4), vec![(0, 0), (1, 1), (1, 2), (1, 3)]);
-        assert!(submesh_materials(0, 3).is_empty());
+        let all = |_: usize| false;
+        assert_eq!(submesh_materials(2, 1, all), vec![(0, 0), (1, 1)]);
+        assert_eq!(submesh_materials(1, 2, all), vec![(0, 0), (0, 1)]);
+        assert_eq!(submesh_materials(2, 4, all), vec![(0, 0), (1, 1), (1, 2), (1, 3)]);
+        assert!(submesh_materials(0, 3, all).is_empty());
+    }
+
+    #[test]
+    fn null_material_slots_are_not_drawn() {
+        // p_o_top_jacket04: one submesh, materials [cf_m_top_jacket04, null].
+        assert_eq!(submesh_materials(1, 2, |i| i == 1), vec![(0, 0)]);
+        // The slots after a null one keep their index and submesh.
+        assert_eq!(submesh_materials(2, 3, |i| i == 0), vec![(1, 1), (1, 2)]);
     }
 
     #[test]

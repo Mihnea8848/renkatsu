@@ -1057,10 +1057,26 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     return shade(i, front);
 }
 
+// Outline pass of main_alpha (pixel program 5). The pass culls front faces,
+// so every pixel is an inside one and gets the forward pass's cut for the
+// inside: nothing is drawn while the outline switch is on.
+fn item_alpha_outline(i: VsOut) -> vec4<f32> {
+    let main = item_main(i);
+    let alpha = min(item_mask(i), main.a);
+    if (min(1.0 - m.over3.z, alpha * 10.0) < 0.5) {
+        discard;
+    }
+    let factor = item_shadow_factor(main.rgb);
+    return vec4<f32>(item_lines(main.rgb * g.line_color.rgb * factor, light_color()), 1.0);
+}
+
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_MAIN) {
         return item_main_outline(i);
+    }
+    if (m.info.x == KIND_ITEM && m.info.z == ITEM_ALPHA) {
+        return item_alpha_outline(i);
     }
     return outline_color(i);
 }

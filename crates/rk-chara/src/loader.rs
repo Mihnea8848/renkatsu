@@ -278,7 +278,10 @@ impl<'a> Loader<'a> {
                         self.warn(format!("material on {name}: {e:#}"));
                         MaterialInst::default()
                     }),
-                    None => MaterialInst::default(),
+                    None => MaterialInst {
+                        absent: true,
+                        ..Default::default()
+                    },
                 };
                 materials.push(mat);
             }

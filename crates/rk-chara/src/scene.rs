@@ -250,6 +250,10 @@ pub struct MaterialInst {
     pub tex_st: HashMap<String, [f32; 4]>,
     pub floats: HashMap<String, f32>,
     pub colors: HashMap<String, [f32; 4]>,
+    /// The renderer's slot points at no material (a null reference in the
+    /// prefab). The slot is kept so material indices stay the game's, but
+    /// nothing of ours is drawn for it.
+    pub absent: bool,
 }
 
 /// Culling box of a renderer as Unity keeps it: centre and half size.
