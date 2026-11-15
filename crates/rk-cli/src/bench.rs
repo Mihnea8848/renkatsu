@@ -117,7 +117,10 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
             ),
         }
         bar.inc(1);
+        // Both caches hold every card's data otherwise; a long list would
+        // run out of memory.
         game.assets.clear();
+        renderer.clear_textures();
     }
     bar.finish_and_clear();
     ui::status(
