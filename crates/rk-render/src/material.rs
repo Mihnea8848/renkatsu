@@ -32,6 +32,9 @@ pub const HAS_OVER3: u32 = 256;
 pub const CASTER_FALLBACK: u32 = 512;
 /// main_item_studio's third pattern mask is bound (the ninth slot).
 pub const HAS_PATTERN3: u32 = 1024;
+/// The tenth and eleventh slot, which the KKShadersPlus materials use.
+pub const HAS_OVER5: u32 = 2048;
+pub const HAS_OVER6: u32 = 4096;
 
 /// Which of the game's clothes shaders an item follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,10 +67,10 @@ pub enum ItemShader {
     Color = 12,
 }
 
-/// Clothes shader from a Unity shader name. Mod shaders follow the game's
-/// naming (`xukmi/MainAlphaPlus`), so matching is by substring.
+/// Clothes shader from a Unity shader name. The KKShadersPlus shaders
+/// (`xukmi/MainAlphaPlus`) have their own ports, see `xukmi.rs`.
 pub fn item_shader(shader: &str) -> ItemShader {
-    // Whole names, since main_opaque_low is another shader. KKShadersPlus stands in for the two under its own names.
+    // Whole names, since main_opaque_low is another shader.
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
     match name.as_str() {
         "main_alpha" => ItemShader::Alpha,
@@ -82,8 +85,10 @@ pub fn item_shader(shader: &str) -> ItemShader {
         "main_texture" => ItemShader::Texture,
         "main_opaque_low" => ItemShader::OpaqueLow,
         "main_color" => ItemShader::Color,
-        n if n.starts_with("mainalphaplus") => ItemShader::Alpha,
-        n if n.starts_with("mainopaqueplus") => ItemShader::Opaque,
+        // xukmi's Studio variants are not ported; they extend these game
+        // shaders, which are the closest stand-ins.
+        n if n.starts_with("mainitemstudioalphaplus") => ItemShader::StudioAlpha,
+        n if n.starts_with("mainitemstudioplus") => ItemShader::Studio,
         _ => ItemShader::Other,
     }
 }
@@ -91,7 +96,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
 /// Shaders whose pixel program is ported from the game's own disassembly.
 /// Everything else goes through an approximation; `rk audit` reports how
 /// many materials that leaves.
-pub const PORTED: [&str; 19] = [
+pub const PORTED: [&str; 41] = [
     "Shader Forge/main_skin",
     "Shader Forge/main_hair",
     "Shader Forge/main_hair_front",
@@ -111,10 +116,33 @@ pub const PORTED: [&str; 19] = [
     "Shader Forge/main_texture",
     "Shader Forge/main_opaque_low",
     "Shader Forge/main_color",
+    // KKShadersPlus, ported from the programs of Vanilla Plus 1.7.2.
+    "xukmi/MainOpaquePlus",
+    "xukmi/MainOpaquePlusTess",
+    "xukmi/MainAlphaPlus",
+    "xukmi/MainAlphaPlusTess",
+    "xukmi/MainItemPlus",
+    "xukmi/MainItemPlusTess",
+    "xukmi/MainItemAlphaPlus",
+    "xukmi/MainItemAlphaPlusTess",
+    "xukmi/SkinPlus",
+    "xukmi/SkinPlusTess",
+    "xukmi/SkinPlusReflect",
+    "xukmi/SkinPlusTessReflect",
+    "xukmi/HairPlus",
+    "xukmi/HairPlusTess",
+    "xukmi/HairPlusReflect",
+    "xukmi/HairPlusTessReflect",
+    "xukmi/HairFrontPlus",
+    "xukmi/HairFrontPlusTess",
+    "xukmi/HairFrontPlusReflect",
+    "xukmi/HairFrontPlusTessReflect",
+    "xukmi/EyePlus",
+    "xukmi/EyeWPlus",
 ];
 
 /// Texture slots in bind order.
-pub const SLOTS: [(&str, u32); 9] = [
+pub const SLOTS: [(&str, u32); 11] = [
     ("_MainTex", HAS_MAIN),
     ("_ColorMask", HAS_COLOR_MASK),
     ("_DetailMask", HAS_DETAIL),
@@ -124,7 +152,13 @@ pub const SLOTS: [(&str, u32); 9] = [
     ("_overtex2", HAS_OVER2),
     ("_overtex3", HAS_OVER3),
     ("_PatternMask3", HAS_PATTERN3),
+    // The KKShadersPlus materials alone fill the last two.
+    ("_NormalMap", HAS_OVER5),
+    ("_NormalMapDetail", HAS_OVER6),
 ];
+
+/// Vectors in the `ext` block of the material uniform.
+pub const EXT: usize = 24;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -144,9 +178,9 @@ pub struct MaterialUniform {
     pub p3: [f32; 4],
     /// The material's own outline colour (hair).
     pub line: [f32; 4],
-    /// What the later item shaders need beside the above; toon.wgsl says
-    /// what each keeps where.
-    pub ext: [[f32; 4]; 13],
+    /// What the later item shaders need beside the above; toon.wgsl and
+    /// xukmi.wgsl say what each keeps where.
+    pub ext: [[f32; 4]; EXT],
     pub info: [u32; 4],
 }
 
@@ -165,7 +199,7 @@ pub struct MaterialDesc {
     /// The shader's shadow caster pass.
     pub shadow: ShadowPass,
     pub uniform: MaterialUniform,
-    pub textures: [Option<Arc<Image>>; 9],
+    pub textures: [Option<Arc<Image>>; 11],
 }
 
 /// Material kind from a Unity shader name such as `Shader Forge/main_skin`.
@@ -311,6 +345,9 @@ impl MaterialDesc {
     pub fn new(mat: Option<&MaterialInst>) -> Self {
         let empty = MaterialInst::default();
         let mat = mat.unwrap_or(&empty);
+        if let Some(x) = crate::xukmi::shader(&mat.shader) {
+            return crate::xukmi::desc(mat, x);
+        }
         let kind = classify(&mat.shader);
         let state = mat.draw.unwrap_or_else(|| state_for_name(&mat.shader, kind));
         // The clothes shaders have their own defaults and texture slots.
@@ -350,7 +387,7 @@ impl MaterialDesc {
         if state.shadow == ShadowPass::Fallback {
             flags |= CASTER_FALLBACK;
         }
-        let mut textures: [Option<Arc<Image>>; 9] = Default::default();
+        let mut textures: [Option<Arc<Image>>; 11] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
@@ -378,6 +415,8 @@ impl MaterialDesc {
                 "_AlphaMask" if patterned => "_PatternMask1",
                 "_overtex3" if patterned => "_PatternMask2",
                 "_PatternMask3" if !patterned => continue,
+                // The last two slots are for the KKShadersPlus materials.
+                "_NormalMap" | "_NormalMapDetail" => continue,
                 // Not properties of main_item_studio_alpha or main_item.
                 "_AlphaMask" | "_overtex3" if studio || accessory => continue,
                 // toon_glasses has the main texture, the normal map and
@@ -591,7 +630,8 @@ impl MaterialDesc {
                 // Vectors and floats as stored; the colours linearised.
                 let vector = |name: &str| mat.colors.get(name).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
                 let second = [0.392_156_9, 0.392_156_9, 0.392_156_9, 1.0];
-                [
+                let mut ext = [[0.0; 4]; EXT];
+                ext[..13].copy_from_slice(&[
                     color("_LineColor", [0.501_960_8, 0.501_960_8, 0.501_960_8, 1.0]),
                     [
                         float("_EmissionPower", 0.0),
@@ -615,13 +655,14 @@ impl MaterialDesc {
                         float("_patternclamp2", 0.0),
                     ],
                     [float("_patternrotator3", 0.0), float("_patternclamp3", 0.0), 0.0, 0.0],
-                ]
+                ]);
+                ext
             } else if low {
-                let mut ext = [[0.0; 4]; 13];
+                let mut ext = [[0.0; 4]; EXT];
                 ext[..3].copy_from_slice(&[st_color_mask, st_detail, st_normal]);
                 ext
             } else {
-                [[0.0; 4]; 13]
+                [[0.0; 4]; EXT]
             },
             info: [kind as u32, flags, item as u32, 0],
         };
@@ -769,8 +810,9 @@ mod tests {
         for (name, shader) in [
             ("Shader Forge/main_alpha", ItemShader::Alpha),
             ("Shader Forge/main_opaque", ItemShader::Opaque),
-            ("xukmi/MainAlphaPlus", ItemShader::Alpha),
-            ("xukmi/MainOpaquePlus", ItemShader::Opaque),
+            // The KKShadersPlus shaders have their own ports.
+            ("xukmi/MainAlphaPlus", ItemShader::Other),
+            ("xukmi/MainOpaquePlus", ItemShader::Other),
             ("Shader Forge/main_item", ItemShader::Main),
             ("Shader Forge/main_item_studio_alpha", ItemShader::StudioAlpha),
             ("Shader Forge/main_opaque_low", ItemShader::OpaqueLow),
@@ -1160,6 +1202,9 @@ mod tests {
     #[test]
     fn every_ported_item_shader_has_its_own_program() {
         for name in PORTED {
+            if crate::xukmi::shader(name).is_some() {
+                continue;
+            }
             if classify(name) == Kind::Item {
                 assert_ne!(item_shader(name), ItemShader::Other, "{name}");
             }
@@ -1332,7 +1377,7 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // WGSL: fourteen vec4<f32>, an array of thirteen and one vec4<u32>.
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 448);
+        // WGSL: fourteen vec4<f32>, an array of twenty-four and one vec4<u32>.
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 624);
     }
 }

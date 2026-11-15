@@ -96,7 +96,7 @@ struct Material {
     line: vec4<f32>,
     // What the later item shaders need beside the above; each says what
     // it keeps where.
-    ext: array<vec4<f32>, 13>,
+    ext: array<vec4<f32>, 24>,
     // x: kind, y: flags, z: item shader, w: 1 when the renderer receives
     // shadows
     info: vec4<u32>,
@@ -111,7 +111,10 @@ struct Material {
 @group(1) @binding(7) var over2_tex: texture_2d<f32>;
 @group(1) @binding(8) var over3_tex: texture_2d<f32>;
 @group(1) @binding(9) var over4_tex: texture_2d<f32>;
-@group(1) @binding(10) var samp: sampler;
+// The tenth and eleventh slot, which the KKShadersPlus materials use.
+@group(1) @binding(10) var over5_tex: texture_2d<f32>;
+@group(1) @binding(11) var over6_tex: texture_2d<f32>;
+@group(1) @binding(12) var samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -187,6 +190,10 @@ fn vs_outline(v: VsIn) -> VsOut {
         let item = m.info.z;
         if (m.info.x == KIND_ITEM && (item == ITEM_MAIN || item == ITEM_EMISSION || item == ITEM_STUDIO)) {
             uv = uv * m.p2.xy + m.p2.zw;
+        }
+        // The KKShadersPlus materials keep the detail mask's placement here.
+        if (item >= XK_FIRST) {
+            uv = uv * m.p3.xy + m.p3.zw;
         }
         width *= 1.0 - textureSampleLevel(detail_tex, samp, uv, 0.0).b;
     }
@@ -1422,6 +1429,9 @@ fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
 
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (m.info.z >= XK_FIRST) {
+        return xk_forward(i, front);
+    }
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_GLASSES) {
         return item_glasses(i, front);
     }
@@ -1482,6 +1492,9 @@ fn item_alpha_outline(i: VsOut) -> vec4<f32> {
 
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
+    if (m.info.z >= XK_FIRST) {
+        return xk_outline(i);
+    }
     if (m.info.x == KIND_ITEM && m.info.z == ITEM_MAIN) {
         return item_main_outline(i);
     }
@@ -1540,6 +1553,8 @@ fn fs_caster(i: CasterOut, @builtin(front_facing) front: bool) {
     if (has(CASTER_FALLBACK)) {
         // Legacy Shaders/VertexLit cuts nothing out.
         keep = 1.0;
+    } else if (item >= XK_FIRST) {
+        keep = select(0.0, 1.0, xk_casts(i.uv0, main_a));
     } else if (kind == KIND_SKIN) {
         // main_skin: the body masks only.
         keep = body_mask(i.uv0);

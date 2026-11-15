@@ -6,6 +6,8 @@
 
 pub mod material;
 pub mod shadow;
+pub mod xukmi;
+mod xukmi_defaults;
 
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -16,6 +18,10 @@ use shadow::{ShadowSettings, CASCADES};
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+
+/// The surface shader: the game shader ports with the KKShadersPlus ports
+/// appended.
+const TOON_WGSL: &str = concat!(include_str!("toon.wgsl"), include_str!("xukmi.wgsl"));
 
 /// The game renders in linear colour space: shaders write linear values,
 /// blending happens on them, and the target stores them as sRGB.
@@ -405,7 +411,7 @@ impl Renderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("toon"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("toon.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(TOON_WGSL.into()),
         });
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
@@ -1362,7 +1368,7 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgpu::naga::front::wgsl::parse_str(include_str!("toon.wgsl")).expect("toon.wgsl parses");
+        let module = wgpu::naga::front::wgsl::parse_str(TOON_WGSL).expect("toon.wgsl parses");
         wgpu::naga::valid::Validator::new(
             wgpu::naga::valid::ValidationFlags::all(),
             wgpu::naga::valid::Capabilities::empty(),
