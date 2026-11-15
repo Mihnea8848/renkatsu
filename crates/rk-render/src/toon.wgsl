@@ -53,6 +53,11 @@ const HAS_OVER3: u32 = 256u;
 const CASTER_FALLBACK: u32 = 512u;
 // main_item_studio binds its third pattern mask in the ninth slot.
 const HAS_PATTERN3: u32 = 1024u;
+// main_skin: the liquid amounts (_Texture2), the liquid normal map
+// (_Texture3) and the liquid mask.
+const HAS_LIQUID: u32 = 2u;
+const HAS_LIQUID_NORMAL: u32 = 1024u;
+const HAS_LIQUID_MASK: u32 = 8192u;
 // Clothes materials bind their normal map and second ramp in the first two
 // layer slots.
 const HAS_NORMAL: u32 = 32u;
@@ -114,7 +119,11 @@ struct Material {
 // The tenth and eleventh slot, which the KKShadersPlus materials use.
 @group(1) @binding(10) var over5_tex: texture_2d<f32>;
 @group(1) @binding(11) var over6_tex: texture_2d<f32>;
-@group(1) @binding(12) var samp: sampler;
+// The twelfth slot: main_skin's liquid mask.
+@group(1) @binding(12) var over7_tex: texture_2d<f32>;
+@group(1) @binding(13) var samp: sampler;
+// Always tiles, for textures that repeat on a material whose main one does not.
+@group(1) @binding(14) var wrap_samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -392,14 +401,122 @@ fn hair_color(i: VsOut, base: vec3<f32>, n: vec3<f32>, light: f32, ramp: f32, de
     return rgb * max(light_color(), g.ambient_shadow.rgb);
 }
 
-// Skin, after the game's main_skin pixel shader. Left out: the two normal
-// maps, the liquid layers and the face normal and face shadow switches,
-// which the game leaves at zero.
+// Tangent space normal out of a normal map texel (x in alpha, y in green).
+fn skin_unpack(t: vec4<f32>) -> vec3<f32> {
+    let xy = t.ag * 2.0 - 1.0;
+    return vec3<f32>(xy, sqrt(1.0 - min(dot(xy, xy), 1.0)));
+}
+
+// One tangent space normal turned by another, as main_skin lays the detail
+// map over the base map and the liquid's over both.
+fn skin_turn(base: vec3<f32>, top: vec3<f32>) -> vec3<f32> {
+    let t = base + vec3<f32>(0.0, 0.0, 1.0);
+    let u = top * vec3<f32>(-1.0, -1.0, 1.0);
+    return t * dot(t, u) / t.z - u;
+}
+
+// How much liquid a level puts down: the red channel of the liquid texture
+// at level one, its green channel as well at level two.
+fn skin_liquid_level(level: vec4<f32>, texel: vec4<f32>) -> vec4<f32> {
+    let one = clamp(level, vec4<f32>(0.0), vec4<f32>(1.0));
+    let two = clamp(level - 1.0, vec4<f32>(0.0), vec4<f32>(1.0));
+    return max(texel.r * one, texel.g * two);
+}
+
+// The liquid cover of a pixel. The mask says which level a place answers
+// to: pure red the front top, pure green the front bottom, pure blue the
+// back top, yellow the back bottom and cyan the face.
+// `body`: _liquidftop, _liquidfbot, _liquidbtop, _liquidbbot.
+fn skin_liquid_cover(body: vec4<f32>, face: f32, texel: vec4<f32>, mask: vec3<f32>) -> f32 {
+    let top = skin_liquid_level(vec4<f32>(body.x), texel).x;
+    let rest = skin_liquid_level(vec4<f32>(body.yzw, face), texel);
+    let pure = mask - max(mask.bbg, mask.grr);
+    let pair = min(mask.gb, mask.rg) * 1.11111104 - 0.111111097;
+    var cover = min(top, pure.x);
+    cover = max(cover, min(pure.y, rest.x));
+    cover = max(min(pure.z, rest.y), cover);
+    cover = max(min(pair.x, rest.z), cover);
+    return clamp(max(min(pair.y, rest.w), cover), 0.0, 1.0);
+}
+
+struct SkinSurface {
+    // world normal from the normal maps
+    n: vec3<f32>,
+    // liquid cover
+    liquid: f32,
+};
+
+// main_skin's normal: _NormalMap, _NormalMapDetail laid over it by
+// _DetailNormalMapScale, and the liquid's normal map where liquid lies.
+// m.ext[0..4]: placement of _NormalMap, _NormalMapDetail, _Texture2,
+// _Texture3 and _liquidmask. m.ext[5]: _LiquidTiling. m.ext[6]: _liquidftop,
+// _liquidfbot, _liquidbtop, _liquidbbot. m.ext[7]: _liquidface, _rimpower,
+// _rimV, which liquid textures tile (bit 0 _Texture2, bit 1 _Texture3).
+fn skin_surface(i: VsOut, front: bool) -> SkinSurface {
+    var s: SkinSurface;
+    // The shader's default for the three normal maps is flat.
+    var base = vec3<f32>(0.0, 0.0, 1.0);
+    if (has(HAS_OVER5)) {
+        base = skin_unpack(textureSample(over5_tex, samp, i.uv0 * m.ext[0].xy + m.ext[0].zw));
+    }
+    var detail = vec3<f32>(0.0, 0.0, 1.0);
+    if (has(HAS_OVER6)) {
+        detail = skin_unpack(textureSample(over6_tex, samp, i.uv0 * m.ext[1].xy + m.ext[1].zw));
+    }
+    var t = mix(base, skin_turn(base, detail), m.color3.w);
+
+    // Without an amount the cover is zero whatever the textures hold, and
+    // the default amount texture and mask are black.
+    s.liquid = 0.0;
+    let wet = max(max(m.ext[6].x, m.ext[6].y), max(max(m.ext[6].z, m.ext[6].w), m.ext[7].x)) > 0.0;
+    if (wet && has(HAS_LIQUID) && has(HAS_LIQUID_MASK)) {
+        let tiles = u32(m.ext[7].w);
+        let luv = i.uv0 * m.ext[5].zw + m.ext[5].xy;
+        let uv2 = luv * m.ext[2].xy + m.ext[2].zw;
+        let uv3 = luv * m.ext[3].xy + m.ext[3].zw;
+        var amount: vec4<f32>;
+        if ((tiles & 1u) != 0u) {
+            amount = textureSample(color_mask_tex, wrap_samp, uv2);
+        } else {
+            amount = textureSample(color_mask_tex, samp, uv2);
+        }
+        var ripple = vec3<f32>(0.0, 0.0, 1.0);
+        if (has(HAS_LIQUID_NORMAL)) {
+            if ((tiles & 2u) != 0u) {
+                ripple = skin_unpack(textureSample(over4_tex, wrap_samp, uv3));
+            } else {
+                ripple = skin_unpack(textureSample(over4_tex, samp, uv3));
+            }
+        }
+        let mask = textureSample(over7_tex, samp, i.uv0 * m.ext[4].xy + m.ext[4].zw).rgb;
+        s.liquid = skin_liquid_cover(m.ext[6], m.ext[7].x, amount, mask);
+        t = mix(t, skin_turn(t, ripple), s.liquid);
+    }
+    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    s.n = normalize(t.x * i.tangent + t.y * i.bitangent + t.z * n);
+    return s;
+}
+
+// The liquid's own colour: paler where lit, with a sharp highlight and a
+// rim. `lambert` is the clamped light amount, `facing` and `ndv` the clamped
+// normal against the half vector and the view. `dm` is the detail mask.
+fn skin_liquid_color(liquid: f32, lambert: f32, facing: f32, ndv: f32, dm: vec4<f32>) -> vec3<f32> {
+    let tone = (lambert + 0.5) * vec3<f32>(0.149999976, 0.199999988, 0.300000012) + vec3<f32>(0.850000024, 0.800000012, 0.699999988);
+    let tint = liquid * vec3<f32>(0.350000024, 0.45294112, 0.607352912) + vec3<f32>(0.5, 0.397058904, 0.242647097);
+    let glint = pow(facing, 256.0) * 0.5;
+    var rim = pow(1.0 - ndv, m.ext[7].y * 9.0 + 1.0) * 5.0 - 2.0;
+    rim = clamp(min(rim, (1.0 - dm.b) * 2.5 - 1.5), 0.0, 1.0) * (1.0 - dm.g);
+    return tint * tone + glint + rim * m.ext[7].z;
+}
+
+// Skin, after the game's main_skin pixel shader. Left out: the face normal
+// and face shadow switches (_NormalMask), which the game leaves at zero.
 // m.color2: specular colour. m.color3: specular height, specular power,
 // nail (or lip) specular power, detail strength. m.line: line switch, plain
-// specular switch, nipple shine, layer mask switch.
+// specular switch, nipple shine, layer mask switch. m.ext: see skin_surface.
 fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4<f32>) -> vec3<f32> {
-    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    let surface = skin_surface(i, front);
+    let n = surface.n;
     let view = normalize(g.eye.xyz - i.world);
     let l = normalize(g.light_dir.xyz);
     let lambert = max(dot(l, n), 0.0);
@@ -444,7 +561,12 @@ fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4
     // Skin shade: the skin's own hue at two thirds of its saturation.
     let shade = shadow_factor_of(hsv_to_rgb(vec3<f32>(hsv.x, hsv.y * 0.660000026, 1.0)));
     let light = light_color();
-    let body = mix(base * shade, base, lit) * max(light, g.ambient_shadow.rgb) * mix(shade, vec3<f32>(1.0), drawn);
+    var covered = mix(base * shade, base, lit);
+    if (surface.liquid > 0.0) {
+        let ndv = max(dot(n, view), 0.0);
+        covered = mix(covered, skin_liquid_color(surface.liquid, lambert, facing, ndv, dm), surface.liquid);
+    }
+    let body = covered * max(light, g.ambient_shadow.rgb) * mix(shade, vec3<f32>(1.0), drawn);
 
     // Lines painted into the masks.
     let ink = diffuse * g.line_color.rgb * shade * ((1.0 - dm.g) * 0.5 + 0.5);

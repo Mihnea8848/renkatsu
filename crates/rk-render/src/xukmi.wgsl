@@ -10,7 +10,7 @@
 // xukmi), which this code follows where the installed build agrees with it.
 // This file is appended to toon.wgsl.
 //
-// Left out everywhere: the liquid layers (as in the game shader ports), the
+// Left out everywhere: the liquid layers (main_skin in toon.wgsl has them), the
 // point light terms (the scene has none; the programs mask unused lights
 // out), the reflection probe and matcap blend (GetBlendReflections, which
 // weighs by 1 - _UseKKMetal and is off at the default of one) and the turn

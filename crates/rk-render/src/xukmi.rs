@@ -175,7 +175,7 @@ pub fn desc(mat: &MaterialInst, x: Xukmi) -> MaterialDesc {
     if state.shadow == ShadowPass::Fallback {
         flags |= CASTER_FALLBACK;
     }
-    let mut textures: [Option<Arc<Image>>; 11] = Default::default();
+    let mut textures: [Option<Arc<Image>>; SLOTS.len()] = Default::default();
     for (i, name) in x.slots().iter().enumerate() {
         if let Some(slot) = mat.textures.get(*name) {
             textures[i] = Some(slot.image.clone());

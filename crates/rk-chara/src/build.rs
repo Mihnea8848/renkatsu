@@ -273,6 +273,32 @@ fn set_layer(m: &mut crate::scene::MaterialInst, tex: &str, color: &str, image: 
     m.colors.insert(color.into(), value);
 }
 
+/// The textures a body or face detail item brings.
+#[derive(Default)]
+struct SkinDetail {
+    lines: Option<Arc<Image>>,
+    normal: Option<Arc<Image>>,
+}
+
+/// Sets a texture as `Material.SetTexture` does: the placement the material
+/// stores for the property stays, and no texture clears the slot.
+fn set_detail(m: &mut crate::scene::MaterialInst, name: &str, image: Option<Arc<Image>>) {
+    match image {
+        Some(image) => {
+            let st = m.tex_st.get(name).copied().unwrap_or([1.0, 1.0, 0.0, 0.0]);
+            m.textures.insert(
+                name.into(),
+                TexSlot {
+                    image,
+                    scale: [st[0], st[1]],
+                    offset: [st[2], st[3]],
+                },
+            );
+        }
+        None => drop(m.textures.remove(name)),
+    }
+}
+
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -348,27 +374,39 @@ impl<'g> Builder<'g> {
     }
 
     /// Sets the values the game writes onto a skin material from the card:
-    /// the line mask of the chosen detail, and plain numbers.
-    fn skin_values(&mut self, inst: &Instance, renderer: &str, lines: Option<Arc<Image>>, floats: &[(&str, f32)]) {
+    /// the line mask and the detail normal map of the chosen detail
+    /// (`ChangeSettingBodyDetail`, `ChangeSettingFaceDetail`), and plain
+    /// numbers.
+    fn skin_values(&mut self, inst: &Instance, renderer: &str, detail: SkinDetail, floats: &[(&str, f32)]) {
         for &ri in &inst.renderers {
             let r = &mut self.scene.renderers[ri];
             let Some(m) = r.materials.first_mut().filter(|_| r.name == renderer) else {
                 continue;
             };
-            match &lines {
-                Some(image) => drop(m.textures.insert(
-                    "_LineMask".into(),
-                    TexSlot {
-                        image: image.clone(),
-                        scale: [1.0, 1.0],
-                        offset: [0.0, 0.0],
-                    },
-                )),
-                None => drop(m.textures.remove("_LineMask")),
-            }
+            set_detail(m, "_LineMask", detail.lines.clone());
+            set_detail(m, "_NormalMapDetail", detail.normal.clone());
             for (name, value) in floats {
                 m.floats.insert((*name).into(), *value);
             }
+        }
+    }
+
+    /// The two textures of a body or face detail item. The list column of
+    /// the normal map is spelled `NormallMapDetail`.
+    fn skin_detail(&mut self, label: &str, property: &str, category: i32, id: i32) -> SkinDetail {
+        let Some(item) = self.item(label, property, category, id) else {
+            return SkinDetail::default();
+        };
+        let mut load = |key: &str| {
+            let (ab, tex) = (item.get("MainAB")?, item.get(key)?);
+            if ab == "0" || tex == "0" {
+                return None;
+            }
+            self.loader.image_by_name(ab, tex, item.mod_idx)
+        };
+        SkinDetail {
+            lines: load("LineMask"),
+            normal: load("NormallMapDetail"),
         }
     }
 
@@ -1458,19 +1496,18 @@ impl<'g> Builder<'g> {
         }
         let image = self.over(kind::BODY_OVER, image);
         self.set_skin(inst, "o_body_a", draw, image);
-        // Body detail: painted lines and their strength, and the shine sliders.
-        let lines = self.item_image(
+        // Body detail: painted lines, the detail normal map and their
+        // strength, and the shine sliders.
+        let detail = self.skin_detail(
             "body detail",
             "ChaFileBody.detailId",
             cat::MT_BODY_DETAIL,
             body.detail_id,
-            "MainAB",
-            "LineMask",
         );
         self.skin_values(
             inst,
             "o_body_a",
-            lines,
+            detail,
             &[
                 ("_DetailNormalMapScale", body.detail_power),
                 // Status can add gloss on top; a character at rest has none.
@@ -1616,19 +1653,18 @@ impl<'g> Builder<'g> {
         }
         let image = self.over(kind::FACE_OVER, image);
         self.set_skin(inst, "cf_O_face", draw, image);
-        // Face detail: painted lines and their strength, cheek and lip shine.
-        let lines = self.item_image(
+        // Face detail: painted lines, the detail normal map and their
+        // strength, cheek and lip shine.
+        let detail = self.skin_detail(
             "face detail",
             "ChaFileFace.detailId",
             cat::MT_FACE_DETAIL,
             face.detail_id,
-            "MainAB",
-            "LineMask",
         );
         self.skin_values(
             inst,
             "cf_O_face",
-            lines,
+            detail,
             &[
                 ("_DetailNormalMapScale", face.detail_power),
                 ("_SpecularPower", face.cheek_gloss_power),
@@ -2207,4 +2243,34 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         physics,
         warnings: b.loader.warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_detail_texture_keeps_the_materials_placement() {
+        let image = Arc::new(Image {
+            name: "cf_body_00_n".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![128, 128, 255, 128],
+            srgb: false,
+            repeat: true,
+        });
+        let mut m = crate::scene::MaterialInst::default();
+        m.tex_st.insert("_NormalMapDetail".into(), [2.0, 3.0, 0.5, 0.25]);
+        set_detail(&mut m, "_NormalMapDetail", Some(image.clone()));
+        set_detail(&mut m, "_LineMask", Some(image));
+        let normal = &m.textures["_NormalMapDetail"];
+        assert_eq!((normal.scale, normal.offset), ([2.0, 3.0], [0.5, 0.25]));
+        assert_eq!(normal.image.name, "cf_body_00_n");
+        // A property the material does not place sits at the full square.
+        let lines = &m.textures["_LineMask"];
+        assert_eq!((lines.scale, lines.offset), ([1.0, 1.0], [0.0, 0.0]));
+        // An item without the texture clears what the material had.
+        set_detail(&mut m, "_NormalMapDetail", None);
+        assert!(!m.textures.contains_key("_NormalMapDetail"));
+    }
 }

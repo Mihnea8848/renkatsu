@@ -35,6 +35,8 @@ pub const HAS_PATTERN3: u32 = 1024;
 /// The tenth and eleventh slot, which the KKShadersPlus materials use.
 pub const HAS_OVER5: u32 = 2048;
 pub const HAS_OVER6: u32 = 4096;
+/// The twelfth slot: main_skin's liquid mask.
+pub const HAS_OVER7: u32 = 8192;
 
 /// Which of the game's clothes shaders an item follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +144,7 @@ pub const PORTED: [&str; 41] = [
 ];
 
 /// Texture slots in bind order.
-pub const SLOTS: [(&str, u32); 11] = [
+pub const SLOTS: [(&str, u32); 12] = [
     ("_MainTex", HAS_MAIN),
     ("_ColorMask", HAS_COLOR_MASK),
     ("_DetailMask", HAS_DETAIL),
@@ -152,9 +154,11 @@ pub const SLOTS: [(&str, u32); 11] = [
     ("_overtex2", HAS_OVER2),
     ("_overtex3", HAS_OVER3),
     ("_PatternMask3", HAS_PATTERN3),
-    // The KKShadersPlus materials alone fill the last two.
+    // The KKShadersPlus materials and main_skin fill these two.
     ("_NormalMap", HAS_OVER5),
     ("_NormalMapDetail", HAS_OVER6),
+    // main_skin alone.
+    ("_liquidmask", HAS_OVER7),
 ];
 
 /// Vectors in the `ext` block of the material uniform.
@@ -199,7 +203,7 @@ pub struct MaterialDesc {
     /// The shader's shadow caster pass.
     pub shadow: ShadowPass,
     pub uniform: MaterialUniform,
-    pub textures: [Option<Arc<Image>>; 11],
+    pub textures: [Option<Arc<Image>>; SLOTS.len()],
 }
 
 /// Material kind from a Unity shader name such as `Shader Forge/main_skin`.
@@ -387,7 +391,7 @@ impl MaterialDesc {
         if state.shadow == ShadowPass::Fallback {
             flags |= CASTER_FALLBACK;
         }
-        let mut textures: [Option<Arc<Image>>; 11] = Default::default();
+        let mut textures: [Option<Arc<Image>>; SLOTS.len()] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
@@ -399,12 +403,24 @@ impl MaterialDesc {
         let mut st_line = st_main;
         // The animation mask or first pattern mask, then the other two.
         let mut st_extra = [st_main; 3];
+        // main_skin: the detail normal map, the liquid layers and their mask.
+        let skin = kind == Kind::Skin;
+        let mut st_normal_detail = st_main;
+        let mut st_liquid = [st_main; 3];
+        // Which of the two liquid textures tile.
+        let mut liquid_wrap = 0u32;
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
             // Clothes have none either; their normal map and second ramp
             // take the first two.
             let name = match *name {
                 "_overtex1" if kind == Kind::Hair => "_HairGloss",
+                // main_skin has no colour mask and no patterns; its two
+                // liquid textures take those slots, its normal maps and
+                // liquid mask the last three.
+                "_ColorMask" if skin => "_Texture2",
+                "_PatternMask3" if skin => "_Texture3",
+                "_NormalMap" | "_NormalMapDetail" | "_liquidmask" if skin => name,
                 "_overtex1" if mapped => "_NormalMap",
                 "_overtex2" if glasses => "_GlassRamp",
                 "_overtex2" if mapped => "_AnotherRamp",
@@ -415,8 +431,8 @@ impl MaterialDesc {
                 "_AlphaMask" if patterned => "_PatternMask1",
                 "_overtex3" if patterned => "_PatternMask2",
                 "_PatternMask3" if !patterned => continue,
-                // The last two slots are for the KKShadersPlus materials.
-                "_NormalMap" | "_NormalMapDetail" => continue,
+                // The last slots are for the KKShadersPlus materials and skin.
+                "_NormalMap" | "_NormalMapDetail" | "_liquidmask" => continue,
                 // Not properties of main_item_studio_alpha or main_item.
                 "_AlphaMask" | "_overtex3" if studio || accessory => continue,
                 // toon_glasses has the main texture, the normal map and
@@ -435,6 +451,16 @@ impl MaterialDesc {
                     "_overtex1" => st_over[0] = st,
                     "_overtex2" => st_over[1] = st,
                     "_NormalMap" => st_normal = st,
+                    "_NormalMapDetail" => st_normal_detail = st,
+                    "_Texture2" => {
+                        st_liquid[0] = st;
+                        liquid_wrap |= u32::from(slot.image.repeat);
+                    }
+                    "_Texture3" => {
+                        st_liquid[1] = st;
+                        liquid_wrap |= u32::from(slot.image.repeat) << 1;
+                    }
+                    "_liquidmask" => st_liquid[2] = st,
                     "_GlassRamp" => st_ramp = st,
                     "_ColorMask" => st_color_mask = st,
                     "_DetailMask" => st_detail = st,
@@ -661,6 +687,30 @@ impl MaterialDesc {
                 let mut ext = [[0.0; 4]; EXT];
                 ext[..3].copy_from_slice(&[st_color_mask, st_detail, st_normal]);
                 ext
+            } else if skin {
+                let mut ext = [[0.0; 4]; EXT];
+                ext[..8].copy_from_slice(&[
+                    st_normal,
+                    st_normal_detail,
+                    st_liquid[0],
+                    st_liquid[1],
+                    st_liquid[2],
+                    // A vector: offset, then scale.
+                    mat.colors.get("_LiquidTiling").copied().unwrap_or([0.0, 0.0, 2.0, 2.0]),
+                    [
+                        float("_liquidftop", 0.0),
+                        float("_liquidfbot", 0.0),
+                        float("_liquidbtop", 0.0),
+                        float("_liquidbbot", 0.0),
+                    ],
+                    [
+                        float("_liquidface", 0.0),
+                        float("_rimpower", 0.5),
+                        float("_rimV", 0.0),
+                        liquid_wrap as f32,
+                    ],
+                ]);
+                ext
             } else {
                 [[0.0; 4]; EXT]
             },
@@ -803,6 +853,73 @@ mod tests {
         assert_eq!(set.color2, linear([0.8, 0.7, 0.6, 0.5]));
         assert_eq!(set.color3, [0.9, 0.3, 0.4, 0.25]);
         assert_eq!(set.line, [0.0, 1.0, 0.7, 1.0]);
+    }
+
+    #[test]
+    fn skin_carries_its_normal_maps_and_liquid_layers() {
+        let slot = |scale: f32, repeat: bool| rk_chara::TexSlot {
+            image: Arc::new(Image {
+                name: "t".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb: false,
+                repeat,
+            }),
+            scale: [scale, scale],
+            offset: [0.5, 0.25],
+        };
+        let mut mat = MaterialInst {
+            shader: "Shader Forge/main_skin".into(),
+            ..Default::default()
+        };
+        // Without values: no textures, the shader's tiling, rim and amounts.
+        let plain = MaterialDesc::new(Some(&mat));
+        assert_eq!(plain.uniform.info[1], 0);
+        assert_eq!(plain.uniform.ext[5], [0.0, 0.0, 2.0, 2.0]);
+        assert_eq!(plain.uniform.ext[6], [0.0; 4]);
+        assert_eq!(plain.uniform.ext[7], [0.0, 0.5, 0.0, 0.0]);
+
+        for (n, name) in [
+            "_NormalMap",
+            "_NormalMapDetail",
+            "_Texture2",
+            "_Texture3",
+            "_liquidmask",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Only the liquid's normal map tiles here.
+            mat.textures
+                .insert(name.into(), slot(1.0 + n as f32, name == "_Texture3"));
+        }
+        mat.colors.insert("_LiquidTiling".into(), [0.1, 0.2, 3.5, 3.5]);
+        for (name, value) in [
+            ("_liquidftop", 1.0),
+            ("_liquidfbot", 2.0),
+            ("_liquidbtop", 0.0),
+            ("_liquidbbot", 1.0),
+            ("_liquidface", 2.0),
+            ("_rimpower", 0.1),
+            ("_rimV", 0.4),
+        ] {
+            mat.floats.insert(name.into(), value);
+        }
+        let d = MaterialDesc::new(Some(&mat));
+        let u = d.uniform;
+        // The liquid textures sit in the slots skin leaves free.
+        let slots = [9, 10, 1, 8, 11];
+        assert!(slots.iter().all(|&i| d.textures[i].is_some()));
+        assert_eq!(u.info[1], slots.iter().fold(0, |f, &i| f | SLOTS[i].1));
+        for n in 0..5 {
+            let scale = 1.0 + n as f32;
+            assert_eq!(u.ext[n], [scale, scale, 0.5, 0.25]);
+        }
+        // The tiling is a vector, not a colour.
+        assert_eq!(u.ext[5], [0.1, 0.2, 3.5, 3.5]);
+        assert_eq!(u.ext[6], [1.0, 2.0, 0.0, 1.0]);
+        assert_eq!(u.ext[7], [2.0, 0.1, 0.4, 2.0]);
     }
 
     #[test]

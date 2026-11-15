@@ -490,6 +490,8 @@ impl Renderer {
             material_entries.push(texture_entry(1 + i, wgpu::ShaderStages::VERTEX_FRAGMENT));
         }
         material_entries.push(sampler_entry(1 + material::SLOTS.len() as u32));
+        // A sampler that always tiles.
+        material_entries.push(sampler_entry(2 + material::SLOTS.len() as u32));
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material"),
             entries: &material_entries,
@@ -784,6 +786,10 @@ impl Renderer {
             } else {
                 &self.sampler_clamp
             }),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2 + views.len() as u32,
+            resource: wgpu::BindingResource::Sampler(&self.sampler_repeat),
         });
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -1469,6 +1475,81 @@ mod tests {
         };
         assert_eq!(scene_shadow_global(&env), [0.501_960_8, 0.25, 1.0, 0.74]);
         assert_eq!(line_color_global(&env), [0.5, 0.5, 0.5, 0.25]);
+    }
+
+    /// main_skin's way of turning one tangent space normal by another, as
+    /// `skin_turn` in `toon.wgsl`.
+    fn skin_turn(base: [f32; 3], top: [f32; 3]) -> [f32; 3] {
+        let t = [base[0], base[1], base[2] + 1.0];
+        let u = [-top[0], -top[1], top[2]];
+        let d = t[0] * u[0] + t[1] * u[1] + t[2] * u[2];
+        std::array::from_fn(|k| t[k] * d / t[2] - u[k])
+    }
+
+    /// main_skin's liquid cover, as `skin_liquid_cover` in `toon.wgsl`.
+    /// `levels`: front top, front bottom, back top, back bottom, face.
+    fn skin_liquid_cover(levels: [f32; 5], texel: [f32; 2], mask: [f32; 3]) -> f32 {
+        let put = |level: f32| (texel[0] * level.clamp(0.0, 1.0)).max(texel[1] * (level - 1.0).clamp(0.0, 1.0));
+        let [r, g, b] = mask;
+        let pure = [r - b.max(g), g - b.max(r), b - g.max(r)];
+        let pair = [g.min(r) * 1.111_111 - 0.111_111_1, b.min(g) * 1.111_111 - 0.111_111_1];
+        let mut cover = put(levels[0]).min(pure[0]);
+        cover = cover.max(pure[1].min(put(levels[1])));
+        cover = cover.max(pure[2].min(put(levels[2])));
+        cover = cover.max(pair[0].min(put(levels[3])));
+        cover.max(pair[1].min(put(levels[4]))).clamp(0.0, 1.0)
+    }
+
+    #[test]
+    fn skin_normals_turn_as_in_the_game() {
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        let tilted = [0.6, 0.0, 0.8];
+        // A flat map on top changes nothing, and a flat base takes the top.
+        assert!(close(skin_turn(tilted, [0.0, 0.0, 1.0]), tilted));
+        assert!(close(skin_turn([0.0, 0.0, 1.0], tilted), tilted));
+        // Two tilts the same way add up, and the length stays one.
+        let both = skin_turn(tilted, tilted);
+        assert!(close(both, [0.96, 0.0, 0.28]));
+    }
+
+    #[test]
+    fn liquid_lies_where_its_mask_and_level_say() {
+        let texel = [0.5, 0.75];
+        // At rest nothing lies anywhere, whatever the mask.
+        for mask in [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0]] {
+            assert_eq!(skin_liquid_cover([0.0; 5], texel, mask), 0.0);
+        }
+        // Level one puts down the red channel, level two the green one too.
+        let red = [1.0, 0.0, 0.0];
+        assert_eq!(skin_liquid_cover([1.0, 0.0, 0.0, 0.0, 0.0], texel, red), 0.5);
+        assert_eq!(skin_liquid_cover([2.0, 0.0, 0.0, 0.0, 0.0], texel, red), 0.75);
+        // Each level answers to its own colour of the mask only.
+        assert_eq!(skin_liquid_cover([0.0, 2.0, 2.0, 2.0, 2.0], texel, red), 0.0);
+        assert_eq!(
+            skin_liquid_cover([0.0, 1.0, 0.0, 0.0, 0.0], texel, [0.0, 1.0, 0.0]),
+            0.5
+        );
+        assert_eq!(
+            skin_liquid_cover([0.0, 0.0, 1.0, 0.0, 0.0], texel, [0.0, 0.0, 1.0]),
+            0.5
+        );
+        assert_eq!(
+            skin_liquid_cover([2.0, 2.0, 2.0, 0.0, 2.0], texel, [1.0, 1.0, 0.0]),
+            0.0
+        );
+        assert_eq!(
+            skin_liquid_cover([0.0, 0.0, 0.0, 1.0, 0.0], texel, [1.0, 1.0, 0.0]),
+            0.5
+        );
+        assert_eq!(
+            skin_liquid_cover([0.0, 0.0, 0.0, 0.0, 2.0], texel, [0.0, 1.0, 1.0]),
+            0.75
+        );
+        // A weak mask caps the cover.
+        assert_eq!(
+            skin_liquid_cover([2.0, 0.0, 0.0, 0.0, 0.0], texel, [0.25, 0.0, 0.0]),
+            0.25
+        );
     }
 
     #[test]

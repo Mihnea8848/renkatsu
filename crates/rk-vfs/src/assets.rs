@@ -75,6 +75,20 @@ pub struct MeShaderInfo {
     pub queue: Option<i32>,
 }
 
+/// Where a source of a bundle path stands when an asset is looked for:
+/// the mod the request comes from, then the other zipmods, then the game.
+/// Sideloader answers a load from a bundle path with a zipmod's bundle at
+/// that path when it holds the asset, also when the path is one of the
+/// game's own (`RedirectHook`, `BundleManager.TryGetObjectFromName`), so a
+/// zipmod that ships `chara/mm_base.unity3d` replaces the materials in it.
+fn source_rank(source_mod: Option<u32>, prefer_mod: Option<u32>) -> u8 {
+    match source_mod {
+        Some(_) if source_mod == prefer_mod => 0,
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
 /// Unity bundles stored inside a file, found by their signature. The size
 /// in each header bounds the bundle.
 fn embedded_bundles(bytes: &[u8]) -> Vec<Bundle> {
@@ -228,11 +242,11 @@ impl Assets {
         locs.iter().filter_map(|l| self.open(&vpath, l).ok()).collect()
     }
 
-    /// Sources of `vpath` restricted to one mod (or the game when `None`),
-    /// falling back to every source.
+    /// Sources of `vpath` in the order an asset is looked for in them; see
+    /// `source_rank`.
     fn sources(&self, vpath: &str, prefer_mod: Option<u32>) -> Vec<Arc<LoadedBundle>> {
         let mut all = self.bundles(vpath);
-        all.sort_by_key(|b| b.mod_idx != prefer_mod);
+        all.sort_by_key(|b| source_rank(b.mod_idx, prefer_mod));
         all
     }
 
@@ -446,5 +460,22 @@ impl Game {
             assets: Assets::new(index),
             items,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_rank;
+
+    #[test]
+    fn zipmods_come_before_the_game() {
+        // A request from the game still finds a zipmod's bundle first.
+        let mut order = [None, Some(4), Some(2)];
+        order.sort_by_key(|m| source_rank(*m, None));
+        assert_eq!(order, [Some(4), Some(2), None]);
+        // A request from a mod looks in that mod first, the game last.
+        let mut order = [None, Some(4), Some(2)];
+        order.sort_by_key(|m| source_rank(*m, Some(2)));
+        assert_eq!(order, [Some(2), Some(4), None]);
     }
 }
