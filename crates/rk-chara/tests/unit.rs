@@ -586,6 +586,7 @@ fn material_editor_overrides_find_their_materials() {
             },
             queue: None,
             defaults: vec![],
+            props: vec![],
         })
     };
     let applied = apply(&mut scene, &ext, 0, &targets, &known);

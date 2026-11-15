@@ -7,8 +7,8 @@
 use crate::index::{norm, BundleLoc, Index};
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
-use rk_unityfs::objects::ShaderPass;
 use rk_unityfs::objects::Texture2D;
+use rk_unityfs::objects::{ShaderPass, ShaderProp};
 use rk_unityfs::{class, Bundle, ObjectInfo, PPtr, SerializedFile, UObject, UValue};
 use std::collections::HashMap;
 use std::io::Read;
@@ -62,15 +62,20 @@ pub struct Assets {
     /// MaterialEditor shaders looked up so far, by name.
     me_shaders: Mutex<HashMap<String, Option<MeShaderInfo>>>,
     /// Shaders in MaterialEditor's own embedded bundles, read once.
-    me_builtin: std::sync::OnceLock<HashMap<String, Vec<ShaderPass>>>,
+    me_builtin: std::sync::OnceLock<HashMap<String, ShaderParts>>,
     /// Bodies offered to the Uncensor Selector plugin, read on first use.
     uncensors: std::sync::OnceLock<crate::uncensor::Uncensors>,
 }
+
+/// Passes and declared properties of a shader.
+type ShaderParts = (Vec<ShaderPass>, Vec<ShaderProp>);
 
 /// A shader MaterialEditor can switch a material to.
 #[derive(Debug, Clone)]
 pub struct MeShaderInfo {
     pub passes: Vec<ShaderPass>,
+    /// The properties the shader declares, with their default values.
+    pub props: Vec<ShaderProp>,
     /// Queue MaterialEditor forces on the material, from the shader's XML entry.
     pub queue: Option<i32>,
     /// Defaults from the XML entry: name, type and value, as written.
@@ -136,7 +141,7 @@ fn files_of(bundle: &Bundle) -> Vec<SerializedFile> {
 }
 
 /// Every shader in some files, by its Unity name.
-fn shaders_in<'a>(files: impl IntoIterator<Item = &'a SerializedFile>) -> HashMap<String, Vec<ShaderPass>> {
+fn shaders_in<'a>(files: impl IntoIterator<Item = &'a SerializedFile>) -> HashMap<String, ShaderParts> {
     let mut out = HashMap::new();
     for sf in files {
         for info in sf.objects_of(class::SHADER) {
@@ -144,12 +149,18 @@ fn shaders_in<'a>(files: impl IntoIterator<Item = &'a SerializedFile>) -> HashMa
                 continue;
             };
             if let Some(name) = rk_unityfs::objects::shader_name(&v) {
-                out.entry(name)
-                    .or_insert_with(|| rk_unityfs::objects::shader_passes(&v));
+                out.entry(name).or_insert_with(|| shader_parts(&v));
             }
         }
     }
     out
+}
+
+fn shader_parts(v: &UObject) -> ShaderParts {
+    (
+        rk_unityfs::objects::shader_passes(v),
+        rk_unityfs::objects::shader_props(v),
+    )
 }
 
 fn stem(path: &str) -> String {
@@ -350,16 +361,17 @@ impl Assets {
         Some(bytes)
     }
 
-    /// Name and passes of the shader a material uses.
+    /// Name, passes and declared properties of the shader a material uses.
     pub fn shader_info(
         &self,
         from: &Arc<AssetFile>,
         shader: PPtr,
-    ) -> Option<(String, Vec<rk_unityfs::objects::ShaderPass>)> {
+    ) -> Option<(String, Vec<ShaderPass>, Vec<ShaderProp>)> {
         let obj = self.deref(from, shader)?;
         let v = obj.file.sf.read_until(&obj.info, "m_ParsedForm").ok()?;
         let name = rk_unityfs::objects::shader_name(&v)?;
-        Some((name, rk_unityfs::objects::shader_passes(&v)))
+        let (passes, props) = shader_parts(&v);
+        Some((name, passes, props))
     }
 
     /// The shader MaterialEditor uses for `name`: one a zipmod offers, or
@@ -374,27 +386,29 @@ impl Assets {
                     .asset
                     .as_deref()
                     .and_then(|a| self.find(&entry.bundle, a, Some(class::SHADER), entry.mod_idx));
-                let passes = match obj {
+                let parts = match obj {
                     Some(obj) => obj
                         .file
                         .sf
                         .read_until(&obj.info, "m_ParsedForm")
                         .ok()
-                        .map(|v| rk_unityfs::objects::shader_passes(&v)),
+                        .map(|v| shader_parts(&v)),
                     // Without an asset name it is loaded by its shader name.
                     None => self
                         .sources(&entry.bundle, entry.mod_idx)
                         .first()
                         .and_then(|b| shaders_in(b.files.iter().map(|f| &f.sf)).remove(name)),
                 };
-                passes.map(|passes| MeShaderInfo {
+                parts.map(|(passes, props)| MeShaderInfo {
                     passes,
+                    props,
                     queue: entry.queue,
                     defaults: entry.defaults.clone(),
                 })
             }
-            None => self.me_builtin().get(name).map(|p| MeShaderInfo {
-                passes: p.clone(),
+            None => self.me_builtin().get(name).map(|(passes, props)| MeShaderInfo {
+                passes: passes.clone(),
+                props: props.clone(),
                 queue: None,
                 defaults: Vec::new(),
             }),
@@ -403,7 +417,7 @@ impl Assets {
         found
     }
 
-    fn me_builtin(&self) -> &HashMap<String, Vec<ShaderPass>> {
+    fn me_builtin(&self) -> &HashMap<String, ShaderParts> {
         self.me_builtin.get_or_init(|| {
             let Some(dll) = find_file(
                 &self.index.game_dir.join("BepInEx").join("plugins"),

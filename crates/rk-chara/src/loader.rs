@@ -103,8 +103,20 @@ impl<'a> Loader<'a> {
 
     pub fn material(&mut self, obj: &ObjRef) -> Result<MaterialInst> {
         let m = Material::read(&obj.read()?)?;
-        let (shader, passes) = self.game.assets.shader_info(&obj.file, m.shader).unwrap_or_default();
+        let info = self.game.assets.shader_info(&obj.file, m.shader);
+        // What the material stores: the asset's saved values and the
+        // properties of its shader.
+        // A shader that lists no property at all was not read in full.
+        let known = info.as_ref().filter(|(_, _, props)| !props.is_empty());
+        let stored = known.map(|(_, _, props)| {
+            let saved = m.textures.iter().map(|(k, _)| k);
+            let saved = saved.chain(m.floats.iter().map(|(k, _)| k));
+            let saved = saved.chain(m.colors.iter().map(|(k, _)| k));
+            saved.chain(props.iter().map(|p| &p.name)).cloned().collect()
+        });
+        let (shader, passes, _) = info.unwrap_or_default();
         let mut inst = MaterialInst {
+            stored,
             name: m.name.clone(),
             shader,
             draw: DrawState::from_passes(&passes),

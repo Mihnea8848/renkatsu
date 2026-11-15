@@ -515,3 +515,46 @@ fn shadow_caster_pass_comes_from_the_shader_or_its_fallback() {
     assert!(fallback_casts_shadows("Legacy Shaders/VertexLit"));
     assert!(!fallback_casts_shadows(""));
 }
+
+#[test]
+fn shader_properties_come_with_their_defaults() {
+    use rk_unityfs::objects::{shader_props, ShaderPropKind};
+    let prop = |name: &str, kind: i64, def: [f64; 4]| {
+        obj(vec![
+            ("m_Name", UValue::Str(name.into())),
+            ("m_Type", UValue::Int(kind)),
+            ("m_DefValue[0]", UValue::Float(def[0])),
+            ("m_DefValue[1]", UValue::Float(def[1])),
+            ("m_DefValue[2]", UValue::Float(def[2])),
+            ("m_DefValue[3]", UValue::Float(def[3])),
+        ])
+    };
+    let props = UValue::Array(vec![
+        prop("_Color", 0, [1.0, 1.0, 1.0, 1.0]),
+        prop("_Patternuv1", 1, [0.0, 0.0, 1.0, 1.0]),
+        prop("_alpha_a", 2, [1.0, 0.0, 0.0, 0.0]),
+        prop("_rimV", 3, [0.5, 0.0, 1.0, 0.0]),
+        prop("_HairGloss", 4, [0.0; 4]),
+        prop("_Other", 9, [0.0; 4]),
+    ]);
+    let sh = root(vec![(
+        "m_ParsedForm",
+        obj(vec![("m_PropInfo", obj(vec![("m_Props", props)]))]),
+    )]);
+    let got = shader_props(&sh);
+    let kinds: Vec<_> = got.iter().map(|p| (p.name.as_str(), p.kind)).collect();
+    assert_eq!(
+        kinds,
+        [
+            ("_Color", ShaderPropKind::Vector),
+            ("_Patternuv1", ShaderPropKind::Vector),
+            ("_alpha_a", ShaderPropKind::Float),
+            ("_rimV", ShaderPropKind::Float),
+            ("_HairGloss", ShaderPropKind::Texture),
+        ]
+    );
+    assert_eq!(got[1].default, [0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(got[3].default[0], 0.5);
+    // A shader without the list declares nothing.
+    assert!(shader_props(&root(vec![])).is_empty());
+}

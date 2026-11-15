@@ -7,9 +7,9 @@
 //! Math follows the stored data: left-handed, Y up, metres.
 
 use glam::{Mat4, Quat, Vec3, Vec4};
-use rk_unityfs::objects::{Mesh, ShaderPass};
+use rk_unityfs::objects::{Mesh, ShaderPass, ShaderProp, ShaderPropKind};
 use rk_vfs::ObjRef;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +254,65 @@ pub struct MaterialInst {
     /// prefab). The slot is kept so material indices stay the game's, but
     /// nothing of ours is drawn for it.
     pub absent: bool,
+    /// Names of the properties the material stores: the ones saved in its
+    /// asset and the ones its shaders declare. `None` when the shader could
+    /// not be read; every property then counts as stored.
+    pub stored: Option<HashSet<String>>,
+    /// Colours and floats set on properties the material does not store.
+    /// Unity keeps those in the running property sheet only, which is built
+    /// again from the stored values when the shader changes.
+    pub unsaved: HashSet<String>,
+}
+
+impl MaterialInst {
+    /// Whether the material stores the property.
+    pub fn stores(&self, name: &str) -> bool {
+        self.stored.as_ref().is_none_or(|s| s.contains(name))
+    }
+
+    /// `Material.SetColor`. A colour on a property the material does not
+    /// store reads back, but does not survive a shader switch.
+    pub fn set_color(&mut self, name: &str, value: [f32; 4]) {
+        if !self.stores(name) {
+            self.unsaved.insert(name.to_string());
+        }
+        self.colors.insert(name.to_string(), value);
+    }
+
+    /// `Material.SetTexture`. `GetTexture` reads the stored list, so a
+    /// texture on a property the material does not store reads back as none,
+    /// and no shader of the material samples it.
+    pub fn set_texture(&mut self, name: &str, slot: TexSlot) {
+        if self.stores(name) {
+            self.textures.insert(name.to_string(), slot);
+        }
+    }
+
+    /// What assigning another shader does to the properties: values that
+    /// were never stored are gone, the stored ones stay, and every property
+    /// the new shader declares that has no value takes the shader's default.
+    pub fn adopt_shader(&mut self, props: &[ShaderProp]) {
+        for name in std::mem::take(&mut self.unsaved) {
+            self.colors.remove(&name);
+            self.floats.remove(&name);
+        }
+        for p in props {
+            match p.kind {
+                ShaderPropKind::Vector => {
+                    self.colors.entry(p.name.clone()).or_insert(p.default);
+                }
+                ShaderPropKind::Float => {
+                    self.floats.entry(p.name.clone()).or_insert(p.default[0]);
+                }
+                ShaderPropKind::Texture => {
+                    self.tex_st.entry(p.name.clone()).or_insert([1.0, 1.0, 0.0, 0.0]);
+                }
+            }
+            if let Some(stored) = &mut self.stored {
+                stored.insert(p.name.clone());
+            }
+        }
+    }
 }
 
 /// Culling box of a renderer as Unity keeps it: centre and half size.

@@ -67,6 +67,8 @@ pub struct Shader {
     pub draw: DrawState,
     pub queue: Option<i32>,
     pub defaults: Vec<(String, ShaderDefault)>,
+    /// The properties the shader declares, with its own default values.
+    pub props: Vec<rk_unityfs::objects::ShaderProp>,
 }
 
 /// A `DefaultValue` from a shader's XML entry. Texture and keyword defaults
@@ -110,12 +112,15 @@ const EYE_MATERIALS: [&str; 6] = [
 /// cannot load leaves the material alone. Otherwise the material takes the
 /// new shader's queue, unless the XML entry sets one or the material is one
 /// of the eye materials, which keep theirs. A queue saved with the entry
-/// wins over all of them. The entry's default values are set last, as
-/// MaterialAPI.SetShader does; the card's own values come after.
+/// wins over all of them. Values the game set on properties the material
+/// does not store are lost with the old shader. The entry's default values
+/// are set last, as MaterialAPI.SetShader does; the card's own values come
+/// after.
 fn switch_shader(m: &mut MaterialInst, name: Option<&str>, shader: Option<&Shader>, queue: Option<i32>) {
     if let (Some(name), Some(sh)) = (name, shader) {
         m.shader = name.to_string();
         m.draw = Some(sh.draw);
+        m.adopt_shader(&sh.props);
         for (prop, value) in &sh.defaults {
             let key = format!("_{prop}");
             match *value {
@@ -397,6 +402,7 @@ mod tests {
             draw: state(2475),
             queue: None,
             defaults: vec![],
+            props: vec![],
         };
         switch_shader(&mut m, Some("xukmi/HairFrontPlus"), Some(&sh), None);
         assert_eq!(m.shader, "xukmi/HairFrontPlus");
@@ -411,6 +417,7 @@ mod tests {
             draw: state(3000),
             queue: None,
             defaults: vec![],
+            props: vec![],
         };
         switch_shader(&mut m, Some("xukmi/EyePlus"), Some(&sh), None);
         assert_eq!(m.render_queue, 2474);
@@ -422,6 +429,7 @@ mod tests {
             draw: state(2000),
             queue: Some(2600),
             defaults: vec![],
+            props: vec![],
         };
         let mut m = material("a", 3040);
         switch_shader(&mut m, Some("s"), Some(&sh), None);
@@ -442,6 +450,7 @@ mod tests {
                     ShaderDefault::parse("Color", "0.5, 0.5, 0.5").unwrap(),
                 ),
             ],
+            props: vec![],
         };
         let mut m = material("cf_m_bra_01", 2450);
         m.floats.insert("_Cutoff".into(), 0.5);
@@ -450,6 +459,85 @@ mod tests {
         assert_eq!(m.colors["_LineColor"], [0.5, 0.5, 0.5, 1.0]);
         assert_eq!(ShaderDefault::parse("Texture", "x"), None);
         assert_eq!(ShaderDefault::parse("Color", "1,2"), None);
+    }
+
+    #[test]
+    fn a_switch_drops_what_the_material_did_not_store() {
+        use rk_unityfs::objects::{ShaderProp, ShaderPropKind};
+        let prop = |name: &str, kind, default| ShaderProp {
+            name: name.into(),
+            kind,
+            default,
+        };
+        // An accessory on a shader with no colour slots: the asset stores a
+        // shadow colour and a main texture only.
+        let mut m = material("Hair1", -1);
+        m.colors.insert("_ShadowColor".into(), [0.8, 0.9, 1.0, 1.0]);
+        m.stored = Some(["_ShadowColor", "_MainTex"].into_iter().map(String::from).collect());
+        // ChaControl.ChangeAccessoryColor sets the card's colours anyway.
+        m.set_color("_Color", [1.0, 0.588, 0.588, 1.0]);
+        m.set_color("_ShadowColor", [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(m.colors["_Color"], [1.0, 0.588, 0.588, 1.0]);
+        // The copy is made before the switch and carries the same state.
+        let mut mats = vec![m];
+        copy_material(&mut mats, "Hair1", "Hair1.MECopy1");
+        let sh = Shader {
+            draw: state(2450),
+            queue: None,
+            defaults: vec![("rimV".into(), ShaderDefault::Float(0.25))],
+            props: vec![
+                prop("_Color", ShaderPropKind::Vector, [1.0; 4]),
+                prop("_Color2", ShaderPropKind::Vector, [0.784, 0.784, 0.784, 1.0]),
+                prop("_ShadowColor", ShaderPropKind::Vector, [0.0; 4]),
+                prop("_rimV", ShaderPropKind::Float, [0.5, 0.0, 0.0, 0.0]),
+                prop("_Cutoff", ShaderPropKind::Float, [0.5, 0.0, 0.0, 0.0]),
+                prop("_HairGloss", ShaderPropKind::Texture, [0.0; 4]),
+            ],
+        };
+        for m in &mut mats {
+            switch_shader(m, Some("Shader Forge/main_hair_front"), Some(&sh), None);
+            // The unsaved colour is gone and the shader's default shows.
+            assert_eq!(m.colors["_Color"], [1.0; 4]);
+            assert_eq!(m.colors["_Color2"], [0.784, 0.784, 0.784, 1.0]);
+            // A stored value survives, and the XML default wins over the shader's.
+            assert_eq!(m.colors["_ShadowColor"], [0.5, 0.5, 0.5, 1.0]);
+            assert_eq!(m.floats["_rimV"], 0.25);
+            assert_eq!(m.floats["_Cutoff"], 0.5);
+            // The new shader's properties are stored from here on.
+            assert!(m.stores("_HairGloss") && m.unsaved.is_empty());
+            assert_eq!(m.tex_st["_HairGloss"], [1.0, 1.0, 0.0, 0.0]);
+            m.set_color("_Color", [0.1, 0.2, 0.3, 1.0]);
+            switch_shader(m, Some("Shader Forge/main_hair_front"), Some(&sh), None);
+            assert_eq!(m.colors["_Color"], [0.1, 0.2, 0.3, 1.0]);
+        }
+    }
+
+    #[test]
+    fn a_texture_needs_a_stored_property() {
+        let slot = || crate::scene::TexSlot {
+            image: Arc::new(Image {
+                name: "gloss".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+                srgb: false,
+                repeat: true,
+            }),
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        };
+        // A hair mesh on an item shader has no gloss slot.
+        let mut m = material("mf_mat1", -1);
+        m.stored = Some(["_MainTex".to_string()].into_iter().collect());
+        m.set_texture("_HairGloss", slot());
+        assert!(!m.textures.contains_key("_HairGloss"));
+        m.set_texture("_MainTex", slot());
+        assert!(m.textures.contains_key("_MainTex"));
+        // A material whose shader could not be read takes everything.
+        let mut m = material("unknown", -1);
+        m.set_texture("_HairGloss", slot());
+        m.set_color("_Color", [1.0; 4]);
+        assert!(m.textures.contains_key("_HairGloss") && m.unsaved.is_empty());
     }
 
     #[test]

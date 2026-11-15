@@ -616,6 +616,53 @@ pub fn shader_passes(o: &UObject) -> Vec<ShaderPass> {
     out
 }
 
+/// What a shader property holds, from `m_Type` of its entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderPropKind {
+    /// A colour or a vector: four numbers.
+    Vector,
+    /// A float or a range.
+    Float,
+    Texture,
+}
+
+/// A property a shader declares, with the value a material that stores
+/// none of its own starts from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderProp {
+    pub name: String,
+    pub kind: ShaderPropKind,
+    /// `m_DefValue`; a float uses the first number.
+    pub default: [f32; 4],
+}
+
+/// The properties a Shader object declares (`m_ParsedForm.m_PropInfo`).
+pub fn shader_props(o: &UObject) -> Vec<ShaderProp> {
+    let Some(props) = o.path("m_ParsedForm.m_PropInfo.m_Props").and_then(UValue::as_array) else {
+        return Vec::new();
+    };
+    props
+        .iter()
+        .filter_map(UValue::as_object)
+        .filter_map(|p| {
+            // SerializedProperty types: 0 colour, 1 vector, 2 float,
+            // 3 range, 4 texture.
+            let kind = match p.i64("m_Type")? {
+                0 | 1 => ShaderPropKind::Vector,
+                2 | 3 => ShaderPropKind::Float,
+                4 => ShaderPropKind::Texture,
+                _ => return None,
+            };
+            let value = |i: usize| p.f32(&format!("m_DefValue[{i}]")).unwrap_or(0.0);
+            Some(ShaderProp {
+                name: p.str("m_Name")?.to_string(),
+                kind,
+                default: [value(0), value(1), value(2), value(3)],
+            })
+        })
+        .collect()
+}
+
 // ------------------------------------------------------------------ texture
 
 #[derive(Debug, Clone)]

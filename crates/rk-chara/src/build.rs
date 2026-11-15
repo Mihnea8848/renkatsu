@@ -801,12 +801,12 @@ impl<'g> Builder<'g> {
                         slot.scale = [st[0], st[1]];
                         slot.offset = [st[2], st[3]];
                     }
-                    m.textures.insert("_HairGloss".into(), slot);
+                    m.set_texture("_HairGloss", slot);
                 }
-                m.colors.insert("_Color".into(), solid(part.base_color));
-                m.colors.insert("_Color2".into(), solid(part.start_color));
-                m.colors.insert("_Color3".into(), solid(part.end_color));
-                m.colors.insert("_LineColor".into(), part.outline_color);
+                m.set_color("_Color", solid(part.base_color));
+                m.set_color("_Color2", solid(part.start_color));
+                m.set_color("_Color3", solid(part.end_color));
+                m.set_color("_LineColor", part.outline_color);
             }
         }
         let count = match self.script_field(inst, "acsDefColor") {
@@ -817,7 +817,7 @@ impl<'g> Builder<'g> {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for (j, name) in ["_Color", "_Color2", "_Color3"].iter().enumerate().take(count) {
                     if let Some(c) = part.acs_color.get(j) {
-                        m.colors.insert((*name).into(), solid(*c));
+                        m.set_color(name, solid(*c));
                     }
                 }
             }
@@ -846,7 +846,7 @@ impl<'g> Builder<'g> {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for (k, (used, name)) in slots.iter().enumerate() {
                     if let (true, Some(c)) = (*used, acc.color.get(k)) {
-                        m.colors.insert((*name).into(), *c);
+                        m.set_color(name, *c);
                     }
                 }
             }
@@ -856,7 +856,7 @@ impl<'g> Builder<'g> {
                 // A fully transparent fourth colour switches the part off.
                 self.scene.renderers[r].enabled &= c[3] != 0.0;
                 if let Some(m) = self.scene.renderers[r].materials.first_mut() {
-                    m.colors.insert("_Color4".into(), *c);
+                    m.set_color("_Color4", *c);
                 }
             }
         }
@@ -865,8 +865,7 @@ impl<'g> Builder<'g> {
         for r in self.accessory_listed(inst, "rendHair") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for name in ["_Color", "_Color2", "_Color3"] {
-                    m.colors
-                        .insert(name.into(), hair.map(|h| h.start_color).unwrap_or([1.0; 4]));
+                    m.set_color(name, hair.map(|h| h.start_color).unwrap_or([1.0; 4]));
                 }
             }
         }
@@ -958,9 +957,9 @@ impl<'g> Builder<'g> {
                 continue;
             };
             if let (true, Some(h)) = (settings.color_match, hair) {
-                m.colors.insert("_Color".into(), h.base_color);
-                m.colors.insert("_Color2".into(), h.start_color);
-                m.colors.insert("_Color3".into(), h.end_color);
+                m.set_color("_Color", h.base_color);
+                m.set_color("_Color2", h.start_color);
+                m.set_color("_Color3", h.end_color);
             }
             match (&gloss, settings.hair_gloss) {
                 (Some(g), true) => {
@@ -969,7 +968,7 @@ impl<'g> Builder<'g> {
                         slot.scale = [st[0], st[1]];
                         slot.offset = [st[2], st[3]];
                     }
-                    m.textures.insert("_HairGloss".into(), slot);
+                    m.set_texture("_HairGloss", slot);
                 }
                 _ => {
                     m.textures.remove("_HairGloss");
@@ -979,12 +978,12 @@ impl<'g> Builder<'g> {
                 (true, Some(h)) => h.outline_color,
                 _ => settings.outline_color,
             };
-            m.colors.insert("_LineColor".into(), outline);
+            m.set_color("_LineColor", outline);
         }
         for r in self.listed_renderers_in(inst, Some(HAIR), "rendAccessory") {
             if let Some(m) = self.scene.renderers[r].materials.first_mut() {
                 for name in ["_Color", "_Color2", "_Color3"] {
-                    m.colors.insert(name.into(), settings.accessory_color);
+                    m.set_color(name, settings.accessory_color);
                 }
             }
         }
@@ -2239,6 +2238,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         Some(crate::material_editor::Shader {
             draw: crate::scene::DrawState::from_passes(&info.passes)?,
             queue: info.queue,
+            props: info.props.clone(),
             defaults: info
                 .defaults
                 .iter()
