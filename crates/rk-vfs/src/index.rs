@@ -566,13 +566,43 @@ impl Index {
                 idx.lists.push(l);
             }
         }
+        // Sideloader searches the zipmods that share a bundle path in the
+        // order of their GUIDs and takes the first one holding the asset;
+        // the game's own file only answers when none does.
+        let mods = &idx.mods;
+        for locs in idx.bundles.values_mut() {
+            locs.sort_by_cached_key(|l| search_key(l.mod_idx.map(|m| mods[m as usize].guid.as_str())));
+        }
         idx
+    }
+}
+
+/// Where a bundle source comes in Sideloader's search: zipmods by GUID,
+/// then the game. Sideloader sorts GUIDs with .NET's default string order,
+/// which compares letters before case; lowercase then ordinal is close.
+fn search_key(guid: Option<&str>) -> (bool, String, String) {
+    match guid {
+        Some(g) => (false, g.to_lowercase(), g.to_string()),
+        None => (true, String::new(), String::new()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zipmods_are_searched_by_guid_before_the_game() {
+        let mut keys = [
+            search_key(None),
+            search_key(Some("moderchan.TongueTexture")),
+            search_key(Some("Face Fixes")),
+        ];
+        keys.sort();
+        assert_eq!(keys[0].2, "Face Fixes");
+        assert_eq!(keys[1].2, "moderchan.TongueTexture");
+        assert!(keys[2].0);
+    }
 
     #[test]
     fn manifest_shaders_are_read() {
