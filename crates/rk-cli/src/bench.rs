@@ -47,7 +47,7 @@ fn tally(summaries: &[Summary]) -> BTreeMap<(String, String), usize> {
     counts
 }
 
-pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
+pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> Result<()> {
     let cfg = Config::load()?;
     let root = cfg.game_dir.join("UserData/chara/female");
     let game = Game::open(&cfg)?;
@@ -106,6 +106,13 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path) -> Result<()> {
                         ),
                     ),
                 );
+                for (kind, lines) in &s.state.groups {
+                    for l in lines {
+                        if show.iter().any(|w| *w == *kind || *w == subject(kind, l)) {
+                            ui::above(&bar, format!("{:>14}{}", "", ui::dim(format!("{kind}: {l}"))));
+                        }
+                    }
+                }
                 summaries.push(s);
             }
             Err(e) => crate::ui::above(

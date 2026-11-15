@@ -83,7 +83,9 @@ impl<'a> Loader<'a> {
             return image.clone();
         }
         if let Some(bytes) = self.game.assets.png(vpath, name) {
-            let image = crate::material_editor::decode(&bytes, name.to_string()).map(|mut image| {
+            // Named after the file: Sideloader's texture from a loose PNG has
+            // no name, so the extension tells the two apart.
+            let image = crate::material_editor::decode(&bytes, format!("{name}.png")).map(|mut image| {
                 // Sideloader takes the wrap mode from the file's path.
                 if key.contains("clamp") {
                     image.repeat = false;

@@ -56,16 +56,24 @@ fn bare(name: &str) -> &str {
 }
 
 /// Our renderer for a captured one: same name, and among several with that
-/// name the one whose first material matches.
-pub fn renderer_for<'a>(r: &Value, scene: &'a Scene) -> Option<&'a rk_chara::RendererInst> {
+/// name the ones whose first material matches. `nth` counts the captured
+/// renderers seen before with the same name and first material, so two
+/// accessories with the same mesh names pair up in order.
+pub fn renderer_for<'a>(r: &Value, scene: &'a Scene, nth: usize) -> Option<&'a rk_chara::RendererInst> {
     let name = r["name"].as_str()?;
     let first = bare(r["materials"][0]["name"].as_str().unwrap_or(""));
     // The game only lists renderers that are switched on.
-    let mut same_name = scene.renderers.iter().filter(|x| x.name == name && x.enabled);
-    same_name
-        .clone()
-        .find(|x| x.materials.first().is_some_and(|m| m.name == first))
-        .or_else(|| same_name.next())
+    let same_name: Vec<_> = scene.renderers.iter().filter(|x| x.name == name && x.enabled).collect();
+    let same_material: Vec<_> = same_name
+        .iter()
+        .copied()
+        .filter(|x| x.materials.first().is_some_and(|m| m.name == first))
+        .collect();
+    same_material
+        .get(nth)
+        .or_else(|| same_material.first())
+        .or_else(|| same_name.first())
+        .copied()
 }
 
 /// Textures Renkatsu builds itself, whose names cannot match the game's.
@@ -73,10 +81,25 @@ fn built_here(name: &str) -> bool {
     name.ends_with("_composed") || name.starts_with("material_editor_") || name.contains("overlay")
 }
 
+/// Textures the capture lists without a name: ones built at run time, loose
+/// PNGs Sideloader loads from a zipmod, and none at all, where Unity shows
+/// the shader's default texture (our `default_*` images).
+fn unnamed_in_game(name: &str) -> bool {
+    built_here(name) || name.ends_with(".png") || name.starts_with("default_")
+}
+
 pub fn compare(capture: &Value, scene: &Scene) -> Report {
     let mut rep = Report::default();
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
     for r in capture["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
-        let Some(ours) = renderer_for(r, scene) else { continue };
+        let key = (
+            r["name"].as_str().unwrap_or("").to_string(),
+            bare(r["materials"][0]["name"].as_str().unwrap_or("")).to_string(),
+        );
+        let nth = seen.entry(key).or_insert(0);
+        let ours = renderer_for(r, scene, *nth);
+        *nth += 1;
+        let Some(ours) = ours else { continue };
         let rname = r["name"].as_str().unwrap_or("");
         if let Some(cast) = r["cast"].as_str() {
             rep.compared += 1;
@@ -159,9 +182,7 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
                 let slot = mine.textures.get(prop);
                 match (game_name.is_empty(), slot) {
                     (true, None) => {}
-                    // The game's runtime-built textures (CustomTextureCreate)
-                    // have no name; ours built the same way are not a difference.
-                    (true, Some(s)) if built_here(&s.image.name) => {}
+                    (true, Some(s)) if unnamed_in_game(&s.image.name) => {}
                     (true, Some(s)) => {
                         rep.compared += 1;
                         rep.differ("texture", format!("{at} {prop}: game none, ours {}", s.image.name));
@@ -235,6 +256,9 @@ mod tests {
         assert!(built_here("clothes_composed"));
         assert!(built_here("material_editor_5"));
         assert!(!built_here("cf_body_00_t"));
+        assert!(unnamed_in_game("kaguya.png"));
+        assert!(unnamed_in_game("default_black"));
+        assert!(!unnamed_in_game("cf_body_00_t"));
     }
 
     #[test]
