@@ -465,7 +465,21 @@ namespace Renkatsu
                 first = false;
                 s.Append("{\"name\": ").Append(Str(r.name));
                 s.Append(", \"kind\": ").Append(Str(r.GetType().Name));
+                s.Append(", \"cast\": ").Append(Str(r.shadowCastingMode.ToString()));
+                s.Append(", \"receive\": ").Append(r.receiveShadows ? "true" : "false");
                 SkinnedMeshRenderer skinned = r as SkinnedMeshRenderer;
+                if (skinned != null)
+                {
+                    s.Append(", \"mesh\": ").Append(Str(skinned.sharedMesh != null ? skinned.sharedMesh.name : ""));
+                    s.Append(", \"root_bone\": ").Append(Str(skinned.rootBone != null ? skinned.rootBone.name : ""));
+                    s.Append(", \"bones\": [");
+                    Transform[] skin = skinned.bones ?? new Transform[0];
+                    for (int i = 0; i < skin.Length; i++)
+                    {
+                        s.Append(i == 0 ? "" : ", ").Append(Str(skin[i] != null ? skin[i].name : ""));
+                    }
+                    s.Append("]");
+                }
                 if (skinned != null && skinned.sharedMesh != null && skinned.sharedMesh.blendShapeCount > 0)
                 {
                     // Blend shapes in use, as [index, weight in percent].
@@ -498,12 +512,116 @@ namespace Renkatsu
                         Vector2 scale = m.GetTextureScale("_MainTex");
                         s.Append(", \"main_tex_st\": [").Append(F(scale.x)).Append(", ").Append(F(scale.y)).Append(", ").Append(F(off.x)).Append(", ").Append(F(off.y)).Append("]");
                     }
+                    if (m != null)
+                    {
+                        Properties(s, m);
+                    }
                     s.Append("}");
                 }
                 s.Append("]}");
             }
             s.Append("\n]\n}\n");
             return s.ToString();
+        }
+
+        // Material properties to record, by type. Unity 5.6 cannot list a
+        // material's properties at runtime, so these are the properties of
+        // the game's shaders and the common modded ones (generated from the
+        // shaders' property tables in mm_base, oo_base, co_top_00,
+        // ao_face_00, ao_hair_00 and xukmi Vanilla Plus).
+        private static readonly string[] Colors = {
+            "_Col0", "_Col1", "_Col2", "_Col3", "_Color", "_Color1_2",
+            "_Color2", "_Color2_2", "_Color3", "_Color3_2", "_Color4", "_Color5",
+            "_Color6", "_Color7", "_CustomAmbient", "_EmissionColor", "_FillColor", "_KKPRimColor",
+            "_LineColor", "_OutlineColor", "_ReflectCol", "_ShadowColor", "_SpecularColor", "_overcolor1",
+            "_overcolor2", "_overcolor3", "_shadowcolor",
+        };
+
+        private static readonly string[] Vectors = {
+            "_Clock", "_ClockDisp", "_GlossColor", "_LiquidTiling", "_Patternuv1", "_Patternuv2",
+            "_Patternuv3", "_ShadowHSV", "_TileAnimation", "_grad", "_hokuro", "_paint1",
+            "_paint2", "_tex4uv", "_tex5uv",
+        };
+
+        private static readonly string[] Floats = {
+            "_AdjustBackfaceNormals", "_Alpha", "_AlphaOptionCutoff", "_AlphaOptionZWrite", "_AngleSpeed", "_AnotherRampFull",
+            "_Blend", "_ColorInverse", "_ColorSort", "_CullOption", "_Cutoff", "_DetailBLineG",
+            "_DetailBLineGA", "_DetailNormalMapScale", "_DetailRLineR", "_DisablePointLights", "_DisableShadowedMatcap", "_DisplaceFull",
+            "_DisplaceMultiplier", "_DisplaceNormalMultiplier", "_EmissionIntensity", "_EmissionKeepCol", "_EmissionMaskMode", "_EmissionPower",
+            "_ExpressionDepth", "_ExpressionSize", "_KKPRimAsDiffuse", "_KKPRimIntensity", "_KKPRimRotateX", "_KKPRimRotateY",
+            "_KKPRimSoft", "_LineWidthS", "_NormalMapScale", "_OutlineOn", "_PatternScale1u", "_PatternScale1v",
+            "_PatternScale2u", "_PatternScale2v", "_PatternScale3u", "_PatternScale3v", "_ReflBlendDst", "_ReflBlendSrc",
+            "_ReflBlendVal", "_ReflectColMix", "_ReflectRotation", "_ReflectionVal", "_Reflective", "_ReflectiveBlend",
+            "_ReflectiveMulOrAdd", "_ReflectiveOverlayed", "_RimPower", "_Roughness", "_Saturation", "_ShadowExtend",
+            "_ShadowExtendAnother", "_ShrinkVal", "_ShrinkVerticalAdjust", "_SizeSpeed", "_SizeWidth", "_SpeclarHeight",
+            "_SpecularDetailNormalScale", "_SpecularHairPower", "_SpecularHeightInvert", "_SpecularIsHighLightsPow", "_SpecularIsHighlights", "_SpecularIsHighlightsRange",
+            "_SpecularNormalScale", "_SpecularPower", "_SpecularPowerNail", "_TessBias", "_TessMax", "_TessMin",
+            "_TessSmooth", "_Tolerance", "_UseDetailRAsSpecularMap", "_UseDiscard", "_UseKKMetal", "_UseKKPRim",
+            "_UseLightColorSpecular", "_UseMatCapReflection", "_UseMeshSpecular", "_UseRampForLights", "_UseRampForShadows", "_UseRampForSpecular",
+            "_WhiteOff", "_WireThickness", "_alpha", "_alpha_a", "_alpha_b", "_ambientshadowOFF",
+            "_dst", "_exppower", "_isHighLight", "_linetexon", "_liquidbbot", "_liquidbtop",
+            "_liquidface", "_liquidfbot", "_liquidftop", "_nip", "_nip_specular", "_nipsize",
+            "_notusetexspecular", "_outline", "_patternclamp1", "_patternclamp2", "_patternclamp3", "_patternrotator1",
+            "_patternrotator2", "_patternrotator3", "_rimReflectMode", "_rimV", "_rimpower", "_rotation",
+            "_src", "_tex1mask", "_transparency", "_yurayura",
+        };
+
+        private static readonly string[] Textures = {
+            "_AlphaMask", "_AnotherRamp", "_ColMask", "_ColorMask", "_DetailMask", "_DisplaceTex",
+            "_EmissionMask", "_GlassRamp", "_HairGloss", "_LineMask", "_MainTex", "_NormalMap",
+            "_NormalMapDetail", "_NormalMask", "_PatternMask1", "_PatternMask2", "_PatternMask3", "_ReflectMap",
+            "_ReflectMapDetail", "_ReflectMask", "_ReflectionMapCap", "_TessTex", "_Texture2", "_Texture3",
+            "_Texture4", "_Texture5", "_Texture6", "_Texture7", "_expression", "_liquidmask",
+            "_overtex1", "_overtex2", "_overtex3", "_paintmask",
+        };
+
+        // Every recorded property the material has, with its stored value.
+        private static void Properties(StringBuilder s, Material m)
+        {
+            s.Append(", \"keywords\": [");
+            string[] kw = m.shaderKeywords ?? new string[0];
+            for (int i = 0; i < kw.Length; i++)
+            {
+                s.Append(i == 0 ? "" : ", ").Append(Str(kw[i]));
+            }
+            s.Append("], \"props\": {");
+            bool first = true;
+            foreach (string n in Colors)
+            {
+                if (!m.HasProperty(n)) continue;
+                s.Append(first ? "" : ", ").Append(Str(n)).Append(": ").Append(C(m.GetColor(n)));
+                first = false;
+            }
+            foreach (string n in Vectors)
+            {
+                if (!m.HasProperty(n)) continue;
+                Vector4 v = m.GetVector(n);
+                s.Append(first ? "" : ", ").Append(Str(n)).Append(": [").Append(F(v.x)).Append(", ").Append(F(v.y)).Append(", ").Append(F(v.z)).Append(", ").Append(F(v.w)).Append("]");
+                first = false;
+            }
+            foreach (string n in Floats)
+            {
+                if (!m.HasProperty(n)) continue;
+                s.Append(first ? "" : ", ").Append(Str(n)).Append(": ").Append(F(m.GetFloat(n)));
+                first = false;
+            }
+            s.Append("}, \"textures\": {");
+            first = true;
+            foreach (string n in Textures)
+            {
+                if (!m.HasProperty(n)) continue;
+                Texture t = m.GetTexture(n);
+                Vector2 sc = m.GetTextureScale(n);
+                Vector2 of = m.GetTextureOffset(n);
+                s.Append(first ? "" : ", ").Append(Str(n)).Append(": {\"name\": ").Append(Str(t != null ? t.name : ""));
+                if (t != null)
+                {
+                    s.Append(", \"size\": [").Append(t.width).Append(", ").Append(t.height).Append("]");
+                }
+                s.Append(", \"st\": [").Append(F(sc.x)).Append(", ").Append(F(sc.y)).Append(", ").Append(F(of.x)).Append(", ").Append(F(of.y)).Append("]}");
+                first = false;
+            }
+            s.Append("}");
         }
 
         private static string F(float v)

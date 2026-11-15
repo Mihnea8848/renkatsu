@@ -11,6 +11,7 @@ mod card;
 mod compare;
 mod reference;
 mod render;
+mod state;
 mod vfs;
 
 #[derive(Parser)]

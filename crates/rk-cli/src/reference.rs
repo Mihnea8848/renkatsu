@@ -310,6 +310,8 @@ pub fn reference(
         "  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture"
     );
     compare_queues(&capture_text, &chara.scene)?;
+    let capture_value: Value = serde_json::from_str(&capture_text)?;
+    crate::state::print(&crate::state::compare(&capture_value, &chara.scene), 8);
     compare_bones(&capture_text, &chara.scene, watch)?;
     Ok(())
 }
