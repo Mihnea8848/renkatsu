@@ -3,16 +3,17 @@
 
 // Koikatsu reference shading. One module serves every material kind; the kind
 // is a uniform so the pipeline count stays small. The game renders in linear
-// colour space: the target is sRGB, so blending happens on linear values as
-// in the game. The clothes shaders (main_opaque, main_alpha), main_item and
-// main_item_studio_alpha work on linear values throughout. The older branches still do their maths on gamma values
-// and are converted on the way out.
+// colour space: sRGB textures are decoded when sampled, material colours
+// arrive linearised and the target is sRGB, so every branch shades and
+// blends on linear values as the game does. The two scene colours
+// (ambient_shadow and line_color) are the exception: the game sets them as
+// global colours, which reach its shaders as stored.
 
 struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     eye: vec4<f32>,
-    // rgb: scene shadow colour, a: 1 - shadow depth
+    // rgb: scene shadow colour as stored (not linearised), a: 1 - shadow depth
     ambient_shadow: vec4<f32>,
     // rgb unused by the game, a: 1 - line depth
     line_color: vec4<f32>,
@@ -435,7 +436,7 @@ fn skin_color(i: VsOut, diffuse: vec3<f32>, front: bool, dm: vec4<f32>, lm: vec4
     return mix(line_rgb, body, keep);
 }
 
-// Every kind except the clothes shaders; the result is in gamma space.
+// Every kind except the clothes shaders.
 fn shade(i: VsOut, front: bool) -> vec4<f32> {
     let kind = m.info.x;
 

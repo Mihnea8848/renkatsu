@@ -118,6 +118,26 @@ struct Globals {
     ambient_light: [f32; 4],
 }
 
+/// `_ambientshadowG` as the shaders read it: the scene's shadow colour with
+/// one minus the shadow depth in alpha.
+///
+/// The game sets it with `Shader.SetGlobalColor`, and in Unity 5.6 a global
+/// colour reaches the shaders as stored, without the sRGB decoding that a
+/// material's Color property gets. Measured on captures: skin of (255, 236,
+/// 230) under a hair shadow is (252, 231, 224) in the game, which main_skin
+/// gives for the stored 0.502 and not for its linear value (250, 227, 220).
+fn scene_shadow_global(env: &Environment) -> [f32; 4] {
+    let [r, g, b] = env.shadow_color;
+    [r, g, b, 1.0 - env.shadow_depth]
+}
+
+/// `_LineColorG` as the shaders read it, set the same way as the shadow
+/// colour. The game keeps its colour at one half and stores one minus the
+/// line depth in alpha.
+fn line_color_global(env: &Environment) -> [f32; 4] {
+    [0.5, 0.5, 0.5, 1.0 - env.line_depth]
+}
+
 /// What the shadow mask pass reads; `Shadow` in `shadow.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -781,14 +801,8 @@ impl Renderer {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
-            // Both are set with SetGlobalColor, which Unity linearises.
-            ambient_shadow: material::linear([
-                env.shadow_color[0],
-                env.shadow_color[1],
-                env.shadow_color[2],
-                1.0 - env.shadow_depth,
-            ]),
-            line_color: material::linear([0.5, 0.5, 0.5, 1.0 - env.line_depth]),
+            ambient_shadow: scene_shadow_global(env),
+            line_color: line_color_global(env),
             params: [env.line_width, env.light_intensity, env.ambient, 0.0],
             // A colour, which Unity hands to shaders linearised.
             ambient_light: material::linear([env.ambient_light[0], env.ambient_light[1], env.ambient_light[2], 1.0]),
@@ -1386,6 +1400,73 @@ mod tests {
             factors(Blend::Premultiplied),
             (One, OneMinusSrcAlpha, One, OneMinusSrcAlpha)
         );
+    }
+
+    /// main_skin's shade factor for a surface colour, as in `toon.wgsl`
+    /// (`scene_shadow` and `shadow_factor_of` on the skin's shade tint).
+    fn skin_shade(surface: [f32; 3], global: [f32; 4]) -> [f32; 3] {
+        let max = surface[0].max(surface[1]).max(surface[2]);
+        // The tint keeps the hue at two thirds of the saturation and full
+        // brightness: each channel moves towards the largest one.
+        let tint = surface.map(|c| 1.0 - 0.66 * (max - c) / max.max(1e-10));
+        let a = global[3];
+        std::array::from_fn(|k| {
+            let rgb = global[k];
+            let scene = if a > 0.0 {
+                1.0 - (1.0 - a) * (1.0 - rgb)
+            } else {
+                (a + 1.0) * rgb
+            }
+            .clamp(0.0, 1.0);
+            let t = tint[k];
+            if t > 0.555_555_6 {
+                1.0 - (1.0 - 2.0 * (t * 0.9 - 0.5)) * (1.0 - scene)
+            } else {
+                t * scene * 1.8
+            }
+            .clamp(0.0, 1.0)
+        })
+    }
+
+    #[test]
+    fn scene_colours_reach_the_shaders_as_stored() {
+        let env = Environment {
+            shadow_color: [0.501_960_8, 0.25, 1.0],
+            shadow_depth: 0.26,
+            line_depth: 0.75,
+            ..Environment::default()
+        };
+        assert_eq!(scene_shadow_global(&env), [0.501_960_8, 0.25, 1.0, 0.74]);
+        assert_eq!(line_color_global(&env), [0.5, 0.5, 0.5, 0.25]);
+    }
+
+    #[test]
+    fn shaded_skin_matches_the_game_with_the_stored_shadow_colour() {
+        let to_srgb = |x: f64| {
+            if x <= 0.003_130_8 {
+                x * 12.92
+            } else {
+                1.055 * x.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let shaded = |lit: [u8; 3], global: [f32; 4]| -> [u8; 3] {
+            let surface = lit.map(|c| srgb_to_linear(f64::from(c) / 255.0) as f32);
+            let shade = skin_shade(surface, global);
+            std::array::from_fn(|k| (to_srgb(f64::from(surface[k] * shade[k])) * 255.0).round() as u8)
+        };
+        // The studio's default scene: shadow colour 128 of 255, depth 0.26.
+        let env = Environment {
+            shadow_color: [0.501_960_8; 3],
+            shadow_depth: 0.26,
+            ..Environment::default()
+        };
+        // Lit and shaded skin of two captured cards, as the game drew them.
+        let stored = scene_shadow_global(&env);
+        assert_eq!(shaded([255, 236, 230], stored), [252, 231, 224]);
+        assert_eq!(shaded([255, 231, 223], stored), [252, 225, 216]);
+        // The linear value of the colour gives a darker shade than the game.
+        let linear = material::linear(stored);
+        assert_eq!(shaded([255, 236, 230], linear), [250, 227, 220]);
     }
 
     #[test]
