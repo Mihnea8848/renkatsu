@@ -30,6 +30,8 @@ pub const BLENDED: u32 = 128;
 pub const HAS_OVER3: u32 = 256;
 /// The shadow caster pass is the fallback shader's: nothing is cut out.
 pub const CASTER_FALLBACK: u32 = 512;
+/// main_item_studio's third pattern mask is bound (the ninth slot).
+pub const HAS_PATTERN3: u32 = 1024;
 
 /// Which of the game's clothes shaders an item follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,20 @@ pub enum ItemShader {
     Glasses = 4,
     /// main_item: accessories.
     Main = 5,
+    /// main_emblem: emblems on clothes.
+    Emblem = 6,
+    /// main_item_emission: accessories that glow.
+    Emission = 7,
+    /// main_item_ditherd: cut out by a dither pattern.
+    Ditherd = 8,
+    /// main_item_studio: accessories with patterns.
+    Studio = 9,
+    /// main_texture: main_item without light direction.
+    Texture = 10,
+    /// main_opaque_low
+    OpaqueLow = 11,
+    /// main_color: one flat colour.
+    Color = 12,
 }
 
 /// Clothes shader from a Unity shader name. Mod shaders follow the game's
@@ -59,6 +75,13 @@ pub fn item_shader(shader: &str) -> ItemShader {
         "main_item_studio_alpha" => ItemShader::StudioAlpha,
         "toon_glasses_lod0" => ItemShader::Glasses,
         "main_item" => ItemShader::Main,
+        "main_emblem" => ItemShader::Emblem,
+        "main_item_emission" => ItemShader::Emission,
+        "main_item_ditherd" => ItemShader::Ditherd,
+        "main_item_studio" => ItemShader::Studio,
+        "main_texture" => ItemShader::Texture,
+        "main_opaque_low" => ItemShader::OpaqueLow,
+        "main_color" => ItemShader::Color,
         n if n.starts_with("mainalphaplus") => ItemShader::Alpha,
         n if n.starts_with("mainopaqueplus") => ItemShader::Opaque,
         _ => ItemShader::Other,
@@ -68,7 +91,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
 /// Shaders whose pixel program is ported from the game's own disassembly.
 /// Everything else goes through an approximation; `rk audit` reports how
 /// many materials that leaves.
-pub const PORTED: [&str; 12] = [
+pub const PORTED: [&str; 19] = [
     "Shader Forge/main_skin",
     "Shader Forge/main_hair",
     "Shader Forge/main_hair_front",
@@ -81,10 +104,17 @@ pub const PORTED: [&str; 12] = [
     "Shader Forge/main_item",
     "Shader Forge/main_item_studio_alpha",
     "Shader Forge/toon_glasses_lod0",
+    "Shader Forge/main_emblem",
+    "Shader Forge/main_item_emission",
+    "Shader Forge/main_item_ditherd",
+    "Shader Forge/main_item_studio",
+    "Shader Forge/main_texture",
+    "Shader Forge/main_opaque_low",
+    "Shader Forge/main_color",
 ];
 
 /// Texture slots in bind order.
-pub const SLOTS: [(&str, u32); 8] = [
+pub const SLOTS: [(&str, u32); 9] = [
     ("_MainTex", HAS_MAIN),
     ("_ColorMask", HAS_COLOR_MASK),
     ("_DetailMask", HAS_DETAIL),
@@ -93,6 +123,7 @@ pub const SLOTS: [(&str, u32); 8] = [
     ("_overtex1", HAS_OVER1),
     ("_overtex2", HAS_OVER2),
     ("_overtex3", HAS_OVER3),
+    ("_PatternMask3", HAS_PATTERN3),
 ];
 
 #[repr(C)]
@@ -113,6 +144,9 @@ pub struct MaterialUniform {
     pub p3: [f32; 4],
     /// The material's own outline colour (hair).
     pub line: [f32; 4],
+    /// What the later item shaders need beside the above; toon.wgsl says
+    /// what each keeps where.
+    pub ext: [[f32; 4]; 13],
     pub info: [u32; 4],
 }
 
@@ -131,7 +165,7 @@ pub struct MaterialDesc {
     /// The shader's shadow caster pass.
     pub shadow: ShadowPass,
     pub uniform: MaterialUniform,
-    pub textures: [Option<Arc<Image>>; 8],
+    pub textures: [Option<Arc<Image>>; 9],
 }
 
 /// Material kind from a Unity shader name such as `Shader Forge/main_skin`.
@@ -209,9 +243,43 @@ pub fn state_for_name(shader: &str, kind: Kind) -> DrawState {
             shadow: ShadowPass::Fallback,
             ..solid
         },
-        // main_item: One with OneMinusSrcAlpha.
-        _ if name == "main_item" => DrawState {
+        // main_item, main_item_emission and main_item_studio: One with
+        // OneMinusSrcAlpha.
+        _ if matches!(name.as_str(), "main_item" | "main_item_emission" | "main_item_studio") => DrawState {
             blend: Blend::Premultiplied,
+            ..solid
+        },
+        // main_texture: the same without an outline pass.
+        _ if name == "main_texture" => DrawState {
+            blend: Blend::Premultiplied,
+            outline: false,
+            ..solid
+        },
+        // main_emblem: its passes cull back faces.
+        _ if name == "main_emblem" => DrawState {
+            blend: Blend::Premultiplied,
+            outline: false,
+            shadow: ShadowPass::CullBack,
+            ..solid
+        },
+        // main_opaque_low and main_item_ditherd name no queue.
+        _ if name == "main_opaque_low" => DrawState {
+            queue: 2000,
+            blend: Blend::Premultiplied,
+            outline: false,
+            ..solid
+        },
+        _ if name == "main_item_ditherd" => DrawState {
+            queue: 2000,
+            outline: false,
+            ..solid
+        },
+        // main_color has a forward pass only; shadows come from its
+        // fallback.
+        _ if name == "main_color" => DrawState {
+            queue: 2000,
+            outline: false,
+            shadow: ShadowPass::Fallback,
             ..solid
         },
         // main_alpha
@@ -257,7 +325,12 @@ impl MaterialDesc {
         // main_emblem have the same factors and write an alpha of one, which
         // is no blending. main_item writes twice its cut alpha minus one
         // beside a colour it does not scale.
-        let accessory = item == ItemShader::Main;
+        // main_item_emission, main_item_studio and main_texture write the
+        // same alpha and share main_item's slots.
+        let emission = item == ItemShader::Emission;
+        let patterned = item == ItemShader::Studio;
+        let accessory = matches!(item, ItemShader::Main | ItemShader::Texture) || emission || patterned;
+        let low = item == ItemShader::OpaqueLow;
         let blend = match state.blend {
             Blend::Premultiplied if !glasses && !accessory => Blend::Off,
             other => other,
@@ -267,7 +340,7 @@ impl MaterialDesc {
         let sheer = item == ItemShader::Alpha;
         let studio = item == ItemShader::StudioAlpha;
         // Shaders whose normal map and second ramp take the layer slots.
-        let mapped = cloth || studio || glasses || accessory;
+        let mapped = cloth || studio || glasses || accessory || low;
         // Colour properties reach the shader linearised; vector properties,
         // which the material stores beside them, do not go through this.
         let color = |name: &str, default: [f32; 4]| linear(mat.colors.get(name).copied().unwrap_or(default));
@@ -277,7 +350,7 @@ impl MaterialDesc {
         if state.shadow == ShadowPass::Fallback {
             flags |= CASTER_FALLBACK;
         }
-        let mut textures: [Option<Arc<Image>>; 8] = Default::default();
+        let mut textures: [Option<Arc<Image>>; 9] = Default::default();
         let mut st_main = [1.0, 1.0, 0.0, 0.0];
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
@@ -287,6 +360,8 @@ impl MaterialDesc {
         let mut st_color_mask = st_main;
         let mut st_detail = st_main;
         let mut st_line = st_main;
+        // The animation mask or first pattern mask, then the other two.
+        let mut st_extra = [st_main; 3];
         for (i, (name, flag)) in SLOTS.iter().enumerate() {
             // Hair has no skin layers; its gloss mask takes the first layer slot.
             // Clothes have none either; their normal map and second ramp
@@ -296,6 +371,13 @@ impl MaterialDesc {
                 "_overtex1" if mapped => "_NormalMap",
                 "_overtex2" if glasses => "_GlassRamp",
                 "_overtex2" if mapped => "_AnotherRamp",
+                // main_item_emission's animation mask and main_item_studio's
+                // pattern masks take the slots those two leave free, and
+                // the ninth.
+                "_AlphaMask" if emission => "_AnimationMask",
+                "_AlphaMask" if patterned => "_PatternMask1",
+                "_overtex3" if patterned => "_PatternMask2",
+                "_PatternMask3" if !patterned => continue,
                 // Not properties of main_item_studio_alpha or main_item.
                 "_AlphaMask" | "_overtex3" if studio || accessory => continue,
                 // toon_glasses has the main texture, the normal map and
@@ -318,6 +400,9 @@ impl MaterialDesc {
                     "_ColorMask" => st_color_mask = st,
                     "_DetailMask" => st_detail = st,
                     "_LineMask" => st_line = st,
+                    "_AnimationMask" | "_PatternMask1" => st_extra[0] = st,
+                    "_PatternMask2" => st_extra[1] = st,
+                    "_PatternMask3" => st_extra[2] = st,
                     _ => {}
                 }
             }
@@ -325,15 +410,24 @@ impl MaterialDesc {
 
         // Skin gets its texture built at load time. Until then use a plain tone.
         // main_item_studio_alpha declares its own default for the three colours.
-        let tint = if studio {
+        // So do main_item_emission and main_item_studio.
+        let tint = if studio || emission || patterned {
             [0.960_784_3, 0.960_784_3, 0.960_784_3, 1.0]
         } else {
             [1.0; 4]
         };
-        // main_item declares a default for each; they show only where a
-        // colour mask is bound.
-        let tints = if accessory {
+        // main_item and main_texture declare a default for each; they show
+        // only where a colour mask is bound. main_opaque_low has its own.
+        let tints = if accessory && !emission && !patterned {
             [[1.0, 0.0, 0.0, 1.0], [0.117_241_9, 0.0, 1.0, 1.0], [0.5, 0.5, 0.5, 1.0]]
+        } else if low {
+            [
+                [0.901_960_8, 0.901_960_8, 0.901_960_8, 1.0],
+                [0.377_595_2, 0.432_856_4, 0.529_411_8, 1.0],
+                [0.784_313_7, 0.353_710_1, 0.353_710_1, 1.0],
+            ]
+        } else if item == ItemShader::Color {
+            [[0.5, 0.5, 0.5, 1.0]; 3]
         } else {
             [tint; 3]
         };
@@ -346,6 +440,8 @@ impl MaterialDesc {
             // The hair shaders cut at one half even when they blend.
             Kind::Hair => 0.5,
             _ if blended => 0.05,
+            // main_item_ditherd takes half the stored value off the alpha.
+            _ if item == ItemShader::Ditherd => float("_Cutoff", 1.0),
             // main_opaque cuts at one half whatever the material says.
             _ if cloth => 0.5,
             _ => float("_Cutoff", 0.5).clamp(0.01, 1.0),
@@ -413,16 +509,16 @@ impl MaterialDesc {
             } else if mapped {
                 [
                     float("_SpeclarHeight", if sheer { 0.985 } else { 0.98 }),
-                    float("_SpecularPower", 0.0),
+                    float("_SpecularPower", if low { 0.5 } else { 0.0 }),
                     float("_SpecularPowerNail", 0.0),
-                    float("_notusetexspecular", 0.0),
+                    float("_notusetexspecular", if emission { 1.0 } else { 0.0 }),
                 ]
             } else {
                 color("_overcolor2", [1.0; 4])
             },
             over3: if mapped {
                 [
-                    float("_rimpower", 0.5),
+                    float("_rimpower", if emission { 0.0 } else { 0.5 }),
                     float("_rimV", if sheer { 0.75 } else { 0.5 }),
                     float("_outline", 1.0),
                     0.0,
@@ -490,6 +586,42 @@ impl MaterialDesc {
                 ]
             } else {
                 color("_LineColor", [0.5, 0.5, 0.5, 1.0])
+            },
+            ext: if emission || patterned {
+                // Vectors and floats as stored; the colours linearised.
+                let vector = |name: &str| mat.colors.get(name).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                let second = [0.392_156_9, 0.392_156_9, 0.392_156_9, 1.0];
+                [
+                    color("_LineColor", [0.501_960_8, 0.501_960_8, 0.501_960_8, 1.0]),
+                    [
+                        float("_EmissionPower", 0.0),
+                        float("_UPanner", 0.0),
+                        float("_VPanner", 0.0),
+                        0.0,
+                    ],
+                    st_extra[0],
+                    st_extra[1],
+                    st_extra[2],
+                    color("_Color1_2", second),
+                    color("_Color2_2", second),
+                    color("_Color3_2", second),
+                    vector("_Patternuv1"),
+                    vector("_Patternuv2"),
+                    vector("_Patternuv3"),
+                    [
+                        float("_patternrotator1", 0.0),
+                        float("_patternclamp1", 0.0),
+                        float("_patternrotator2", 0.0),
+                        float("_patternclamp2", 0.0),
+                    ],
+                    [float("_patternrotator3", 0.0), float("_patternclamp3", 0.0), 0.0, 0.0],
+                ]
+            } else if low {
+                let mut ext = [[0.0; 4]; 13];
+                ext[..3].copy_from_slice(&[st_color_mask, st_detail, st_normal]);
+                ext
+            } else {
+                [[0.0; 4]; 13]
             },
             info: [kind as u32, flags, item as u32, 0],
         };
@@ -641,7 +773,14 @@ mod tests {
             ("xukmi/MainOpaquePlus", ItemShader::Opaque),
             ("Shader Forge/main_item", ItemShader::Main),
             ("Shader Forge/main_item_studio_alpha", ItemShader::StudioAlpha),
-            ("Shader Forge/main_opaque_low", ItemShader::Other),
+            ("Shader Forge/main_opaque_low", ItemShader::OpaqueLow),
+            ("Shader Forge/main_emblem", ItemShader::Emblem),
+            ("Shader Forge/main_item_emission", ItemShader::Emission),
+            ("Shader Forge/main_item_ditherd", ItemShader::Ditherd),
+            ("Shader Forge/main_item_studio", ItemShader::Studio),
+            ("Shader Forge/main_texture", ItemShader::Texture),
+            ("Shader Forge/main_color", ItemShader::Color),
+            ("Shader Forge/main_item_studio_add", ItemShader::Other),
             ("Standard", ItemShader::Other),
         ] {
             assert_eq!(item_shader(name), shader, "{name}");
@@ -764,7 +903,7 @@ mod tests {
 
         // Other items keep their layer colours and ignore the normal map.
         let mut other = MaterialInst {
-            shader: "Shader Forge/main_opaque_low".into(),
+            shader: "Shader Forge/main_item_studio_add".into(),
             ..Default::default()
         };
         other.textures.insert("_NormalMap".into(), slot(false));
@@ -996,9 +1135,204 @@ mod tests {
         assert_eq!(u.p3[1], 0.5);
     }
 
+    fn tex(scale: f32) -> rk_chara::TexSlot {
+        rk_chara::TexSlot {
+            image: Arc::new(Image {
+                name: "t".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb: false,
+                repeat: false,
+            }),
+            scale: [scale, scale],
+            offset: [0.5, 0.25],
+        }
+    }
+
+    fn inst(shader: &str) -> MaterialInst {
+        MaterialInst {
+            shader: shader.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_ported_item_shader_has_its_own_program() {
+        for name in PORTED {
+            if classify(name) == Kind::Item {
+                assert_ne!(item_shader(name), ItemShader::Other, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn unread_states_are_those_of_the_game_shaders() {
+        // (queue, blend after the alpha rule, outline, shadow pass)
+        for (name, want) in [
+            ("main_emblem", (2450, Blend::Off, false, ShadowPass::CullBack)),
+            (
+                "main_item_emission",
+                (2450, Blend::Premultiplied, true, ShadowPass::TwoSided),
+            ),
+            (
+                "main_item_studio",
+                (2450, Blend::Premultiplied, true, ShadowPass::TwoSided),
+            ),
+            (
+                "main_texture",
+                (2450, Blend::Premultiplied, false, ShadowPass::TwoSided),
+            ),
+            ("main_item_ditherd", (2000, Blend::Off, false, ShadowPass::TwoSided)),
+            ("main_opaque_low", (2000, Blend::Off, false, ShadowPass::TwoSided)),
+            ("main_color", (2000, Blend::Off, false, ShadowPass::Fallback)),
+        ] {
+            let d = MaterialDesc::new(Some(&inst(&format!("Shader Forge/{name}"))));
+            assert_eq!((d.queue, d.blend, d.outline, d.shadow), want, "{name}");
+            assert!(d.zwrite, "{name}");
+        }
+    }
+
+    #[test]
+    fn glowing_accessories_follow_main_item_emission() {
+        let mut m = inst("Shader Forge/main_item_emission");
+        let u = MaterialDesc::new(Some(&m)).uniform;
+        assert_eq!(u.info[2], ItemShader::Emission as u32);
+        // The defaults of its property list.
+        let grey = srgb_to_linear(0.960_784_3);
+        assert_eq!(u.color1, [grey, grey, grey, 1.0]);
+        assert_eq!((u.color2, u.color3), (u.color1, u.color1));
+        assert_eq!(u.over1, [0.0; 4]);
+        // No shine texture, no rim power.
+        assert_eq!(u.over2[3], 1.0);
+        assert_eq!(u.over3[..2], [0.0, 0.5]);
+        assert_eq!(u.p0[1..], [1.0, 1.0, 0.0]);
+        assert_eq!(u.ext[0], linear([0.501_960_8, 0.501_960_8, 0.501_960_8, 1.0]));
+        assert_eq!(u.ext[1], [0.0; 4]);
+
+        m.floats.insert("_EmissionPower".into(), 0.75);
+        m.floats.insert("_UPanner".into(), -0.5);
+        m.floats.insert("_VPanner".into(), 0.25);
+        m.floats.insert("_rimpower".into(), 0.3);
+        m.colors.insert("_LineColor".into(), [0.5, 0.0, 1.0, 1.0]);
+        m.textures.insert("_AnimationMask".into(), tex(2.0));
+        m.textures.insert("_DetailMask".into(), tex(3.0));
+        // Not a property of the shader.
+        m.textures.insert("_AlphaMask".into(), tex(4.0));
+        m.textures.insert("_PatternMask3".into(), tex(4.0));
+        let d = MaterialDesc::new(Some(&m));
+        let u = d.uniform;
+        assert_eq!(u.ext[1], [0.75, -0.5, 0.25, 0.0]);
+        assert_eq!(u.over3[0], 0.3);
+        assert_eq!(u.ext[0], linear([0.5, 0.0, 1.0, 1.0]));
+        // The animation mask sits in the alpha mask slot with its placement.
+        assert_eq!(u.info[1], BLENDED | HAS_DETAIL | HAS_ALPHA_MASK);
+        assert_eq!(u.ext[2], [2.0, 2.0, 0.5, 0.25]);
+        assert_eq!(u.p2, [3.0, 3.0, 0.5, 0.25]);
+        assert!(d.textures[4].is_some() && d.textures[8].is_none());
+    }
+
+    #[test]
+    fn patterned_accessories_follow_main_item_studio() {
+        let mut m = inst("Shader Forge/main_item_studio");
+        let u = MaterialDesc::new(Some(&m)).uniform;
+        assert_eq!(u.info[2], ItemShader::Studio as u32);
+        let grey = srgb_to_linear(0.960_784_3);
+        assert_eq!(u.color1, [grey, grey, grey, 1.0]);
+        assert_eq!(u.over2, [0.98, 0.0, 0.0, 0.0]);
+        assert_eq!(u.over3[..2], [0.5, 0.5]);
+        let second = linear([0.392_156_9, 0.392_156_9, 0.392_156_9, 1.0]);
+        assert_eq!(u.ext[5..8], [second; 3]);
+        assert_eq!(u.ext[8..11], [[0.0, 0.0, 1.0, 1.0]; 3]);
+        assert_eq!((u.ext[11], u.ext[12]), ([0.0; 4], [0.0; 4]));
+
+        for (k, scale) in [(1, 2.0), (2, 3.0), (3, 4.0)] {
+            m.textures.insert(format!("_PatternMask{k}"), tex(scale));
+            m.floats.insert(format!("_patternrotator{k}"), 0.1 * k as f32);
+            m.floats.insert(format!("_patternclamp{k}"), 1.0);
+        }
+        // A vector stays as stored; a colour is linearised.
+        m.colors.insert("_Patternuv2".into(), [0.5, 0.25, 2.0, 3.0]);
+        m.colors.insert("_Color2_2".into(), [0.5, 0.5, 0.5, 0.25]);
+        let d = MaterialDesc::new(Some(&m));
+        let u = d.uniform;
+        assert_eq!(u.info[1], BLENDED | HAS_ALPHA_MASK | HAS_OVER3 | HAS_PATTERN3);
+        assert!(d.textures[4].is_some() && d.textures[7].is_some() && d.textures[8].is_some());
+        assert_eq!(u.ext[2], [2.0, 2.0, 0.5, 0.25]);
+        assert_eq!(u.ext[3], [3.0, 3.0, 0.5, 0.25]);
+        assert_eq!(u.ext[4], [4.0, 4.0, 0.5, 0.25]);
+        assert_eq!(u.ext[9], [0.5, 0.25, 2.0, 3.0]);
+        assert_eq!(u.ext[6], linear([0.5, 0.5, 0.5, 0.25]));
+        assert_eq!(u.ext[11], [0.1, 1.0, 0.2, 1.0]);
+        assert_eq!(u.ext[12][..2], [0.1 * 3.0, 1.0]);
+    }
+
+    #[test]
+    fn the_small_item_shaders_take_their_own_defaults() {
+        // main_texture: main_item's colours and slots.
+        let mut m = inst("Shader Forge/main_texture");
+        m.textures.insert("_ColorMask".into(), tex(2.0));
+        m.textures.insert("_LineMask".into(), tex(3.0));
+        let d = MaterialDesc::new(Some(&m));
+        let u = d.uniform;
+        assert_eq!((d.blend, u.info[2]), (Blend::Premultiplied, ItemShader::Texture as u32));
+        assert_eq!(u.color1, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(u.color2, linear([0.117_241_9, 0.0, 1.0, 1.0]));
+        assert_eq!(u.st_alpha, [2.0, 2.0, 0.5, 0.25]);
+        assert_eq!(u.p3, [3.0, 3.0, 0.5, 0.25]);
+        assert_eq!(u.p0[1..], [1.0, 1.0, 0.0]);
+
+        // main_opaque_low: its three colours, the masks' placements.
+        let mut m = inst("Shader Forge/main_opaque_low");
+        m.textures.insert("_ColorMask".into(), tex(2.0));
+        m.textures.insert("_DetailMask".into(), tex(3.0));
+        m.textures.insert("_NormalMap".into(), tex(4.0));
+        m.textures.insert("_AlphaMask".into(), tex(5.0));
+        let d = MaterialDesc::new(Some(&m));
+        let u = d.uniform;
+        assert_eq!((d.blend, u.info[2]), (Blend::Off, ItemShader::OpaqueLow as u32));
+        assert_eq!(u.info[1], HAS_COLOR_MASK | HAS_DETAIL | HAS_ALPHA_MASK | HAS_OVER1);
+        assert_eq!(u.color1, linear([0.901_960_8, 0.901_960_8, 0.901_960_8, 1.0]));
+        assert_eq!(u.color2, linear([0.377_595_2, 0.432_856_4, 0.529_411_8, 1.0]));
+        assert_eq!(u.color3, linear([0.784_313_7, 0.353_710_1, 0.353_710_1, 1.0]));
+        assert_eq!(u.ext[0], [2.0, 2.0, 0.5, 0.25]);
+        assert_eq!(u.ext[1], [3.0, 3.0, 0.5, 0.25]);
+        assert_eq!(u.ext[2], [4.0, 4.0, 0.5, 0.25]);
+        assert_eq!(u.st_alpha, [5.0, 5.0, 0.5, 0.25]);
+        // Shadow extend, specular power, the two body mask switches.
+        assert_eq!((u.p0[1], u.over2[1], u.p2[0], u.p2[1]), (1.0, 0.5, 1.0, 1.0));
+
+        // main_item_ditherd: white, and the cutoff as stored.
+        let mut m = inst("Shader Forge/main_item_ditherd");
+        let u = MaterialDesc::new(Some(&m)).uniform;
+        assert_eq!(
+            (u.color1, u.p0[0], u.info[2]),
+            ([1.0; 4], 1.0, ItemShader::Ditherd as u32)
+        );
+        m.floats.insert("_Cutoff".into(), 0.0);
+        assert_eq!(MaterialDesc::new(Some(&m)).uniform.p0[0], 0.0);
+
+        // main_color: mid grey unless the material says otherwise.
+        let mut m = inst("Shader Forge/main_color");
+        let u = MaterialDesc::new(Some(&m)).uniform;
+        assert_eq!(
+            (u.color1, u.info[2]),
+            (linear([0.5, 0.5, 0.5, 1.0]), ItemShader::Color as u32)
+        );
+        m.colors.insert("_Color".into(), [1.0, 0.5, 0.0, 1.0]);
+        assert_eq!(MaterialDesc::new(Some(&m)).uniform.color1, linear([1.0, 0.5, 0.0, 1.0]));
+
+        // main_emblem: the texture only.
+        let mut m = inst("Shader Forge/main_emblem");
+        m.textures.insert("_MainTex".into(), tex(2.0));
+        let u = MaterialDesc::new(Some(&m)).uniform;
+        assert_eq!((u.info[1], u.info[2]), (HAS_MAIN, ItemShader::Emblem as u32));
+        assert_eq!(u.st_main, [2.0, 2.0, 0.5, 0.25]);
+    }
+
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // WGSL: thirteen vec4<f32> and one vec4<u32>.
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 240);
+        // WGSL: fourteen vec4<f32>, an array of thirteen and one vec4<u32>.
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 448);
     }
 }
