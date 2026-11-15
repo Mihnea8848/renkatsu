@@ -122,6 +122,31 @@ impl<'g> Builder<'g> {
         }
     }
 
+    /// Like `item`, falling back as `ChaControl.LoadCharaFbxDataAsync` does
+    /// when the list has no such item: to the category's default item, then
+    /// to item 0. Clothes, hair and the head load this way; accessories and
+    /// textures do not (the game passes -1 or draws nothing for them).
+    fn item_or_default(
+        &mut self,
+        label: &str,
+        property: &str,
+        category: i32,
+        id: i32,
+        default: i32,
+    ) -> Option<&'g Item> {
+        if let Some(item) = self.item(label, property, category, id) {
+            return Some(item);
+        }
+        let items = &self.game.items;
+        let fallback = items.vanilla(category, default).or_else(|| items.vanilla(category, 0));
+        if fallback.is_some() {
+            self.loader.warn(format!(
+                "{label}: using the game's default item instead, as the game does"
+            ));
+        }
+        fallback
+    }
+
     /// Remembers a prefab's scripts for the physics step.
     fn physics_source(&mut self, inst: &Instance, part: bool, copy: bool, shake: bool) {
         self.physics_sources.push(PhysicsSource {
@@ -1600,7 +1625,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     };
 
     // Head: its prefab carries the bone layout for this face type.
-    if let Some(item) = b.item("head", "ChaFileFace.headId", cat::BO_HEAD, card.face.head_id) {
+    if let Some(item) = b.item_or_default("head", "ChaFileFace.headId", cat::BO_HEAD, card.face.head_id, 0) {
         if let Some(head) = b.part("head", item, None, Part::Head) {
             b.physics_source(&head, true, false, true);
             let src = b.scene.name_map(head.root);
@@ -1679,7 +1704,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         for (i, hp) in card.hair.parts.iter().enumerate().take(4) {
             let label = format!("hair {}", ["back", "front", "side", "option"][i]);
             let prop = format!("ChaFileHair.{}", cat::HAIR_PROPS[i]);
-            if let Some(item) = b.item(&label, &prop, cat::HAIR[i], hp.id) {
+            // Back, front, side and option hair default to 0, 1, 0 and 0.
+            if let Some(item) = b.item_or_default(&label, &prop, cat::HAIR[i], hp.id, [0, 1, 0, 0][i]) {
                 if let Some(inst) = b.part(&label, item, Some(hair_parent), Part::Hair(i as u8)) {
                     b.hair_shadows_fix(&inst);
                     b.color_hair(&inst, hp);
@@ -1719,7 +1745,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 }
                 let label = format!("outfit{outfit}.{}", rk_card::CLOTHES_KIND_NAMES[i]);
                 let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
-                let Some(item) = b.item(&label, &prop, cat::CLOTHES[i], cp.id) else {
+                let Some(item) = b.item_or_default(&label, &prop, cat::CLOTHES[i], cp.id, 0) else {
                     continue;
                 };
                 let inst = b.part(&label, item, Some(top), Part::Clothes(i as u8));
@@ -1796,7 +1822,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         let id = co.clothes.sub_parts_id.get(k).copied().unwrap_or(0);
                         let sub_label = format!("{label}.sub{k}");
                         let sub_prop = format!("outfit{outfit}.ChaFileClothes.{}", names[k]);
-                        let Some(sub) = b.item(&sub_label, &sub_prop, cats[k], id) else {
+                        // The game's default sub-parts: sailor tops {0, 0, 1},
+                        // jacket tops {0, 1, 1}.
+                        let default = if kind == 1 { [0, 0, 1][k] } else { [0, 1, 1][k] };
+                        let Some(sub) = b.item_or_default(&sub_label, &sub_prop, cats[k], id, default) else {
                             continue;
                         };
                         // ChangeClothesTopParts: the first sailor part, or
