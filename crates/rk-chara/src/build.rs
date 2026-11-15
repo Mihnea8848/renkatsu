@@ -1425,7 +1425,31 @@ impl<'g> Builder<'g> {
             paint_mask: paint_mask.as_deref(),
             paints: [decal(0), decal(1)],
         });
-        let draw = self.loader.material_by_name(&mm_base, &source.material, mm_mod);
+        let mut draw = self.loader.material_by_name(&mm_base, &source.material, mm_mod);
+        // ChangeSettingNip, ChangeSettingAreolaSize, ChangeSettingNipColor,
+        // ChangeSettingUnderhair and ChangeSettingUnderhairColor set these on
+        // the body's material, as layers the skin shader draws.
+        let nip = self.item_image(
+            "nipple",
+            "ChaFileBody.nipId",
+            cat::MT_NIP,
+            body.nip_id,
+            "MainAB",
+            "NipTex",
+        );
+        let underhair = self.item_image(
+            "underhair",
+            "ChaFileBody.underhairId",
+            cat::MT_UNDERHAIR,
+            body.underhair_id,
+            "MainAB",
+            "UnderhairTex",
+        );
+        if let Some(m) = draw.as_mut() {
+            set_layer(m, "_overtex1", "_overcolor1", nip, body.nip_color);
+            set_layer(m, "_overtex2", "_overcolor2", underhair, body.underhair_color);
+            m.floats.insert("_nipsize".into(), body.areola_size);
+        }
         let image = self.over(kind::BODY_OVER, image);
         self.set_skin(inst, "o_body_a", draw, image);
         // Body detail: painted lines and their strength, and the shine sliders.
@@ -1575,8 +1599,13 @@ impl<'g> Builder<'g> {
         if let Some(m) = draw.as_mut() {
             set_layer(m, "_overtex1", "_overcolor1", lip, makeup.lip_color);
             set_layer(m, "_overtex3", "_overcolor3", shadow, makeup.eyeshadow_color);
-            // The second layer is the blush, which is an expression state.
-            m.textures.remove("_overtex2");
+            // The second layer is the blush, an expression state: the texture
+            // comes with the material and ChangeHohoAkaRate sets its strength
+            // to Lerp(0, 0.2, rate). Studio loads cards without their status,
+            // so the rate is 0.
+            if let Some(c) = m.colors.get_mut("_overcolor2") {
+                c[3] = 0.0;
+            }
             m.floats.insert("_nip".into(), 0.0);
         }
         let image = self.over(kind::FACE_OVER, image);

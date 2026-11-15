@@ -155,6 +155,9 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
                 let slot = mine.textures.get(prop);
                 match (game_name.is_empty(), slot) {
                     (true, None) => {}
+                    // The game's runtime-built textures (CustomTextureCreate)
+                    // have no name; ours built the same way are not a difference.
+                    (true, Some(s)) if built_here(&s.image.name) => {}
                     (true, Some(s)) => {
                         rep.compared += 1;
                         rep.differ("texture", format!("{at} {prop}: game none, ours {}", s.image.name));
