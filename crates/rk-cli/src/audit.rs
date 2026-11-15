@@ -113,7 +113,8 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
                 if rend.skinned && !rend.bones.is_empty() && rend.bones.iter().all(Option::is_none) {
                     s.unbound += 1;
                 }
-                for m in &rend.materials {
+                // Empty material slots are not drawn, in the game or ours.
+                for m in rend.materials.iter().filter(|m| !m.absent) {
                     let kind = classify(&m.shader);
                     let ported = if rk_render::material::PORTED.contains(&m.shader.as_str()) {
                         "ported     "
@@ -127,7 +128,10 @@ pub fn audit(count: usize, threads: usize) -> Result<()> {
                     ));
                     let textured = m.textures.contains_key("_MainTex") || m.textures.contains_key("_ColorMask");
                     let colored = m.colors.get("_Color").is_some_and(|c| c[..3] != [1.0, 1.0, 1.0]);
-                    if matches!(kind, Kind::Item | Kind::Skin) && !textured && !colored {
+                    // Glass lenses are clear by design: their shader shades
+                    // with _Color4 and the glass ramp, not a texture.
+                    let glass = m.shader == "Shader Forge/toon_glasses_lod0";
+                    if matches!(kind, Kind::Item | Kind::Skin) && !textured && !colored && !glass {
                         let part = match rend.part {
                             Part::Body => "body",
                             Part::Head => "head",
