@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod audit;
+mod bench;
 mod bundle;
 mod card;
 mod compare;
@@ -112,6 +113,18 @@ enum Cmd {
         #[arg(long, default_value_t = 4)]
         threads: usize,
     },
+    /// Compare every card in a list with its capture: one line per card,
+    /// then the data differences grouped across all cards.
+    Bench {
+        /// Card paths relative to UserData/chara/female, one per line.
+        list: PathBuf,
+        /// Folder with the captures (<card file stem>.json and pictures).
+        #[arg(long, default_value = "renders/reference")]
+        captures: PathBuf,
+        /// Where the comparison pictures go.
+        #[arg(long, default_value = "renders/scratch/bench")]
+        out: PathBuf,
+    },
     /// Inspect Unity asset bundle files.
     Bundle {
         #[command(subcommand)]
@@ -180,6 +193,7 @@ fn main() -> Result<()> {
             reference::reference(&card, &capture, &out, &opts, &bones, !no_shadows)
         }
         Cmd::Audit { count, threads } => audit::audit(count, threads),
+        Cmd::Bench { list, captures, out } => bench::bench(&list, &captures, &out),
         Cmd::Compare {
             cards,
             count,

@@ -205,12 +205,52 @@ pub fn reference(
     watch: &[String],
     shadows: bool,
 ) -> Result<()> {
+    let game = Game::open(&Config::load()?)?;
+    let mut renderer = Renderer::new()?;
+    run(
+        &game,
+        &mut renderer,
+        card_path,
+        capture_path,
+        out,
+        opts,
+        watch,
+        shadows,
+        true,
+    )?;
+    Ok(())
+}
+
+/// What one comparison found, for batch runs.
+pub struct Summary {
+    pub name: String,
+    /// Mean colour difference and outline mismatch per view.
+    pub views: Vec<(String, f32, f32)>,
+    pub queues_differ: usize,
+    pub state: crate::state::Report,
+    pub warnings: Vec<String>,
+}
+
+/// Builds, renders and compares one card. With `verbose` off nothing is
+/// printed, and the bone listing is skipped.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    game: &Game,
+    renderer: &mut Renderer,
+    card_path: &Path,
+    capture_path: &Path,
+    out: &Path,
+    opts: &BuildOptions,
+    watch: &[String],
+    shadows: bool,
+    verbose: bool,
+) -> Result<Summary> {
+    macro_rules! say { ($($t:tt)*) => { if verbose { println!($($t)*); } } }
     let capture_text = std::fs::read_to_string(capture_path)?;
     let cap = Capture::parse(&capture_text)?;
     let (w, h) = (cap.width, cap.height);
-    let game = Game::open(&Config::load()?)?;
     let card = Card::load(card_path)?;
-    let mut chara = rk_chara::build(&game, &card, opts)?;
+    let mut chara = rk_chara::build(game, &card, opts)?;
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
     let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene);
     let draws = chara.scene.pose();
@@ -219,7 +259,7 @@ pub fn reference(
     let env = Environment {
         ramp: cap
             .ramp
-            .and_then(|id| rk_chara::build::ramp(&game, id))
+            .and_then(|id| rk_chara::build::ramp(game, id))
             .or_else(|| chara.ramp.clone()),
         shadow_color,
         shadow_depth,
@@ -236,14 +276,17 @@ pub fn reference(
         },
         ..defaults
     };
-    println!(
+    say!(
         "  scene: ramp {:?}, shadow depth {:.2}, line depth {:.2}, line width {:.3}",
-        cap.ramp, env.shadow_depth, env.line_depth, env.line_width
+        cap.ramp,
+        env.shadow_depth,
+        env.line_depth,
+        env.line_width
     );
     let back = cap.background.map(f64::from);
     let back8 = [0, 1, 2].map(|c| (cap.background[c] * 255.0 + 0.5) as u8);
-    let mut renderer = Renderer::new()?;
-    println!("{}: game, Renkatsu, difference", card.full_name());
+    say!("{}: game, Renkatsu, difference", card.full_name());
+    let mut views = Vec::new();
 
     for (name, camera) in &cap.views {
         let picture = capture_path.with_extension(format!("{name}.plain.png"));
@@ -276,17 +319,18 @@ pub fn reference(
         let stem = out.file_stem().unwrap_or_default().to_string_lossy();
         let file = out.with_file_name(format!("{stem}-{name}.png"));
         save_png(&file, sheet_w, sheet_h, &sheet)?;
-        println!("  {name} -> {}", file.display());
-        println!(
+        say!("  {name} -> {}", file.display());
+        say!(
             "    character pixels: {} ({:.1}% of the picture)",
             diff.covered,
             100.0 * diff.covered as f32 / (w * h) as f32
         );
-        println!(
+        say!(
             "    outline mismatch: {:.1}% of them are character in only one picture",
             100.0 * diff.outline_mismatch
         );
-        println!("    mean colour difference: {:.1} of 255", diff.mean);
+        say!("    mean colour difference: {:.1} of 255", diff.mean);
+        views.push((name.clone(), diff.mean, diff.outline_mismatch));
         if env.shadows.enabled {
             let plain_env = Environment {
                 shadows: ShadowSettings {
@@ -297,23 +341,32 @@ pub fn reference(
             };
             let plain = renderer.render(&draws, camera, &plain_env, w, h, back)?;
             let s = shadow_difference(&game_px, &ours, &plain, back8);
-            println!(
+            say!(
                 "    shadows: {:.2} of 255 over the {} pixels the game shades ({:.2} without our shadows)",
-                s.mean, s.pixels, s.mean_without
+                s.mean,
+                s.pixels,
+                s.mean_without
             );
         }
     }
     for warning in &chara.warnings {
-        println!("  warning: {warning}");
+        say!("  warning: {warning}");
     }
-    println!(
-        "  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture"
-    );
-    compare_queues(&capture_text, &chara.scene)?;
+    say!("  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture");
+    let queues_differ = compare_queues(&capture_text, &chara.scene, verbose)?;
     let capture_value: Value = serde_json::from_str(&capture_text)?;
-    crate::state::print(&crate::state::compare(&capture_value, &chara.scene), 8);
-    compare_bones(&capture_text, &chara.scene, watch)?;
-    Ok(())
+    let state = crate::state::compare(&capture_value, &chara.scene);
+    if verbose {
+        crate::state::print(&state, 8);
+        compare_bones(&capture_text, &chara.scene, watch)?;
+    }
+    Ok(Summary {
+        name: card.full_name(),
+        views,
+        queues_differ,
+        state,
+        warnings: chara.warnings.clone(),
+    })
 }
 
 /// A renderer name with its blend shape weights, as shape index and 0 to 1.
@@ -403,7 +456,7 @@ fn apply_iris_placement(placements: &[(String, [f32; 4])], scene: &mut rk_chara:
 }
 
 /// Checks the draw order numbers we set ourselves against the game's.
-fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
+fn compare_queues(capture: &str, scene: &rk_chara::Scene, verbose: bool) -> Result<usize> {
     let v: Value = serde_json::from_str(capture)?;
     let (mut same, mut differ) = (0, Vec::new());
     for r in v["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
@@ -446,11 +499,13 @@ fn compare_queues(capture: &str, scene: &rk_chara::Scene) -> Result<()> {
             }
         }
     }
-    println!("  draw order: {same} materials match the game, {} differ", differ.len());
-    for line in differ.iter().take(12) {
-        println!("    {line}");
+    if verbose {
+        println!("  draw order: {same} materials match the game, {} differ", differ.len());
+        for line in differ.iter().take(12) {
+            println!("    {line}");
+        }
     }
-    Ok(())
+    Ok(differ.len())
 }
 
 /// Lists the bones whose place or shape differs most from the capture.
