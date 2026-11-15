@@ -55,15 +55,34 @@ fn bare(name: &str) -> &str {
     name.split(" (Instance)").next().unwrap_or(name)
 }
 
+/// Each node's place in a depth-first walk of the scene, children in order:
+/// the order `GetComponentsInChildren` lists renderers in, which the capture
+/// keeps.
+fn hierarchy_order(scene: &Scene) -> Vec<usize> {
+    let mut rank = vec![usize::MAX; scene.nodes.len()];
+    let mut next = 0;
+    let mut stack: Vec<usize> = (0..scene.nodes.len())
+        .filter(|&i| scene.nodes[i].parent.is_none())
+        .rev()
+        .collect();
+    while let Some(n) = stack.pop() {
+        rank[n] = next;
+        next += 1;
+        stack.extend(scene.nodes[n].children.iter().rev());
+    }
+    rank
+}
+
 /// Our renderer for a captured one: same name, and among several with that
 /// name the ones whose first material matches. `nth` counts the captured
 /// renderers seen before with the same name and first material, so two
-/// accessories with the same mesh names pair up in order.
-pub fn renderer_for<'a>(r: &Value, scene: &'a Scene, nth: usize) -> Option<&'a rk_chara::RendererInst> {
+/// accessories with the same mesh names pair up in hierarchy order.
+pub fn renderer_for<'a>(r: &Value, scene: &'a Scene, rank: &[usize], nth: usize) -> Option<&'a rk_chara::RendererInst> {
     let name = r["name"].as_str()?;
     let first = bare(r["materials"][0]["name"].as_str().unwrap_or(""));
     // The game only lists renderers that are switched on.
-    let same_name: Vec<_> = scene.renderers.iter().filter(|x| x.name == name && x.enabled).collect();
+    let mut same_name: Vec<_> = scene.renderers.iter().filter(|x| x.name == name && x.enabled).collect();
+    same_name.sort_by_key(|x| rank.get(x.node).copied().unwrap_or(usize::MAX));
     let same_material: Vec<_> = same_name
         .iter()
         .copied()
@@ -90,6 +109,7 @@ fn unnamed_in_game(name: &str) -> bool {
 
 pub fn compare(capture: &Value, scene: &Scene) -> Report {
     let mut rep = Report::default();
+    let rank = hierarchy_order(scene);
     let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
     for r in capture["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let key = (
@@ -97,7 +117,7 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
             bare(r["materials"][0]["name"].as_str().unwrap_or("")).to_string(),
         );
         let nth = seen.entry(key).or_insert(0);
-        let ours = renderer_for(r, scene, *nth);
+        let ours = renderer_for(r, scene, &rank, *nth);
         *nth += 1;
         let Some(ours) = ours else { continue };
         let rname = r["name"].as_str().unwrap_or("");
@@ -259,6 +279,26 @@ mod tests {
         assert!(unnamed_in_game("kaguya.png"));
         assert!(unnamed_in_game("default_black"));
         assert!(!unnamed_in_game("cf_body_00_t"));
+    }
+
+    #[test]
+    fn renderers_are_ranked_in_hierarchy_order() {
+        let node = |name: &str, parent: Option<usize>, children: Vec<usize>| rk_chara::scene::Node {
+            name: name.into(),
+            parent,
+            children,
+            local: Default::default(),
+            active: true,
+        };
+        // 0 has children 2 then 1; a depth-first walk visits 0, 2, 3, 1.
+        let mut scene = Scene::default();
+        scene.nodes = vec![
+            node("root", None, vec![2, 1]),
+            node("late", Some(0), vec![]),
+            node("early", Some(0), vec![3]),
+            node("inner", Some(2), vec![]),
+        ];
+        assert_eq!(hierarchy_order(&scene), vec![0, 3, 1, 2]);
     }
 
     #[test]
