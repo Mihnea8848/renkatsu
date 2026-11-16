@@ -47,6 +47,18 @@ fn tally(summaries: &[Summary]) -> BTreeMap<(String, String), usize> {
     counts
 }
 
+/// A list line is a card path, optionally followed by `|<outfit>`, as the
+/// capture plugin reads it.
+fn split_outfit(line: &str) -> (&str, Option<usize>) {
+    match line.rsplit_once('|') {
+        Some((path, n)) => match n.trim().parse() {
+            Ok(n) => (path.trim(), Some(n)),
+            Err(_) => (line, None),
+        },
+        None => (line, None),
+    }
+}
+
 pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> Result<()> {
     let cfg = Config::load()?;
     let root = cfg.game_dir.join("UserData/chara/female");
@@ -65,8 +77,12 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> R
     crate::ui::status("Comparing", format!("{} cards with their captures", lines.len()));
     let bar = ui::bar(lines.len() as u64);
     for line in &lines {
-        let card = root.join(line);
-        let stem = card.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let (path, outfit) = split_outfit(line);
+        let card = root.join(path);
+        let mut stem = card.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        if let Some(n) = outfit {
+            stem = format!("{stem}.outfit{n}");
+        }
         bar.set_message(stem.clone());
         let capture = captures.join(format!("{stem}.json"));
         if !capture.exists() {
@@ -191,6 +207,13 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_can_name_an_outfit() {
+        assert_eq!(split_outfit("a/b.png|6"), ("a/b.png", Some(6)));
+        assert_eq!(split_outfit("a/b.png"), ("a/b.png", None));
+        assert_eq!(split_outfit("odd|name.png"), ("odd|name.png", None));
+    }
 
     #[test]
     fn differences_group_by_what_they_are_about() {
