@@ -33,6 +33,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "starter"; Description: "Download Starter Content: Characters (about 800 MB), so Renkatsu works without Koikatsu"; GroupDescription: "Content:"
 
 [Files]
 Source: "..\..\target\release\renkatsu.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -47,4 +48,7 @@ Name: "{group}\Renkatsu Studio"; Filename: "{app}\renkatsu.exe"; IconFilename: "
 Name: "{autodesktop}\Renkatsu Studio"; Filename: "{app}\renkatsu.exe"; IconFilename: "{app}\renkatsu.ico"; Tasks: desktopicon
 
 [Run]
+; Into the packages folder of the user who started Setup, not the
+; administrator's.
+Filename: "{app}\rk.exe"; Parameters: "package download starter-characters"; StatusMsg: "Downloading Starter Content: Characters..."; Tasks: starter; Flags: runasoriginaluser waituntilterminated
 Filename: "{app}\renkatsu.exe"; Description: "{cm:LaunchProgram,Renkatsu Studio}"; Flags: nowait postinstall skipifsilent

@@ -12,6 +12,7 @@ on:
   pull_request:
     paths:
       - "packaging/**"
+      - "crates/rk-installer/**"
       - ".github/workflows/release.yml"
 
 permissions:
@@ -31,24 +32,21 @@ jobs:
         id: version
         run: echo "version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rk-studio") | .version')" >>"$GITHUB_OUTPUT"
       - name: Build
-        run: cargo build --release --locked -p rk-studio -p rk-cli
-      - name: AppImage
+        run: cargo build --release --locked -p rk-studio -p rk-cli -p rk-installer
+      - name: Installer
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          mkdir -p dist AppDir/usr/bin
-          cp target/release/renkatsu target/release/rk AppDir/usr/bin/
-          cp packaging/renkatsu.desktop packaging/renkatsu.png AppDir/
-          cp packaging/linux/AppRun AppDir/AppRun
-          chmod +x AppDir/AppRun
-          curl -fsSLo appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "dist/Renkatsu-$VERSION-linux-x86_64.AppImage"
-      - name: Archive with an install script
+          mkdir -p dist payload/LICENSES
+          cp target/release/renkatsu target/release/rk packaging/renkatsu.png LICENSE README.md payload/
+          cp LICENSES/* payload/LICENSES/
+          (cd payload && zip -qr -X ../payload.zip .)
+          target/release/renkatsu-installer --attach payload.zip "dist/Renkatsu-$VERSION-linux-x86_64-installer"
+      - name: Portable archive with an install script
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          name="Renkatsu-$VERSION-linux-x86_64"
+          name="Renkatsu-$VERSION-linux-x86_64-portable"
           mkdir -p "$name"
           cp target/release/renkatsu target/release/rk packaging/renkatsu.desktop packaging/renkatsu.png \
             packaging/linux/install.sh LICENSE README.md "$name/"
