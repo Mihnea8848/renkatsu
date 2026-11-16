@@ -237,9 +237,9 @@ pub struct Ribbon {
 }
 
 impl Ribbon {
-    pub fn show(&mut self, ui: &mut Ui, theme: &Theme) -> Action {
-        let mut action = Action::None;
-        // Tab row.
+    /// The row of category tabs. Clicking the active tab again collapses
+    /// the ribbon to this row.
+    pub fn tab_row(&mut self, ui: &mut Ui, theme: &Theme) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             for (i, tab) in TABS.iter().enumerate() {
@@ -271,6 +271,11 @@ impl Ribbon {
                 }
             }
         });
+    }
+
+    pub fn show(&mut self, ui: &mut Ui, theme: &Theme) -> Action {
+        let mut action = Action::None;
+        self.tab_row(ui, theme);
         if self.collapsed {
             return action;
         }

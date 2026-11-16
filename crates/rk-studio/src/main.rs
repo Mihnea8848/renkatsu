@@ -5,11 +5,14 @@
 //! docs/editor.md: Unity's layout, the ribbon, the menu bar and docked panels
 //! with placeholder content, for judging layout and look.
 
+mod appearance;
 mod panels;
 mod ribbon;
 mod theme;
+mod toolbar;
 
 use anyhow::{Context, Result};
+use appearance::{Appearance, Tabs, TopBar, TypeIcons};
 use clap::Parser;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
@@ -31,6 +34,15 @@ struct Cli {
     /// Window size, as WIDTHxHEIGHT.
     #[arg(long, default_value = "1600x900")]
     size: String,
+    /// The area above the panels.
+    #[arg(long, value_enum, default_value = "unreal")]
+    top_bar: TopBar,
+    /// How docked panel tabs are drawn.
+    #[arg(long, value_enum, default_value = "unreal")]
+    tabs: Tabs,
+    /// How object types show in lists.
+    #[arg(long, value_enum, default_value = "glyph")]
+    type_icons: TypeIcons,
 }
 
 struct Studio {
@@ -41,6 +53,7 @@ struct Studio {
     selected: usize,
     screenshot: Option<PathBuf>,
     frames: u32,
+    look: Appearance,
 }
 
 impl Studio {
@@ -67,6 +80,11 @@ impl Studio {
             selected: 1,
             screenshot: cli.screenshot.clone(),
             frames: 0,
+            look: Appearance {
+                top_bar: cli.top_bar,
+                tabs: cli.tabs,
+                type_icons: cli.type_icons,
+            },
         };
         studio.apply_theme(&cc.egui_ctx);
         Ok(studio)
@@ -95,6 +113,9 @@ impl Studio {
                     let _ = ui.button(item);
                 }
             });
+            if self.look.top_bar == TopBar::Unity {
+                toolbar::unity_category_menus(ui);
+            }
             ui.menu_button("Window", |ui| {
                 for panel in Panel::ALL {
                     if ui.button(panel.title()).clicked() {
@@ -126,14 +147,25 @@ impl eframe::App for Studio {
                     .inner_margin(egui::Margin::symmetric(6, 2)),
             )
             .show(ui, |ui| self.menu_bar(ui));
+        let top_margin = match self.look.top_bar {
+            TopBar::Unreal | TopBar::Unity => egui::Margin::symmetric(6, 3),
+            TopBar::SlimRibbon | TopBar::Ribbon => egui::Margin::ZERO,
+        };
         egui::Panel::top("ribbon")
-            .frame(egui::Frame::new().fill(t.header))
-            .show(ui, |ui| {
-                if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
-                    match label {
-                        "Next theme" => self.next_theme(ctx),
-                        "Reset" if self.ribbon.tab == ribbon::TABS.len() - 1 => self.dock = panels::default_layout(),
-                        _ => {}
+            .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
+            .show(ui, |ui| match self.look.top_bar {
+                TopBar::Unreal => toolbar::unreal(ui, &t),
+                TopBar::Unity => toolbar::unity(ui, &t),
+                TopBar::SlimRibbon => toolbar::slim_ribbon(ui, &t, &mut self.ribbon),
+                TopBar::Ribbon => {
+                    if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
+                        match label {
+                            "Next theme" => self.next_theme(ctx),
+                            "Reset" if self.ribbon.tab == ribbon::TABS.len() - 1 => {
+                                self.dock = panels::default_layout()
+                            }
+                            _ => {}
+                        }
                     }
                 }
             });
@@ -167,6 +199,23 @@ impl eframe::App for Studio {
                 style.tab.focused.bg_fill = t.panel;
                 style.tab.inactive.bg_fill = t.header;
                 style.tab.hovered.bg_fill = t.control;
+                match self.look.tabs {
+                    Tabs::Unreal => {
+                        style.tab.hline_below_active_tab_name = true;
+                        style.tab_bar.hline_color = t.select;
+                    }
+                    Tabs::Unity => {
+                        style.tab.hline_below_active_tab_name = false;
+                        style.tab.inactive.text_color = t.text_dim;
+                    }
+                    Tabs::Underline => {
+                        style.tab.hline_below_active_tab_name = true;
+                        style.tab_bar.hline_color = t.select;
+                        style.tab.active.bg_fill = t.header;
+                        style.tab.focused.bg_fill = t.header;
+                        style.tab.inactive.text_color = t.text_dim;
+                    }
+                }
                 style.separator.width = 2.0;
                 style.separator.color_idle = t.divider;
                 style.separator.color_hovered = t.select;
@@ -177,6 +226,7 @@ impl eframe::App for Studio {
                     theme: &t,
                     viewport_image: self.viewport_image.as_ref(),
                     selected: &mut self.selected,
+                    type_icons: self.look.type_icons,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)

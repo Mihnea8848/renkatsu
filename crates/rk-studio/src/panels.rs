@@ -4,6 +4,7 @@
 //! The docked panels and Unity's default layout. Content is placeholder: the
 //! shell is for judging layout and look before the scene model exists.
 
+use crate::appearance::{Kind, TypeIcons};
 use crate::theme::Theme;
 use egui::{Color32, RichText, TextureHandle, Ui, Vec2};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabViewer};
@@ -75,6 +76,7 @@ pub struct Viewer<'a> {
     pub theme: &'a Theme,
     pub viewport_image: Option<&'a TextureHandle>,
     pub selected: &'a mut usize,
+    pub type_icons: TypeIcons,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -143,43 +145,25 @@ impl Viewer<'_> {
     }
 
     fn outliner(&mut self, ui: &mut Ui) {
-        let rows: [(usize, &str, &str); 7] = [
-            (0, icon::GLOBE_HEMISPHERE_WEST, "Untitled scene"),
-            (1, icon::USER, "Simple"),
-            (2, icon::T_SHIRT, "Outfit 1"),
-            (2, icon::DIAMOND, "Accessories"),
-            (1, icon::SUN, "Key light"),
-            (1, icon::VIDEO_CAMERA, "Camera 1"),
-            (1, icon::MAP_TRIFOLD, "No map"),
+        let rows: [(usize, Kind, &str); 11] = [
+            (0, Kind::Scene, "Untitled scene"),
+            (1, Kind::Folder, "Cast"),
+            (2, Kind::Character, "Simple"),
+            (3, Kind::Outfit, "Outfit 1"),
+            (3, Kind::Accessory, "Accessories"),
+            (2, Kind::Pose, "Standing pose"),
+            (1, Kind::Item, "Chair"),
+            (1, Kind::Light, "Key light"),
+            (1, Kind::Camera, "Camera 1"),
+            (1, Kind::Map, "Rooftop"),
+            (1, Kind::Script, "Scene script"),
         ];
         search(ui, "Search the scene");
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (i, (depth, g, name)) in rows.iter().enumerate() {
-                // Full-width rows, highlighted edge to edge as in Unity and Unreal.
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), self.theme.row), egui::Sense::click());
-                let fill = if *self.selected == i {
-                    self.theme.select
-                } else if resp.hovered() {
-                    self.theme.control
-                } else {
-                    Color32::TRANSPARENT
-                };
-                ui.painter().rect_filled(rect, 0.0, fill);
-                let x = rect.left() + 6.0 + *depth as f32 * ui.spacing().indent;
-                ui.painter().text(
-                    egui::pos2(x, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{g}  {name}"),
-                    egui::FontId::proportional(13.0),
-                    if *self.selected == i {
-                        Color32::WHITE
-                    } else {
-                        self.theme.text
-                    },
-                );
-                if resp.clicked() {
+            for (i, (depth, kind, name)) in rows.iter().enumerate() {
+                let selected = *self.selected == i;
+                if type_row(ui, self.theme, self.type_icons, *depth, *kind, name, selected).clicked() {
                     *self.selected = i;
                 }
             }
@@ -311,4 +295,81 @@ fn search(ui: &mut Ui, hint: &str) {
             .hint_text(format!("{}  {hint}", icon::MAGNIFYING_GLASS))
             .desired_width(f32::INFINITY),
     );
+}
+
+/// One full-width list row with the object's type shown in the chosen
+/// style, highlighted edge to edge as in Unity and Unreal.
+pub fn type_row(
+    ui: &mut Ui,
+    t: &Theme,
+    style: TypeIcons,
+    depth: usize,
+    kind: Kind,
+    name: &str,
+    selected: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), t.row), egui::Sense::click());
+    let fill = if selected {
+        t.select
+    } else if resp.hovered() {
+        t.control
+    } else {
+        Color32::TRANSPARENT
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 0.0, fill);
+    let x = rect.left() + 8.0 + depth as f32 * 14.0;
+    let y = rect.center().y;
+    let text = if selected { Color32::WHITE } else { t.text };
+    let glyph_font = egui::FontId::proportional(14.0);
+    match style {
+        TypeIcons::Glyph => {
+            p.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_CENTER,
+                kind.glyph(),
+                glyph_font,
+                kind.color(),
+            );
+        }
+        TypeIcons::Chip => {
+            let chip = egui::Rect::from_center_size(egui::pos2(x + 7.0, y), Vec2::splat(t.row - 6.0));
+            p.rect_filled(chip, 2.0, kind.color());
+            p.text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                kind.glyph(),
+                egui::FontId::proportional(12.0),
+                t.field,
+            );
+        }
+        TypeIcons::Strip => {
+            let bar = egui::Rect::from_min_size(egui::pos2(x - 5.0, rect.top() + 3.0), Vec2::new(3.0, t.row - 6.0));
+            p.rect_filled(bar, 0.0, kind.color());
+            p.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_CENTER,
+                kind.glyph(),
+                glyph_font,
+                text,
+            );
+        }
+        TypeIcons::Plain => {
+            p.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_CENTER,
+                kind.glyph(),
+                glyph_font,
+                t.text_dim,
+            );
+        }
+    }
+    p.text(
+        egui::pos2(x + 22.0, y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(13.0),
+        text,
+    );
+    resp
 }
