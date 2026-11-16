@@ -291,13 +291,15 @@ mod tests {
             active: true,
         };
         // 0 has children 2 then 1; a depth-first walk visits 0, 2, 3, 1.
-        let mut scene = Scene::default();
-        scene.nodes = vec![
-            node("root", None, vec![2, 1]),
-            node("late", Some(0), vec![]),
-            node("early", Some(0), vec![3]),
-            node("inner", Some(2), vec![]),
-        ];
+        let scene = Scene {
+            nodes: vec![
+                node("root", None, vec![2, 1]),
+                node("late", Some(0), vec![]),
+                node("early", Some(0), vec![3]),
+                node("inner", Some(2), vec![]),
+            ],
+            ..Default::default()
+        };
         assert_eq!(hierarchy_order(&scene), vec![0, 3, 1, 2]);
     }
 
