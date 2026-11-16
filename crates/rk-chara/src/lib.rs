@@ -12,6 +12,7 @@ pub mod clothing_unlocker;
 pub mod colliders;
 pub mod compose;
 pub mod dynamic_bone_editor;
+pub mod edit_fangs;
 pub mod expression;
 pub mod eye_control;
 pub mod eyelook;

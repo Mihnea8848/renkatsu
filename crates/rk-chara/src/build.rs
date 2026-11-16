@@ -53,6 +53,8 @@ pub struct BuildOptions {
     /// Run Slider Unlocker: highlight positions follow slider values set
     /// outside 0 to 1 instead of stopping at the ends.
     pub slider_unlocker: bool,
+    /// Run Edit Fangs: the card sets the length and spacing of each fang.
+    pub edit_fangs: bool,
     /// Run the Pregnancy plugin: the body grows with the stored week.
     pub pregnancy: bool,
     /// Run the Accessory States plugin: accessories bound to clothes
@@ -83,6 +85,7 @@ impl Default for BuildOptions {
             clothing_unlocker: true,
             eye_control: true,
             slider_unlocker: true,
+            edit_fangs: true,
             pregnancy: true,
             accessory_states: true,
             uncensor_selector: true,
@@ -2247,6 +2250,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         })
     };
     let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
+
+    if let Some(fangs) = opts.edit_fangs.then(|| crate::edit_fangs::read(&card.ext)).flatten() {
+        for r in b.scene.renderers.iter_mut() {
+            if r.part == Part::Head && r.name == crate::edit_fangs::RENDERER {
+                if let Some(mesh) = crate::edit_fangs::apply(&r.mesh, fangs) {
+                    r.mesh = std::sync::Arc::new(mesh);
+                }
+            }
+        }
+    }
 
     // Physics runs on the finished skeleton, as the game's does once a
     // character is loaded.
