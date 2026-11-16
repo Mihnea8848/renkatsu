@@ -23,7 +23,7 @@ use theme::{Theme, THEMES};
 #[command(name = "renkatsu", version, about = "Renkatsu Studio")]
 struct Cli {
     /// Theme variant to start with.
-    #[arg(long, default_value = "Unreal dark")]
+    #[arg(long, default_value = "Unreal 5")]
     theme: String,
     /// Picture to show in the viewport until the live viewport exists.
     #[arg(long)]
@@ -35,10 +35,10 @@ struct Cli {
     #[arg(long, default_value = "1600x900")]
     size: String,
     /// The area above the panels.
-    #[arg(long, value_enum, default_value = "unreal")]
+    #[arg(long, value_enum, default_value = "combined-rail")]
     top_bar: TopBar,
     /// How docked panel tabs are drawn.
-    #[arg(long, value_enum, default_value = "unreal")]
+    #[arg(long, value_enum, default_value = "unity")]
     tabs: Tabs,
     /// How object types show in lists.
     #[arg(long, value_enum, default_value = "glyph")]
@@ -62,6 +62,17 @@ struct Studio {
 impl Studio {
     fn new(cc: &eframe::CreationContext, cli: &Cli) -> Result<Self> {
         let mut fonts = egui::FontDefinitions::default();
+        // A modern interface font from the system for now; a bundled one
+        // comes once the choice is made.
+        if let Ok(bytes) = std::fs::read("/usr/share/fonts/TTF/OpenSans-Regular.ttf") {
+            fonts.font_data.insert(
+                "interface".into(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "interface".into());
+            }
+        }
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
         let theme = Theme::by_name(&cli.theme).with_context(|| {
@@ -228,6 +239,7 @@ impl eframe::App for Studio {
                     }
                     Tabs::Unity => {
                         style.tab.hline_below_active_tab_name = false;
+                        style.tab_bar.hline_color = t.header;
                         style.tab.inactive.text_color = t.text_dim;
                     }
                     Tabs::Underline => {

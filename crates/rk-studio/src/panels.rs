@@ -117,6 +117,10 @@ impl TabViewer for Viewer<'_> {
 
 impl Viewer<'_> {
     fn viewport(&mut self, ui: &mut Ui) {
+        if self.top_bar.tools_in_viewport() {
+            self.studio_viewport(ui);
+            return;
+        }
         let t = self.theme;
         // Toolbar along the top edge, as in Unreal.
         ui.horizontal(|ui| {
@@ -159,6 +163,153 @@ impl Viewer<'_> {
             tool_strip(ui, t, rect);
         }
         ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    }
+
+    /// The converged design: the picture fills the panel, and everything
+    /// else floats over it. A slim row along the top carries the
+    /// selection's actions and the view options; down the left side sit
+    /// the named mode rail, the active mode's tools and the tool strip.
+    fn studio_viewport(&mut self, ui: &mut Ui) {
+        let t = self.theme;
+        let full = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(full, 0.0, t.field);
+        if let Some(tex) = self.viewport_image {
+            let size = tex.size_vec2();
+            let scale = (full.width() / size.x).min(full.height() / size.y);
+            let fit = egui::Rect::from_center_size(full.center(), size * scale);
+            ui.painter().image(
+                tex.id(),
+                fit,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        let overlay = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 235);
+
+        // Top row: the selection and what can be done with it, then the view.
+        let bar_h = t.row + 8.0;
+        let bar = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), bar_h));
+        ui.painter().rect_filled(bar, 0.0, overlay(t.header));
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(bar.shrink2(Vec2::new(8.0, 4.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        row.spacing_mut().item_spacing.x = 2.0;
+        row.label(
+            RichText::new(Kind::Character.glyph())
+                .color(Kind::Character.color(self.palette))
+                .size(15.0),
+        );
+        row.label(RichText::new("Simple").color(Color32::WHITE));
+        row.label(RichText::new("Character").color(t.text_dim).size(12.0));
+        row.add_space(10.0);
+        for (g, label) in [
+            (icon::IDENTIFICATION_CARD, "Load card"),
+            (icon::T_SHIRT, "Outfit"),
+            (icon::SMILEY, "Expression"),
+            (icon::PUZZLE_PIECE, "Modules"),
+        ] {
+            let _ = row.add(egui::Button::new(format!("{g}  {label}  {}", icon::CARET_DOWN)).frame(false));
+        }
+        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (g, label) in [
+                (icon::MAGNET, "Snap"),
+                (icon::SUN, "Lit"),
+                (icon::CAMERA, "Perspective"),
+            ] {
+                let _ = ui.add(egui::Button::new(format!("{g}  {label}")).frame(false));
+            }
+        });
+
+        // Left: the named mode rail.
+        let rail_w = 58.0;
+        let rail = egui::Rect::from_min_max(
+            egui::pos2(full.left(), bar.bottom()),
+            egui::pos2(full.left() + rail_w, full.bottom()),
+        );
+        ui.painter().rect_filled(rail, 0.0, overlay(t.header));
+        let active = 2;
+        for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
+            let cell = egui::Rect::from_min_size(
+                rail.min + Vec2::new(0.0, 4.0 + i as f32 * 54.0),
+                Vec2::new(rail_w, 54.0),
+            );
+            let p = ui.painter();
+            if i == active {
+                p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.control);
+            }
+            let color = if i == active { Color32::WHITE } else { t.text_dim };
+            p.text(
+                cell.center() - Vec2::new(0.0, 8.0),
+                egui::Align2::CENTER_CENTER,
+                *g,
+                egui::FontId::proportional(19.0),
+                color,
+            );
+            p.text(
+                cell.center() + Vec2::new(0.0, 13.0),
+                egui::Align2::CENTER_CENTER,
+                *name,
+                egui::FontId::proportional(10.5),
+                color,
+            );
+        }
+
+        // The active mode's tools, beside the rail.
+        let pal_w = 210.0;
+        let pal = egui::Rect::from_min_max(
+            egui::pos2(rail.right() + 1.0, rail.top()),
+            egui::pos2(rail.right() + 1.0 + pal_w, full.bottom()),
+        );
+        ui.painter().rect_filled(pal, 0.0, overlay(t.panel));
+        let mut tools = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(pal.shrink(10.0))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        tools.label(RichText::new("Pose").size(15.0).color(Color32::WHITE));
+        tools.add_space(6.0);
+        for (section, items) in [
+            (
+                "Edit",
+                [
+                    (icon::BONE, "Forward kinematics"),
+                    (icon::TARGET, "Inverse kinematics"),
+                    (icon::FLIP_HORIZONTAL, "Mirror pose"),
+                ],
+            ),
+            (
+                "Library",
+                [
+                    (icon::BOOKMARKS_SIMPLE, "Load pose"),
+                    (icon::BOOKMARK_SIMPLE, "Save pose"),
+                    (icon::ARROW_U_UP_LEFT, "Reset pose"),
+                ],
+            ),
+            (
+                "Body",
+                [
+                    (icon::HAND, "Hands"),
+                    (icon::SMILEY, "Expression"),
+                    (icon::EYE, "Look at camera"),
+                ],
+            ),
+        ] {
+            tools.label(RichText::new(section).size(11.5).color(t.text_dim));
+            for (g, label) in items {
+                let _ = tool_row(&mut tools, t, g, label);
+            }
+            tools.add_space(6.0);
+        }
+
+        // The transform tools, floating just right of the palette.
+        tool_strip(
+            ui,
+            t,
+            egui::Rect::from_min_max(egui::pos2(pal.right(), pal.top()), full.max),
+        );
+        ui.allocate_rect(full, egui::Sense::click_and_drag());
     }
 
     /// What fits the selection, above the viewport: here a character.
@@ -553,4 +704,29 @@ fn mode_rail(ui: &mut Ui, t: &Theme, active: usize) {
             color,
         );
     }
+}
+
+/// A left-aligned tool row with its icon, highlighted on hover.
+fn tool_row(ui: &mut Ui, t: &Theme, glyph: &str, label: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), t.row), egui::Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, t.control_radius as f32, t.control);
+    }
+    let color = if resp.hovered() { Color32::WHITE } else { t.text };
+    p.text(
+        rect.left_center() + Vec2::new(10.0, 0.0),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(15.0),
+        color,
+    );
+    p.text(
+        rect.left_center() + Vec2::new(24.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        color,
+    );
+    resp
 }

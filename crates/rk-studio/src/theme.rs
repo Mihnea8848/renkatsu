@@ -36,8 +36,28 @@ pub struct Theme {
     pub row: f32,
 }
 
-/// The variants offered for comparison, all within Unreal's colours.
-pub const THEMES: [Theme; 3] = [
+/// The variants offered for comparison, all within Unreal's colours. The
+/// first follows Unreal 5's own dark style colours as remembered from its
+/// style code (input #0F0F0F, background #151515, panel #242424, dropdown
+/// #383838, hover #575757, foreground #C0C0C0, selection #0070E0); they are
+/// to be checked against the real editor.
+pub const THEMES: [Theme; 4] = [
+    Theme {
+        name: "Unreal 5",
+        base: Color32::from_rgb(0x0f, 0x0f, 0x0f),
+        panel: Color32::from_rgb(0x24, 0x24, 0x24),
+        header: Color32::from_rgb(0x15, 0x15, 0x15),
+        field: Color32::from_rgb(0x0f, 0x0f, 0x0f),
+        control: Color32::from_rgb(0x38, 0x38, 0x38),
+        control_hover: Color32::from_rgb(0x57, 0x57, 0x57),
+        divider: Color32::from_rgb(0x0f, 0x0f, 0x0f),
+        text: Color32::from_rgb(0xc0, 0xc0, 0xc0),
+        text_dim: Color32::from_rgb(0x84, 0x84, 0x84),
+        select: Color32::from_rgb(0x00, 0x70, 0xe0),
+        active: Color32::from_rgb(0xf0, 0x8d, 0x00),
+        control_radius: 3,
+        row: 24.0,
+    },
     Theme {
         name: "Unreal dark",
         base: Color32::from_rgb(0x15, 0x15, 0x15),
@@ -154,6 +174,6 @@ mod tests {
         let mut style = Style::default();
         THEMES[0].apply(&mut style);
         assert_eq!(style.visuals.window_corner_radius, CornerRadius::ZERO);
-        assert!(THEMES.iter().all(|t| t.control_radius <= 2));
+        assert!(THEMES.iter().all(|t| t.control_radius <= 3));
     }
 }

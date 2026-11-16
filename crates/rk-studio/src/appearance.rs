@@ -42,7 +42,12 @@ pub enum TopBar {
 impl TopBar {
     /// Whether the active mode's tools live in a docked Tools panel.
     pub fn has_tools_panel(self) -> bool {
-        matches!(self, TopBar::UnrealModes | TopBar::Combined | TopBar::CombinedRail)
+        matches!(self, TopBar::UnrealModes | TopBar::Combined)
+    }
+
+    /// Whether the modes and their tools are drawn inside the viewport.
+    pub fn tools_in_viewport(self) -> bool {
+        self == TopBar::CombinedRail
     }
 
     /// Whether the viewport carries the selection's context bar and the
