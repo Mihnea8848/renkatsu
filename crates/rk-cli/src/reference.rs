@@ -262,6 +262,10 @@ pub fn run(
         opts.outfit = outfit;
     }
     let mut chara = rk_chara::build(game, &card, &opts)?;
+    let capture_value: Value = serde_json::from_str(&capture_text)?;
+    // Clothing blend shapes are checked before the capture's shapes are
+    // copied over for the face's expression.
+    let clothing_shapes = crate::state::compare_clothing_shapes(&capture_value, &chara.scene);
     let shaped = apply_shapes(&capture_shapes(&capture_text)?, &mut chara.scene);
     let gazes = apply_iris_placement(&capture_iris(&capture_text)?, &mut chara.scene, verbose);
     let draws = chara.scene.pose();
@@ -369,8 +373,8 @@ pub fn run(
     }
     say!("  expression: blend shapes of {shaped} meshes and the iris placement of {gazes} eyes set from the capture");
     let queues_differ = compare_queues(&capture_text, &chara.scene, verbose)?;
-    let capture_value: Value = serde_json::from_str(&capture_text)?;
-    let state = crate::state::compare(&capture_value, &chara.scene);
+    let mut state = crate::state::compare(&capture_value, &chara.scene);
+    state.merge(clothing_shapes);
     if verbose {
         crate::state::print(&state, 8);
         compare_bones(&capture_text, &chara.scene, watch)?;
