@@ -408,7 +408,12 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await?;
+        Self::with_device(device, queue)
+    }
 
+    /// A renderer on a device someone else made, such as the editor's
+    /// window. The device must allow 8192 pixel textures.
+    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("toon"),
             source: wgpu::ShaderSource::Wgsl(TOON_WGSL.into()),
@@ -798,16 +803,19 @@ impl Renderer {
         })
     }
 
-    /// Renders posed meshes to an RGBA8 image, top row first.
-    pub fn render(
+    /// Records the passes that draw posed meshes into `target_view`, an
+    /// RGBA8 sRGB texture of `width` by `height`.
+    #[allow(clippy::too_many_arguments)]
+    fn encode(
         &mut self,
+        target_view: &wgpu::TextureView,
         draws: &[DrawMesh],
         camera: &Camera,
         env: &Environment,
         width: u32,
         height: u32,
         background: [f64; 4],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wgpu::CommandEncoder> {
         let aspect = width as f32 / height as f32;
         let to_eye = (camera.eye - camera.target).normalize_or_zero();
         // Key light from the camera's upper left, as a viewer expects.
@@ -1021,12 +1029,6 @@ impl Renderer {
         let msaa = make(COLOR_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
         let depth =
             make(DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
-        let target = make(
-            COLOR_FORMAT,
-            1,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        );
-        let target_view = target.create_view(&Default::default());
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let mask = if cast {
@@ -1238,7 +1240,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &msaa,
                     depth_slice: None,
-                    resolve_target: Some(&target_view),
+                    resolve_target: Some(target_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: srgb_to_linear(background[0]),
@@ -1285,7 +1287,36 @@ impl Renderer {
                 pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
             }
         }
+        Ok(encoder)
+    }
 
+    /// Renders posed meshes to an RGBA8 image, top row first.
+    pub fn render(
+        &mut self,
+        draws: &[DrawMesh],
+        camera: &Camera,
+        env: &Environment,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+    ) -> Result<Vec<u8>> {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("render target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&Default::default());
+        let mut encoder = self.encode(&target_view, draws, camera, env, width, height, background)?;
         // Read back, honouring the row alignment wgpu requires.
         let row = width * 4;
         let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -1326,6 +1357,27 @@ impl Renderer {
         }
         Ok(out)
     }
+
+    /// Draws posed meshes into `target`, which must be an RGBA8 sRGB
+    /// texture made for rendering to, and submits the work without waiting
+    /// for it: the editor's viewport draws this way every frame.
+    pub fn render_to(
+        &mut self,
+        target: &wgpu::Texture,
+        draws: &[DrawMesh],
+        camera: &Camera,
+        env: &Environment,
+        background: [f64; 4],
+    ) -> Result<()> {
+        let size = target.size();
+        let view = target.create_view(&Default::default());
+        let encoder = self.encode(&view, draws, camera, env, size.width, size.height, background)?;
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// The format `render_to` expects its target in.
+    pub const TARGET_FORMAT: wgpu::TextureFormat = COLOR_FORMAT;
 }
 
 /// Bounding box of posed meshes.
