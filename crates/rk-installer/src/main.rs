@@ -103,7 +103,7 @@ impl Installer {
                 let files = payload::own()?;
                 install::install(&files, &layout, options, &mut |s| tell(Note::Step(s.to_owned())))?;
                 if starter {
-                    tell(Note::Step("Getting Starter Content: Characters".to_owned()));
+                    tell(Note::Step("Getting Starter Content: Characters & Clothing".to_owned()));
                     let known = rk_packages::index::known()
                         .into_iter()
                         .find(|k| k.id == STARTER)
@@ -342,7 +342,7 @@ impl eframe::App for Installer {
                             Pos2::new(x, y),
                             width,
                             &mut self.starter,
-                            "Download Starter Content: Characters",
+                            "Download Starter Content: Characters & Clothing",
                             &hint,
                             enabled,
                         );

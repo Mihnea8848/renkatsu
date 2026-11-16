@@ -45,7 +45,7 @@ The latest version is 0.1.2, on the
 - 0.1.2 draws CharaStudio's screen effects (ambient occlusion, bloom, the
   colour filter and the vignette), so characters look as they do in Studio:
   99.0% body and 99.4% face against captures with the effects on. It adds
-  packages, and Starter Content: Characters, Koikatsu's own vanilla
+  packages, and Starter Content: Characters & Clothing, Koikatsu's own vanilla
   character content, so Renkatsu works without a Koikatsu install.
 - Next: posing.
 
@@ -134,7 +134,7 @@ Download Renkatsu from the
   portable `.tar.gz` holds the same programs with an `install.sh`
 
 Both include the `rk` command line tools, and both installers can download
-Starter Content: Characters on the way. Renkatsu Studio also offers it in
+Starter Content: Characters & Clothing on the way. Renkatsu Studio also offers it in
 the project selector and in Window, Packages.
 
 To build from source instead:
