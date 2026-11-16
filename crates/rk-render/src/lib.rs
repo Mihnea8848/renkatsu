@@ -227,6 +227,42 @@ pub struct Renderer {
     white: wgpu::TextureView,
     hard_ramp: wgpu::TextureView,
     textures: HashMap<usize, wgpu::TextureView>,
+    /// GPU buffers of the meshes drawn last frame, kept so that a new frame
+    /// only uploads the moved vertices.
+    meshes: HashMap<(usize, u32), MeshBuffers>,
+    /// Material bind groups of the last frame, by their contents.
+    materials: HashMap<Vec<u8>, MaterialGroup>,
+    /// The frame's render targets, made again only when the size changes.
+    targets: Option<Targets>,
+    /// The light's shadow map and its side.
+    shadow_map: Option<(u32, wgpu::TextureView)>,
+    /// Counts frames, to drop what a frame no longer used.
+    frame: u64,
+}
+
+struct MeshBuffers {
+    /// Holds the mesh so that its address, the key, is not reused.
+    _mesh: Arc<dyn std::any::Any + Send + Sync>,
+    vb: wgpu::Buffer,
+    ib: wgpu::Buffer,
+    used: u64,
+}
+
+struct MaterialGroup {
+    /// Holds the textures so that their addresses, part of the key, are not
+    /// reused.
+    _textures: Vec<Arc<Image>>,
+    group: wgpu::BindGroup,
+    used: u64,
+}
+
+#[derive(Clone)]
+struct Targets {
+    size: [u32; 2],
+    msaa: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    depth_texture: wgpu::TextureView,
+    mask: wgpu::TextureView,
 }
 
 /// Box-filtered mip chain for an RGBA8 image.
@@ -542,6 +578,11 @@ impl Renderer {
             white,
             hard_ramp,
             textures: HashMap::new(),
+            meshes: HashMap::new(),
+            materials: HashMap::new(),
+            targets: None,
+            shadow_map: None,
+            frame: 0,
         })
     }
 
@@ -730,10 +771,14 @@ impl Renderer {
         texture.create_view(&Default::default())
     }
 
-    /// Drops uploaded textures. Call between characters: the cache is keyed
-    /// by image address, which can be reused once a character is dropped.
+    /// Drops uploaded textures, and the mesh buffers and material groups
+    /// kept from the last frame. Call between characters: the texture cache
+    /// is keyed by image address, which can be reused once a character is
+    /// dropped, and the GPU should not hold two characters at once.
     pub fn clear_textures(&mut self) {
         self.textures.clear();
+        self.meshes.clear();
+        self.materials.clear();
     }
 
     fn texture(&mut self, image: &Arc<Image>) -> wgpu::TextureView {
@@ -758,7 +803,32 @@ impl Renderer {
         view
     }
 
+    /// The bind group of a material, kept from an earlier frame when its
+    /// contents are the same.
     fn material_bind_group(&mut self, desc: &MaterialDesc) -> wgpu::BindGroup {
+        let mut key = bytemuck::bytes_of::<MaterialUniform>(&desc.uniform).to_vec();
+        for t in &desc.textures {
+            let ptr = t.as_ref().map_or(0, |i| Arc::as_ptr(i) as usize);
+            key.extend_from_slice(&ptr.to_ne_bytes());
+        }
+        if let Some(m) = self.materials.get_mut(&key) {
+            m.used = self.frame;
+            return m.group.clone();
+        }
+        let group = self.make_material_bind_group(desc);
+        let textures = desc.textures.iter().flatten().cloned().collect();
+        self.materials.insert(
+            key,
+            MaterialGroup {
+                _textures: textures,
+                group: group.clone(),
+                used: self.frame,
+            },
+        );
+        group
+    }
+
+    fn make_material_bind_group(&mut self, desc: &MaterialDesc) -> wgpu::BindGroup {
         let views: Vec<wgpu::TextureView> = desc
             .textures
             .iter()
@@ -816,6 +886,8 @@ impl Renderer {
         height: u32,
         background: [f64; 4],
     ) -> Result<wgpu::CommandEncoder> {
+        self.frame += 1;
+        let frame = self.frame;
         let aspect = width as f32 / height as f32;
         let to_eye = (camera.eye - camera.target).normalize_or_zero();
         // Key light from the camera's upper left, as a viewer expects.
@@ -900,6 +972,8 @@ impl Renderer {
         let mut binds = Vec::new();
         // Culling boxes of the renderers that receive shadows.
         let mut receivers = Vec::new();
+        // How often each mesh came up this frame: two renderers can share one.
+        let mut seen: HashMap<usize, u32> = HashMap::new();
         for d in draws {
             let mesh = &d.renderer.mesh;
             let uv = |set: usize, i: usize| mesh.uv[set].get(i).copied().unwrap_or([0.0, 0.0]);
@@ -921,16 +995,40 @@ impl Renderer {
             if verts.is_empty() || mesh.indices.is_empty() {
                 continue;
             }
-            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+            let ptr = Arc::as_ptr(mesh) as usize;
+            let n = seen.entry(ptr).or_default();
+            let key = (ptr, *n);
+            *n += 1;
+            let vertex_bytes: &[u8] = bytemuck::cast_slice(&verts);
+            let (vb, ib) = match self.meshes.get_mut(&key) {
+                Some(m) if m.vb.size() == vertex_bytes.len() as u64 => {
+                    self.queue.write_buffer(&m.vb, 0, vertex_bytes);
+                    m.used = frame;
+                    (m.vb.clone(), m.ib.clone())
+                }
+                _ => {
+                    let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: vertex_bytes,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                    let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: bytemuck::cast_slice(&mesh.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+                    self.meshes.insert(
+                        key,
+                        MeshBuffers {
+                            _mesh: mesh.clone(),
+                            vb: vb.clone(),
+                            ib: ib.clone(),
+                            used: frame,
+                        },
+                    );
+                    (vb, ib)
+                }
+            };
             // Unity draws materials beyond the submesh count with the last
             // submesh again; MaterialEditor's copies rely on this.
             let materials = &d.renderer.materials;
@@ -1009,26 +1107,20 @@ impl Renderer {
             }
         }
 
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let make = |format, samples, usage| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size,
-                mip_level_count: 1,
-                sample_count: samples,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let msaa = make(COLOR_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
-        let depth =
-            make(DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
+        // What the last frame no longer drew is let go.
+        self.meshes.retain(|_, m| m.used == frame);
+        self.materials.retain(|_, m| m.used == frame);
+
+        if self.targets.as_ref().is_none_or(|t| t.size != [width, height]) {
+            self.targets = Some(self.make_targets(width, height));
+        }
+        let Targets {
+            msaa,
+            depth,
+            depth_texture,
+            mask,
+            ..
+        } = self.targets.clone().expect("made above");
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let mask = if cast {
@@ -1103,23 +1195,27 @@ impl Renderer {
                 let hull = shadow::focused_hull(&view.slice_corners(r.0, r.1), light, bounds.as_ref()?);
                 shadow::fit_cascade(&hull, light_view, set.near_plane_offset, [half, half], true)
             });
-            let map = self
-                .device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("shadow map"),
-                    size: wgpu::Extent3d {
-                        width: side,
-                        height: side,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: SHADOW_MAP_FORMAT,
-                    usage: attachment,
-                    view_formats: &[],
-                })
-                .create_view(&Default::default());
+            if self.shadow_map.as_ref().is_none_or(|(s, _)| *s != side) {
+                let map = self
+                    .device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("shadow map"),
+                        size: wgpu::Extent3d {
+                            width: side,
+                            height: side,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: SHADOW_MAP_FORMAT,
+                        usage: attachment,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default());
+                self.shadow_map = Some((side, map));
+            }
+            let map = self.shadow_map.as_ref().expect("made above").1.clone();
             let groups = cascades.map(|c| {
                 let c = c?;
                 let globals = Globals {
@@ -1148,7 +1244,6 @@ impl Renderer {
 
             // The camera's depth texture: the same pass, seen from the camera
             // and without the light's bias.
-            let depth_texture = make(DEPTH_TEXTURE_FORMAT, 1, attachment).create_view(&Default::default());
             {
                 let group = globals_group(self, base, &self.white);
                 let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
@@ -1200,7 +1295,6 @@ impl Renderer {
                     },
                 ],
             });
-            let mask = make(MASK_FORMAT, 1, attachment).create_view(&Default::default());
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("shadow mask"),
@@ -1288,6 +1382,36 @@ impl Renderer {
             }
         }
         Ok(encoder)
+    }
+
+    /// The colour, depth, camera depth and shadow mask targets of a frame.
+    fn make_targets(&self, width: u32, height: u32) -> Targets {
+        let make = |format, samples, usage| {
+            self.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        Targets {
+            size: [width, height],
+            msaa: make(COLOR_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT),
+            depth: make(DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT),
+            depth_texture: make(DEPTH_TEXTURE_FORMAT, 1, attachment),
+            mask: make(MASK_FORMAT, 1, attachment),
+        }
     }
 
     /// Renders posed meshes to an RGBA8 image, top row first.
