@@ -63,7 +63,8 @@ and the formulas come from the game's own code and shaders, not from tuning.
   material copies), MoreAccessories, ABMX bone edits, Hair Accessory
   Customizer, Pushup, Uncensor Selector, Clothing Unlocker, Accessory States,
   Accessory Clothes, Eye Control, Pregnancy, Colliders, Invisible Body,
-  Dynamic Bone Editor and Slider Unlocker
+  Dynamic Bone Editor, Dynamic Bone Distribution Editor, Slider Unlocker,
+  Edit Fangs, Clothing BlendShape, Copy Cha Body Mat and Stiletto heels
 - Rendering to a PNG file, side by side comparisons with captures from the
   game, and a bench that compares a whole list of cards at once
 
@@ -178,8 +179,9 @@ Renkatsu Character Maker with everything the Koikatsu maker can do.
 
 1. Character look: Koikatsu shaders, card colours, texture compositing,
    overlays and the other plugin data that cards depend on
-2. The studio: a docked editor with a viewport, scene tree and inspector, and
-   scene and project files stored as readable text
+2. The studio: a docked editor with a viewport, scene tree and inspector,
+   posing characters (static poses and CharaStudio's FK and IK), and scene
+   and project files stored as readable text
 3. Import of existing CharaStudio scenes
 4. The Ren'Py link: baked images and video that are rendered again when a
    character changes
