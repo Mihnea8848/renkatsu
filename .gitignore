@@ -6,3 +6,6 @@ renkatsu.toml
 tools/reference-capture/bin/
 tools/reference-capture/obj/
 notes/
+
+# the app icon is ours, unlike the pictures above
+!/packaging/renkatsu.png
