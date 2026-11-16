@@ -145,7 +145,7 @@ pub fn compare(cards: Vec<PathBuf>, count: usize, face: bool, out: &Path) -> Res
             let mut lo = Vec3::splat(f32::MAX);
             let mut hi = Vec3::splat(f32::MIN);
             for d in &head {
-                for p in &d.positions {
+                for p in &d.positions() {
                     lo = lo.min(Vec3::from(*p));
                     hi = hi.max(Vec3::from(*p));
                 }

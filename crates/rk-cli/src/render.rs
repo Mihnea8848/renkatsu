@@ -49,7 +49,7 @@ pub fn render(a: Args) -> Result<()> {
                 "{:?} {} ({} verts, casts {:?}, receives {})",
                 r.part,
                 r.name,
-                d.positions.len(),
+                d.base_positions.len(),
                 r.cast_shadows,
                 r.receive_shadows
             );

@@ -9,6 +9,7 @@
 use glam::{Mat4, Quat, Vec3, Vec4};
 use rk_unityfs::objects::{Mesh, ShaderPass, ShaderProp, ShaderPropKind};
 use rk_vfs::ObjRef;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -500,21 +501,134 @@ impl Scene {
     }
 }
 
-/// A mesh posed in world space, ready to draw.
+/// A mesh posed in world space, ready to draw: its vertices after blend
+/// shapes and the matrices that carry them into the world. The renderer
+/// applies the matrices on the GPU; `posed` does the same on the CPU.
 pub struct DrawMesh<'a> {
     pub renderer: &'a RendererInst,
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
-    /// Direction along the surface, with Unity's handedness sign in `w`.
-    pub tangents: Vec<[f32; 4]>,
+    /// Vertex positions after blend shapes, before skinning. Borrowed from
+    /// the mesh when no blend shape is on.
+    pub base_positions: Cow<'a, [[f32; 3]]>,
+    /// Vertex normals after blend shapes, before skinning.
+    pub base_normals: Cow<'a, [[f32; 3]]>,
+    pub skinning: Skinning,
     /// Lowest and highest corner of the renderer's culling box in the world
     /// (`Renderer.bounds`); `None` when the files give no box.
     pub bounds: Option<[[f32; 3]; 2]>,
 }
 
+/// How a posed mesh's vertices reach the world.
+#[derive(Debug, Clone)]
+pub enum Skinning {
+    /// Each vertex blends up to four bone matrices (the bone's world matrix
+    /// times its bind pose) by its weights; a bone that is missing is
+    /// `None`. `node` is the renderer's own world matrix.
+    Bones { matrices: Vec<Option<Mat4>>, node: Mat4 },
+    /// One matrix for every vertex, and its inverse transpose for normals.
+    Rigid { matrix: Mat4, normal: Mat4 },
+}
+
+/// A mesh's vertices in world space.
+pub struct Posed {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    /// Direction along the surface, with Unity's handedness sign in `w`.
+    pub tangents: Vec<[f32; 4]>,
+}
+
+impl DrawMesh<'_> {
+    fn has_normals(&self) -> bool {
+        self.renderer.mesh.normals.len() == self.renderer.mesh.positions.len()
+    }
+
+    fn has_tangents(&self) -> bool {
+        self.renderer.mesh.tangents.len() == self.renderer.mesh.positions.len()
+    }
+
+    /// The matrix that carries vertex `vi` into the world.
+    fn vertex_matrix(&self, vi: usize) -> Mat4 {
+        match &self.skinning {
+            Skinning::Rigid { matrix, .. } => *matrix,
+            Skinning::Bones { matrices, node } => {
+                let bw = &self.renderer.mesh.skin[vi];
+                let mut acc = Mat4::ZERO;
+                let mut total = 0.0;
+                for k in 0..4 {
+                    let w = bw.weights[k];
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    if let Some(Some(mat)) = matrices.get(bw.bones[k] as usize) {
+                        acc += *mat * w;
+                        total += w;
+                    }
+                }
+                if total > 0.0 {
+                    acc * (1.0 / total)
+                } else if bw.weights.iter().all(|w| *w <= 0.0) {
+                    // Unity sums weight times bone matrix, so a vertex
+                    // without weights gets the zero matrix and lands on
+                    // the origin of the skinned space. Triangles made of
+                    // such vertices have no area and are not drawn.
+                    Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, node.w_axis)
+                } else {
+                    *node
+                }
+            }
+        }
+    }
+
+    /// The vertex positions in world space.
+    pub fn positions(&self) -> Vec<[f32; 3]> {
+        (0..self.base_positions.len())
+            .map(|vi| {
+                self.vertex_matrix(vi)
+                    .transform_point3(Vec3::from(self.base_positions[vi]))
+                    .to_array()
+            })
+            .collect()
+    }
+
+    /// The vertices in world space, as the renderer's skinning pass makes
+    /// them.
+    pub fn posed(&self) -> Posed {
+        let n = self.base_positions.len();
+        let (has_normals, has_tangents) = (self.has_normals(), self.has_tangents());
+        let mut out = Posed {
+            positions: Vec::with_capacity(n),
+            normals: Vec::with_capacity(n),
+            tangents: Vec::with_capacity(n),
+        };
+        for vi in 0..n {
+            let mat = self.vertex_matrix(vi);
+            out.positions
+                .push(mat.transform_point3(Vec3::from(self.base_positions[vi])).to_array());
+            out.tangents.push(if has_tangents {
+                let t = self.renderer.mesh.tangents[vi];
+                let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
+                [dir.x, dir.y, dir.z, t[3]]
+            } else {
+                [1.0, 0.0, 0.0, 1.0]
+            });
+            out.normals.push(if has_normals {
+                let nmat = match &self.skinning {
+                    Skinning::Rigid { normal, .. } => *normal,
+                    Skinning::Bones { .. } => mat,
+                };
+                nmat.transform_vector3(Vec3::from(self.base_normals[vi]))
+                    .normalize_or_zero()
+                    .to_array()
+            } else {
+                [0.0, 0.0, 1.0]
+            });
+        }
+        out
+    }
+}
+
 impl Scene {
-    /// Applies skinning (or the node transform) to every visible renderer,
-    /// and to the ones that only cast shadows.
+    /// Poses every visible renderer, and the ones that only cast shadows:
+    /// applies the blend shapes and works out the skinning matrices.
     pub fn pose(&self) -> Vec<DrawMesh<'_>> {
         let (world, active) = self.world();
         let mut out = Vec::new();
@@ -523,10 +637,9 @@ impl Scene {
                 continue;
             }
             let m = &r.mesh;
-            let has_normals = m.normals.len() == m.positions.len();
             // Blend shapes move vertices before skinning.
-            let mut base_positions = std::borrow::Cow::Borrowed(&m.positions[..]);
-            let mut base_normals = std::borrow::Cow::Borrowed(&m.normals[..]);
+            let mut base_positions = Cow::Borrowed(&m.positions[..]);
+            let mut base_normals = Cow::Borrowed(&m.normals[..]);
             for (shape, &w) in m.blend_shapes.iter().zip(&r.shape_weights) {
                 if w == 0.0 {
                     continue;
@@ -543,87 +656,29 @@ impl Scene {
                     }
                 }
             }
-            let mut positions = Vec::with_capacity(m.positions.len());
-            let mut normals = Vec::with_capacity(m.positions.len());
-            let has_tangents = m.tangents.len() == m.positions.len();
-            let mut tangents = Vec::with_capacity(if has_tangents { m.positions.len() } else { 0 });
-            if r.skinned && !m.skin.is_empty() && !m.bind_poses.is_empty() {
-                let mats: Vec<Option<Mat4>> = (0..m.bind_poses.len())
-                    .map(|i| {
-                        let node = r.bones.get(i).copied().flatten()?;
-                        Some(world[node] * Mat4::from_cols_array(&m.bind_poses[i]).transpose())
-                    })
-                    .collect();
-                for (vi, p) in base_positions.iter().enumerate() {
-                    let bw = &m.skin[vi];
-                    let mut acc = Mat4::ZERO;
-                    let mut total = 0.0;
-                    for k in 0..4 {
-                        let w = bw.weights[k];
-                        if w <= 0.0 {
-                            continue;
-                        }
-                        if let Some(Some(mat)) = mats.get(bw.bones[k] as usize) {
-                            acc += *mat * w;
-                            total += w;
-                        }
-                    }
-                    let mat = if total > 0.0 {
-                        acc * (1.0 / total)
-                    } else if bw.weights.iter().all(|w| *w <= 0.0) {
-                        // Unity sums weight times bone matrix, so a vertex
-                        // without weights gets the zero matrix and lands on
-                        // the origin of the skinned space. Triangles made of
-                        // such vertices have no area and are not drawn.
-                        Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, world[r.node].w_axis)
-                    } else {
-                        world[r.node]
-                    };
-                    positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
-                    if has_tangents {
-                        let t = m.tangents[vi];
-                        let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
-                        tangents.push([dir.x, dir.y, dir.z, t[3]]);
-                    }
-                    if has_normals {
-                        normals.push(
-                            mat.transform_vector3(Vec3::from(base_normals[vi]))
-                                .normalize_or_zero()
-                                .to_array(),
-                        );
-                    }
+            let skinning = if r.skinned && !m.skin.is_empty() && !m.bind_poses.is_empty() {
+                Skinning::Bones {
+                    matrices: (0..m.bind_poses.len())
+                        .map(|i| {
+                            let node = r.bones.get(i).copied().flatten()?;
+                            Some(world[node] * Mat4::from_cols_array(&m.bind_poses[i]).transpose())
+                        })
+                        .collect(),
+                    node: world[r.node],
                 }
             } else {
-                let mat = world[r.node];
-                let nmat = mat.inverse().transpose();
-                for (vi, p) in base_positions.iter().enumerate() {
-                    positions.push(mat.transform_point3(Vec3::from(*p)).to_array());
-                    if has_tangents {
-                        let t = m.tangents[vi];
-                        let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
-                        tangents.push([dir.x, dir.y, dir.z, t[3]]);
-                    }
-                    if has_normals {
-                        normals.push(
-                            nmat.transform_vector3(Vec3::from(base_normals[vi]))
-                                .normalize_or_zero()
-                                .to_array(),
-                        );
-                    }
+                let matrix = world[r.node];
+                Skinning::Rigid {
+                    matrix,
+                    normal: matrix.inverse().transpose(),
                 }
-            }
-            if !has_normals {
-                normals = vec![[0.0, 0.0, 1.0]; positions.len()];
-            }
-            if !has_tangents {
-                tangents = vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
-            }
+            };
             let bounds = r.bounds.map(|b| b.transformed(world[r.root_bone.unwrap_or(r.node)]));
             out.push(DrawMesh {
                 renderer: r,
-                positions,
-                normals,
-                tangents,
+                base_positions,
+                base_normals,
+                skinning,
                 bounds,
             });
         }

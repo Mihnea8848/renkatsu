@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use material::{MaterialDesc, MaterialUniform};
-use rk_chara::{Blend, DrawMesh, Image, ShadowCasting, Stencil};
+use rk_chara::{Blend, DrawMesh, Image, ShadowCasting, Skinning, Stencil};
 use shadow::{ShadowSettings, CASCADES};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -227,6 +227,9 @@ pub struct Renderer {
     white: wgpu::TextureView,
     hard_ramp: wgpu::TextureView,
     textures: HashMap<usize, wgpu::TextureView>,
+    /// The skinning compute pass of `skin.wgsl`.
+    skin_pipeline: wgpu::ComputePipeline,
+    skin_layout: wgpu::BindGroupLayout,
     /// GPU buffers of the meshes drawn last frame, kept so that a new frame
     /// only uploads the moved vertices.
     meshes: HashMap<(usize, u32), MeshBuffers>,
@@ -245,7 +248,90 @@ struct MeshBuffers {
     _mesh: Arc<dyn std::any::Any + Send + Sync>,
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
+    /// Positions, normals and tangents before skinning, three per vertex.
+    base: wgpu::Buffer,
+    /// The skinning matrices of the frame, after a header.
+    pose: wgpu::Buffer,
+    skin_group: wgpu::BindGroup,
+    /// Whether `base` holds blend-shaped vertices rather than the mesh's own.
+    shaped: bool,
     used: u64,
+}
+
+/// The header of a skinning pass's pose buffer, as `skin.wgsl` reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkinHeader {
+    mode: u32,
+    count: u32,
+    has_normals: u32,
+    has_tangents: u32,
+    node: [f32; 16],
+    normal: [f32; 16],
+}
+
+/// One bone of a skinning pass's pose buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkinBone {
+    matrix: [f32; 16],
+    valid: [u32; 4],
+}
+
+/// Bone indices and weights of a vertex, as `skin.wgsl` reads them.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkinVertex {
+    bones: [u32; 4],
+    weights: [f32; 4],
+}
+
+/// The skinning pass's pose buffer for a posed mesh.
+fn skin_pose(d: &DrawMesh) -> Vec<u8> {
+    let mesh = &d.renderer.mesh;
+    let (mode, node, normal, bones) = match &d.skinning {
+        Skinning::Rigid { matrix, normal } => (1, *matrix, *normal, Vec::new()),
+        Skinning::Bones { matrices, node } => (
+            0,
+            *node,
+            Mat4::IDENTITY,
+            matrices
+                .iter()
+                .map(|m| SkinBone {
+                    matrix: m.unwrap_or(Mat4::ZERO).to_cols_array(),
+                    valid: [m.is_some() as u32, 0, 0, 0],
+                })
+                .collect(),
+        ),
+    };
+    let header = SkinHeader {
+        mode,
+        count: d.base_positions.len() as u32,
+        has_normals: (mesh.normals.len() == mesh.positions.len()) as u32,
+        has_tangents: (mesh.tangents.len() == mesh.positions.len()) as u32,
+        node: node.to_cols_array(),
+        normal: normal.to_cols_array(),
+    };
+    let mut out = bytemuck::bytes_of(&header).to_vec();
+    // A storage array needs at least one element; an empty one is invalid.
+    if bones.is_empty() {
+        out.extend_from_slice(bytemuck::bytes_of(&SkinBone::zeroed()));
+    }
+    out.extend_from_slice(bytemuck::cast_slice(&bones));
+    out
+}
+
+/// Positions, normals and tangents before skinning, three per vertex.
+fn skin_base(d: &DrawMesh) -> Vec<[f32; 4]> {
+    let mesh = &d.renderer.mesh;
+    (0..d.base_positions.len())
+        .flat_map(|i| {
+            let p = d.base_positions[i];
+            let n = d.base_normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+            let t = mesh.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+            [[p[0], p[1], p[2], 1.0], [n[0], n[1], n[2], 0.0], t]
+        })
+        .collect()
 }
 
 struct MaterialGroup {
@@ -526,6 +612,41 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let storage_entry = |binding, read_only| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skin"),
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, false),
+            ],
+        });
+        let skin_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skin"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("skin.wgsl").into()),
+        });
+        let skin_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("skin"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("skin"),
+                bind_group_layouts: &[Some(&skin_layout)],
+                immediate_size: 0,
+            })),
+            module: &skin_shader,
+            entry_point: Some("cs_skin"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let mut material_entries = vec![uniform_entry(0)];
         for i in 0..material::SLOTS.len() as u32 {
             material_entries.push(texture_entry(1 + i, wgpu::ShaderStages::VERTEX_FRAGMENT));
@@ -578,6 +699,8 @@ impl Renderer {
             white,
             hard_ramp,
             textures: HashMap::new(),
+            skin_pipeline,
+            skin_layout,
             meshes: HashMap::new(),
             materials: HashMap::new(),
             targets: None,
@@ -974,61 +1097,115 @@ impl Renderer {
         let mut receivers = Vec::new();
         // How often each mesh came up this frame: two renderers can share one.
         let mut seen: HashMap<usize, u32> = HashMap::new();
+        // The skinning pass of each mesh: its bind group and vertex count.
+        let mut skins = Vec::new();
         for d in draws {
             let mesh = &d.renderer.mesh;
             let uv = |set: usize, i: usize| mesh.uv[set].get(i).copied().unwrap_or([0.0, 0.0]);
-            let verts: Vec<Vertex> = d
-                .positions
-                .iter()
-                .enumerate()
-                .map(|(i, p)| Vertex {
-                    pos: *p,
-                    normal: d.normals[i],
-                    uv0: uv(0, i),
-                    uv1: uv(1, i),
-                    uv2: uv(2, i),
-                    uv3: uv(3, i),
-                    color: mesh.colors.get(i).copied().unwrap_or([1.0; 4]),
-                    tangent: d.tangents[i],
-                })
-                .collect();
-            if verts.is_empty() || mesh.indices.is_empty() {
+            let count = d.base_positions.len();
+            if count == 0 || mesh.indices.is_empty() {
                 continue;
             }
             let ptr = Arc::as_ptr(mesh) as usize;
             let n = seen.entry(ptr).or_default();
             let key = (ptr, *n);
             *n += 1;
-            let vertex_bytes: &[u8] = bytemuck::cast_slice(&verts);
-            let (vb, ib) = match self.meshes.get_mut(&key) {
-                Some(m) if m.vb.size() == vertex_bytes.len() as u64 => {
-                    self.queue.write_buffer(&m.vb, 0, vertex_bytes);
-                    m.used = frame;
-                    (m.vb.clone(), m.ib.clone())
+            let shaped = matches!(d.base_positions, std::borrow::Cow::Owned(_));
+            let pose = skin_pose(d);
+            let kept = self.meshes.get(&key).is_some_and(|m| {
+                m.vb.size() == (count * std::mem::size_of::<Vertex>()) as u64 && m.pose.size() == pose.len() as u64
+            });
+            if kept {
+                let m = self.meshes.get_mut(&key).expect("checked above");
+                // Blend shapes change the vertices before skinning; when they
+                // are switched off, the mesh's own come back.
+                if shaped || m.shaped {
+                    self.queue.write_buffer(&m.base, 0, bytemuck::cast_slice(&skin_base(d)));
+                    m.shaped = shaped;
                 }
-                _ => {
-                    let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                self.queue.write_buffer(&m.pose, 0, &pose);
+                m.used = frame;
+            } else {
+                // The vertices start unskinned; the skinning pass writes the
+                // posed position, normal and tangent of each over them.
+                let verts: Vec<Vertex> = (0..count)
+                    .map(|i| Vertex {
+                        pos: d.base_positions[i],
+                        normal: [0.0, 0.0, 1.0],
+                        uv0: uv(0, i),
+                        uv1: uv(1, i),
+                        uv2: uv(2, i),
+                        uv3: uv(3, i),
+                        color: mesh.colors.get(i).copied().unwrap_or([1.0; 4]),
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    })
+                    .collect();
+                let buffer = |contents: &[u8], usage| {
+                    self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: None,
-                        contents: vertex_bytes,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    });
-                    let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::cast_slice(&mesh.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                    self.meshes.insert(
-                        key,
-                        MeshBuffers {
-                            _mesh: mesh.clone(),
-                            vb: vb.clone(),
-                            ib: ib.clone(),
-                            used: frame,
+                        contents,
+                        usage,
+                    })
+                };
+                let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+                let vb = buffer(
+                    bytemuck::cast_slice(&verts),
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
+                );
+                let ib = buffer(bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX);
+                let base = buffer(bytemuck::cast_slice(&skin_base(d)), storage);
+                let pose_buf = buffer(&pose, storage);
+                let mut skin: Vec<SkinVertex> = mesh
+                    .skin
+                    .iter()
+                    .map(|bw| SkinVertex {
+                        bones: bw.bones,
+                        weights: bw.weights,
+                    })
+                    .collect();
+                if skin.is_empty() {
+                    skin.push(SkinVertex::zeroed());
+                }
+                let skin_buf = buffer(bytemuck::cast_slice(&skin), wgpu::BufferUsages::STORAGE);
+                let skin_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("skin"),
+                    layout: &self.skin_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: pose_buf.as_entire_binding(),
                         },
-                    );
-                    (vb, ib)
-                }
-            };
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: base.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: skin_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: vb.as_entire_binding(),
+                        },
+                    ],
+                });
+                self.meshes.insert(
+                    key,
+                    MeshBuffers {
+                        _mesh: mesh.clone(),
+                        vb,
+                        ib,
+                        base,
+                        pose: pose_buf,
+                        skin_group,
+                        shaped,
+                        used: frame,
+                    },
+                );
+            }
+            let m = &self.meshes[&key];
+            let (vb, ib) = (m.vb.clone(), m.ib.clone());
+            skins.push((m.skin_group.clone(), count as u32));
             // Unity draws materials beyond the submesh count with the last
             // submesh again; MaterialEditor's copies rely on this.
             let materials = &d.renderer.materials;
@@ -1084,7 +1261,7 @@ impl Renderer {
                         min: min.into(),
                         max: max.into(),
                     }),
-                    None => shadow::Aabb::of(d.positions.iter().map(|p| Vec3::from(*p))),
+                    None => shadow::Aabb::of(d.positions().iter().map(|p| Vec3::from(*p))),
                 };
                 receivers.extend(own);
             }
@@ -1123,6 +1300,17 @@ impl Renderer {
         } = self.targets.clone().expect("made above");
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("skin"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.skin_pipeline);
+            for (group, count) in &skins {
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+            }
+        }
         let mask = if cast {
             let draw = |pass: &mut wgpu::RenderPass, r: &Self, depth_texture: bool| {
                 for c in &casters {
@@ -1513,8 +1701,8 @@ pub fn bounds(draws: &[DrawMesh]) -> (Vec3, Vec3) {
         if d.renderer.cast_shadows == ShadowCasting::ShadowsOnly {
             continue;
         }
-        for p in &d.positions {
-            let p = Vec3::from(*p);
+        for p in d.positions() {
+            let p = Vec3::from(p);
             if p.is_finite() {
                 min = min.min(p);
                 max = max.max(p);
@@ -1578,6 +1766,24 @@ mod tests {
         )
         .validate(&module)
         .expect("shadow.wgsl validates");
+    }
+
+    #[test]
+    fn skin_shader_is_valid_wgsl_and_matches_the_vertex_layout() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("skin.wgsl")).expect("skin.wgsl parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("skin.wgsl validates");
+        // The shader writes into the vertex buffer by float offsets.
+        let floats = |bytes: usize| bytes / 4;
+        assert_eq!(floats(std::mem::size_of::<Vertex>()), 22);
+        assert_eq!(floats(std::mem::offset_of!(Vertex, normal)), 3);
+        assert_eq!(floats(std::mem::offset_of!(Vertex, tangent)), 18);
+        assert_eq!(std::mem::size_of::<SkinHeader>(), 144);
+        assert_eq!(std::mem::size_of::<SkinBone>(), 80);
     }
 
     #[test]

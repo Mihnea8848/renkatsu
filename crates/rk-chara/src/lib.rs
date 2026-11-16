@@ -39,6 +39,6 @@ pub mod uncensor_selector;
 pub use build::{build, BuildOptions, Character};
 pub use loader::Loader;
 pub use scene::{
-    Blend, Bounds, DrawMesh, DrawState, Image, MaterialInst, Part, RendererInst, Scene, ShadowCasting, ShadowPass,
-    Stencil, TexSlot, Trs,
+    Blend, Bounds, DrawMesh, DrawState, Image, MaterialInst, Part, Posed, RendererInst, Scene, ShadowCasting,
+    ShadowPass, Skinning, Stencil, TexSlot, Trs,
 };

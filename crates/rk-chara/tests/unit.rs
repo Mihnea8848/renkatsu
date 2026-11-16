@@ -203,7 +203,7 @@ fn skinning_blends_bone_transforms() {
     scene.nodes[bone].local.pos = Vec3::new(0.0, 0.0, 2.0);
     let draws = scene.pose();
     assert_eq!(draws.len(), 1);
-    let p: Vec<Vec3> = draws[0].positions.iter().map(|p| Vec3::from(*p)).collect();
+    let p: Vec<Vec3> = draws[0].positions().iter().map(|p| Vec3::from(*p)).collect();
     assert!(near(p[0], Vec3::new(0.0, 0.0, 2.0)), "fully on the moved bone");
     assert!(near(p[1], Vec3::new(1.0, 0.0, 1.0)), "half on each bone");
     assert!(near(p[2], Vec3::new(0.0, 1.0, 0.0)), "on the still bone");
@@ -212,7 +212,7 @@ fn skinning_blends_bone_transforms() {
     // A missing bone drops out and the remaining weights are renormalised.
     scene.renderers[0].bones[1] = None;
     let draws = scene.pose();
-    assert!(near(Vec3::from(draws[0].positions[1]), Vec3::new(1.0, 0.0, 2.0)));
+    assert!(near(Vec3::from(draws[0].positions()[1]), Vec3::new(1.0, 0.0, 2.0)));
     drop(draws);
 
     // Hidden renderers are not posed. Shadow-only ones are: they cast.
@@ -247,7 +247,7 @@ fn vertices_without_weights_collapse_to_one_point() {
     scene.renderers[0].mesh = Arc::new(mesh);
     let draws = scene.pose();
     // All three corners meet, so the triangle has no area.
-    for p in &draws[0].positions {
+    for p in &draws[0].positions() {
         assert!(near(Vec3::from(*p), Vec3::new(0.0, 3.0, 0.0)));
     }
 }
@@ -279,19 +279,22 @@ fn blend_shapes_move_vertices_before_skinning() {
     scene.renderers[0].mesh = Arc::new(mesh);
 
     // No weights: the stored mesh.
-    assert!(near(Vec3::from(scene.pose()[0].positions[0]), Vec3::ZERO));
+    assert!(near(Vec3::from(scene.pose()[0].positions()[0]), Vec3::ZERO));
 
     // Half of the first shape; a missing entry for the second counts as 0.
     scene.renderers[0].shape_weights = vec![0.5];
-    assert!(near(Vec3::from(scene.pose()[0].positions[0]), Vec3::new(0.0, 1.0, 0.0)));
+    assert!(near(
+        Vec3::from(scene.pose()[0].positions()[0]),
+        Vec3::new(0.0, 1.0, 0.0)
+    ));
 
     // Shapes add up, and the bone moves the reshaped vertex.
     scene.renderers[0].shape_weights = vec![0.5, 0.25];
     scene.nodes[bone].local.pos = Vec3::new(0.0, 0.0, 3.0);
     let posed = scene.pose();
-    assert!(near(Vec3::from(posed[0].positions[0]), Vec3::new(1.0, 1.0, 3.0)));
+    assert!(near(Vec3::from(posed[0].positions()[0]), Vec3::new(1.0, 1.0, 3.0)));
     // Other vertices are untouched by the shapes.
-    assert!(near(Vec3::from(posed[0].positions[2]), Vec3::new(0.0, 1.0, 0.0)));
+    assert!(near(Vec3::from(posed[0].positions()[2]), Vec3::new(0.0, 1.0, 0.0)));
 }
 
 #[test]
