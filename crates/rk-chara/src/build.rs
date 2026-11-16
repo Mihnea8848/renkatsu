@@ -75,6 +75,9 @@ pub struct BuildOptions {
     /// Run the Colliders plugin: floor, arm and leg colliders where the
     /// card switches them on, and its changes to skirts and the bust.
     pub colliders: bool,
+    /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
+    /// and turns the lower legs, feet and toes.
+    pub stiletto: bool,
 }
 
 impl Default for BuildOptions {
@@ -101,6 +104,7 @@ impl Default for BuildOptions {
             accessory_states: true,
             uncensor_selector: true,
             colliders: true,
+            stiletto: true,
         }
     }
 }
@@ -2098,6 +2102,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 
     let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
     let mut accessory_nodes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    // The worn shoe's list entry and renderers, for Stiletto.
+    let mut shoe: Option<(&Item, Vec<usize>)> = None;
     let hair_settings = crate::hair_accessories::for_outfit(&card.ext, outfit);
     // Bust size, softness and weight in effect; Pushup may replace them.
     let mut bust = crate::pushup::BodyData::from_body(
@@ -2130,6 +2136,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     continue;
                 };
                 let inst = b.part(&label, item, Some(top), Part::Clothes(i as u8));
+                if i >= 7 {
+                    let renderers = inst.as_ref().map(|inst| inst.renderers.clone());
+                    shoe = Some((item, renderers.unwrap_or_default()));
+                }
                 let pattern_prop = format!("outfit{outfit}.ChaFileClothes.{}Pattern", cat::CLOTHES_PROPS[i]);
                 if let Some(inst) = &inst {
                     if opts.clothing_blend_shape {
@@ -2364,6 +2374,25 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     }
     if female && opts.studio {
         crate::hand_size::studio_copy(&mut b.scene, &bones, &mods);
+    }
+    // Stiletto turns the bones after the animation, each frame.
+    if let Some((item, renderers)) = shoe.filter(|_| opts.stiletto) {
+        use crate::stiletto as st;
+        let config = st::Config::load(&game.assets.index.game_dir);
+        let heel = config.heel(item.name());
+        // No animation is played, so the lookup has no controller or clip.
+        match st::flags_for(&config.flag_files, None, None) {
+            Ok(flags) => {
+                st::warp_shoe(&mut b.scene, &renderers, &heel, flags);
+                let pose = st::CustomPose::default();
+                // `objBodyBone.transform.parent`: what holds `cf_j_root`.
+                let holder = b.scene.nodes[body_root].parent.unwrap_or(anim.root);
+                st::pose(&mut b.scene, &bones, holder, &heel, flags, &pose, &config.settings);
+            }
+            Err(pattern) => b.loader.warn(format!(
+                "Stiletto: flags pattern `{pattern}` is not supported, heels are not applied"
+            )),
+        }
     }
     // ChaControl.UpdateVisible: tongue state 0, where Studio starts since it
     // loads cards without their status, shows the face's tongue (S_TongueF)
