@@ -9,6 +9,8 @@
 //! root to the object's transform and stepping its physics while it plays.
 
 use crate::camera::{Focus, Orbit, ViewCamera};
+use crate::mods::Games;
+use crate::project::Project;
 use crate::scene::{Content, ObjectId, Scene, Transform};
 use crate::state::{Log, Physics};
 use anyhow::{Context, Result};
@@ -16,7 +18,7 @@ use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
 use rk_chara::scene::Trs;
 use rk_render::{bounds, Camera, Environment, Renderer};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 struct Target {
     texture: wgpu::Texture,
@@ -27,6 +29,7 @@ struct Target {
 /// What a character is built from: a change to any of it builds it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Recipe {
+    /// The card on disk.
     card: PathBuf,
     outfit: usize,
     outdoor_shoes: bool,
@@ -95,8 +98,6 @@ pub struct Built {
 pub struct Live {
     renderer: Renderer,
     render_state: egui_wgpu::RenderState,
-    /// The game's files, opened when the first character is built.
-    game: Option<rk_vfs::Game>,
     actors: Vec<Actor>,
     /// Characters that could not be built, with what was tried and why, so
     /// that they are not tried again every frame.
@@ -116,13 +117,26 @@ impl Live {
         Ok(Live {
             renderer,
             render_state: render_state.clone(),
-            game: None,
             actors: Vec::new(),
             failed: Vec::new(),
             target: None,
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
             framed: false,
         })
+    }
+
+    /// Drops everything built, for another project: its scene's objects
+    /// may carry the ids of the last one's, and its mods are its own.
+    pub fn reset(&mut self) {
+        if !self.actors.is_empty() {
+            self.renderer.clear_textures();
+        }
+        self.actors.clear();
+        self.failed.clear();
+        for focus in [self.cam.focus, self.cam.home_focus()].into_iter().flatten() {
+            self.cam.forget(focus.object);
+        }
+        self.framed = false;
     }
 
     /// Whether any character is built.
@@ -152,8 +166,19 @@ impl Live {
 
     /// Brings the built characters in line with the scene, and moves the
     /// physics on by `dt` seconds while it plays. `was` is the physics
-    /// state of the frame before.
-    pub fn follow(&mut self, scene: &Scene, was: Physics, physics: Physics, dt: f32, log: &mut Log) {
+    /// state of the frame before. The scene names its cards relative to
+    /// the project, whose mods `games` opens the game with.
+    #[allow(clippy::too_many_arguments)]
+    pub fn follow(
+        &mut self,
+        scene: &Scene,
+        project: &Project,
+        games: &mut Games,
+        was: Physics,
+        physics: Physics,
+        dt: f32,
+        log: &mut Log,
+    ) {
         let wanted: Vec<(ObjectId, Recipe)> = scene
             .objects()
             .iter()
@@ -166,7 +191,7 @@ impl Live {
                 } => Some((
                     o.id,
                     Recipe {
-                        card: card.clone(),
+                        card: project.resolve(card),
                         outfit: *outfit,
                         outdoor_shoes: *outdoor_shoes,
                     },
@@ -199,7 +224,7 @@ impl Live {
             }
             let name = scene.get(id).map_or("", |o| o.name.as_str());
             let started = std::time::Instant::now();
-            match self.build(id, &recipe) {
+            match Self::build(games, &project.mods_dir(), id, &recipe) {
                 Ok(actor) => {
                     let file = recipe.card.file_name().unwrap_or_default().to_string_lossy();
                     log.info(format!(
@@ -246,11 +271,8 @@ impl Live {
         }
     }
 
-    fn build(&mut self, id: ObjectId, recipe: &Recipe) -> Result<Actor> {
-        if self.game.is_none() {
-            self.game = Some(rk_vfs::Game::open(&rk_core::Config::load()?)?);
-        }
-        let game = self.game.as_ref().expect("opened above");
+    fn build(games: &mut Games, mods: &Path, id: ObjectId, recipe: &Recipe) -> Result<Actor> {
+        let game = games.get(mods)?;
         let card = rk_card::Card::load(&recipe.card).with_context(|| format!("loading {}", recipe.card.display()))?;
         let options = rk_chara::BuildOptions {
             outfit: recipe.outfit.min(card.coordinates.len().saturating_sub(1)),

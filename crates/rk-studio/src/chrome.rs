@@ -17,10 +17,18 @@ use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuil
 use egui_dock::DockState;
 use egui_phosphor::regular as icon;
 
-/// The placeholder names of the open project and scene.
-const PROJECT: &str = "Untitled project";
-const SCENE_NAME: &str = "Untitled scene";
 const APP: &str = "Renkatsu Studio";
+
+/// The window's title for the desktop: the project, the scene and a mark
+/// for unsaved changes.
+pub fn window_title(st: &State) -> String {
+    format!(
+        "{} - {}{} - {APP}",
+        st.project.file.name,
+        st.doc.scene().name,
+        if st.dirty() { " *" } else { "" }
+    )
+}
 
 /// The application's mark, centred on `center`. Returns its rectangle.
 fn mark(ui: &Ui, k: &Look, center: Pos2) -> Rect {
@@ -39,17 +47,19 @@ fn mark(ui: &Ui, k: &Look, center: Pos2) -> Rect {
 /// The project and the scene as breadcrumbs from `x`, with the dot of
 /// unsaved changes after the scene. `project` leaves the project out when
 /// it is already named elsewhere.
-fn breadcrumbs(ui: &Ui, k: &Look, mut x: f32, y: f32, project: bool) {
+fn breadcrumbs(ui: &Ui, k: &Look, st: &State, mut x: f32, y: f32, project: bool) {
     let t = &k.t;
     let p = ui.painter();
     if project {
-        x = label(p, k, Pos2::new(x, y), PROJECT, t.text_dim);
+        x = label(p, k, Pos2::new(x, y), &st.project.file.name, t.text_dim);
         glyph(p, k, Pos2::new(x + 9.0, y + 0.5), icon::CARET_RIGHT, 9.0, t.text_dim);
         x += 18.0;
     }
-    let x = label(p, k, Pos2::new(x, y), SCENE_NAME, t.text);
+    let x = label(p, k, Pos2::new(x, y), &st.doc.scene().name, t.text);
     // Unsaved changes: one of the few places for the orange.
-    p.circle_filled(Pos2::new(x + 9.0, y + 0.5), 3.0, t.accent);
+    if st.dirty() {
+        p.circle_filled(Pos2::new(x + 9.0, y + 0.5), 3.0, t.accent);
+    }
 }
 
 /// The window's title bar: a strip of its own above the menu row, which
@@ -78,12 +88,19 @@ pub fn title_bar(ui: &mut Ui, k: &Look, st: &State) {
 
     let y = rect.center().y;
     let rest = format!(" - {APP}");
+    let project_name = st.project.file.name.as_str();
     match st.title_bar {
         TitleBar::A => {
             mark(ui, k, Pos2::new(rect.left() + 21.0, y));
-            let w = widgets::text_width(ui, PROJECT, k.font()) + widgets::text_width(ui, &rest, k.font());
+            let w = widgets::text_width(ui, project_name, k.font()) + widgets::text_width(ui, &rest, k.font());
             let p = ui.painter();
-            let x = label(p, k, Pos2::new((rect.center().x - w / 2.0).round(), y), PROJECT, t.text);
+            let x = label(
+                p,
+                k,
+                Pos2::new((rect.center().x - w / 2.0).round(), y),
+                project_name,
+                t.text,
+            );
             label(p, k, Pos2::new(x, y), &rest, t.text_dim);
         }
         TitleBar::B => {
@@ -99,13 +116,13 @@ pub fn title_bar(ui: &mut Ui, k: &Look, st: &State) {
                 )
                 .right();
             hair_v(p, x + 12.0, y - 7.0, y + 7.0, t.border);
-            breadcrumbs(ui, k, x + 25.0, y, true);
+            breadcrumbs(ui, k, st, x + 25.0, y, true);
         }
         TitleBar::C => {
             ui.painter().text(
                 Pos2::new(rect.center().x.round(), y),
                 Align2::CENTER_CENTER,
-                format!("{PROJECT}{rest}"),
+                format!("{project_name}{rest}"),
                 k.small(),
                 t.text_dim,
             );
@@ -151,14 +168,14 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
     });
     // What the title bar already names is not repeated here.
     let project = st.title_bar == TitleBar::C;
-    let mut need = widgets::text_width(ui, SCENE_NAME, k.font()) + 42.0;
+    let mut need = widgets::text_width(ui, &st.doc.scene().name, k.font()) + 42.0;
     if project {
-        need += widgets::text_width(ui, PROJECT, k.font()) + 18.0;
+        need += widgets::text_width(ui, &st.project.file.name, k.font()) + 18.0;
     }
     if st.title_bar != TitleBar::B && end + need < limit {
         let y = rect.center().y;
         hair_v(ui.painter(), end + 8.0, y - 8.0, y + 8.0, t.border);
-        breadcrumbs(ui, k, end + 22.0, y, project);
+        breadcrumbs(ui, k, st, end + 22.0, y, project);
     }
 
     play_group(ui, k, st, rect.center());
@@ -317,14 +334,46 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
     ui.spacing_mut().item_spacing.x = 0.0;
     let item = |ui: &mut Ui, text: &str, keys: &str| ui.add(egui::Button::new(text).shortcut_text(keys));
     ui.menu_button("File", |ui| {
-        let _ = item(ui, "New project", "Ctrl+N");
-        let _ = item(ui, "Open project", "Ctrl+O");
-        ui.separator();
-        let _ = item(ui, "Save", "Ctrl+S");
-        let _ = item(ui, "Save as", "Ctrl+Shift+S");
-        ui.separator();
-        let _ = item(ui, "Project settings", "");
-        let _ = item(ui, "Quit", "Ctrl+Q");
+        let mut chosen = None;
+        for (text, keys, command) in [
+            ("New project", "Ctrl+N", Command::NewProject),
+            ("Open project", "Ctrl+O", Command::OpenProject(None)),
+            ("Save", "Ctrl+S", Command::Save),
+            ("Save as", "Ctrl+Shift+S", Command::SaveAs),
+            ("Import card", "Ctrl+I", Command::ImportCard),
+            ("Quit", "Ctrl+Q", Command::Quit),
+        ] {
+            if matches!(text, "Save" | "Import card" | "Quit") {
+                ui.separator();
+            }
+            if item(ui, text, keys).clicked() {
+                chosen = Some(command);
+            }
+            if text == "Open project" {
+                ui.menu_button("Open recent", |ui| {
+                    let recent: Vec<_> = st
+                        .settings
+                        .recent_projects
+                        .iter()
+                        .filter(|p| **p != st.project.root)
+                        .cloned()
+                        .collect();
+                    if recent.is_empty() {
+                        ui.label(egui::RichText::new("No other projects yet").color(k.t.text_dim));
+                    }
+                    for path in recent {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        if ui.button(name).on_hover_text(path.display().to_string()).clicked() {
+                            chosen = Some(Command::OpenProject(Some(path)));
+                        }
+                    }
+                });
+            }
+        }
+        if let Some(command) = chosen {
+            st.ask(command, ui.ctx());
+            ui.close();
+        }
     });
     ui.menu_button("Edit", |ui| {
         let chosen = st.doc.selected.is_some();

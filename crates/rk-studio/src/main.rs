@@ -9,12 +9,15 @@
 mod camera;
 mod chrome;
 mod design;
+mod dialogs;
 mod kinds;
 mod library;
 mod live;
 mod modes;
+mod mods;
 mod panels;
 mod preferences;
+mod project;
 mod properties;
 mod scene;
 mod settings;
@@ -29,6 +32,7 @@ use design::{Design, Overlays, TitleBar};
 use eframe::egui_wgpu::wgpu;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
+use project::Project;
 use state::{Command, Look, Physics, Rail, State};
 use std::path::PathBuf;
 
@@ -48,10 +52,20 @@ struct Cli {
     /// Picture to show in the viewport while the scene has no character.
     #[arg(long)]
     viewport_image: Option<PathBuf>,
-    /// Card whose character joins the scene at the start. May be given
-    /// several times.
+    /// The project to open, by its folder. A folder that holds no project
+    /// gets a new one. Without this the last project opens, or a new one
+    /// is made in the documents folder.
+    #[arg(long)]
+    project: Option<PathBuf>,
+    /// Card to import into the project and put in the scene at the start.
+    /// May be given several times. A new project then starts without its
+    /// default character.
     #[arg(long)]
     card: Vec<PathBuf>,
+    /// Card to import into the project at the start as File, Import card
+    /// does, with its question about mods. May be given several times.
+    #[arg(long)]
+    import: Vec<PathBuf>,
     /// Save a picture of the window here after a few frames, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
@@ -120,6 +134,69 @@ struct Studio {
     clicks: Vec<egui::Pos2>,
     hover: Option<egui::Pos2>,
     frames: u32,
+    /// The window title as last given to the desktop.
+    title: String,
+    /// The window was told to close.
+    closing: bool,
+    /// The project of a scripted run that named none: a folder of its own
+    /// that goes away with the window.
+    temporary: Option<PathBuf>,
+}
+
+impl Drop for Studio {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.temporary {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// The project the editor starts on: the one asked for, else the last one
+/// that is still there, else a new one. Returns it with its scene, whether
+/// it was just made, and its folder when that is a temporary one.
+fn starting_project(cli: &Cli, settings: &settings::Settings) -> Result<(State, bool, Option<PathBuf>)> {
+    let fresh = |root: &std::path::Path, name: &str| -> Result<State> {
+        Ok(State::new(Project::create(root, name)?, scene::Scene::new()))
+    };
+    let opened = |root: &std::path::Path| -> Result<State> {
+        let (project, scene, note) = Project::open(root)?;
+        let mut state = State::new(project, scene);
+        if let Some(note) = note {
+            state.log.warn(note);
+        }
+        Ok(state)
+    };
+    if let Some(root) = &cli.project {
+        if Project::exists(root) {
+            return Ok((opened(root)?, false, None));
+        }
+        let name = root
+            .file_name()
+            .map_or("Untitled project".to_owned(), |n| n.to_string_lossy().into_owned());
+        return Ok((fresh(root, &name)?, true, None));
+    }
+    if cli.screenshot.is_some() {
+        // A scripted picture must not depend on, or add to, the user's own
+        // projects.
+        let root = std::env::temp_dir().join(format!("renkatsu-scripted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        return Ok((fresh(&root, "Untitled project")?, true, Some(root)));
+    }
+    let mut problem = None;
+    if let Some(last) = settings.last_project() {
+        match opened(last) {
+            Ok(state) => return Ok((state, false, None)),
+            Err(e) => problem = Some(format!("{} could not be opened: {e:#}", last.display())),
+        }
+    }
+    let home = project::home().context("no documents folder to make a project in")?;
+    let root = project::free_folder(&home, "Untitled project");
+    let name = root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let mut state = fresh(&root, &name)?;
+    if let Some(problem) = problem {
+        state.log.error(problem);
+    }
+    Ok((state, true, None))
 }
 
 impl Studio {
@@ -137,9 +214,10 @@ impl Studio {
             }
         });
 
-        let mut state = State::new();
-        state.settings = settings;
+        let (mut state, fresh, temporary) = starting_project(cli, &settings)?;
         state.vsync_at_start = settings.frame_rate.vsync();
+        state.settings = settings;
+        state.scripted = cli.screenshot.is_some();
         state.mode = modes::MODES
             .iter()
             .position(|m| m.name.eq_ignore_ascii_case(&cli.mode))
@@ -154,10 +232,33 @@ impl Studio {
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             state.live = Some(live::Live::new(render_state)?);
         }
+        if fresh {
+            state.start_fresh(cli.card.is_empty());
+        }
+        state.remember();
         for card in &cli.card {
             rk_card::Card::load(card).with_context(|| format!("loading {}", card.display()))?;
-            state.run(Command::AddCard(card.clone()));
+            state.imports.push_back(dialogs::Import {
+                path: card.clone(),
+                place: true,
+                // A scripted run has no one to answer.
+                ask: !state.scripted,
+                name: None,
+            });
         }
+        for card in &cli.import {
+            state.imports.push_back(dialogs::Import {
+                path: card.clone(),
+                place: false,
+                ask: true,
+                name: None,
+            });
+        }
+        while state.modal.is_none() && !state.imports.is_empty() {
+            state.next_import();
+        }
+        // An import brings the Content panel forward; the start does not.
+        state.show_content = false;
         let first = state
             .doc
             .scene()
@@ -196,6 +297,8 @@ impl Studio {
             // stops the start and the camera flags find a framed view.
             live.follow(
                 state.doc.scene(),
+                &state.project,
+                &mut state.games,
                 Physics::Stopped,
                 Physics::Stopped,
                 0.0,
@@ -240,6 +343,9 @@ impl Studio {
             clicks: cli.click.clone(),
             hover: cli.hover,
             frames: 0,
+            title: String::new(),
+            closing: false,
+            temporary,
         })
     }
 }
@@ -279,6 +385,26 @@ fn fonts() -> egui::FontDefinitions {
         "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
         egui::FontFamily::Monospace,
     );
+    // Card, item and mod names are often Japanese, which the interface font
+    // does not cover: the first system font found that does comes last in
+    // every family, so it only draws what the others lack.
+    const JAPANESE: [&str; 6] = [
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "C:\\Windows\\Fonts\\YuGothM.ttc",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "C:\\Windows\\Fonts\\msgothic.ttc",
+    ];
+    if let Some(bytes) = JAPANESE.iter().find_map(|path| std::fs::read(path).ok()) {
+        fonts.font_data.insert(
+            "japanese".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for list in fonts.families.values_mut() {
+            list.push("japanese".into());
+        }
+    }
     fonts
 }
 
@@ -297,6 +423,9 @@ impl eframe::App for Studio {
         if !ctx.input(|i| i.pointer.any_down()) {
             self.state.doc.end_gesture();
         }
+        self.state.poll_picker();
+        self.state.next_import();
+        self.file_keys(ctx);
         self.scene_keys(ctx);
         let t = k.t;
         let bar = |id: &'static str, height: f32| {
@@ -373,11 +502,14 @@ impl eframe::App for Studio {
             });
 
         preferences::show(ctx, &k, &mut self.state);
+        dialogs::show(ctx, &k, &mut self.state);
+        self.window(ctx);
 
         // Something asked for the cards: bring the Content panel forward.
         if std::mem::take(&mut self.state.show_content) {
             self.state.maximised = false;
             self.state.folder = 0;
+            self.bottom = Panel::Content;
             panels::open(&mut self.dock, Panel::Content);
             if let Some(tab) = self.dock.find_tab(&Panel::Content) {
                 let _ = self.dock.set_active_tab(tab);
@@ -416,6 +548,47 @@ impl eframe::App for Studio {
 }
 
 impl Studio {
+    /// Keeps the desktop's window title in step with the project, and
+    /// asks about unsaved changes before the window closes.
+    fn window(&mut self, ctx: &egui::Context) {
+        let title = chrome::window_title(&self.state);
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        if asked && !self.state.quit && self.screenshot.is_none() && self.state.dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.ask(Command::Quit, ctx);
+        }
+        if self.state.quit && !self.closing {
+            self.closing = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The keys of the File menu. They work while a text field has the
+    /// keyboard too, but not while a dialog is open.
+    fn file_keys(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        if self.state.modal.is_some() {
+            return;
+        }
+        let keys = [
+            (Modifiers::COMMAND | Modifiers::SHIFT, Key::S, Command::SaveAs),
+            (Modifiers::COMMAND, Key::S, Command::Save),
+            (Modifiers::COMMAND, Key::N, Command::NewProject),
+            (Modifiers::COMMAND, Key::O, Command::OpenProject(None)),
+            (Modifiers::COMMAND, Key::I, Command::ImportCard),
+            (Modifiers::COMMAND, Key::Q, Command::Quit),
+        ];
+        for (modifiers, key, command) in keys {
+            if ctx.input_mut(|i| i.consume_key(modifiers, key)) {
+                self.state.ask(command, ctx);
+            }
+        }
+    }
+
     /// The keys that act on the scene: Unity's, where it has them.
     fn scene_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};

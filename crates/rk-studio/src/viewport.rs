@@ -398,8 +398,11 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     for (g, text, menu) in actions(kind) {
         let resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
-            if resp.on_hover_text("Show the cards in the Content panel").clicked() {
-                st.show_content = true;
+            if resp
+                .on_hover_text("Pick a card and bring it into the project")
+                .clicked()
+            {
+                st.ask(Command::ImportCard, ui.ctx());
             }
         } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
@@ -961,7 +964,15 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     let Some(live) = st.live.as_mut() else { return };
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
-    live.follow(st.doc.scene(), st.last_physics, st.physics, dt, &mut st.log);
+    live.follow(
+        st.doc.scene(),
+        &st.project,
+        &mut st.games,
+        st.last_physics,
+        st.physics,
+        dt,
+        &mut st.log,
+    );
     if st.physics == crate::state::Physics::Playing {
         ui.ctx().request_repaint();
     }

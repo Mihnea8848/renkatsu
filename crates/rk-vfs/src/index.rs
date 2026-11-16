@@ -398,8 +398,16 @@ fn scan_zipmod(path: &Path) -> ZipScan {
     scan
 }
 
+/// What a zipmod's manifest says about it, or `None` when the file is no
+/// zipmod for this game. `path` is the path given.
+pub fn mod_info(path: &Path) -> Option<ModInfo> {
+    let mut info = scan_zipmod(path).info?;
+    info.path = path.to_string_lossy().into_owned();
+    Some(info)
+}
+
 /// Orders manifest versions the loose way mods use them (`v1.3.3`, `1.10`).
-fn version_key(v: &str) -> Vec<u64> {
+pub fn version_key(v: &str) -> Vec<u64> {
     v.split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse().ok())
@@ -425,9 +433,63 @@ pub(crate) fn cache_file(game_dir: &Path, kind: &str) -> PathBuf {
     base.join("renkatsu").join(format!("{kind}-{h:016x}.bin"))
 }
 
+/// What the zipmods of one folder outside the game hold, remembered in a
+/// cache file of that folder's own so that the game's cache stays as it is
+/// whichever folders are searched with it.
+#[derive(Default, Serialize, Deserialize)]
+struct ExtraCache {
+    version: u32,
+    zips: HashMap<String, ZipScan>,
+}
+
+/// The scans of the zipmods under `dir`, by absolute path, rescanning only
+/// the files that changed.
+fn scan_extra(dir: &Path) -> HashMap<String, ZipScan> {
+    let file = cache_file(dir, "mods");
+    let mut cache: ExtraCache = std::fs::read(&file)
+        .ok()
+        .and_then(|b| rmp_serde::from_slice(&b).ok())
+        .filter(|c: &ExtraCache| c.version == CACHE_VERSION)
+        .unwrap_or_default();
+    cache.version = CACHE_VERSION;
+    let mut zips = Vec::new();
+    for ext in ["zipmod", "zip"] {
+        rk_core::walk_files(dir, ext, &mut zips);
+    }
+    let key = |p: &PathBuf| p.to_string_lossy().into_owned();
+    let todo: Vec<&PathBuf> = zips
+        .iter()
+        .filter(|p| !cache.zips.get(&key(p)).is_some_and(|s| same(&s.stamp, &stamp(p))))
+        .collect();
+    let scanned: Vec<(String, ZipScan)> = todo.par_iter().map(|p| (key(p), scan_zipmod(p))).collect();
+    let live: std::collections::HashSet<String> = zips.iter().map(key).collect();
+    let before = cache.zips.len();
+    let mut dirty = !scanned.is_empty();
+    cache.zips.extend(scanned);
+    cache.zips.retain(|k, _| live.contains(k));
+    dirty |= before != cache.zips.len();
+    if dirty {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Ok(bytes) = rmp_serde::to_vec(&cache) {
+            std::fs::write(&file, bytes).ok();
+        }
+    }
+    cache.zips
+}
+
 impl Index {
     /// Loads the cached index, rescanning only files that changed.
     pub fn load(cfg: &Config) -> Result<Self> {
+        Self::load_with(cfg, &[])
+    }
+
+    /// As [`Index::load`], and searches the zipmods of `extra` folders, such
+    /// as a project's own, together with the game's. They are listed under
+    /// their absolute paths and take part in the same choice by GUID and
+    /// version as the game's.
+    pub fn load_with(cfg: &Config, extra: &[PathBuf]) -> Result<Self> {
         let cache_file = cache_path(&cfg.game_dir);
         let mut cache: Cache = std::fs::read(&cache_file)
             .ok()
@@ -500,6 +562,9 @@ impl Index {
                 std::fs::create_dir_all(dir).ok();
             }
             std::fs::write(&cache_file, rmp_serde::to_vec(&cache)?).ok();
+        }
+        for dir in extra {
+            cache.zips.extend(scan_extra(dir));
         }
         Ok(Self::build(cfg, cache))
     }
@@ -618,6 +683,62 @@ mod tests {
         assert_eq!(keys[0].2, "Face Fixes");
         assert_eq!(keys[1].2, "moderchan.TongueTexture");
         assert!(keys[2].0);
+    }
+
+    #[test]
+    fn a_mod_outside_the_game_takes_part_in_the_choice_by_version() {
+        let zip = |guid: &str, version: &str| ZipScan {
+            info: Some(ModInfo {
+                guid: guid.to_string(),
+                version: version.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut cache = Cache::default();
+        // The game's mods are listed relative to it, a project's in full.
+        for (path, guid, version) in [
+            ("mods/hair.zipmod", "hair", "1.0"),
+            ("/project/mods/hair.zipmod", "hair", "1.1"),
+            ("mods/top.zipmod", "top", "v2.0"),
+            ("/project/mods/top.zipmod", "top", "v1.9"),
+            ("/project/mods/only.zipmod", "only", "1"),
+        ] {
+            cache.zips.insert(path.to_string(), zip(guid, version));
+        }
+        let cfg = Config {
+            game_dir: PathBuf::from("/game"),
+        };
+        let idx = Index::build(&cfg, cache);
+        let file = |guid: &str| {
+            let info = idx.mods.iter().find(|m| m.guid == guid).unwrap();
+            idx.game_dir.join(&info.path)
+        };
+        assert_eq!(idx.mods.len(), 3);
+        assert_eq!(file("hair"), Path::new("/project/mods/hair.zipmod"));
+        assert_eq!(file("top"), Path::new("/game/mods/top.zipmod"));
+        assert_eq!(file("only"), Path::new("/project/mods/only.zipmod"));
+        assert_eq!(idx.skipped.len(), 2);
+    }
+
+    #[test]
+    fn a_zipmods_manifest_is_read_on_its_own() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("renkatsu-vfs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hair.zipmod");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.xml", stored).unwrap();
+        zip.write_all(b"<manifest><guid>some.hair</guid><version>v1.2</version><name>Hair</name></manifest>")
+            .unwrap();
+        zip.finish().unwrap();
+        let info = mod_info(&path).unwrap();
+        assert_eq!((info.guid.as_str(), info.version.as_str()), ("some.hair", "v1.2"));
+        assert_eq!(Path::new(&info.path), path);
+        std::fs::write(dir.join("broken.zipmod"), b"not a zip").unwrap();
+        assert!(mod_info(&dir.join("broken.zipmod")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

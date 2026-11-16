@@ -666,57 +666,81 @@ pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 }
 
-/// The kinds of asset the project will hold besides cards, each with the
-/// feature it waits for.
-const LATER: [(&str, Kind, &str); 5] = [
-    ("Poses", Kind::Pose, "Poses arrive with posing"),
-    ("Maps", Kind::Map, "Maps arrive with their feature"),
-    ("Items", Kind::Item, "Items arrive with their feature"),
-    ("Scenes", Kind::Scene, "Scenes arrive with project files"),
-    ("Renders", Kind::Camera, "Renders arrive with baking"),
+/// The project's folders besides Characters, as they are on disk: each
+/// with its kind, what its import button says (none when the folder fills
+/// another way) and what the folder shows until its feature arrives.
+const LATER: [(&str, Kind, Option<&str>, &str); 6] = [
+    ("Poses", Kind::Pose, Some("Import pose"), "Poses arrive with posing"),
+    ("Maps", Kind::Map, Some("Import map"), "Maps arrive with their feature"),
+    (
+        "Items",
+        Kind::Item,
+        Some("Import item"),
+        "Items arrive with their feature",
+    ),
+    (
+        "Scenes",
+        Kind::Scene,
+        Some("Import scene"),
+        "A project holds one scene for now",
+    ),
+    ("Renders", Kind::Camera, None, "Renders arrive with baking"),
+    (
+        "Mods",
+        Kind::Folder,
+        None,
+        "Imported cards copy the mods they need here",
+    ),
 ];
 
 fn content(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
     st.library.begin_frame();
-    let card_folders = st.library.folders.len();
-    st.folder = st.folder.min(card_folders + LATER.len() - 1);
-    let open = st.library.folders.get(st.folder).cloned();
-    // The way to the open folder, for the bar.
-    let mut trail: Vec<String> = Vec::new();
-    match &open {
-        Some(folder) => {
-            let mut depth = folder.depth + 1;
-            for f in st.library.folders[..=st.folder].iter().rev() {
-                if f.depth < depth {
-                    trail.insert(0, f.name.clone());
-                    depth = f.depth;
-                }
-            }
-            trail.insert(0, "Koikatsu".to_owned());
-        }
-        None => {
-            trail.push("Project".to_owned());
-            trail.push(LATER[st.folder - card_folders].0.to_owned());
-        }
-    }
+    st.folder = st.folder.min(LATER.len());
+    // The characters come first, then the folders kept for later.
+    // The folder this frame draws; a click in the tree below changes
+    // `st.folder` for the next frame.
+    let folder = st.folder;
+    let characters = folder == 0;
+    let trail = [
+        st.project.file.name.clone(),
+        if characters {
+            "Characters".to_owned()
+        } else {
+            LATER[folder - 1].0.to_owned()
+        },
+    ];
 
     let mut add: Option<PathBuf> = None;
     let bar = toolbar(ui, k, |ui| {
-        let resp =
-            flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false).on_hover_text(if st.asset.is_some() {
-                "Add the selected card's character to the scene"
-            } else {
-                "Select a card first, or double click one"
+        // Each folder imports its own kind of file.
+        if characters {
+            if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import card", false, false)
+                .on_hover_text("Pick a card and copy it into the project, with the mods it needs")
+                .clicked()
+            {
+                st.ask(Command::ImportCard, ui.ctx());
+            }
+            let resp = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false).on_hover_text(
+                if st.asset.is_some() {
+                    "Add the selected character to the scene"
+                } else {
+                    "Select a character first, or double click one"
+                },
+            );
+            if resp.clicked() {
+                add = st.asset.clone();
+            }
+        } else if let (Some(import), why) = (LATER[folder - 1].2, LATER[folder - 1].3) {
+            ui.add_enabled_ui(false, |ui| {
+                flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), import, false, false).on_disabled_hover_text(why);
             });
-        if resp.clicked() {
-            add = st.asset.clone();
         }
         if icon_button(ui, k, icon::ARROWS_CLOCKWISE, false)
-            .on_hover_text("Read the card folders again")
+            .on_hover_text("Read the project's folders again")
             .clicked()
         {
-            st.library.scan();
+            st.library.refresh(&st.project);
         }
         bar_divider(ui, k);
         ui.add_space(2.0);
@@ -748,14 +772,31 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
         .auto_shrink(false)
         .show(&mut side, |ui| {
             ui.add_space(4.0);
-            let folders = st
-                .library
-                .folders
-                .iter()
-                .map(|f| (f.name.as_str(), Kind::Character, f.depth))
-                .chain(LATER.iter().map(|(name, kind, _)| (*name, *kind, 0)));
+            // The project folder holds the others, as on disk.
+            let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::hover());
+            let p = ui.painter();
+            let x = row.left() + 10.0;
+            glyph(p, k, Pos2::new(x, row.center().y), icon::CARET_DOWN, 10.0, t.text_dim);
+            glyph(
+                p,
+                k,
+                Pos2::new(x + 14.0, row.center().y),
+                icon::FOLDER_OPEN,
+                15.0,
+                t.text_dim,
+            );
+            let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
+            label(
+                &clip,
+                k,
+                Pos2::new(x + 28.0, row.center().y),
+                &st.project.file.name,
+                t.text_bright,
+            );
+            let folders = std::iter::once(("Characters", Kind::Character))
+                .chain(LATER.iter().map(|(name, kind, _, _)| (*name, *kind)));
             let mut chosen = None;
-            for (i, (name, kind, depth)) in folders.enumerate() {
+            for (i, (name, kind)) in folders.enumerate() {
                 let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
                 if resp.clicked() {
                     chosen = Some(i);
@@ -768,7 +809,7 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
                     p.rect_filled(row, 0.0, t.row_hover);
                 }
                 let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
-                let x = row.left() + 20.0 + depth as f32 * 12.0;
+                let x = row.left() + 34.0;
                 glyph(p, k, Pos2::new(x, row.center().y), g, 15.0, kind.color());
                 let color = if on { t.text_bright } else { t.text };
                 let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
@@ -793,32 +834,38 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
         );
     };
     let search = st.content_search.trim().to_lowercase();
-    let cards: Vec<PathBuf> = match &open {
-        Some(folder) => st
-            .library
-            .cards(&folder.path)
+    let cards: Vec<crate::library::Entry> = if characters {
+        st.library
+            .characters
             .iter()
-            .filter(|c| search.is_empty() || c.to_string_lossy().to_lowercase().contains(&search))
+            .filter(|c| {
+                search.is_empty()
+                    || c.name.to_lowercase().contains(&search)
+                    || c.file.to_string_lossy().to_lowercase().contains(&search)
+            })
             .cloned()
-            .collect(),
-        None => Vec::new(),
+            .collect()
+    } else {
+        Vec::new()
     };
-    match (&open, &st.library.problem) {
-        (None, _) => note(&area, LATER[st.folder - card_folders].2),
-        (Some(_), _) if !cards.is_empty() => {}
-        (Some(_), _) if !search.is_empty() => note(&area, "No card in this folder matches the search"),
-        (Some(_), _) => note(&area, "This folder holds no cards"),
-    }
-    if card_folders == 0 {
-        if let Some(problem) = &st.library.problem {
-            area.painter().text(
-                grid.min + Vec2::new(14.0, 42.0),
-                Align2::LEFT_CENTER,
-                problem,
-                k.font(),
-                t.accent,
-            );
+    if !characters {
+        let (name, _, _, why) = LATER[folder - 1];
+        if name == "Mods" {
+            let count = std::fs::read_dir(st.project.folder(name))
+                .map(|d| {
+                    d.flatten()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "zipmod"))
+                        .count()
+                })
+                .unwrap_or(0);
+            note(&area, &format!("{count} mods. {why}"));
+        } else {
+            note(&area, why);
         }
+    } else if cards.is_empty() && !search.is_empty() {
+        note(&area, "No character matches the search");
+    } else if cards.is_empty() {
+        note(&area, "The project has no characters yet. Import a card to add one.");
     }
 
     // Cards are portrait pictures, 252 by 352.
@@ -848,20 +895,23 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
                 if !ui.is_rect_visible(cell) {
                     continue;
                 }
-                let name = card.file_stem().unwrap_or_default().to_string_lossy();
+                let name = card.name.as_str();
                 let resp = ui
                     .interact(cell, ui.id().with(("card", i)), Sense::click_and_drag())
-                    .on_hover_text(format!("{name}\nDouble click or drag into the scene to add"));
-                resp.dnd_set_drag_payload(DragCard(card.clone()));
+                    .on_hover_text(format!(
+                        "{name}\n{}\nDouble click or drag into the scene to add",
+                        card.file.display()
+                    ));
+                resp.dnd_set_drag_payload(DragCard(card.file.clone()));
                 if resp.clicked() || resp.drag_started() {
-                    st.asset = Some(card.clone());
+                    st.asset = Some(card.file.clone());
                 }
                 if resp.double_clicked() {
-                    add = Some(card.clone());
+                    add = Some(card.file.clone());
                 }
-                let on = st.asset.as_ref() == Some(card);
+                let on = st.asset.as_ref() == Some(&card.file);
                 let picture = Rect::from_min_size(cell.min, thumb);
-                let texture = st.library.thumb(ui.ctx(), card).map(|tex| tex.id());
+                let texture = st.library.thumb(ui.ctx(), &card.path).map(|tex| tex.id());
                 let p = ui.painter();
                 p.rect_filled(picture, 0.0, t.input);
                 match texture {
@@ -896,7 +946,7 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
                     &clip,
                     k,
                     Pos2::new(cell.left() + 1.0, picture.bottom() + 12.0),
-                    &name,
+                    name,
                     color,
                 );
                 if caption {

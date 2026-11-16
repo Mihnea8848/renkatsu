@@ -472,7 +472,13 @@ pub struct Game {
 
 impl Game {
     pub fn open(cfg: &rk_core::Config) -> Result<Self> {
-        let index = Arc::new(Index::load(cfg).context("building content index")?);
+        Self::open_with(cfg, &[])
+    }
+
+    /// As [`Game::open`], with the zipmods of `extra` folders searched
+    /// together with the game's own.
+    pub fn open_with(cfg: &rk_core::Config, extra: &[std::path::PathBuf]) -> Result<Self> {
+        let index = Arc::new(Index::load_with(cfg, extra).context("building content index")?);
         let items = crate::items::ItemDb::build(&index);
         Ok(Self {
             assets: Assets::new(index),

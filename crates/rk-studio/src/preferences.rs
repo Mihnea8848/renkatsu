@@ -24,7 +24,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             ui.label(RichText::new("Viewport").font(k.bold(k.d.text)).color(t.text_bright));
             ui.add_space(4.0);
             ui.label("Frame rate");
-            let before = st.settings;
+            let before = st.settings.clone();
             for rate in FrameRate::ALL {
                 ui.radio_value(&mut st.settings.frame_rate, rate, rate.label());
                 ui.indent(rate.label(), |ui| {
