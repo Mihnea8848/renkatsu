@@ -4,7 +4,7 @@
 //! The docked panels and Unity's default layout. Content is placeholder: the
 //! shell is for judging layout and look before the scene model exists.
 
-use crate::appearance::{Kind, TypeIcons};
+use crate::appearance::{Kind, TypeIcons, TypePalette};
 use crate::theme::Theme;
 use egui::{Color32, RichText, TextureHandle, Ui, Vec2};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabViewer};
@@ -77,6 +77,7 @@ pub struct Viewer<'a> {
     pub viewport_image: Option<&'a TextureHandle>,
     pub selected: &'a mut usize,
     pub type_icons: TypeIcons,
+    pub palette: TypePalette,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -163,7 +164,18 @@ impl Viewer<'_> {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (i, (depth, kind, name)) in rows.iter().enumerate() {
                 let selected = *self.selected == i;
-                if type_row(ui, self.theme, self.type_icons, *depth, *kind, name, selected).clicked() {
+                if type_row(
+                    ui,
+                    self.theme,
+                    self.type_icons,
+                    self.palette,
+                    *depth,
+                    *kind,
+                    name,
+                    selected,
+                )
+                .clicked()
+                {
                     *self.selected = i;
                 }
             }
@@ -303,6 +315,7 @@ pub fn type_row(
     ui: &mut Ui,
     t: &Theme,
     style: TypeIcons,
+    palette: TypePalette,
     depth: usize,
     kind: Kind,
     name: &str,
@@ -329,12 +342,12 @@ pub fn type_row(
                 egui::Align2::LEFT_CENTER,
                 kind.glyph(),
                 glyph_font,
-                kind.color(),
+                kind.color(palette),
             );
         }
         TypeIcons::Chip => {
             let chip = egui::Rect::from_center_size(egui::pos2(x + 7.0, y), Vec2::splat(t.row - 6.0));
-            p.rect_filled(chip, 2.0, kind.color());
+            p.rect_filled(chip, 2.0, kind.color(palette));
             p.text(
                 chip.center(),
                 egui::Align2::CENTER_CENTER,
@@ -345,7 +358,7 @@ pub fn type_row(
         }
         TypeIcons::Strip => {
             let bar = egui::Rect::from_min_size(egui::pos2(x - 5.0, rect.top() + 3.0), Vec2::new(3.0, t.row - 6.0));
-            p.rect_filled(bar, 0.0, kind.color());
+            p.rect_filled(bar, 0.0, kind.color(palette));
             p.text(
                 egui::pos2(x, y),
                 egui::Align2::LEFT_CENTER,

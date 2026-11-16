@@ -12,7 +12,7 @@ mod theme;
 mod toolbar;
 
 use anyhow::{Context, Result};
-use appearance::{Appearance, Tabs, TopBar, TypeIcons};
+use appearance::{Appearance, Tabs, TopBar, TypeIcons, TypePalette};
 use clap::Parser;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
@@ -43,6 +43,9 @@ struct Cli {
     /// How object types show in lists.
     #[arg(long, value_enum, default_value = "glyph")]
     type_icons: TypeIcons,
+    /// Colours of the object types.
+    #[arg(long, value_enum, default_value = "pastel")]
+    palette: TypePalette,
 }
 
 struct Studio {
@@ -84,6 +87,7 @@ impl Studio {
                 top_bar: cli.top_bar,
                 tabs: cli.tabs,
                 type_icons: cli.type_icons,
+                palette: cli.palette,
             },
         };
         studio.apply_theme(&cc.egui_ctx);
@@ -149,7 +153,8 @@ impl eframe::App for Studio {
             .show(ui, |ui| self.menu_bar(ui));
         let top_margin = match self.look.top_bar {
             TopBar::Unreal | TopBar::Unity => egui::Margin::symmetric(6, 3),
-            TopBar::SlimRibbon | TopBar::Ribbon => egui::Margin::ZERO,
+            TopBar::Labelled => egui::Margin::symmetric(6, 2),
+            TopBar::SlimRibbon | TopBar::Ribbon | TopBar::ProRibbon | TopBar::ModeBar => egui::Margin::ZERO,
         };
         egui::Panel::top("ribbon")
             .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
@@ -157,6 +162,9 @@ impl eframe::App for Studio {
                 TopBar::Unreal => toolbar::unreal(ui, &t),
                 TopBar::Unity => toolbar::unity(ui, &t),
                 TopBar::SlimRibbon => toolbar::slim_ribbon(ui, &t, &mut self.ribbon),
+                TopBar::Labelled => toolbar::labelled_toolbar(ui, &t),
+                TopBar::ProRibbon => toolbar::pro_ribbon(ui, &t, &mut self.ribbon),
+                TopBar::ModeBar => toolbar::mode_bar(ui, &t, &mut self.ribbon),
                 TopBar::Ribbon => {
                     if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
                         match label {
@@ -227,6 +235,7 @@ impl eframe::App for Studio {
                     viewport_image: self.viewport_image.as_ref(),
                     selected: &mut self.selected,
                     type_icons: self.look.type_icons,
+                    palette: self.look.palette,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)

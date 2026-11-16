@@ -186,3 +186,244 @@ pub fn slim_ribbon(ui: &mut Ui, theme: &Theme, ribbon: &mut Ribbon) {
             });
         });
 }
+
+/// A button with the icon left of its label, a toolbar row tall.
+fn labelled(ui: &mut Ui, theme: &Theme, glyph: &str, label: &str, on: bool) -> egui::Response {
+    let font = FontId::proportional(13.0);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), theme.text)
+        .size()
+        .x;
+    let h = theme.row + 10.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w + 40.0, h), Sense::click());
+    let fill = if on {
+        theme.field
+    } else if resp.hovered() {
+        theme.control
+    } else {
+        Color32::TRANSPARENT
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, theme.control_radius as f32, fill);
+    if on {
+        p.hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(2.0, theme.select),
+        );
+    }
+    p.text(
+        rect.left_center() + Vec2::new(16.0, 0.0),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(18.0),
+        theme.text,
+    );
+    p.text(
+        rect.left_center() + Vec2::new(30.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        theme.text,
+    );
+    resp
+}
+
+/// One taller row of labelled buttons: the common tools are buttons, the
+/// categories are labelled dropdowns.
+pub fn labelled_toolbar(ui: &mut Ui, theme: &Theme) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let _ = labelled(ui, theme, icon::FLOPPY_DISK, "Save", false);
+        divider(ui, theme);
+        for (i, (g, l)) in [
+            (icon::CURSOR, "Select"),
+            (icon::ARROWS_OUT_CARDINAL, "Move"),
+            (icon::ARROWS_CLOCKWISE, "Rotate"),
+            (icon::ARROWS_OUT, "Scale"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _ = labelled(ui, theme, g, l, i == 1);
+        }
+        divider(ui, theme);
+        ui.spacing_mut().button_padding = Vec2::new(10.0, 7.0);
+        for (i, g) in [
+            (0, icon::PLUS_CIRCLE),
+            (2, icon::USER),
+            (3, icon::PERSON_ARMS_SPREAD),
+            (5, icon::LIGHTBULB),
+            (6, icon::FILM_SLATE),
+        ] {
+            let name = if i == 0 { "Add" } else { TABS[i].name };
+            category_menu(ui, g, name, i);
+        }
+        divider(ui, theme);
+        let _ = labelled(ui, theme, icon::PLAY, "Simulate", false);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button(format!("{}  Layout  {}", icon::LAYOUT, icon::CARET_DOWN), |ui| {
+                let _ = ui.button("Reset layout");
+            });
+        });
+    });
+}
+
+/// A small button with its label to the right, for stacked columns.
+fn small(ui: &mut Ui, theme: &Theme, glyph: &str, label: &str) -> egui::Response {
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(12.5), theme.text)
+        .size()
+        .x;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(text_w + 30.0, 20.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, theme.control_radius as f32, theme.control);
+    }
+    let p = ui.painter();
+    p.text(
+        rect.left_center() + Vec2::new(10.0, 0.0),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(14.0),
+        theme.text,
+    );
+    p.text(
+        rect.left_center() + Vec2::new(22.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.5),
+        theme.text,
+    );
+    resp
+}
+
+/// A large button: icon above a label, slimmer than the full ribbon's.
+fn large(ui: &mut Ui, theme: &Theme, glyph: &str, label: &str) -> egui::Response {
+    let font = FontId::proportional(12.0);
+    let w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), theme.text)
+        .size()
+        .x
+        .max(30.0)
+        + 14.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 62.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, theme.control_radius as f32, theme.control);
+    }
+    let p = ui.painter();
+    p.text(
+        rect.center_top() + Vec2::new(0.0, 20.0),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(24.0),
+        theme.text,
+    );
+    p.text(
+        rect.center_bottom() - Vec2::new(0.0, 14.0),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        theme.text,
+    );
+    resp
+}
+
+/// Office and 3ds Max style: per group, the first action as a large button
+/// and the rest stacked three high with their labels beside them.
+pub fn pro_ribbon(ui: &mut Ui, theme: &Theme, ribbon: &mut Ribbon) {
+    ribbon.tab_row(ui, theme);
+    if ribbon.collapsed {
+        return;
+    }
+    egui::Frame::new()
+        .fill(theme.panel)
+        .inner_margin(egui::Margin::symmetric(6, 3))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                for (gi, group) in TABS[ribbon.tab].groups.iter().enumerate() {
+                    if gi > 0 {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(9.0, 78.0), Sense::hover());
+                        ui.painter()
+                            .vline(rect.center().x, rect.y_range(), egui::Stroke::new(1.0, theme.divider));
+                    }
+                    ui.vertical(|ui| {
+                        let row = ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let (g, l) = group.buttons[0];
+                            let _ = large(ui, theme, g, l);
+                            for column in group.buttons[1..].chunks(3) {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    for &(g, l) in column {
+                                        let _ = small(ui, theme, g, l);
+                                    }
+                                });
+                            }
+                        });
+                        let w = row.response.rect.width();
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 14.0), Sense::hover());
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            group.name,
+                            FontId::proportional(11.0),
+                            theme.text_dim,
+                        );
+                    });
+                }
+            });
+        });
+}
+
+/// Labelled category modes on the left, as Unreal's mode selector, and the
+/// active mode's tools as labelled buttons in the row below.
+pub fn mode_bar(ui: &mut Ui, theme: &Theme, ribbon: &mut Ribbon) {
+    let modes = [
+        icon::HOUSE,
+        icon::GLOBE_HEMISPHERE_WEST,
+        icon::USER,
+        icon::PERSON_ARMS_SPREAD,
+        icon::FILM_STRIP,
+        icon::LIGHTBULB,
+        icon::FILM_SLATE,
+        icon::EYE,
+    ];
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(6, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (i, tab) in TABS.iter().enumerate() {
+                    if labelled(ui, theme, modes[i], tab.name, i == ribbon.tab).clicked() {
+                        ribbon.tab = i;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let _ = labelled(ui, theme, icon::PLAY, "Simulate", false);
+                });
+            });
+        });
+    egui::Frame::new()
+        .fill(theme.panel)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                for (gi, group) in TABS[ribbon.tab].groups.iter().enumerate() {
+                    if gi > 0 {
+                        divider(ui, theme);
+                    }
+                    for &(g, l) in group.buttons {
+                        let _ = small(ui, theme, g, l);
+                    }
+                }
+            });
+        });
+}
