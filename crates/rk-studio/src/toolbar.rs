@@ -427,3 +427,52 @@ pub fn mode_bar(ui: &mut Ui, theme: &Theme, ribbon: &mut Ribbon) {
             });
         });
 }
+
+/// The slim toolbar of the Unity and Unreal directions: the project and
+/// save on the left, play controls in the middle, search and layout on the
+/// right. With `modes`, an Unreal style mode selector and Add menu follow
+/// the project.
+pub fn slim(ui: &mut Ui, theme: &Theme, modes: bool) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.menu_button(
+            format!("{}  Untitled project  {}", icon::CUBE, icon::CARET_DOWN),
+            |ui| {
+                for item in ["Project settings", "Character library", "Open project folder"] {
+                    let _ = ui.button(item);
+                }
+            },
+        );
+        let _ = icon_button(ui, theme, icon::FLOPPY_DISK, "Save", false);
+        if modes {
+            divider(ui, theme);
+            ui.menu_button(format!("{}  Select mode  {}", icon::CURSOR, icon::CARET_DOWN), |ui| {
+                for (g, m) in [
+                    (icon::CURSOR, "Select"),
+                    (icon::PERSON_ARMS_SPREAD, "Pose"),
+                    (icon::LIGHTBULB, "Light"),
+                    (icon::FILM_STRIP, "Animate"),
+                    (icon::FILM_SLATE, "Bake"),
+                ] {
+                    let _ = ui.button(format!("{g}  {m}"));
+                }
+            });
+            category_menu(ui, icon::PLUS_CIRCLE, "Add", 0);
+        }
+        let left = ui.cursor().left();
+        let centre = ui.max_rect().center().x;
+        ui.add_space((centre - left - 50.0).max(8.0));
+        play_controls(ui, theme);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button(format!("{}  Layout  {}", icon::LAYOUT, icon::CARET_DOWN), |ui| {
+                let _ = ui.button("Reset layout");
+            });
+            let mut text = String::new();
+            ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text(format!("{}  Search commands", icon::MAGNIFYING_GLASS))
+                    .desired_width(200.0),
+            );
+        });
+    });
+}

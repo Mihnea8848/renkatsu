@@ -24,6 +24,14 @@ pub enum TopBar {
     ProRibbon,
     /// Labelled category modes, the active one's tools in a row below.
     ModeBar,
+    /// Unity 6: a slim toolbar, tools as overlays inside the viewport,
+    /// categories in the menu bar.
+    UnityOverlay,
+    /// Unreal 5: a slim toolbar with a mode selector; the mode's tools in a
+    /// docked Tools panel on the left.
+    UnrealModes,
+    /// No toolbar: a bar above the viewport offers what fits the selection.
+    ContextBar,
 }
 
 /// How docked panel tabs are drawn.

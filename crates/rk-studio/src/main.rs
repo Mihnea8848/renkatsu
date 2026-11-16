@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, value_enum, default_value = "glyph")]
     type_icons: TypeIcons,
     /// Colours of the object types.
-    #[arg(long, value_enum, default_value = "pastel")]
+    #[arg(long, value_enum, default_value = "muted")]
     palette: TypePalette,
 }
 
@@ -74,7 +74,7 @@ impl Studio {
         };
         let studio = Studio {
             theme,
-            dock: panels::default_layout(),
+            dock: panels::default_layout(cli.top_bar),
             ribbon: ribbon::Ribbon {
                 tab: 0,
                 collapsed: false,
@@ -117,7 +117,10 @@ impl Studio {
                     let _ = ui.button(item);
                 }
             });
-            if self.look.top_bar == TopBar::Unity {
+            if matches!(
+                self.look.top_bar,
+                TopBar::Unity | TopBar::UnityOverlay | TopBar::ContextBar
+            ) {
                 toolbar::unity_category_menus(ui);
             }
             ui.menu_button("Window", |ui| {
@@ -129,7 +132,7 @@ impl Studio {
                 }
                 ui.separator();
                 if ui.button("Reset layout").clicked() {
-                    self.dock = panels::default_layout();
+                    self.dock = panels::default_layout(self.look.top_bar);
                     ui.close();
                 }
             });
@@ -153,30 +156,36 @@ impl eframe::App for Studio {
             .show(ui, |ui| self.menu_bar(ui));
         let top_margin = match self.look.top_bar {
             TopBar::Unreal | TopBar::Unity => egui::Margin::symmetric(6, 3),
-            TopBar::Labelled => egui::Margin::symmetric(6, 2),
+            TopBar::Labelled | TopBar::UnityOverlay | TopBar::UnrealModes => egui::Margin::symmetric(6, 3),
+            TopBar::ContextBar => egui::Margin::ZERO,
             TopBar::SlimRibbon | TopBar::Ribbon | TopBar::ProRibbon | TopBar::ModeBar => egui::Margin::ZERO,
         };
-        egui::Panel::top("ribbon")
-            .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
-            .show(ui, |ui| match self.look.top_bar {
-                TopBar::Unreal => toolbar::unreal(ui, &t),
-                TopBar::Unity => toolbar::unity(ui, &t),
-                TopBar::SlimRibbon => toolbar::slim_ribbon(ui, &t, &mut self.ribbon),
-                TopBar::Labelled => toolbar::labelled_toolbar(ui, &t),
-                TopBar::ProRibbon => toolbar::pro_ribbon(ui, &t, &mut self.ribbon),
-                TopBar::ModeBar => toolbar::mode_bar(ui, &t, &mut self.ribbon),
-                TopBar::Ribbon => {
-                    if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
-                        match label {
-                            "Next theme" => self.next_theme(ctx),
-                            "Reset" if self.ribbon.tab == ribbon::TABS.len() - 1 => {
-                                self.dock = panels::default_layout()
+        if self.look.top_bar != TopBar::ContextBar {
+            egui::Panel::top("ribbon")
+                .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
+                .show(ui, |ui| match self.look.top_bar {
+                    TopBar::Unreal => toolbar::unreal(ui, &t),
+                    TopBar::Unity => toolbar::unity(ui, &t),
+                    TopBar::SlimRibbon => toolbar::slim_ribbon(ui, &t, &mut self.ribbon),
+                    TopBar::Labelled => toolbar::labelled_toolbar(ui, &t),
+                    TopBar::ProRibbon => toolbar::pro_ribbon(ui, &t, &mut self.ribbon),
+                    TopBar::ModeBar => toolbar::mode_bar(ui, &t, &mut self.ribbon),
+                    TopBar::UnityOverlay => toolbar::slim(ui, &t, false),
+                    TopBar::UnrealModes => toolbar::slim(ui, &t, true),
+                    TopBar::ContextBar => {}
+                    TopBar::Ribbon => {
+                        if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
+                            match label {
+                                "Next theme" => self.next_theme(ctx),
+                                "Reset" if self.ribbon.tab == ribbon::TABS.len() - 1 => {
+                                    self.dock = panels::default_layout(self.look.top_bar)
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
-            });
+                });
+        }
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -236,6 +245,7 @@ impl eframe::App for Studio {
                     selected: &mut self.selected,
                     type_icons: self.look.type_icons,
                     palette: self.look.palette,
+                    top_bar: self.look.top_bar,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)

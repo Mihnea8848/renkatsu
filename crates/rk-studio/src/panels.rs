@@ -4,7 +4,7 @@
 //! The docked panels and Unity's default layout. Content is placeholder: the
 //! shell is for judging layout and look before the scene model exists.
 
-use crate::appearance::{Kind, TypeIcons, TypePalette};
+use crate::appearance::{Kind, TopBar, TypeIcons, TypePalette};
 use crate::theme::Theme;
 use egui::{Color32, RichText, TextureHandle, Ui, Vec2};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabViewer};
@@ -18,16 +18,18 @@ pub enum Panel {
     Content,
     Console,
     Timeline,
+    Tools,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 6] = [
+    pub const ALL: [Panel; 7] = [
         Panel::Viewport,
         Panel::Outliner,
         Panel::Properties,
         Panel::Content,
         Panel::Console,
         Panel::Timeline,
+        Panel::Tools,
     ];
 
     pub fn title(self) -> &'static str {
@@ -38,6 +40,7 @@ impl Panel {
             Panel::Content => "Content",
             Panel::Console => "Console",
             Panel::Timeline => "Timeline",
+            Panel::Tools => "Tools",
         }
     }
 
@@ -49,18 +52,23 @@ impl Panel {
             Panel::Content => icon::FOLDER_SIMPLE,
             Panel::Console => icon::TERMINAL_WINDOW,
             Panel::Timeline => icon::FILM_STRIP,
+            Panel::Tools => icon::TOOLBOX,
         }
     }
 }
 
 /// Unity's arrangement: the viewport large at the top left, Outliner over
 /// Properties on the right, Content, Console and Timeline along the bottom.
-pub fn default_layout() -> DockState<Panel> {
+pub fn default_layout(top_bar: TopBar) -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
     let surface = state.main_surface_mut();
     let [left, right] = surface.split_right(NodeIndex::root(), 0.76, vec![Panel::Outliner]);
     surface.split_below(right, 0.42, vec![Panel::Properties]);
-    surface.split_below(left, 0.70, vec![Panel::Content, Panel::Console, Panel::Timeline]);
+    let [top, _] = surface.split_below(left, 0.70, vec![Panel::Content, Panel::Console, Panel::Timeline]);
+    // Unreal's modes keep the active mode's tools in a panel on the left.
+    if top_bar == TopBar::UnrealModes {
+        surface.split_left(top, 0.2, vec![Panel::Tools]);
+    }
     state
 }
 
@@ -78,6 +86,7 @@ pub struct Viewer<'a> {
     pub selected: &'a mut usize,
     pub type_icons: TypeIcons,
     pub palette: TypePalette,
+    pub top_bar: TopBar,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -98,6 +107,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Properties => self.properties(ui),
             Panel::Content => self.content(ui),
             Panel::Console => self.console(ui),
+            Panel::Tools => self.tools(ui),
             Panel::Timeline => {
                 ui.label(RichText::new("The timeline arrives with animation.").color(self.theme.text_dim));
             }
@@ -122,6 +132,9 @@ impl Viewer<'_> {
                 ui.label(RichText::new("Koikatsu look").color(t.text_dim));
             });
         });
+        if self.top_bar == TopBar::ContextBar {
+            self.context_bar(ui);
+        }
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, t.field);
         if let Some(tex) = self.viewport_image {
@@ -142,7 +155,40 @@ impl Viewer<'_> {
             egui::FontId::proportional(11.0),
             t.text_dim,
         );
+        if matches!(self.top_bar, TopBar::UnityOverlay | TopBar::ContextBar) {
+            tool_strip(ui, t, rect);
+        }
         ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    }
+
+    /// What fits the selection, above the viewport: here a character.
+    fn context_bar(&mut self, ui: &mut Ui) {
+        let t = self.theme;
+        egui::Frame::new()
+            .fill(t.header)
+            .inner_margin(egui::Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(Kind::Character.glyph())
+                            .color(Kind::Character.color(self.palette))
+                            .size(15.0),
+                    );
+                    ui.label(RichText::new("Simple").color(t.text).strong());
+                    ui.label(RichText::new("Character").color(t.text_dim));
+                    ui.separator();
+                    for (g, label) in [
+                        (icon::IDENTIFICATION_CARD, "Load card"),
+                        (icon::T_SHIRT, "Outfit"),
+                        (icon::PERSON_ARMS_SPREAD, "Pose"),
+                        (icon::SMILEY, "Expression"),
+                        (icon::PUZZLE_PIECE, "Modules"),
+                    ] {
+                        let _ = ui.button(format!("{g}  {label}  {}", icon::CARET_DOWN));
+                    }
+                });
+            });
     }
 
     fn outliner(&mut self, ui: &mut Ui) {
@@ -288,6 +334,52 @@ impl Viewer<'_> {
         });
     }
 
+    /// Unreal's mode toolkit: the tools of the active mode, here Pose.
+    fn tools(&mut self, ui: &mut Ui) {
+        let t = self.theme;
+        ui.label(
+            RichText::new(format!("{}  Pose mode", icon::PERSON_ARMS_SPREAD))
+                .size(14.0)
+                .color(t.text),
+        );
+        ui.add_space(4.0);
+        for (section, items) in [
+            (
+                "Edit",
+                [
+                    (icon::BONE, "Forward kinematics"),
+                    (icon::TARGET, "Inverse kinematics"),
+                    (icon::FLIP_HORIZONTAL, "Mirror pose"),
+                ],
+            ),
+            (
+                "Library",
+                [
+                    (icon::BOOKMARKS_SIMPLE, "Load pose"),
+                    (icon::BOOKMARK_SIMPLE, "Save pose"),
+                    (icon::ARROW_U_UP_LEFT, "Reset pose"),
+                ],
+            ),
+            (
+                "Body",
+                [
+                    (icon::HAND, "Hands"),
+                    (icon::SMILEY, "Expression"),
+                    (icon::EYE, "Look at camera"),
+                ],
+            ),
+        ] {
+            egui::CollapsingHeader::new(section).default_open(true).show(ui, |ui| {
+                for (g, label) in items {
+                    let _ = ui.add_sized(
+                        [ui.available_width(), t.row + 4.0],
+                        egui::Button::new(format!("{g}  {label}")),
+                    );
+                }
+            });
+        }
+    }
+
     fn console(&mut self, ui: &mut Ui) {
         let t = self.theme;
         for (c, line) in [
@@ -385,4 +477,38 @@ pub fn type_row(
         text,
     );
     resp
+}
+
+/// Unity 6's tool overlay: the transform tools as a vertical strip floating
+/// at the viewport's left edge.
+fn tool_strip(ui: &mut Ui, t: &Theme, viewport: egui::Rect) {
+    let tools = [
+        (icon::HAND, "View"),
+        (icon::CURSOR, "Select"),
+        (icon::ARROWS_OUT_CARDINAL, "Move"),
+        (icon::ARROWS_CLOCKWISE, "Rotate"),
+        (icon::ARROWS_OUT, "Scale"),
+        (icon::BONE, "Pose"),
+    ];
+    let size = 30.0;
+    let strip = egui::Rect::from_min_size(
+        viewport.min + Vec2::new(8.0, 8.0),
+        Vec2::new(size, size * tools.len() as f32),
+    );
+    let p = ui.painter();
+    p.rect_filled(strip, 0.0, t.header);
+    p.rect_stroke(strip, 0.0, egui::Stroke::new(1.0, t.divider), egui::StrokeKind::Outside);
+    for (i, (g, _)) in tools.iter().enumerate() {
+        let cell = egui::Rect::from_min_size(strip.min + Vec2::new(0.0, i as f32 * size), Vec2::splat(size));
+        if i == 2 {
+            p.rect_filled(cell, 0.0, t.select);
+        }
+        p.text(
+            cell.center(),
+            egui::Align2::CENTER_CENTER,
+            *g,
+            egui::FontId::proportional(16.0),
+            t.text,
+        );
+    }
 }
