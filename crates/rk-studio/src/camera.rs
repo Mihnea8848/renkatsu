@@ -119,6 +119,23 @@ impl Orbit {
         self.distance = (self.distance * (-scroll * 0.002).exp()).clamp(0.05, 50.0);
     }
 
+    /// The view part of the way from this one to `to`, `t` from 0 to 1: the
+    /// target, the distance and the angles each go straight to theirs, the
+    /// turn around the vertical axis by its shorter side, so the eye swings
+    /// around on an arc rather than cutting through what it looks at.
+    pub fn toward(&self, to: &Orbit, t: f32) -> Orbit {
+        use std::f32::consts::{PI, TAU};
+        let t = t.clamp(0.0, 1.0);
+        let turn = (to.yaw - self.yaw + PI).rem_euclid(TAU) - PI;
+        Orbit {
+            target: self.target.lerp(to.target, t),
+            yaw: self.yaw + turn * t,
+            pitch: self.pitch + (to.pitch - self.pitch) * t,
+            distance: self.distance + (to.distance - self.distance) * t,
+            fov_y_deg: self.fov_y_deg + (to.fov_y_deg - self.fov_y_deg) * t,
+        }
+    }
+
     /// Whether this view differs from `start` enough to be worth a way
     /// back: the eye or the target went farther than a tenth of the
     /// starting distance, the view turned by more than five degrees, or the
@@ -153,10 +170,31 @@ pub enum RightDrag {
     Explore,
 }
 
+/// How long the camera takes to ease to a view it was sent to, in seconds.
+pub const GLIDE: f32 = 0.3;
+
+/// A move of the camera to another view that is under way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Glide {
+    from: Orbit,
+    to: Orbit,
+    /// Seconds since it began.
+    elapsed: f32,
+}
+
+/// Fast at first and slowing into the end, `x` from 0 to 1.
+fn ease_out(x: f32) -> f32 {
+    1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
+}
+
 /// The camera of a viewport with its focus and its fly speed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewCamera {
     pub orbit: Orbit,
+    /// The move to another view that is under way.
+    glide: Option<Glide>,
+    /// How long such a move takes, in seconds; 0 jumps.
+    pub glide_time: f32,
     /// The framing and the focus the viewport started with.
     home: (Orbit, Option<Focus>),
     /// The object the camera goes around, or nothing while it is free.
@@ -171,6 +209,8 @@ impl ViewCamera {
     pub fn new(orbit: Orbit, focus: Option<Focus>) -> ViewCamera {
         ViewCamera {
             orbit,
+            glide: None,
+            glide_time: GLIDE,
             home: (orbit, focus),
             focus,
             speed: 1.0,
@@ -178,11 +218,75 @@ impl ViewCamera {
         }
     }
 
+    /// Sends the camera to another view: it eases there over the glide
+    /// time as `advance` is called, or is there at once when that is 0.
+    pub fn glide_to(&mut self, to: Orbit) {
+        if self.glide_time > 0.0 && to != self.orbit {
+            self.glide = Some(Glide {
+                from: self.orbit,
+                to,
+                elapsed: 0.0,
+            });
+        } else {
+            self.glide = None;
+            self.orbit = to;
+        }
+    }
+
+    /// Moves a glide on by `dt` seconds. Returns whether the camera is
+    /// still on its way, and so needs another frame.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        let Some(glide) = &mut self.glide else { return false };
+        glide.elapsed += dt.max(0.0);
+        let t = glide.elapsed / self.glide_time.max(1e-6);
+        if t >= 1.0 {
+            self.orbit = glide.to;
+            self.glide = None;
+            return false;
+        }
+        self.orbit = glide.from.toward(&glide.to, ease_out(t));
+        true
+    }
+
+    /// Stops a glide where it is: the user took the camera.
+    pub fn cancel_glide(&mut self) {
+        self.glide = None;
+    }
+
+    /// Whether the camera is on its way to another view.
+    #[cfg(test)]
+    pub fn gliding(&self) -> bool {
+        self.glide.is_some()
+    }
+
+    /// The view the camera is at, or on its way to.
+    pub fn destination(&self) -> Orbit {
+        self.glide.map_or(self.orbit, |g| g.to)
+    }
+
     /// Focuses on an object and frames it, keeping the direction of view.
     pub fn focus_on(&mut self, focus: Focus) {
         self.focus = Some(focus);
-        self.orbit.target = focus.center;
-        self.orbit.distance = focus.distance;
+        let mut to = self.destination();
+        to.target = focus.center;
+        to.distance = focus.distance;
+        self.glide_to(to);
+    }
+
+    /// Looks at a point from the distance and the direction the view has,
+    /// without focusing on anything.
+    pub fn look_at(&mut self, point: Vec3) {
+        let mut to = self.destination();
+        to.target = point;
+        self.glide_to(to);
+    }
+
+    /// Makes a framing the one the viewport starts from and goes back to,
+    /// and goes to it.
+    pub fn rehome(&mut self, orbit: Orbit, focus: Option<Focus>) {
+        self.home = (orbit, focus);
+        self.focus = focus;
+        self.glide_to(orbit);
     }
 
     /// The object `now` names moved or changed size: a view focused on it
@@ -198,6 +302,11 @@ impl ViewCamera {
                 *focus = Some(now);
             }
         };
+        // A glide under way ends where the object went.
+        if let Some(glide) = &mut self.glide {
+            let mut focus = self.focus;
+            carry(&mut glide.to, &mut focus);
+        }
         carry(&mut self.orbit, &mut self.focus);
         carry(&mut self.home.0, &mut self.home.1);
     }
@@ -223,7 +332,8 @@ impl ViewCamera {
 
     /// Back to the framing and the focus the viewport started with.
     pub fn reset(&mut self) {
-        (self.orbit, self.focus) = self.home;
+        self.focus = self.home.1;
+        self.glide_to(self.home.0);
     }
 
     /// Whether the view left its starting framing far enough to offer the
@@ -248,6 +358,7 @@ impl ViewCamera {
     /// `fast` for Shift. A movement key switches to exploring, which lets
     /// go of the focus and lasts until the button is released.
     pub fn right_held(&mut self, drag: egui::Vec2, along: Vec3, dt: f32, fast: bool) -> RightDrag {
+        self.cancel_glide();
         if along != Vec3::ZERO {
             self.exploring = true;
             self.focus = None;
@@ -274,6 +385,7 @@ impl ViewCamera {
     /// Alt with the left button: around the focused object, or around the
     /// middle of the view while the camera is free.
     pub fn orbit_drag(&mut self, drag: egui::Vec2) {
+        self.cancel_glide();
         match self.focus {
             Some(focus) => self.orbit.rotate_around(focus.center, drag),
             None => self.orbit.rotate(drag),
@@ -318,7 +430,80 @@ mod tests {
             center: Vec3::new(0.0, 1.0, 0.0),
             distance: 2.0,
         };
-        ViewCamera::new(orbit(), Some(focus))
+        let mut cam = ViewCamera::new(orbit(), Some(focus));
+        // The tests of where the camera goes do not wait for it.
+        cam.glide_time = 0.0;
+        cam
+    }
+
+    #[test]
+    fn the_camera_eases_to_where_it_is_sent_and_input_stops_it() {
+        let mut cam = focused();
+        cam.glide_time = GLIDE;
+        let start = cam.orbit;
+        let focus = Focus {
+            object: ObjectId(7),
+            center: Vec3::new(2.0, 1.0, 0.0),
+            distance: 4.0,
+        };
+        cam.focus_on(focus);
+        // Nothing moved yet; the focus is taken at once.
+        assert_eq!(cam.orbit, start);
+        assert_eq!(cam.focus, Some(focus));
+        assert!(cam.gliding());
+        assert!(cam.advance(GLIDE / 2.0));
+        // Easing out: more than half the way after half the time.
+        let x = cam.orbit.target.x;
+        assert!(x > 1.0 && x < 2.0, "{x}");
+        assert!(cam.orbit.distance > 3.0 && cam.orbit.distance < 4.0);
+        assert!(!cam.advance(GLIDE));
+        // It ends exactly where it was sent, keeping the direction of view.
+        assert_eq!(cam.orbit.target, focus.center);
+        assert_eq!(cam.orbit.distance, 4.0);
+        assert_eq!((cam.orbit.yaw, cam.orbit.pitch), (start.yaw, start.pitch));
+        assert!(!cam.gliding() && !cam.advance(1.0));
+
+        // The way back is eased too, and taking the camera stops it there.
+        cam.orbit.rotate(Vec2::new(200.0, 0.0));
+        cam.reset();
+        assert!(cam.advance(GLIDE / 3.0));
+        let held = cam.orbit;
+        cam.orbit_drag(Vec2::ZERO);
+        assert!(!cam.gliding() && !cam.advance(1.0));
+        assert!((cam.orbit.target - held.target).length() < 1e-5 && cam.orbit.yaw == held.yaw);
+        assert!(held != start);
+        cam.reset();
+        cam.right_held(Vec2::ZERO, Vec3::ZERO, 0.0, false);
+        assert!(!cam.gliding());
+
+        // With no time to take, the camera is there at once.
+        cam.glide_time = 0.0;
+        cam.reset();
+        assert_eq!(cam.orbit, start);
+        assert!(!cam.gliding());
+    }
+
+    #[test]
+    fn a_turn_takes_the_shorter_way_around() {
+        let from = Orbit { yaw: 3.0, ..orbit() };
+        let to = Orbit { yaw: -3.0, ..orbit() };
+        let half = from.toward(&to, 0.5);
+        // From 3 to -3 radians is a short step across the back, not a
+        // turn of almost a whole circle through the front.
+        assert!((half.yaw - std::f32::consts::PI).abs() < 0.01, "{}", half.yaw);
+        assert_eq!(from.toward(&to, 0.0), from);
+        let end = from.toward(&to, 1.0);
+        assert!((end.camera().eye - to.camera().eye).length() < 1e-4);
+        // A glide carries on to where a focused object moved.
+        let mut cam = focused();
+        cam.glide_time = GLIDE;
+        let mut focus = cam.focus.unwrap();
+        cam.orbit.pan(Vec2::new(50.0, 0.0), 500.0);
+        cam.focus_on(focus);
+        focus.center += Vec3::X;
+        cam.follow(focus);
+        cam.advance(GLIDE);
+        assert_eq!(cam.orbit.target, focus.center);
     }
 
     #[test]

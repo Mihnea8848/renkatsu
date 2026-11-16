@@ -8,7 +8,7 @@
 //! folders, are here too.
 
 use crate::mods::{count_text, size_text, Plan};
-use crate::project;
+use crate::project::{self, Start};
 use crate::state::{Look, State};
 use egui::{Align, Layout, RichText, Ui};
 use std::path::PathBuf;
@@ -45,20 +45,57 @@ pub enum After {
     New,
     /// Open a project: this one, or the one the user picks.
     Open(Option<PathBuf>),
+    /// Close the project and show the project selector.
+    Selector,
     Quit,
+}
+
+/// The name and place of a new project, or of a copy of the open one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectForm {
+    /// The form saves a copy of the open project rather than a new one.
+    pub save_as: bool,
+    pub name: String,
+    /// The folder the project's own folder goes into.
+    pub folder: PathBuf,
+    /// What a new project starts with.
+    pub start: Start,
+    pub problem: Option<String>,
+}
+
+impl ProjectForm {
+    /// The form of a new project: in the projects folder, under the first
+    /// name that is free there.
+    pub fn new() -> ProjectForm {
+        let folder = project::home().unwrap_or_default();
+        let name = project::free_folder(&folder, "Untitled project")
+            .file_name()
+            .map_or("Untitled project".to_owned(), |n| n.to_string_lossy().into_owned());
+        ProjectForm {
+            save_as: false,
+            name,
+            folder,
+            start: Start::default(),
+            problem: None,
+        }
+    }
+
+    /// The folder the project will have.
+    pub fn root(&self) -> PathBuf {
+        self.folder.join(project::file_name(&self.name))
+    }
+
+    /// Whether the form can be accepted.
+    pub fn ready(&self) -> bool {
+        !self.name.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     Import(PendingImport),
     Unsaved(After),
-    /// The name and place of a new project, or of a copy of this one.
-    Project {
-        save_as: bool,
-        name: String,
-        folder: PathBuf,
-        problem: Option<String>,
-    },
+    Project(ProjectForm),
 }
 
 /// What a system file dialog was opened for.
@@ -68,6 +105,8 @@ pub enum Pick {
     Project,
     /// The folder a new project goes into.
     Folder,
+    /// The picture that becomes a project's icon.
+    Icon,
 }
 
 /// A system file dialog that is open. It runs on a thread of its own, so
@@ -87,6 +126,7 @@ impl Picker {
                 Pick::Card => "Import card",
                 Pick::Project => "Open project",
                 Pick::Folder => "Project location",
+                Pick::Icon => "Project icon",
             });
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
@@ -97,6 +137,7 @@ impl Picker {
                     .add_filter("Renkatsu projects", &[crate::project::EXTENSION])
                     .pick_file(),
                 Pick::Folder => dialog.pick_folder(),
+                Pick::Icon => dialog.add_filter("PNG pictures", &["png"]).pick_file(),
             };
             let _ = send.send(picked);
             ctx.request_repaint();
@@ -232,6 +273,7 @@ fn unsaved(ui: &mut Ui, k: &Look, scene: &str, after: &After) -> Choice {
         match after {
             After::New => "making a new project",
             After::Open(_) => "opening another project",
+            After::Selector => "closing the project",
             After::Quit => "quitting",
         }
     ));
@@ -243,49 +285,55 @@ fn unsaved(ui: &mut Ui, k: &Look, scene: &str, after: &After) -> Choice {
     }
 }
 
-fn project_form(
-    ui: &mut Ui,
-    k: &Look,
-    save_as: bool,
-    name: &mut String,
-    folder: &std::path::Path,
-    problem: Option<&str>,
-) -> Choice {
+fn project_form(ui: &mut Ui, k: &Look, form: &mut ProjectForm) -> Choice {
     let t = &k.t;
-    heading(ui, k, if save_as { "Save project as" } else { "New project" });
+    heading(ui, k, if form.save_as { "Save project as" } else { "New project" });
     let mut choice = Choice::Wait;
     egui::Grid::new("project form")
         .num_columns(2)
         .spacing([10.0, 8.0])
         .show(ui, |ui| {
             ui.label("Name");
-            ui.add(egui::TextEdit::singleline(name).desired_width(WIDTH - 110.0));
+            let name = ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(WIDTH - 110.0));
+            // The name is what the user came to type.
+            if ui.memory(|m| m.focused().is_none()) {
+                name.request_focus();
+            }
+            if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && form.ready() {
+                choice = Choice::Accept;
+            }
             ui.end_row();
             ui.label("Location");
             ui.horizontal(|ui| {
                 if ui.button("Browse").clicked() {
                     choice = Choice::Browse;
                 }
-                ui.add(egui::Label::new(RichText::new(folder.display().to_string()).color(t.text_dim)).truncate());
+                ui.add(egui::Label::new(RichText::new(form.folder.display().to_string()).color(t.text_dim)).truncate());
             });
             ui.end_row();
+            if !form.save_as {
+                ui.label("Starts with");
+                ui.horizontal(|ui| {
+                    for start in Start::ALL {
+                        ui.radio_value(&mut form.start, start, start.label())
+                            .on_hover_text(start.hint());
+                    }
+                });
+                ui.end_row();
+            }
         });
     ui.add_space(6.0);
-    let target = folder.join(project::file_name(name));
     ui.label(
-        RichText::new(format!("The project's folder will be {}", target.display()))
+        RichText::new(format!("The project's folder will be {}", form.root().display()))
             .font(k.small())
             .color(t.text_dim),
     );
-    if let Some(problem) = problem {
+    if let Some(problem) = &form.problem {
         ui.add_space(4.0);
         ui.label(RichText::new(problem).color(t.accent));
     }
-    let ready = !name.trim().is_empty();
-    match buttons(
-        ui,
-        &[("Cancel", true), (if save_as { "Save" } else { "Create" }, ready)],
-    ) {
+    let accept = if form.save_as { "Save" } else { "Create" };
+    match buttons(ui, &[("Cancel", true), (accept, form.ready())]) {
         Some(0) => Choice::Cancel,
         Some(_) => Choice::Accept,
         None => choice,
@@ -302,12 +350,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         match &mut modal {
             Modal::Import(pending) => import(ui, k, pending),
             Modal::Unsaved(after) => unsaved(ui, k, &scene, after),
-            Modal::Project {
-                save_as,
-                name,
-                folder,
-                problem,
-            } => project_form(ui, k, *save_as, name, folder, problem.as_deref()),
+            Modal::Project(form) => project_form(ui, k, form),
         }
     });
     let choice = match shown.inner {
@@ -318,8 +361,8 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         (Choice::Wait, modal) => st.modal = Some(modal),
         (Choice::Cancel, _) => {}
         (Choice::Browse, modal) => {
-            if let Modal::Project { folder, .. } = &modal {
-                st.pick(Pick::Folder, Some(folder.clone()), ctx);
+            if let Modal::Project(form) = &modal {
+                st.pick(Pick::Folder, Some(form.folder.clone()), ctx);
             }
             st.modal = Some(modal);
         }
@@ -330,25 +373,15 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             }
         }
         (Choice::Discard, Modal::Unsaved(after)) => st.proceed(after, ctx),
-        (
-            Choice::Accept,
-            Modal::Project {
-                save_as, name, folder, ..
-            },
-        ) => {
-            let root = folder.join(project::file_name(&name));
-            let done = if save_as {
-                st.save_as(&root, name.trim())
+        (Choice::Accept, Modal::Project(mut form)) => {
+            let done = if form.save_as {
+                st.save_as(&form.root(), form.name.trim())
             } else {
-                st.new_project(&root, name.trim())
+                st.new_project(&form.root(), form.name.trim(), form.start)
             };
             if let Err(e) = done {
-                st.modal = Some(Modal::Project {
-                    save_as,
-                    name,
-                    folder,
-                    problem: Some(format!("{e:#}")),
-                });
+                form.problem = Some(format!("{e:#}"));
+                st.modal = Some(Modal::Project(form));
             }
         }
         (Choice::Discard, _) => {}

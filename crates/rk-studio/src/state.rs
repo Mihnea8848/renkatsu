@@ -6,12 +6,13 @@
 //! scene being edited and the commands that change them.
 
 use crate::design::{Spec, TitleBar};
-use crate::dialogs::{After, Import, Modal, PendingImport, Pick, Picker};
+use crate::dialogs::{After, Import, Modal, PendingImport, Pick, Picker, ProjectForm};
 use crate::kinds::Kind;
 use crate::library::Library;
 use crate::mods::{self, Games};
-use crate::project::{self, Project};
+use crate::project::{self, Project, Start};
 use crate::scene::{Content, Document, ObjectId, Scene};
+use crate::selector::Selector;
 use crate::theme::{Theme, ICONS, SEMIBOLD};
 use anyhow::Result;
 use egui::{Color32, FontFamily, FontId, TextureHandle};
@@ -136,6 +137,10 @@ pub enum Command {
     OpenProject(Option<PathBuf>),
     /// Pick a card and bring it into the project.
     ImportCard,
+    /// Close the project and go back to the project selector.
+    ProjectSelector,
+    /// Pick a picture as the project's icon.
+    SetIcon,
     Quit,
 }
 
@@ -150,8 +155,14 @@ pub struct State {
     /// When the fly speed last changed, in egui's seconds, for the meter
     /// that shows it and fades away.
     pub speed_shown: Option<f64>,
-    /// The project that is open.
+    /// The project that is open; `Project::none()` while the project
+    /// selector shows.
     pub project: Project,
+    /// The project selector, while it shows in place of the editor.
+    pub selector: Option<Selector>,
+    /// The object that was just added: the camera goes to it once the
+    /// viewport has something of it to look at.
+    pub focus_pending: Option<ObjectId>,
     /// The scene being edited, with the selection and the undo history.
     pub doc: Document,
     /// The scene as it was last saved, to tell unsaved changes by.
@@ -241,6 +252,8 @@ impl State {
             speed_shown: None,
             library: Library::new(&project),
             project,
+            selector: None,
+            focus_pending: None,
             saved: scene.clone(),
             doc: Document::new(scene),
             games: Games::default(),
@@ -254,14 +267,14 @@ impl State {
             renaming: None,
             show_content: false,
             log: Log::new(),
-            mode: 2,
+            mode: 0,
             mode_tool: [0, 0, 1, 0, 0, 0],
-            palette_open: true,
+            palette_open: false,
             palette_pinned: true,
             rail: Rail::Named,
             overlays_hidden: false,
             maximised: false,
-            tool: 2,
+            tool: 0,
             snap: true,
             physics: Physics::Stopped,
             sections: [true, true, true, false, true],
@@ -306,7 +319,7 @@ impl State {
             }
             Command::Duplicate => {
                 if let Some(id) = selected {
-                    self.doc.duplicate(id);
+                    self.focus_pending = self.doc.duplicate(id);
                 }
             }
             Command::ToggleHidden => {
@@ -329,6 +342,7 @@ impl State {
                     };
                     let id = self.doc.add(name, content);
                     self.unfold_to(id);
+                    self.focus_pending = Some(id);
                 }
             }
             Command::AddCard(card) => self.add_card(card),
@@ -336,7 +350,13 @@ impl State {
                 self.save();
             }
             // The rest need the window, and go through `ask`.
-            Command::SaveAs | Command::NewProject | Command::OpenProject(_) | Command::ImportCard | Command::Quit => {}
+            Command::SaveAs
+            | Command::NewProject
+            | Command::OpenProject(_)
+            | Command::ImportCard
+            | Command::ProjectSelector
+            | Command::SetIcon
+            | Command::Quit => {}
         }
         if self
             .renaming
@@ -353,14 +373,20 @@ impl State {
         match command {
             Command::SaveAs => {
                 let folder = self.project.root.parent().map(Path::to_owned).or_else(project::home);
-                self.modal = Some(Modal::Project {
+                self.modal = Some(Modal::Project(ProjectForm {
                     save_as: true,
                     name: format!("{} copy", self.project.file.name),
                     folder: folder.unwrap_or_default(),
+                    start: Start::default(),
                     problem: None,
-                });
+                }));
             }
+            Command::ProjectSelector => self.request(After::Selector, ctx),
+            Command::SetIcon => self.pick(Pick::Icon, None, ctx),
             Command::NewProject => self.request(After::New, ctx),
+            // Open project goes through the project selector, which lists the
+            // recent projects and can pick any other.
+            Command::OpenProject(None) => self.request(After::Selector, ctx),
             Command::OpenProject(path) => self.request(After::Open(path), ctx),
             Command::Quit => self.request(After::Quit, ctx),
             Command::ImportCard => {
@@ -380,16 +406,46 @@ impl State {
 
     /// Saves the scene and the project. Returns whether it worked.
     pub fn save(&mut self) -> bool {
+        if self.project.is_none() {
+            return false;
+        }
         match self.project.save_scene(self.doc.scene()) {
             Ok(()) => {
                 self.saved = self.doc.scene().clone();
                 self.log.info(format!("Saved {}", self.project.file.name));
+                self.take_picture();
                 true
             }
             Err(e) => {
                 self.log.error(format!("The project could not be saved: {e:#}"));
                 false
             }
+        }
+    }
+
+    /// Takes the picture of the scene that the project selector shows for
+    /// the project, from the viewport's camera. Without a viewport, as in
+    /// tests, the picture stays as it is.
+    fn take_picture(&mut self) {
+        let Some(live) = self.live.as_mut() else { return };
+        if self.project.is_none() {
+            return;
+        }
+        let taken = live
+            .snapshot(self.doc.scene(), project::THUMBNAIL_SIZE, [0.22, 0.22, 0.23, 1.0])
+            .and_then(|pixels| self.project.set_thumbnail(pixels.as_deref()));
+        if let Err(e) = taken {
+            self.log
+                .warn(format!("The picture of the scene could not be saved: {e:#}"));
+        }
+    }
+
+    /// The project is about to be left: when the scene is as it was saved,
+    /// its picture is taken again, so that it shows characters that were
+    /// still building at the save.
+    fn leave(&mut self) {
+        if !self.dirty() && self.live.as_ref().is_some_and(|live| live.has_characters()) {
+            self.take_picture();
         }
     }
 
@@ -406,28 +462,17 @@ impl State {
     /// Goes on with what the unsaved changes held up.
     pub fn proceed(&mut self, after: After, ctx: &egui::Context) {
         match after {
-            After::New => {
-                let folder = project::home().unwrap_or_default();
-                let name = project::free_folder(&folder, "Untitled project")
-                    .file_name()
-                    .map_or("Untitled project".to_owned(), |n| n.to_string_lossy().into_owned());
-                self.modal = Some(Modal::Project {
-                    save_as: false,
-                    name,
-                    folder,
-                    problem: None,
-                });
-            }
-            After::Open(Some(path)) => {
-                if let Err(e) = self.open_project(&path) {
-                    self.log.error(format!("{} could not be opened: {e:#}", path.display()));
-                }
-            }
+            After::New => self.modal = Some(Modal::Project(ProjectForm::new())),
+            After::Open(Some(path)) => self.open_or_tell(&path),
             After::Open(None) => {
-                let start = self.project.root.parent().map(Path::to_owned);
+                let start = self.project.root.parent().map(Path::to_owned).or_else(project::home);
                 self.pick(Pick::Project, start, ctx);
             }
-            After::Quit => self.quit = true,
+            After::Selector => self.show_selector(),
+            After::Quit => {
+                self.leave();
+                self.quit = true;
+            }
         }
     }
 
@@ -454,15 +499,29 @@ impl State {
                 ask: true,
                 name: None,
             }),
-            Pick::Project => {
-                if let Err(e) = self.open_project(&path) {
-                    self.log.error(format!("{} could not be opened: {e:#}", path.display()));
+            Pick::Project => self.open_or_tell(&path),
+            Pick::Icon => {
+                let set = match self.selector.as_mut().and_then(|s| s.icon_for.take()) {
+                    Some(root) => project::set_icon_in(&root, Some(&path)),
+                    None if self.project.is_none() => Ok(()),
+                    None => self.project.set_icon(Some(&path)),
+                };
+                match (set, &mut self.selector) {
+                    (Ok(()), Some(selector)) => selector.refresh(&self.settings),
+                    (Ok(()), None) => self.log.info(format!("{} is the project's icon now", path.display())),
+                    (Err(e), Some(selector)) => selector.problem = Some(format!("{e:#}")),
+                    (Err(e), None) => self.log.error(format!("The icon could not be set: {e:#}")),
                 }
             }
             Pick::Folder => {
-                if let Some(Modal::Project { folder, problem, .. }) = &mut self.modal {
-                    *folder = path;
-                    *problem = None;
+                let form = match (&mut self.modal, &mut self.selector) {
+                    (Some(Modal::Project(form)), _) => Some(form),
+                    (None, Some(selector)) => Some(&mut selector.form),
+                    _ => None,
+                };
+                if let Some(form) = form {
+                    form.folder = path;
+                    form.problem = None;
                 }
             }
         }
@@ -470,6 +529,8 @@ impl State {
 
     /// Makes another project the open one, with its scene.
     fn adopt(&mut self, project: Project, scene: Scene) {
+        self.leave();
+        self.focus_pending = None;
         self.project = project;
         self.saved = scene.clone();
         self.doc = Document::new(scene);
@@ -482,15 +543,38 @@ impl State {
         self.asset = None;
         self.folder = 0;
         self.imports.clear();
+        self.selector = None;
         if let Some(live) = self.live.as_mut() {
             live.reset();
         }
         self.remember();
     }
 
+    /// Closes the project and shows the project selector in its place.
+    pub fn show_selector(&mut self) {
+        self.adopt(Project::none(), Scene::new());
+        self.modal = None;
+        self.preferences_open = false;
+        let mut selector = Selector::new(&self.settings);
+        selector.eager = self.scripted;
+        self.selector = Some(selector);
+    }
+
+    /// Opens a project and, when that fails, says so where the user looks:
+    /// in the project selector while it shows, else in the console.
+    pub fn open_or_tell(&mut self, path: &Path) {
+        if let Err(e) = self.open_project(path) {
+            let problem = format!("{} could not be opened: {e:#}", path.display());
+            match &mut self.selector {
+                Some(selector) => selector.problem = Some(problem),
+                None => self.log.error(problem),
+            }
+        }
+    }
+
     /// Puts the open project at the head of the recent ones.
     pub fn remember(&mut self) {
-        if self.scripted {
+        if self.scripted || self.project.is_none() {
             return;
         }
         self.settings.opened(&self.project.root);
@@ -512,11 +596,12 @@ impl State {
     }
 
     /// Makes a new project in a folder and opens it: the key light and,
-    /// when the game has it, the default character in the scene.
-    pub fn new_project(&mut self, root: &Path, name: &str) -> Result<()> {
+    /// when the start asks for her and the game has her, the default
+    /// character in the scene.
+    pub fn new_project(&mut self, root: &Path, name: &str, start: Start) -> Result<()> {
         let project = Project::create(root, name)?;
         self.adopt(project, Scene::new());
-        self.start_fresh(true);
+        self.start_fresh(start == Start::RenkatsuChan);
         Ok(())
     }
 
@@ -701,6 +786,8 @@ impl State {
         };
         let id = self.doc.add_character(&name, card);
         self.unfold_to(id);
+        // The camera goes to her once she is built.
+        self.focus_pending = Some(id);
     }
 
     /// Opens the folders around an object so that its row shows.

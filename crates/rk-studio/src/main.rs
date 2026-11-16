@@ -20,6 +20,7 @@ mod preferences;
 mod project;
 mod properties;
 mod scene;
+mod selector;
 mod settings;
 mod state;
 mod theme;
@@ -69,19 +70,24 @@ struct Cli {
     /// Save a picture of the window here after a few frames, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
-    /// Window size, as WIDTHxHEIGHT.
-    #[arg(long, default_value = "1600x900")]
-    size: String,
+    /// Window size, as WIDTHxHEIGHT. The editor's is 1600x900 unless this
+    /// says otherwise.
+    #[arg(long)]
+    size: Option<String>,
+    /// Start on the project selector even where the settings or a
+    /// screenshot would not, to picture it.
+    #[arg(long, hide = true)]
+    project_selector: bool,
     /// The mode to start in, by name.
-    #[arg(long, default_value = "pose")]
+    #[arg(long, default_value = "select")]
     mode: String,
     /// The object selected at the start, by its name or its card's file
     /// name, or "none". Without it the first `--card` character is.
     #[arg(long)]
     select: Option<String>,
-    /// Start with the mode's tool palette folded away.
+    /// Start with the mode's tool palette open.
     #[arg(long)]
-    palette_closed: bool,
+    palette_open: bool,
     /// Start with the mode rail shrunk to icons.
     #[arg(long)]
     rail_icons: bool,
@@ -141,6 +147,14 @@ struct Studio {
     /// The project of a scripted run that named none: a folder of its own
     /// that goes away with the window.
     temporary: Option<PathBuf>,
+    /// The size of the editor's window, for when the project selector's
+    /// own smaller window gives way to it.
+    editor_size: egui::Vec2,
+    /// The window has the size of the project selector's own.
+    small: bool,
+    /// Seconds since a project opened from the selector, while the editor
+    /// still fades in.
+    entering: Option<f32>,
 }
 
 impl Drop for Studio {
@@ -151,10 +165,34 @@ impl Drop for Studio {
     }
 }
 
-/// The project the editor starts on: the one asked for, else the last one
-/// that is still there, else a new one. Returns it with its scene, whether
-/// it was just made, and its folder when that is a temporary one.
+/// Whether the start shows the project selector rather than a project: no
+/// project or card was named, and the settings ask for it. A scripted
+/// picture shows it only when it names a layout.
+fn starts_on_selector(cli: &Cli, settings: &settings::Settings) -> bool {
+    cli.project.is_none()
+        && cli.card.is_empty()
+        && cli.import.is_empty()
+        && (cli.project_selector || (settings.show_project_selector && cli.screenshot.is_none()))
+}
+
+/// The editor's window size, from `--size`.
+fn editor_size(cli: &Cli) -> Result<egui::Vec2> {
+    let text = cli.size.as_deref().unwrap_or("1600x900");
+    text.split_once('x')
+        .and_then(|(w, h)| Some(egui::Vec2::new(w.parse().ok()?, h.parse().ok()?)))
+        .context("--size must look like 1600x900")
+}
+
+/// The project the editor starts on: none, under the project selector, or
+/// the one asked for, else the last one that is still there, else a new
+/// one. Returns it with its scene, whether it was just made, and its folder
+/// when that is a temporary one.
 fn starting_project(cli: &Cli, settings: &settings::Settings) -> Result<(State, bool, Option<PathBuf>)> {
+    if starts_on_selector(cli, settings) {
+        // No project is read, and the game is not looked at, until the
+        // user chooses one.
+        return Ok((State::new(Project::none(), scene::Scene::new()), false, None));
+    }
     let fresh = |root: &std::path::Path, name: &str| -> Result<State> {
         Ok(State::new(Project::create(root, name)?, scene::Scene::new()))
     };
@@ -218,11 +256,15 @@ impl Studio {
         state.vsync_at_start = settings.frame_rate.vsync();
         state.settings = settings;
         state.scripted = cli.screenshot.is_some();
+        let selecting = state.project.is_none();
+        if selecting {
+            state.show_selector();
+        }
         state.mode = modes::MODES
             .iter()
             .position(|m| m.name.eq_ignore_ascii_case(&cli.mode))
             .with_context(|| format!("unknown mode {:?}", cli.mode))?;
-        state.palette_open = !cli.palette_closed;
+        state.palette_open = cli.palette_open;
         state.overlays_hidden = cli.overlays_hidden;
         state.maximised = cli.maximised;
         if cli.rail_icons {
@@ -230,7 +272,12 @@ impl Studio {
         }
         state.library.eager = cli.screenshot.is_some();
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
-            state.live = Some(live::Live::new(render_state)?);
+            let mut live = live::Live::new(render_state)?;
+            if state.scripted {
+                // A picture must not catch the camera on its way.
+                live.cam.glide_time = 0.0;
+            }
+            state.live = Some(live);
         }
         if fresh {
             state.start_fresh(cli.card.is_empty());
@@ -346,6 +393,9 @@ impl Studio {
             title: String::new(),
             closing: false,
             temporary,
+            editor_size: editor_size(cli)?,
+            small: selecting && cli.size.is_none(),
+            entering: None,
         })
     }
 }
@@ -425,8 +475,91 @@ impl eframe::App for Studio {
         }
         self.state.poll_picker();
         self.state.next_import();
-        self.file_keys(ctx);
-        self.scene_keys(ctx);
+        let selecting = self.state.selector.is_some();
+        // The project selector has a smaller window of its own. The desktop
+        // resizes it in one step, so the editor's content fades in instead.
+        if selecting != self.small {
+            self.small = selecting;
+            let size = if selecting { selector::WINDOW } else { self.editor_size };
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            self.entering = (!selecting).then_some(0.0);
+        }
+        if !selecting {
+            self.file_keys(ctx);
+            self.scene_keys(ctx);
+        }
+        let t = k.t;
+
+        // The title bar is a strip of its own, a shade darker than the menu
+        // row under it.
+        egui::Panel::top("title")
+            .exact_size(self.state.title_bar.height())
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(t.input))
+            .show(ui, |ui| chrome::title_bar(ui, &k, &self.state));
+        if selecting {
+            // The selector takes the window; the editor is not drawn.
+            chrome::window_edges(ui.ctx(), &k);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.panel))
+                .show(ui, |ui| selector::page(ui, &k, &mut self.state));
+        } else {
+            self.editor(ui, &k);
+        }
+
+        preferences::show(ctx, &k, &mut self.state);
+        self.enter(ctx, &k);
+        dialogs::show(ctx, &k, &mut self.state);
+        self.window(ctx);
+
+        // Something asked for the cards: bring the Content panel forward.
+        if std::mem::take(&mut self.state.show_content) {
+            self.state.maximised = false;
+            self.state.folder = 0;
+            self.bottom = Panel::Content;
+            panels::open(&mut self.dock, Panel::Content);
+            if let Some(tab) = self.dock.find_tab(&Panel::Content) {
+                let _ = self.dock.set_active_tab(tab);
+            }
+        }
+
+        // Frames come as often as the display shows them unless the user
+        // chose to save power, when egui draws only on input.
+        if self.state.settings.frame_rate.continuous() {
+            ctx.request_repaint();
+        }
+        let dt = ctx.input(|i| i.unstable_dt);
+        let ft = &mut self.state.frame_time;
+        *ft = if *ft == 0.0 { dt } else { *ft + (dt - *ft) * 0.05 };
+
+        self.frames += 1;
+        if let Some(path) = self.screenshot.clone() {
+            if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            let shot = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                if let Err(e) = save_png(&path, &image) {
+                    eprintln!("could not save {}: {e:#}", path.display());
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint();
+        }
+    }
+}
+
+impl Studio {
+    /// The editor below the title bar: the menu row, the status bar and
+    /// the docked panels.
+    fn editor(&mut self, ui: &mut egui::Ui, k: &Look) {
+        let k = *k;
+        let ctx = &ui.ctx().clone();
         let t = k.t;
         let bar = |id: &'static str, height: f32| {
             let panel = if id == "status" {
@@ -439,14 +572,6 @@ impl eframe::App for Studio {
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(t.well))
         };
-
-        // The title bar is a strip of its own, a shade darker than the menu
-        // row under it.
-        egui::Panel::top("title")
-            .exact_size(self.state.title_bar.height())
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(t.input))
-            .show(ui, |ui| chrome::title_bar(ui, &k, &self.state));
         let mut reset = false;
         bar("menu", k.d.menu_height).show(ui, |ui| {
             chrome::menu_row(ui, &k, &mut self.state, &mut self.dock, &mut reset)
@@ -500,54 +625,27 @@ impl eframe::App for Studio {
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);
             });
-
-        preferences::show(ctx, &k, &mut self.state);
-        dialogs::show(ctx, &k, &mut self.state);
-        self.window(ctx);
-
-        // Something asked for the cards: bring the Content panel forward.
-        if std::mem::take(&mut self.state.show_content) {
-            self.state.maximised = false;
-            self.state.folder = 0;
-            self.bottom = Panel::Content;
-            panels::open(&mut self.dock, Panel::Content);
-            if let Some(tab) = self.dock.find_tab(&Panel::Content) {
-                let _ = self.dock.set_active_tab(tab);
-            }
-        }
-
-        // Frames come as often as the display shows them unless the user
-        // chose to save power, when egui draws only on input.
-        if self.state.settings.frame_rate.continuous() {
-            ctx.request_repaint();
-        }
-        let dt = ctx.input(|i| i.unstable_dt);
-        let ft = &mut self.state.frame_time;
-        *ft = if *ft == 0.0 { dt } else { *ft + (dt - *ft) * 0.05 };
-
-        self.frames += 1;
-        if let Some(path) = self.screenshot.clone() {
-            if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-            }
-            let shot = ctx.input(|i| {
-                i.raw.events.iter().find_map(|e| match e {
-                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(image) = shot {
-                if let Err(e) = save_png(&path, &image) {
-                    eprintln!("could not save {}: {e:#}", path.display());
-                }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            ctx.request_repaint();
-        }
     }
-}
 
-impl Studio {
+    /// Fades the editor in after a project opened from the selector: a
+    /// veil of the selector's own colour lifts off it.
+    fn enter(&mut self, ctx: &egui::Context, k: &Look) {
+        let Some(elapsed) = self.entering else { return };
+        let time = 0.24 * ctx.global_style().animation_time * 12.0;
+        if time <= 0.0 || elapsed >= time {
+            self.entering = None;
+            return;
+        }
+        let left = (1.0 - elapsed / time).clamp(0.0, 1.0).powi(3);
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("entering"));
+        ctx.layer_painter(layer)
+            .rect_filled(ctx.content_rect(), 0.0, k.t.panel.gamma_multiply(left));
+        // The frame that builds the scene's characters is a long one; it
+        // must not use the fade up.
+        self.entering = Some(elapsed + ctx.input(|i| i.stable_dt).min(1.0 / 30.0));
+        ctx.request_repaint();
+    }
+
     /// Keeps the desktop's window title in step with the project, and
     /// asks about unsaved changes before the window closes.
     fn window(&mut self, ctx: &egui::Context) {
@@ -686,17 +784,18 @@ fn save_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let (w, h) = cli
-        .size
-        .split_once('x')
-        .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
-        .context("--size must look like 1600x900")?;
     let settings = settings::Settings::load();
+    let mut size = editor_size(&cli)?;
+    if starts_on_selector(&cli, &settings) && cli.size.is_none() {
+        size = selector::WINDOW;
+    }
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("Renkatsu Studio")
-            .with_inner_size([w, h])
+            // Matches renkatsu.desktop, so the desktop shows the launcher's icon.
+            .with_app_id("renkatsu")
+            .with_inner_size(size)
             .with_min_inner_size([960.0, 600.0])
             // The window draws its own title bar and border, as Unreal does.
             .with_decorations(false),
@@ -723,4 +822,36 @@ fn main() -> Result<()> {
         Some(inner) => inner,
         None => anyhow::anyhow!("{e}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_start_shows_the_selector_unless_told_otherwise() {
+        let on = settings::Settings::default();
+        let off = settings::Settings {
+            show_project_selector: false,
+            ..Default::default()
+        };
+        let cli = |args: &[&str]| Cli::parse_from([&["renkatsu"], args].concat());
+        assert!(starts_on_selector(&cli(&[]), &on));
+        // With the setting off the last project opens, as before.
+        assert!(!starts_on_selector(&cli(&[]), &off));
+        // A project or a card named on the command line goes straight in.
+        assert!(!starts_on_selector(&cli(&["--project", "/somewhere"]), &on));
+        assert!(!starts_on_selector(&cli(&["--card", "a.png"]), &on));
+        assert!(!starts_on_selector(
+            &cli(&["--project-selector", "--project", "/p"]),
+            &on
+        ));
+        // A scripted picture shows the selector only when it asks for it.
+        assert!(!starts_on_selector(&cli(&["--screenshot", "/tmp/a.png"]), &on));
+        assert!(starts_on_selector(
+            &cli(&["--screenshot", "/tmp/a.png", "--project-selector"]),
+            &off
+        ));
+        assert!(starts_on_selector(&cli(&["--project-selector"]), &off));
+    }
 }

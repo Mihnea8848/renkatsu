@@ -88,7 +88,7 @@ impl Library {
 }
 
 /// A card's own picture: the PNG image the card file starts with.
-fn picture(card: &Path) -> Option<egui::ColorImage> {
+pub fn picture(card: &Path) -> Option<egui::ColorImage> {
     let mut decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(card).ok()?));
     // Palettes and 16-bit channels come out as plain 8-bit colour.
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);

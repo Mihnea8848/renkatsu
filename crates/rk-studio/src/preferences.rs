@@ -21,10 +21,25 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .default_width(360.0)
         .show(ctx, |ui| {
+            let before = st.settings.clone();
+            ui.label(RichText::new("Start").font(k.bold(k.d.text)).color(t.text_bright));
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut st.settings.show_project_selector,
+                "Show the project selector at start",
+            );
+            ui.indent("selector hint", |ui| {
+                let hint = if st.settings.show_project_selector {
+                    "Renkatsu starts on the list of projects."
+                } else {
+                    "Renkatsu starts in the project that was open last."
+                };
+                ui.label(RichText::new(hint).font(k.small()).color(t.text_dim));
+            });
+            ui.add_space(8.0);
             ui.label(RichText::new("Viewport").font(k.bold(k.d.text)).color(t.text_bright));
             ui.add_space(4.0);
             ui.label("Frame rate");
-            let before = st.settings.clone();
             for rate in FrameRate::ALL {
                 ui.radio_value(&mut st.settings.frame_rate, rate, rate.label());
                 ui.indent(rate.label(), |ui| {
@@ -35,7 +50,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                 ui.add_space(4.0);
                 ui.label(RichText::new("Waiting for the display changes after a restart.").color(t.accent));
             }
-            if st.settings != before {
+            if st.settings != before && !st.scripted {
                 if let Err(e) = st.settings.save() {
                     eprintln!("could not save the settings: {e:#}");
                 }

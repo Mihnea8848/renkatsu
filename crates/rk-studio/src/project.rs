@@ -77,6 +77,13 @@ pub struct ProjectFile {
     /// Ask before an import copies zipmods into the project.
     #[serde(default = "yes")]
     pub ask_before_copying_mods: bool,
+    /// The picture the user gave the project, relative to its folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// The picture of the scene as it was last saved, relative to the
+    /// project folder. The editor writes it; it may be deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
     #[serde(default)]
     pub characters: Vec<Character>,
 }
@@ -166,9 +173,107 @@ pub fn free_folder(home: &Path, base: &str) -> PathBuf {
         .expect("some number is free")
 }
 
+/// What a new project starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Start {
+    /// The default character and the key light.
+    #[default]
+    RenkatsuChan,
+    /// The key light alone.
+    Empty,
+}
+
+impl Start {
+    pub const ALL: [Start; 2] = [Start::RenkatsuChan, Start::Empty];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Start::RenkatsuChan => "Renkatsu-Chan",
+            Start::Empty => "Empty",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Start::RenkatsuChan => "The default character under a key light.",
+            Start::Empty => "Only the key light.",
+        }
+    }
+}
+
+/// The environment variable that names another folder for new projects,
+/// for tests and scripted runs that must leave the documents folder alone.
+pub const HOME_VARIABLE: &str = "RENKATSU_PROJECTS";
+
+/// Where a project keeps its icon: beside the project file.
+pub const ICON: &str = "Icon.png";
+/// Where the editor keeps the picture of the last saved scene: in a folder
+/// of its own, apart from the user's renders.
+pub const THUMBNAIL: &str = ".renkatsu/thumbnail.png";
+/// The size of that picture, in pixels.
+pub const THUMBNAIL_SIZE: [u32; 2] = [640, 360];
+
+/// What the project selector shows of a project without opening it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub name: String,
+    /// The user's icon, when the project has one that is still there.
+    pub icon: Option<PathBuf>,
+    /// The picture of the last saved scene, when there is one.
+    pub thumbnail: Option<PathBuf>,
+    pub scenes: usize,
+    pub characters: usize,
+}
+
+/// Reads the summary of the project in a folder: its project file and the
+/// names in two of its folders. `None` when the folder holds no project.
+pub fn summary(root: &Path) -> Option<Summary> {
+    let file = project_files(root).into_iter().next()?;
+    let read = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| toml::from_str::<ProjectFile>(&text).ok());
+    let picture = |relative: Option<&String>| relative.map(|r| root.join(r)).filter(|p| p.is_file());
+    let scenes = std::fs::read_dir(root.join(SCENES))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")))
+        .count();
+    Some(Summary {
+        name: match &read {
+            Some(f) => f.name.clone(),
+            None => file.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+        },
+        icon: picture(read.as_ref().and_then(|f| f.icon.as_ref())),
+        thumbnail: picture(read.as_ref().and_then(|f| f.thumbnail.as_ref())),
+        scenes,
+        characters: cards_in(root).len(),
+    })
+}
+
+/// Gives the project in a folder an icon, or takes it away, without the
+/// project being open.
+pub fn set_icon_in(root: &Path, source: Option<&Path>) -> Result<()> {
+    let (mut project, ..) = Project::open(root)?;
+    project.set_icon(source)
+}
+
+/// The cards in a project folder's characters folder, by file name.
+pub fn cards_in(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join(CHARACTERS)) else {
+        return Vec::new();
+    };
+    let mut cards: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| is_card(p)).collect();
+    cards.sort_by(|a, b| by_name(a, b));
+    cards
+}
+
 /// Where new projects go unless the user says otherwise: `Renkatsu` in the
 /// user's documents folder.
 pub fn home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(HOME_VARIABLE).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     let documents = if cfg!(windows) {
         PathBuf::from(std::env::var_os("USERPROFILE")?).join("Documents")
     } else {
@@ -201,6 +306,28 @@ fn documents_of(text: &str, home: &Path) -> Option<PathBuf> {
 }
 
 impl Project {
+    /// No project: what the editor holds while the project selector shows.
+    /// It has no folder, and nothing reads or writes it.
+    pub fn none() -> Project {
+        Project {
+            root: PathBuf::new(),
+            file: ProjectFile {
+                format: FORMAT,
+                name: String::new(),
+                scene: String::new(),
+                ask_before_copying_mods: true,
+                icon: None,
+                thumbnail: None,
+                characters: Vec::new(),
+            },
+        }
+    }
+
+    /// Whether this is the stand-in for no project.
+    pub fn is_none(&self) -> bool {
+        self.root.as_os_str().is_empty()
+    }
+
     /// Makes a new project in `root`, which must be free, with its folders
     /// and its project file. The scene is written by the first save.
     pub fn create(root: &Path, name: &str) -> Result<Project> {
@@ -218,6 +345,8 @@ impl Project {
                 name: name.to_owned(),
                 scene: String::new(),
                 ask_before_copying_mods: true,
+                icon: None,
+                thumbnail: None,
                 characters: Vec::new(),
             },
         };
@@ -282,6 +411,9 @@ impl Project {
     /// Writes the project file, and makes sure every folder is there. A
     /// project file left under another name, by a rename or a copy, goes.
     pub fn save(&self) -> Result<()> {
+        if self.is_none() {
+            bail!("no project is open");
+        }
         for folder in FOLDERS {
             let dir = self.root.join(folder);
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -341,6 +473,59 @@ impl Project {
         Ok(copy)
     }
 
+    /// Makes a PNG picture the project's icon: it is copied into the
+    /// project folder and named in the project file. `None` takes the icon
+    /// away, with its file.
+    pub fn set_icon(&mut self, source: Option<&Path>) -> Result<()> {
+        match source {
+            Some(source) => {
+                let bytes = std::fs::read(source).with_context(|| format!("reading {}", source.display()))?;
+                png::Decoder::new(std::io::Cursor::new(&bytes))
+                    .read_info()
+                    .with_context(|| format!("{} is not a PNG picture", source.display()))?;
+                let target = self.root.join(ICON);
+                std::fs::write(&target, bytes).with_context(|| format!("writing {}", target.display()))?;
+                self.file.icon = Some(ICON.to_owned());
+            }
+            None => {
+                if let Some(old) = self.file.icon.take() {
+                    let _ = std::fs::remove_file(self.root.join(old));
+                }
+            }
+        }
+        self.save()
+    }
+
+    /// Writes the picture of the saved scene, from RGBA bytes of
+    /// `THUMBNAIL_SIZE`, and names it in the project file. `None` removes
+    /// the picture: the scene shows nothing to take one of.
+    pub fn set_thumbnail(&mut self, rgba: Option<&[u8]>) -> Result<()> {
+        let path = self.root.join(THUMBNAIL);
+        let named = match rgba {
+            Some(rgba) => {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let file = std::fs::File::create(&path).with_context(|| format!("writing {}", path.display()))?;
+                let mut encoder =
+                    png::Encoder::new(std::io::BufWriter::new(file), THUMBNAIL_SIZE[0], THUMBNAIL_SIZE[1]);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header()?.write_image_data(rgba)?;
+                Some(THUMBNAIL.to_owned())
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        };
+        if self.file.thumbnail != named {
+            self.file.thumbnail = named;
+            self.save()?;
+        }
+        Ok(())
+    }
+
     pub fn mods_dir(&self) -> PathBuf {
         self.root.join(MODS)
     }
@@ -390,12 +575,10 @@ impl Project {
     /// folder, by file name, under the name it was imported with or, for a
     /// card that was put there by hand, its file name.
     pub fn characters(&self) -> Vec<Character> {
-        let Ok(entries) = std::fs::read_dir(self.root.join(CHARACTERS)) else {
+        if self.is_none() {
             return Vec::new();
-        };
-        let mut cards: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| is_card(p)).collect();
-        cards.sort_by(|a, b| by_name(a, b));
-        cards
+        }
+        cards_in(&self.root)
             .iter()
             .map(|card| {
                 let file = relative(CHARACTERS, &card.file_name().unwrap_or_default().to_string_lossy());
@@ -556,6 +739,89 @@ mod tests {
         assert!(Project::create(&home.join("Untitled project"), "Again").is_err());
         assert_eq!(file_name("a/b: c?"), "a_b_ c_");
         assert_eq!(file_name("  . "), "Untitled");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_project_reads_and_writes_nothing() {
+        let none = Project::none();
+        assert!(none.is_none());
+        assert!(none.characters().is_empty());
+        assert!(none.save().is_err());
+        let home = scratch("none");
+        let project = Project::create(&home.join("P"), "P: one").unwrap();
+        assert!(!project.is_none());
+        assert_eq!(summary(&home.join("P")).map(|s| s.name).as_deref(), Some("P: one"));
+        assert_eq!(summary(&home.join("nowhere")), None);
+        std::fs::write(home.join("P/Characters/b.png"), b"").unwrap();
+        std::fs::write(home.join("P/Characters/A.png"), b"").unwrap();
+        assert_eq!(
+            cards_in(&home.join("P")),
+            [home.join("P/Characters/A.png"), home.join("P/Characters/b.png")]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A PNG picture of one grey pixel.
+    fn tiny_png(path: &Path) {
+        let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[90, 90, 90, 255])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_project_names_its_icon_and_its_scene_picture_relative_to_itself() {
+        let home = scratch("pictures");
+        let root = home.join("P");
+        let mut project = Project::create(&root, "P").unwrap();
+        let none = summary(&root).unwrap();
+        assert_eq!(
+            (none.icon, none.thumbnail, none.scenes, none.characters),
+            (None, None, 0, 0)
+        );
+        assert!(!std::fs::read_to_string(project.path()).unwrap().contains("icon"));
+
+        // The scene's picture goes to a folder of its own, not the renders.
+        let pixels = vec![40u8; (THUMBNAIL_SIZE[0] * THUMBNAIL_SIZE[1] * 4) as usize];
+        project.set_thumbnail(Some(&pixels)).unwrap();
+        assert_eq!(project.file.thumbnail.as_deref(), Some(".renkatsu/thumbnail.png"));
+        assert!(root.join(".renkatsu/thumbnail.png").is_file());
+        assert!(std::fs::read_dir(root.join("Renders")).unwrap().next().is_none());
+
+        // An icon is copied in; what is no picture is refused.
+        tiny_png(&home.join("logo.png"));
+        std::fs::write(home.join("notes.png"), b"not a picture").unwrap();
+        assert!(project.set_icon(Some(&home.join("notes.png"))).is_err());
+        assert_eq!(project.file.icon, None);
+        set_icon_in(&root, Some(&home.join("logo.png"))).unwrap();
+        let text = std::fs::read_to_string(project.path()).unwrap();
+        assert!(text.contains("icon = \"Icon.png\""), "{text}");
+        assert!(text.contains("thumbnail = \".renkatsu/thumbnail.png\""), "{text}");
+        assert!(!text.contains(&*home.to_string_lossy()), "{text}");
+
+        // Scenes and characters are counted from their folders.
+        let (mut project, ..) = Project::open(&root).unwrap();
+        project.save_scene(&Scene::new()).unwrap();
+        std::fs::write(root.join("Scenes/Second.toml"), b"").unwrap();
+        std::fs::write(root.join("Scenes/notes.txt"), b"").unwrap();
+        std::fs::write(root.join("Characters/a.png"), b"").unwrap();
+        let both = summary(&root).unwrap();
+        assert_eq!(both.icon, Some(root.join("Icon.png")));
+        assert_eq!(both.thumbnail, Some(root.join(".renkatsu/thumbnail.png")));
+        assert_eq!((both.scenes, both.characters), (2, 1));
+
+        // Both follow the project to a copy, and both can go again.
+        let copy = project.copy_to(&home.join("Q"), "Q").unwrap();
+        assert_eq!(summary(&copy.root).unwrap().icon, Some(home.join("Q/Icon.png")));
+        project.set_icon(None).unwrap();
+        project.set_thumbnail(None).unwrap();
+        let gone = summary(&root).unwrap();
+        assert_eq!((gone.icon, gone.thumbnail), (None, None));
+        assert!(!root.join("Icon.png").exists() && !root.join(".renkatsu/thumbnail.png").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 

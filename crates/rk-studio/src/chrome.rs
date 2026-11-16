@@ -22,6 +22,9 @@ const APP: &str = "Renkatsu Studio";
 /// The window's title for the desktop: the project, the scene and a mark
 /// for unsaved changes.
 pub fn window_title(st: &State) -> String {
+    if st.project.is_none() {
+        return APP.to_owned();
+    }
     format!(
         "{} - {}{} - {APP}",
         st.project.file.name,
@@ -87,6 +90,20 @@ pub fn title_bar(ui: &mut Ui, k: &Look, st: &State) {
     window_buttons(&mut right, k, if slim { 38.0 } else { 46.0 });
 
     let y = rect.center().y;
+    if st.project.is_none() {
+        // No project is open: the application's name alone.
+        if !slim {
+            mark(ui, k, Pos2::new(rect.left() + 21.0, y));
+        }
+        ui.painter().text(
+            Pos2::new(rect.center().x.round(), y),
+            Align2::CENTER_CENTER,
+            APP,
+            if slim { k.small() } else { k.font() },
+            t.text_dim,
+        );
+        return;
+    }
     let rest = format!(" - {APP}");
     let project_name = st.project.file.name.as_str();
     match st.title_bar {
@@ -341,9 +358,11 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             ("Save", "Ctrl+S", Command::Save),
             ("Save as", "Ctrl+Shift+S", Command::SaveAs),
             ("Import card", "Ctrl+I", Command::ImportCard),
+            ("Set project icon", "", Command::SetIcon),
+            ("Project selector", "", Command::ProjectSelector),
             ("Quit", "Ctrl+Q", Command::Quit),
         ] {
-            if matches!(text, "Save" | "Import card" | "Quit") {
+            if matches!(text, "Save" | "Import card" | "Set project icon") {
                 ui.separator();
             }
             if item(ui, text, keys).clicked() {
@@ -355,8 +374,8 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
                         .settings
                         .recent_projects
                         .iter()
-                        .filter(|p| **p != st.project.root)
-                        .cloned()
+                        .map(|r| r.path.clone())
+                        .filter(|p| *p != st.project.root)
                         .collect();
                     if recent.is_empty() {
                         ui.label(egui::RichText::new("No other projects yet").color(k.t.text_dim));

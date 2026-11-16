@@ -976,6 +976,30 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     if st.physics == crate::state::Physics::Playing {
         ui.ctx().request_repaint();
     }
+    // What was just added gets the camera, once there is something of it
+    // to look at: a character when it is built, anything else where it is.
+    if let Some(id) = st.focus_pending {
+        match (st.doc.scene().get(id), live.subject(id)) {
+            (None, _) => st.focus_pending = None,
+            (Some(_), Some(subject)) => {
+                live.cam.focus_on(subject);
+                st.focus_pending = None;
+            }
+            (Some(object), None) => {
+                if object.kind() != crate::kinds::Kind::Character {
+                    if object.kind() != crate::kinds::Kind::Folder {
+                        live.cam.look_at(object.transform.position.into());
+                    }
+                    st.focus_pending = None;
+                } else if live.failure(id).is_some() {
+                    st.focus_pending = None;
+                }
+            }
+        }
+    }
+    if live.cam.advance(dt) {
+        ui.ctx().request_repaint();
+    }
     st.last_physics = st.physics;
     let ppp = ui.ctx().pixels_per_point();
     let size = [
@@ -1048,6 +1072,7 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     let delta = scene.drag_delta();
     let right = right_down && (scene.dragged_by(Secondary) || scene.is_pointer_button_down_on());
     let nav = if right && alt {
+        cam.cancel_glide();
         cam.orbit.zoom((delta.x - delta.y) * 2.0);
         Some(Nav::Zoom)
     } else if right {
@@ -1075,6 +1100,7 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
         cam.orbit_drag(delta);
         Some(Nav::Orbit)
     } else if scene.dragged_by(Middle) {
+        cam.cancel_glide();
         cam.orbit.pan(delta, full.height());
         Some(Nav::Pan)
     } else {
@@ -1088,6 +1114,7 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
         cam.scroll_speed(scroll);
         st.speed_shown = Some(ui.input(|i| i.time));
     } else if scroll != 0.0 && scene.hovered() {
+        cam.cancel_glide();
         cam.orbit.zoom(scroll);
     }
     if let Some(nav) = nav {

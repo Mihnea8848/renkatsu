@@ -241,7 +241,7 @@ impl Live {
                         let mut home = self.cam.orbit;
                         home.target = subject.center;
                         home.distance = subject.distance;
-                        self.cam = ViewCamera::new(home, Some(subject));
+                        self.cam.rehome(home, Some(subject));
                         self.framed = true;
                     }
                     self.actors.push(actor);
@@ -377,5 +377,26 @@ impl Live {
         self.renderer
             .render_to(&target.texture, &draws, &self.cam.orbit.camera(), &env, background)?;
         Ok(target.id)
+    }
+
+    /// A small picture of the scene as the viewport's camera will see it
+    /// once it is at rest, as RGBA bytes of `size` pixels, for the project
+    /// selector. `None` when the scene shows no character: a picture of
+    /// nothing says nothing.
+    pub fn snapshot(&mut self, scene: &Scene, size: [u32; 2], background: [f64; 4]) -> Result<Option<Vec<u8>>> {
+        let draws: Vec<_> = self
+            .actors
+            .iter()
+            .filter(|a| scene.shown(a.id))
+            .flat_map(|a| a.chara.scene.pose())
+            .collect();
+        if draws.is_empty() {
+            return Ok(None);
+        }
+        let env = self.environment(scene);
+        let camera = self.cam.destination().camera();
+        self.renderer
+            .render(&draws, &camera, &env, size[0], size[1], background)
+            .map(Some)
     }
 }
