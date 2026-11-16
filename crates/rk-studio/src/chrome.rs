@@ -11,9 +11,8 @@ use crate::kinds::Kind;
 use crate::modes::{tool_hint, MODES, TOOLS};
 use crate::panels::{self, Panel};
 use crate::state::{Look, Physics, Rail, State};
-use crate::theme::Theme;
 use crate::viewport::{self, RailShape};
-use crate::widgets::{self, boxed, flat_button, glyph, hair_h, hair_v, label};
+use crate::widgets::{self, flat_button, glyph, hair_h, hair_v, label};
 use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 use egui_dock::DockState;
 use egui_phosphor::regular as icon;
@@ -184,30 +183,38 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
     });
 }
 
-/// Unreal 5's play group, centred in the menu row: a dark segmented box
-/// with a green play, a pause, a red stop that resets the physics, and
-/// the simulation's options.
+/// Unreal 5's play controls, centred in the menu row: flat icon buttons
+/// with no box around them, a soft background only on hover or while
+/// held, thin dividers either side of the group, and the simulation's
+/// options behind a vertical three-dot button. Play is green; pause and
+/// stop stay grey while nothing runs, and stop turns red once it does.
 fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     let t = &k.t;
-    let seg = Vec2::new(34.0, k.d.row);
-    let caret_w = 22.0;
-    let size = Vec2::new(seg.x * 3.0 + caret_w + 2.0, seg.y);
+    let cell = Vec2::new(30.0, k.d.row + 2.0);
+    let dots_w = 20.0;
+    let gap = 2.0;
+    let size = Vec2::new(cell.x * 3.0 + gap * 3.0 + dots_w, cell.y);
     let group = Rect::from_min_size((center - size / 2.0).round(), size);
-    boxed(ui.painter(), group, k.radius(), t.input, t.border);
+    let running = st.physics != Physics::Stopped;
+    {
+        let p = ui.painter();
+        for x in [group.left() - 8.0, group.right() + 8.0] {
+            hair_v(p, x, group.top() + 4.0, group.bottom() - 4.0, t.border);
+        }
+    }
     let tips = [
         "Play the physics",
         "Pause the physics",
         "Stop and reset the physics",
         "Simulation options",
     ];
+    let mut x = group.left();
     for (i, tip) in tips.into_iter().enumerate() {
-        let w = if i == 3 { caret_w } else { seg.x };
-        let cell = Rect::from_min_size(
-            Pos2::new(group.left() + 1.0 + i as f32 * seg.x, group.top()),
-            Vec2::new(w, seg.y),
-        );
+        let w = if i == 3 { dots_w } else { cell.x };
+        let rect = Rect::from_min_size(Pos2::new(x, group.top()), Vec2::new(w, cell.y));
+        x += w + gap;
         let resp = ui
-            .interact(cell, ui.id().with(("play", i)), Sense::click())
+            .interact(rect, ui.id().with(("play", i)), Sense::click())
             .on_hover_text(tip);
         if resp.clicked() {
             st.physics = match (i, st.physics) {
@@ -219,49 +226,45 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
             };
         }
         let p = ui.painter();
-        let inner = cell.shrink2(Vec2::new(1.0, 2.0));
         let held = matches!((i, st.physics), (0, Physics::Playing) | (1, Physics::Paused));
         if held {
-            p.rect_filled(inner, 2.0, Theme::glass(t.play, 46));
+            p.rect_filled(rect, k.radius(), t.control);
         } else if resp.hovered() {
-            p.rect_filled(inner, 2.0, t.control);
+            p.rect_filled(rect, k.radius(), t.hover);
         }
-        if i > 0 {
-            hair_v(p, cell.left(), cell.top() + 5.0, cell.bottom() - 5.0, t.border);
-        }
-        let c = cell.center().round();
+        let c = rect.center().round();
+        let idle = t.text_dim;
         match i {
             0 => {
                 p.add(egui::Shape::convex_polygon(
                     vec![
-                        c + Vec2::new(-4.0, -6.0),
-                        c + Vec2::new(6.0, 0.0),
-                        c + Vec2::new(-4.0, 6.0),
+                        c + Vec2::new(-5.0, -7.0),
+                        c + Vec2::new(7.0, 0.0),
+                        c + Vec2::new(-5.0, 7.0),
                     ],
                     t.play,
                     Stroke::NONE,
                 ));
             }
             1 => {
-                let color = if st.physics == Physics::Stopped {
-                    t.text_dim
-                } else {
-                    t.text_bright
-                };
-                for x in [-4.0, 1.0] {
+                let color = if running { t.text_bright } else { idle };
+                for dx in [-5.0, 1.5] {
                     p.rect_filled(
-                        Rect::from_min_size(c + Vec2::new(x, -5.0), Vec2::new(3.0, 10.0)),
-                        0.0,
+                        Rect::from_min_size(c + Vec2::new(dx, -6.0), Vec2::new(3.5, 12.0)),
+                        0.5,
                         color,
                     );
                 }
             }
             2 => {
-                p.rect_filled(Rect::from_center_size(c, Vec2::splat(10.0)), 1.0, t.stop);
+                let color = if running { t.stop } else { idle };
+                p.rect_filled(Rect::from_center_size(c, Vec2::splat(11.0)), 1.5, color);
             }
             _ => {
-                let color = if resp.hovered() { t.text_bright } else { t.text_dim };
-                glyph(p, k, c + Vec2::new(0.0, 1.0), icon::CARET_DOWN, 10.0, color);
+                let color = if resp.hovered() { t.text_bright } else { idle };
+                for dy in [-5.0, 0.0, 5.0] {
+                    p.circle_filled(c + Vec2::new(0.0, dy), 1.6, color);
+                }
                 egui::Popup::menu(&resp).show(|ui| {
                     let _ = ui.button("Simulate hair");
                     let _ = ui.button("Simulate clothes");
