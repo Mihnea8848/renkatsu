@@ -8,6 +8,7 @@
 //
 // Input:  UserData/renkatsu/cards.txt, one card path per line (relative paths
 //         start at UserData/chara/female). Without the file, the default card.
+//         "path|3" wears outfit 3 and names the files <name>.outfit3.
 // Output: UserData/renkatsu/out/<name>.<view>.studio.png  with Studio's effects
 //         UserData/renkatsu/out/<name>.<view>.plain.png   image effects off
 //         UserData/renkatsu/out/<name>.json
@@ -59,12 +60,13 @@ namespace Renkatsu
             string root = Path.Combine(Paths.GameRootPath, "UserData/renkatsu");
             string outDir = Path.Combine(root, "out");
             Directory.CreateDirectory(outDir);
-            List<string> cards = ReadList(Path.Combine(root, "cards.txt"));
+            List<Entry> cards = ReadList(Path.Combine(root, "cards.txt"));
             Logger.LogMessage("Reference capture: " + cards.Count + " cards");
 
             int done = 0;
-            foreach (string card in cards)
+            foreach (Entry entry in cards)
             {
+                string card = entry.Path;
                 if (!File.Exists(card))
                 {
                     Logger.LogWarning("Reference capture: missing " + card);
@@ -83,6 +85,10 @@ namespace Renkatsu
                 {
                     continue;
                 }
+                if (entry.Outfit >= 0)
+                {
+                    chara.SetCoordinateInfo((ChaFileDefine.CoordinateType)entry.Outfit, true);
+                }
                 // A blink in the middle of a picture would make runs differ.
                 chara.charInfo.ChangeEyesBlinkFlag(false);
                 for (int i = 0; i < SettleFrames; i++)
@@ -92,7 +98,12 @@ namespace Renkatsu
                 yield return new WaitForEndOfFrame();
                 try
                 {
-                    Capture(chara, card, Path.Combine(outDir, Path.GetFileNameWithoutExtension(card)));
+                    string name = Path.GetFileNameWithoutExtension(card);
+                    if (entry.Outfit >= 0)
+                    {
+                        name += ".outfit" + entry.Outfit;
+                    }
+                    Capture(chara, card, Path.Combine(outDir, name));
                     done++;
                 }
                 catch (Exception e)
@@ -109,10 +120,17 @@ namespace Renkatsu
             running = false;
         }
 
-        private static List<string> ReadList(string listPath)
+        private struct Entry
+        {
+            public string Path;
+            // Outfit to wear, or -1 for the one the card loads with.
+            public int Outfit;
+        }
+
+        private static List<Entry> ReadList(string listPath)
         {
             string female = Path.Combine(Paths.GameRootPath, "UserData/chara/female");
-            List<string> cards = new List<string>();
+            List<Entry> cards = new List<Entry>();
             if (File.Exists(listPath))
             {
                 foreach (string raw in File.ReadAllLines(listPath))
@@ -122,12 +140,20 @@ namespace Renkatsu
                     {
                         continue;
                     }
-                    cards.Add(Path.IsPathRooted(line) ? line : Path.Combine(female, line));
+                    int outfit = -1;
+                    int bar = line.LastIndexOf('|');
+                    if (bar >= 0 && int.TryParse(line.Substring(bar + 1).Trim(), out int n))
+                    {
+                        outfit = n;
+                        line = line.Substring(0, bar).Trim();
+                    }
+                    string path = Path.IsPathRooted(line) ? line : Path.Combine(female, line);
+                    cards.Add(new Entry { Path = path, Outfit = outfit });
                 }
             }
             if (cards.Count == 0)
             {
-                cards.Add(Path.Combine(female, "Simple.png"));
+                cards.Add(new Entry { Path = Path.Combine(female, "Simple.png"), Outfit = -1 });
             }
             return cards;
         }
