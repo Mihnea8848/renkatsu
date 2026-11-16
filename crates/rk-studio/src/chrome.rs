@@ -22,6 +22,17 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
     let t = &k.t;
     let rect = ui.max_rect();
     hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.divider);
+    // The row is the window's title bar: its empty parts move the window and
+    // a double click maximises or restores it. Everything drawn on top of it
+    // takes its own clicks first.
+    let title = ui.interact(rect, ui.id().with("title bar"), Sense::click_and_drag());
+    if title.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if title.double_clicked() {
+        let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
 
     // The mark, then the menus and the project. In the design with the
     // rail in the window, the mark sits over the rail's icons.
@@ -75,11 +86,12 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
         UiBuilder::new()
             .max_rect(Rect::from_min_max(
                 Pos2::new(rect.center().x + 80.0, rect.top()),
-                Pos2::new(rect.right() - 8.0, rect.bottom() - 1.0),
+                Pos2::new(rect.right(), rect.bottom() - 1.0),
             ))
             .layout(Layout::right_to_left(Align::Center)),
     );
     right.spacing_mut().item_spacing.x = 6.0;
+    window_buttons(&mut right, k);
     let resp = flat_button(&mut right, k, Some(icon::LAYOUT), "Layout", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         if ui.button("Reset layout").clicked() {
@@ -90,6 +102,141 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
     });
     let w = (right.available_width() - 8.0).clamp(120.0, 260.0);
     widgets::search(&mut right, k, &mut st.command_search, "Search commands", w);
+}
+
+/// Minimise, maximise or restore, and close, at the title bar's right end,
+/// flat as in Unreal; close turns red under the pointer.
+fn window_buttons(ui: &mut Ui, k: &Look) {
+    let t = &k.t;
+    let h = ui.available_height();
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    let restore = if maximized { icon::CORNERS_IN } else { icon::SQUARE };
+    let buttons = [
+        (icon::X, "Close", egui::ViewportCommand::Close),
+        (
+            restore,
+            if maximized { "Restore" } else { "Maximise" },
+            egui::ViewportCommand::Maximized(!maximized),
+        ),
+        (icon::MINUS, "Minimise", egui::ViewportCommand::Minimized(true)),
+    ];
+    let saved = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 0.0;
+    for (i, (glyph_name, tip, command)) in buttons.into_iter().enumerate() {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, h), Sense::click());
+        let resp = resp.on_hover_text(tip);
+        let close = i == 0;
+        let p = ui.painter();
+        if resp.hovered() {
+            let fill = if close {
+                Color32::from_rgb(0xc4, 0x2b, 0x1c)
+            } else {
+                t.control
+            };
+            p.rect_filled(rect, 0.0, fill);
+        }
+        let color = if resp.hovered() { Color32::WHITE } else { t.text };
+        glyph(p, k, rect.center(), glyph_name, 14.0, color);
+        if resp.clicked() {
+            ui.ctx().send_viewport_cmd(command);
+        }
+    }
+    ui.spacing_mut().item_spacing.x = saved;
+    bar_gap(ui, h);
+}
+
+/// A thin divider between the window buttons and the rest of the row.
+fn bar_gap(ui: &mut Ui, h: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(9.0, h), Sense::hover());
+    let _ = rect;
+}
+
+/// The window's edges and corners resize it, now that the system frame is
+/// gone; a thin border shows where the window ends while it is not
+/// maximised.
+pub fn window_edges(ctx: &egui::Context, k: &Look) {
+    use egui::{CursorIcon, ResizeDirection as D};
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)) {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("window border"),
+    ));
+    painter.rect_stroke(
+        screen.shrink(0.5),
+        0.0,
+        Stroke::new(1.0, k.t.border),
+        egui::StrokeKind::Inside,
+    );
+    let grip = 5.0;
+    let corner = 12.0;
+    let (l, r, top, b) = (screen.left(), screen.right(), screen.top(), screen.bottom());
+    let zones = [
+        (
+            Rect::from_min_max(Pos2::new(l, top), Pos2::new(l + corner, top + corner)),
+            D::NorthWest,
+            CursorIcon::ResizeNorthWest,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(r - corner, top), Pos2::new(r, top + corner)),
+            D::NorthEast,
+            CursorIcon::ResizeNorthEast,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(l, b - corner), Pos2::new(l + corner, b)),
+            D::SouthWest,
+            CursorIcon::ResizeSouthWest,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(r - corner, b - corner), Pos2::new(r, b)),
+            D::SouthEast,
+            CursorIcon::ResizeSouthEast,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(l, top), Pos2::new(r, top + grip)),
+            D::North,
+            CursorIcon::ResizeNorth,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(l, b - grip), Pos2::new(r, b)),
+            D::South,
+            CursorIcon::ResizeSouth,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(l, top), Pos2::new(l + grip, b)),
+            D::West,
+            CursorIcon::ResizeWest,
+        ),
+        (
+            Rect::from_min_max(Pos2::new(r - grip, top), Pos2::new(r, b)),
+            D::East,
+            CursorIcon::ResizeEast,
+        ),
+    ];
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window edges"));
+    for (i, (rect, direction, cursor)) in zones.into_iter().enumerate() {
+        let resp = egui::Area::new(egui::Id::new(("window edge", i)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                ui.set_min_size(rect.size());
+                ui.interact(
+                    Rect::from_min_size(ui.min_rect().min, rect.size()),
+                    ui.id(),
+                    Sense::drag(),
+                )
+            })
+            .inner;
+        let _ = layer;
+        if resp.hovered() || resp.dragged() {
+            ctx.set_cursor_icon(cursor);
+        }
+        if resp.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
+    }
 }
 
 fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, reset: &mut bool) {

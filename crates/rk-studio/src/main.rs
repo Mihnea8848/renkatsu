@@ -236,6 +236,7 @@ impl eframe::App for Studio {
             self.state.maximised = false;
         }
         bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &self.state));
+        chrome::window_edges(ui.ctx(), &k);
         if k.d.overlays == Overlays::Header && !self.state.overlays_hidden {
             egui::Panel::left("rail")
                 .exact_size(chrome::window_rail_width(&k, &self.state))
@@ -384,7 +385,10 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("Renkatsu Studio")
-            .with_inner_size([w, h]),
+            .with_inner_size([w, h])
+            .with_min_inner_size([960.0, 600.0])
+            // The window draws its own title bar and border, as Unreal does.
+            .with_decorations(false),
         ..Default::default()
     };
     let mut error = None;

@@ -50,10 +50,35 @@ impl Orbit {
         }
     }
 
-    /// Turns around the target, by a drag in points.
+    /// Turns around the target, by a drag in points: dragging right turns
+    /// the view right and dragging down tilts it down, as in Unity.
     pub fn rotate(&mut self, drag: egui::Vec2) {
-        self.yaw += drag.x * 0.008;
-        self.pitch = (self.pitch + drag.y * 0.008).clamp(-1.5, 1.5);
+        self.turn(drag, 0.008);
+    }
+
+    fn turn(&mut self, drag: egui::Vec2, rate: f32) {
+        self.yaw -= drag.x * rate;
+        self.pitch = (self.pitch + drag.y * rate).clamp(-1.5, 1.5);
+    }
+
+    /// Turns the camera where it stands, by a drag in points, as holding
+    /// the right button does in Unity: the eye stays and the target moves.
+    pub fn look(&mut self, drag: egui::Vec2) {
+        let eye = self.camera().eye;
+        self.turn(drag, 0.004);
+        let to_eye = self.camera().eye - self.target;
+        self.target = eye - to_eye;
+    }
+
+    /// Flies the camera and its target together. `along` is right, up and
+    /// forward, each -1 to 1; the speed follows the distance to the target
+    /// so it suits a close-up and a whole room alike.
+    pub fn fly(&mut self, along: Vec3, dt: f32, fast: bool) {
+        let cam = self.camera();
+        let forward = (cam.target - cam.eye).normalize_or_zero();
+        let right = Vec3::Y.cross(forward).normalize_or_zero();
+        let speed = self.distance.max(0.5) * if fast { 3.0 } else { 1.0 };
+        self.target += (right * along.x + Vec3::Y * along.y + forward * along.z) * speed * dt;
     }
 
     /// Moves the target across the view, by a drag in points.
@@ -216,7 +241,28 @@ mod tests {
         };
         o.zoom(1.0e6);
         assert!(o.distance >= 0.05);
-        o.rotate(egui::Vec2::new(0.0, 1.0e4));
+        o.rotate(egui::Vec2::new(0.0, -1.0e4));
         assert!(o.pitch <= 1.5);
+        o.rotate(egui::Vec2::new(0.0, 1.0e4));
+        assert!(o.pitch >= -1.5);
+    }
+
+    #[test]
+    fn looking_keeps_the_eye_and_flying_moves_both() {
+        let mut o = Orbit {
+            target: Vec3::new(0.0, 1.0, 0.0),
+            yaw: 0.3,
+            pitch: 0.2,
+            distance: 2.0,
+            fov_y_deg: 30.0,
+        };
+        let eye = o.camera().eye;
+        o.look(egui::Vec2::new(40.0, -25.0));
+        assert!((o.camera().eye - eye).length() < 1e-4);
+        let (eye, target) = (o.camera().eye, o.target);
+        o.fly(Vec3::new(0.0, 0.0, 1.0), 0.5, false);
+        let moved = o.target - target;
+        assert!(moved.length() > 0.1);
+        assert!(((o.camera().eye - eye) - moved).length() < 1e-4);
     }
 }

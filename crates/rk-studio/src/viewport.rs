@@ -111,6 +111,10 @@ fn keys(ui: &Ui, st: &mut State) {
             st.pick_mode(i);
         }
     }
+    // While the right button is held these keys fly the camera instead.
+    if ui.input(|i| i.pointer.secondary_down()) {
+        return;
+    }
     for (i, key) in [Key::Q, Key::W, Key::E, Key::R, Key::T].into_iter().enumerate() {
         if pressed(key) {
             st.tool = i + 1;
@@ -382,6 +386,14 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
         .clicked()
     {
         st.maximised = !st.maximised;
+    }
+    if let Some(live) = st.live.as_mut() {
+        if icon_button(ui, k, icon::ARROWS_COUNTER_CLOCKWISE, false)
+            .on_hover_text("Reset the view to the starting framing (Home)")
+            .clicked()
+        {
+            live.frame();
+        }
     }
     if icon_button(ui, k, icon::EYE_SLASH, st.overlays_hidden)
         .on_hover_text("Hide or show the viewport tools (`)")
@@ -727,23 +739,115 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     }
 }
 
-/// Unity's viewport navigation: the right button, or Alt with the left,
-/// orbits; the middle button pans; the wheel zooms; F frames the character.
+/// What a drag in the viewport is doing, as in Unity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    /// Right button: turn where the camera stands, and fly with W A S D.
+    Look,
+    /// Alt and the left button: turn around the target.
+    Orbit,
+    /// Middle button: slide the view.
+    Pan,
+    /// Alt and the right button: move closer or farther.
+    Zoom,
+}
+
+impl Nav {
+    /// The symbol the pointer turns into, after Unity's: an eye while
+    /// looking, a turning arrow while orbiting, a hand while panning and a
+    /// magnifier while zooming. Drawn with our own icon font.
+    fn glyph(self) -> &'static str {
+        match self {
+            Nav::Look => icon::EYE,
+            Nav::Orbit => icon::ARROWS_CLOCKWISE,
+            Nav::Pan => icon::HAND_GRABBING,
+            Nav::Zoom => icon::MAGNIFYING_GLASS,
+        }
+    }
+}
+
+/// Unity's viewport navigation. The right button looks around and, while
+/// it is held, W A S D fly, Q and E go down and up, Shift goes faster; Alt
+/// with the left button orbits; the middle button pans; Alt with the right
+/// button or the wheel zooms; F frames the character and Home resets the
+/// view.
 fn navigate(ui: &Ui, live: &mut crate::live::Live, scene: &egui::Response, full: Rect) {
-    let alt = ui.input(|i| i.modifiers.alt);
+    use egui::PointerButton::{Middle, Primary, Secondary};
+    let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
     let delta = scene.drag_delta();
-    if scene.dragged_by(egui::PointerButton::Secondary) || (alt && scene.dragged_by(egui::PointerButton::Primary)) {
-        live.orbit.rotate(delta);
-    } else if scene.dragged_by(egui::PointerButton::Middle) {
-        live.orbit.pan(delta, full.height());
+    let nav = if scene.dragged_by(Secondary) {
+        Some(if alt { Nav::Zoom } else { Nav::Look })
+    } else if alt && scene.dragged_by(Primary) {
+        Some(Nav::Orbit)
+    } else if scene.dragged_by(Middle) {
+        Some(Nav::Pan)
+    } else {
+        None
+    };
+    match nav {
+        Some(Nav::Look) => live.orbit.look(delta),
+        Some(Nav::Orbit) => live.orbit.rotate(delta),
+        Some(Nav::Pan) => live.orbit.pan(delta, full.height()),
+        Some(Nav::Zoom) => live.orbit.zoom((delta.x - delta.y) * 2.0),
+        None => {}
+    }
+    if nav == Some(Nav::Look) {
+        let held = |key: Key| if ui.input(|i| i.key_down(key)) { 1.0 } else { 0.0 };
+        let along = glam::Vec3::new(
+            held(Key::D) - held(Key::A),
+            held(Key::E) - held(Key::Q),
+            held(Key::W) - held(Key::S),
+        );
+        if along != glam::Vec3::ZERO {
+            let dt = ui.input(|i| i.stable_dt).min(1.0 / 20.0);
+            live.orbit.fly(along, dt, shift);
+        }
+        // Keep drawing while the button is held, so flying is smooth.
+        ui.ctx().request_repaint();
     }
     if scene.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             live.orbit.zoom(scroll);
         }
-        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::F) && i.modifiers.is_none()) {
-            live.frame();
+        if !ui.ctx().egui_wants_keyboard_input() {
+            if ui.input(|i| i.key_pressed(Key::F) && i.modifiers.is_none()) {
+                live.frame();
+            }
+            if ui.input(|i| i.key_pressed(Key::Home)) {
+                live.frame();
+            }
         }
     }
+    if let Some(nav) = nav {
+        nav_cursor(ui, nav);
+    }
+}
+
+/// Hides the system pointer and draws the action's symbol in its place,
+/// with a dark edge so it reads on any picture.
+fn nav_cursor(ui: &Ui, nav: Nav) {
+    let Some(at) = ui.input(|i| i.pointer.latest_pos()) else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("nav cursor")));
+    let font = egui::FontId::proportional(20.0);
+    for offset in [
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, -1.0),
+        Vec2::new(0.0, 1.0),
+    ] {
+        painter.text(
+            at + offset,
+            Align2::CENTER_CENTER,
+            nav.glyph(),
+            font.clone(),
+            Color32::from_black_alpha(220),
+        );
+    }
+    painter.text(at, Align2::CENTER_CENTER, nav.glyph(), font, Color32::WHITE);
 }
