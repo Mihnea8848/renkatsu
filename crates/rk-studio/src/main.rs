@@ -139,6 +139,11 @@ impl Studio {
             ui.menu_button("Help", |ui| {
                 let _ = ui.button("About Renkatsu");
             });
+            if matches!(self.look.top_bar, TopBar::Combined | TopBar::CombinedRail) {
+                ui.add_space(24.0);
+                let theme = self.theme;
+                toolbar::menu_bar_tools(ui, &theme, self.look.top_bar == TopBar::Combined);
+            }
         });
     }
 }
@@ -157,10 +162,10 @@ impl eframe::App for Studio {
         let top_margin = match self.look.top_bar {
             TopBar::Unreal | TopBar::Unity => egui::Margin::symmetric(6, 3),
             TopBar::Labelled | TopBar::UnityOverlay | TopBar::UnrealModes => egui::Margin::symmetric(6, 3),
-            TopBar::ContextBar => egui::Margin::ZERO,
+            TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail => egui::Margin::ZERO,
             TopBar::SlimRibbon | TopBar::Ribbon | TopBar::ProRibbon | TopBar::ModeBar => egui::Margin::ZERO,
         };
-        if self.look.top_bar != TopBar::ContextBar {
+        if !self.look.top_bar.no_toolbar() {
             egui::Panel::top("ribbon")
                 .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
                 .show(ui, |ui| match self.look.top_bar {
@@ -172,7 +177,7 @@ impl eframe::App for Studio {
                     TopBar::ModeBar => toolbar::mode_bar(ui, &t, &mut self.ribbon),
                     TopBar::UnityOverlay => toolbar::slim(ui, &t, false),
                     TopBar::UnrealModes => toolbar::slim(ui, &t, true),
-                    TopBar::ContextBar => {}
+                    TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail => {}
                     TopBar::Ribbon => {
                         if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
                             match label {

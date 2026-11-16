@@ -66,7 +66,7 @@ pub fn default_layout(top_bar: TopBar) -> DockState<Panel> {
     surface.split_below(right, 0.42, vec![Panel::Properties]);
     let [top, _] = surface.split_below(left, 0.70, vec![Panel::Content, Panel::Console, Panel::Timeline]);
     // Unreal's modes keep the active mode's tools in a panel on the left.
-    if top_bar == TopBar::UnrealModes {
+    if top_bar.has_tools_panel() {
         surface.split_left(top, 0.2, vec![Panel::Tools]);
     }
     state
@@ -132,7 +132,7 @@ impl Viewer<'_> {
                 ui.label(RichText::new("Koikatsu look").color(t.text_dim));
             });
         });
-        if self.top_bar == TopBar::ContextBar {
+        if self.top_bar.has_context_bar() {
             self.context_bar(ui);
         }
         let rect = ui.available_rect_before_wrap();
@@ -155,7 +155,7 @@ impl Viewer<'_> {
             egui::FontId::proportional(11.0),
             t.text_dim,
         );
-        if matches!(self.top_bar, TopBar::UnityOverlay | TopBar::ContextBar) {
+        if self.top_bar == TopBar::UnityOverlay || self.top_bar.has_context_bar() {
             tool_strip(ui, t, rect);
         }
         ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -336,6 +336,17 @@ impl Viewer<'_> {
 
     /// Unreal's mode toolkit: the tools of the active mode, here Pose.
     fn tools(&mut self, ui: &mut Ui) {
+        if self.top_bar == TopBar::CombinedRail {
+            ui.horizontal_top(|ui| {
+                mode_rail(ui, self.theme, 2);
+                ui.vertical(|ui| self.tool_list(ui));
+            });
+        } else {
+            self.tool_list(ui);
+        }
+    }
+
+    fn tool_list(&mut self, ui: &mut Ui) {
         let t = self.theme;
         ui.label(
             RichText::new(format!("{}  Pose mode", icon::PERSON_ARMS_SPREAD))
@@ -510,6 +521,36 @@ fn tool_strip(ui: &mut Ui, t: &Theme, viewport: egui::Rect) {
             *g,
             egui::FontId::proportional(16.0),
             t.text,
+        );
+    }
+}
+
+/// The modes as a named vertical rail, the active one marked.
+fn mode_rail(ui: &mut Ui, t: &Theme, active: usize) {
+    let w = 64.0;
+    let (rail, _) = ui.allocate_exact_size(Vec2::new(w, 6.0 * 50.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rail, 0.0, t.header);
+    for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
+        let cell = egui::Rect::from_min_size(rail.min + Vec2::new(0.0, i as f32 * 50.0), Vec2::new(w, 50.0));
+        if i == active {
+            p.rect_filled(cell, 0.0, t.panel);
+            p.vline(cell.left() + 1.0, cell.y_range(), egui::Stroke::new(2.0, t.select));
+        }
+        let color = if i == active { t.text } else { t.text_dim };
+        p.text(
+            cell.center() - Vec2::new(0.0, 8.0),
+            egui::Align2::CENTER_CENTER,
+            *g,
+            egui::FontId::proportional(18.0),
+            color,
+        );
+        p.text(
+            cell.center() + Vec2::new(0.0, 13.0),
+            egui::Align2::CENTER_CENTER,
+            *name,
+            egui::FontId::proportional(11.0),
+            color,
         );
     }
 }

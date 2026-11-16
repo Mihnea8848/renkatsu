@@ -32,6 +32,29 @@ pub enum TopBar {
     UnrealModes,
     /// No toolbar: a bar above the viewport offers what fits the selection.
     ContextBar,
+    /// Unreal's modes and Tools panel with the context bar; the mode
+    /// selector, Add and play controls sit in the menu bar row.
+    Combined,
+    /// As Combined, with the modes as a named vertical rail beside the tools.
+    CombinedRail,
+}
+
+impl TopBar {
+    /// Whether the active mode's tools live in a docked Tools panel.
+    pub fn has_tools_panel(self) -> bool {
+        matches!(self, TopBar::UnrealModes | TopBar::Combined | TopBar::CombinedRail)
+    }
+
+    /// Whether the viewport carries the selection's context bar and the
+    /// floating tool strip.
+    pub fn has_context_bar(self) -> bool {
+        matches!(self, TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail)
+    }
+
+    /// Whether there is no toolbar row under the menu bar.
+    pub fn no_toolbar(self) -> bool {
+        matches!(self, TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail)
+    }
 }
 
 /// How docked panel tabs are drawn.

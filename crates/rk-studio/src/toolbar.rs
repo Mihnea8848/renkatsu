@@ -34,7 +34,7 @@ fn icon_button(ui: &mut Ui, theme: &Theme, glyph: &str, tip: &str, on: bool) -> 
 }
 
 /// A labelled dropdown button whose menu lists a category's actions.
-fn category_menu(ui: &mut Ui, glyph: &str, name: &str, tab: usize) {
+pub fn category_menu(ui: &mut Ui, glyph: &str, name: &str, tab: usize) {
     ui.menu_button(format!("{glyph}  {name}  {}", icon::CARET_DOWN), |ui| {
         for (gi, group) in TABS[tab].groups.iter().enumerate() {
             if gi > 0 {
@@ -57,7 +57,7 @@ fn divider(ui: &mut Ui, theme: &Theme) {
 }
 
 /// Play, pause and reset for the physics, centred in the remaining space.
-fn play_controls(ui: &mut Ui, theme: &Theme) {
+pub fn play_controls(ui: &mut Ui, theme: &Theme) {
     for (g, tip, on) in [
         (icon::PLAY, "Play physics", true),
         (icon::PAUSE, "Pause", false),
@@ -473,6 +473,49 @@ pub fn slim(ui: &mut Ui, theme: &Theme, modes: bool) {
                     .hint_text(format!("{}  Search commands", icon::MAGNIFYING_GLASS))
                     .desired_width(200.0),
             );
+        });
+    });
+}
+
+/// The modes of the editor, each with its icon.
+pub const MODES: [(&str, &str); 6] = [
+    (icon::CURSOR, "Select"),
+    (icon::USER, "Character"),
+    (icon::PERSON_ARMS_SPREAD, "Pose"),
+    (icon::LIGHTBULB, "Light"),
+    (icon::FILM_STRIP, "Animate"),
+    (icon::FILM_SLATE, "Bake"),
+];
+
+/// The right side of the menu bar row in the combined directions: with
+/// `modes`, the mode selector and Add, then play controls, command search
+/// and the layout menu.
+pub fn menu_bar_tools(ui: &mut Ui, theme: &Theme, modes: bool) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.menu_button(format!("{}  Layout  {}", icon::LAYOUT, icon::CARET_DOWN), |ui| {
+            let _ = ui.button("Reset layout");
+        });
+        let mut text = String::new();
+        ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .hint_text(format!("{}  Search commands", icon::MAGNIFYING_GLASS))
+                .desired_width(180.0),
+        );
+        divider(ui, theme);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            if modes {
+                ui.menu_button(
+                    format!("{}  Pose mode  {}", icon::PERSON_ARMS_SPREAD, icon::CARET_DOWN),
+                    |ui| {
+                        for (g, m) in MODES {
+                            let _ = ui.button(format!("{g}  {m}"));
+                        }
+                    },
+                );
+                category_menu(ui, icon::PLUS_CIRCLE, "Add", 0);
+                divider(ui, theme);
+            }
+            play_controls(ui, theme);
         });
     });
 }
