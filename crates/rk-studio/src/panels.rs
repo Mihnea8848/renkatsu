@@ -1,13 +1,19 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The docked panels and Unity's default layout. Content is placeholder: the
-//! shell is for judging layout and look before the scene model exists.
+//! The docked panels and Unity's default layout: the viewport large at the
+//! top left, Outliner over Properties on the right, Content, Console and
+//! Timeline along the bottom. Their content is placeholder until the scene
+//! model exists; the shell is for judging layout and look.
 
-use crate::appearance::{Kind, TopBar, TypeIcons, TypePalette};
-use crate::theme::Theme;
-use egui::{Color32, RichText, TextureHandle, Ui, Vec2};
-use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabViewer};
+use crate::design::{Overlays, Tabs, Tree};
+use crate::kinds::Kind;
+use crate::properties;
+use crate::state::{has_children, Look, State, SCENE};
+use crate::viewport;
+use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, label};
+use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
+use egui_dock::{DockState, NodeIndex, TabViewer};
 use egui_phosphor::regular as icon;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,18 +24,16 @@ pub enum Panel {
     Content,
     Console,
     Timeline,
-    Tools,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 7] = [
+    pub const ALL: [Panel; 6] = [
         Panel::Viewport,
         Panel::Outliner,
         Panel::Properties,
         Panel::Content,
         Panel::Console,
         Panel::Timeline,
-        Panel::Tools,
     ];
 
     pub fn title(self) -> &'static str {
@@ -40,11 +44,10 @@ impl Panel {
             Panel::Content => "Content",
             Panel::Console => "Console",
             Panel::Timeline => "Timeline",
-            Panel::Tools => "Tools",
         }
     }
 
-    fn glyph(self) -> &'static str {
+    pub fn glyph(self) -> &'static str {
         match self {
             Panel::Viewport => icon::CUBE_FOCUS,
             Panel::Outliner => icon::TREE_STRUCTURE,
@@ -52,54 +55,89 @@ impl Panel {
             Panel::Content => icon::FOLDER_SIMPLE,
             Panel::Console => icon::TERMINAL_WINDOW,
             Panel::Timeline => icon::FILM_STRIP,
-            Panel::Tools => icon::TOOLBOX,
         }
     }
 }
 
-/// Unity's arrangement: the viewport large at the top left, Outliner over
-/// Properties on the right, Content, Console and Timeline along the bottom.
-pub fn default_layout(top_bar: TopBar) -> DockState<Panel> {
+/// Unity's arrangement, with the viewport given as much room as the side
+/// and bottom panels can spare.
+pub fn default_layout(bottom: Panel) -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
     let surface = state.main_surface_mut();
-    let [left, right] = surface.split_right(NodeIndex::root(), 0.8, vec![Panel::Outliner]);
-    surface.split_below(right, 0.42, vec![Panel::Properties]);
-    let [top, _] = surface.split_below(left, 0.76, vec![Panel::Content, Panel::Console, Panel::Timeline]);
-    // Unreal's modes keep the active mode's tools in a panel on the left.
-    if top_bar.has_tools_panel() {
-        surface.split_left(top, 0.2, vec![Panel::Tools]);
+    let [left, right] = surface.split_right(NodeIndex::root(), 0.795, vec![Panel::Outliner]);
+    surface.split_below(right, 0.44, vec![Panel::Properties]);
+    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline];
+    let active = tabs.iter().position(|p| *p == bottom).unwrap_or(0);
+    let [top, below] = surface.split_below(left, 0.775, tabs);
+    let path = |node| egui_dock::NodePath {
+        surface: egui_dock::SurfaceIndex::main(),
+        node,
+    };
+    if let Ok(leaf) = state.leaf_mut(path(below)) {
+        let _ = leaf.set_active_tab(active);
     }
+    state.set_focused_node_and_surface(path(top));
     state
 }
 
-/// Opens a panel that is not shown, as Window in the menu bar does.
+/// Opens a panel that is not shown, as Window in the menu row does.
 pub fn open(state: &mut DockState<Panel>, panel: Panel) {
     if state.find_tab(&panel).is_none() {
         state.push_to_focused_leaf(panel);
     }
-    let _ = SurfaceIndex::main();
 }
 
-/// What the viewport's overlays show, kept between frames.
-pub struct Overlays {
-    /// Index into `toolbar::MODES`.
-    pub mode: usize,
-    /// The active mode's tool palette is open.
-    pub palette: bool,
-    /// The mode rail is shown; folded it is a thin edge.
-    pub rail: bool,
-    /// Every overlay is hidden.
-    pub hidden: bool,
+/// The docking style of a design: square tabs, thin dividers.
+pub fn dock_style(ui: &Ui, k: &Look) -> egui_dock::Style {
+    let t = &k.t;
+    let mut style = egui_dock::Style::from_egui(ui.style().as_ref());
+    let underline = k.d.tabs == Tabs::Underline;
+    let bar = if underline { t.panel } else { t.well };
+    style.tab_bar.bg_fill = bar;
+    style.tab_bar.height = k.d.tab_height;
+    style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+    style.tab_bar.hline_color = if underline { t.line } else { bar };
+    style.tab.hline_below_active_tab_name = underline;
+    style.tab.spacing = 0.0;
+    style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
+    style.tab.tab_body.stroke = Stroke::NONE;
+    style.tab.tab_body.inner_margin = egui::Margin::ZERO;
+    style.tab.tab_body.bg_fill = t.panel;
+    let lit = if underline { t.panel } else { t.row_hover };
+    for (state, fill, text) in [
+        (&mut style.tab.active, t.panel, t.text_bright),
+        (&mut style.tab.focused, t.panel, t.text_bright),
+        (&mut style.tab.inactive, bar, t.text_dim),
+        (&mut style.tab.hovered, lit, t.text),
+        (&mut style.tab.active_with_kb_focus, t.panel, t.text_bright),
+        (&mut style.tab.focused_with_kb_focus, t.panel, t.text_bright),
+        (&mut style.tab.inactive_with_kb_focus, bar, t.text_dim),
+    ] {
+        state.corner_radius = egui::CornerRadius::ZERO;
+        state.bg_fill = fill;
+        state.outline_color = Color32::TRANSPARENT;
+        state.text_color = text;
+    }
+    style.separator.width = k.d.separator;
+    style.separator.extra_interact_width = 4.0;
+    style.separator.color_idle = t.divider;
+    style.separator.color_hovered = t.select;
+    style.separator.color_dragged = t.select;
+    style.main_surface_border_stroke = Stroke::NONE;
+    style.main_surface_border_rounding = egui::CornerRadius::ZERO;
+    style.overlay.selection_color = crate::theme::Theme::glass(t.select, 90);
+    style
 }
 
 pub struct Viewer<'a> {
-    pub theme: &'a Theme,
-    pub viewport_image: Option<&'a TextureHandle>,
-    pub selected: &'a mut usize,
-    pub type_icons: TypeIcons,
-    pub palette: TypePalette,
-    pub top_bar: TopBar,
-    pub overlays: &'a mut Overlays,
+    pub k: &'a Look,
+    pub st: &'a mut State,
+    /// The tab shown in each group of tabs.
+    pub active: Vec<Panel>,
+    /// The panel that has the focus.
+    pub focused: Panel,
+    /// Where each tab's title was drawn this frame.
+    pub tab_rects: Vec<(Panel, Rect)>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -110,741 +148,589 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        format!("{}  {}", tab.glyph(), tab.title()).into()
+        let k = self.k;
+        let format = |font: egui::FontId| egui::TextFormat {
+            font_id: font,
+            color: Color32::PLACEHOLDER,
+            valign: Align::Center,
+            ..Default::default()
+        };
+        let mut job = egui::text::LayoutJob::default();
+        if k.d.tab_icons {
+            job.append(tab.glyph(), 2.0, format(k.icons(15.0)));
+            job.append(tab.title(), 6.0, format(k.font()));
+        } else {
+            job.append(tab.title(), 4.0, format(k.font()));
+        }
+        job.append(" ", 0.0, format(k.font()));
+        job.into()
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let header = self.viewport_header(ui);
+        let (k, st) = (self.k, &mut *self.st);
         match tab {
-            Panel::Viewport => self.viewport(ui),
-            Panel::Outliner => self.outliner(ui),
-            Panel::Properties => self.properties(ui),
-            Panel::Content => self.content(ui),
-            Panel::Console => self.console(ui),
-            Panel::Tools => self.tools(ui),
-            Panel::Timeline => {
-                ui.label(RichText::new("The timeline arrives with animation.").color(self.theme.text_dim));
-            }
+            Panel::Viewport => viewport::show(ui, k, st, header),
+            Panel::Outliner => outliner(ui, k, st),
+            Panel::Properties => properties::show(ui, k, st),
+            Panel::Content => content(ui, k, st),
+            Panel::Console => console(ui, k, st),
+            Panel::Timeline => timeline(ui, k),
         }
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Panel, response: &egui::Response) {
+        self.tab_rects.push((*tab, response.rect));
+        if !self.active.contains(tab) {
+            return;
+        }
+        let t = &self.k.t;
+        let color = if self.focused == *tab { t.select } else { t.hover };
+        let r = response.rect;
+        let line = match self.k.d.tabs {
+            Tabs::Filled => return,
+            Tabs::TopLine => Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 2.0)),
+            Tabs::Underline => Rect::from_min_max(
+                Pos2::new(r.left() + 10.0, r.bottom() - 3.0),
+                Pos2::new(r.right() - 10.0, r.bottom() - 1.0),
+            ),
+        };
+        response
+            .ctx
+            .layer_painter(response.layer_id)
+            .rect_filled(line, 0.0, color);
+    }
+
+    fn scroll_bars(&self, _tab: &Panel) -> [bool; 2] {
+        [false, false]
     }
 }
 
 impl Viewer<'_> {
-    fn viewport(&mut self, ui: &mut Ui) {
-        if self.top_bar.tools_in_viewport() {
-            self.studio_viewport(ui);
-            return;
+    /// The free part of the tab row above the viewport, for the design
+    /// that puts the selection bar there.
+    fn viewport_header(&self, ui: &Ui) -> Option<Rect> {
+        if self.k.d.overlays != Overlays::Header {
+            return None;
         }
-        let t = self.theme;
-        // Toolbar along the top edge, as in Unreal.
-        ui.horizontal(|ui| {
-            for (g, label) in [
-                (icon::CAMERA, "Perspective"),
-                (icon::SUN, "Lit"),
-                (icon::GLOBE_SIMPLE, "World"),
-                (icon::MAGNET, "Snap"),
-            ] {
-                let _ = ui.button(format!("{g}  {label}"));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Koikatsu look").color(t.text_dim));
-            });
-        });
-        if self.top_bar.has_context_bar() {
-            self.context_bar(ui);
+        let body = ui.available_rect_before_wrap();
+        let row = Rect::from_min_max(
+            Pos2::new(body.left(), body.top() - self.k.d.tab_height),
+            Pos2::new(body.right(), body.top() - 1.0),
+        );
+        let tabs_end = self
+            .tab_rects
+            .iter()
+            .filter(|(_, r)| row.contains(r.center()))
+            .map(|(_, r)| r.right())
+            .fold(row.left(), f32::max);
+        let free = Rect::from_min_max(Pos2::new(tabs_end + 4.0, row.top()), row.max);
+        (free.width() > 240.0).then_some(free)
+    }
+}
+
+/// A row of controls across the top of a panel. Returns its rectangle.
+fn toolbar(ui: &mut Ui, k: &Look, add: impl FnOnce(&mut Ui)) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 10.0), Sense::hover());
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(8.0, 0.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = 4.0;
+    add(&mut row);
+    rect
+}
+
+/// A type colour lightened so it stays readable on the selection colour.
+fn on_selection(color: Color32) -> Color32 {
+    let mix = |c: u8| (u16::from(c) + (255 - u16::from(c)) * 7 / 10) as u8;
+    Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
+}
+
+fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
+    let t = &k.t;
+    toolbar(ui, k, |ui| {
+        if k.d.tree == Tree::Plain {
+            let _ = flat_button(ui, k, Some(icon::PLUS), "", true, false).on_hover_text("Add to the scene");
         }
-        let rect = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(rect, 0.0, t.field);
-        if let Some(tex) = self.viewport_image {
-            let size = tex.size_vec2();
-            let scale = (rect.width() / size.x).min(rect.height() / size.y);
-            let fit = egui::Rect::from_center_size(rect.center(), size * scale);
-            ui.painter().image(
-                tex.id(),
-                fit,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        ui.painter().text(
-            rect.left_bottom() + Vec2::new(8.0, -8.0),
-            egui::Align2::LEFT_BOTTOM,
-            "Still image: the live viewport comes next",
-            egui::FontId::proportional(11.0),
+        let w = ui.available_width() - k.field() - 4.0;
+        widgets::search(ui, k, &mut st.scene_search, "Search the scene", w);
+        let _ = icon_button(ui, k, icon::FUNNEL, false).on_hover_text("Filter by type");
+    });
+
+    let eye_w = 28.0;
+    let type_w = 92.0;
+    if k.d.tree == Tree::Columns {
+        let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(head, 0.0, t.header);
+        glyph(
+            p,
+            k,
+            Pos2::new(head.left() + eye_w / 2.0, head.center().y),
+            icon::EYE,
+            13.0,
             t.text_dim,
         );
-        if self.top_bar == TopBar::UnityOverlay || self.top_bar.has_context_bar() {
-            tool_strip(ui, t, rect);
-        }
-        ui.allocate_rect(rect, egui::Sense::click_and_drag());
-    }
-
-    /// The converged design: the picture fills the panel, and everything
-    /// else floats over it. A slim row along the top carries the
-    /// selection's actions and the view options; down the left side sit
-    /// the named mode rail, the active mode's tools and the tool strip.
-    fn studio_viewport(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        let full = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(full, 0.0, t.field);
-        if let Some(tex) = self.viewport_image {
-            let size = tex.size_vec2();
-            let scale = (full.width() / size.x).min(full.height() / size.y);
-            let fit = egui::Rect::from_center_size(full.center(), size * scale);
-            ui.painter().image(
-                tex.id(),
-                fit,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        let overlay = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 235);
-        // The backtick key hides every overlay, for a clean viewport.
-        if ui.input(|i| i.key_pressed(egui::Key::Backtick)) {
-            self.overlays.hidden = !self.overlays.hidden;
-        }
-        if self.overlays.hidden {
-            ui.painter().text(
-                full.right_top() + Vec2::new(-10.0, 10.0),
-                egui::Align2::RIGHT_TOP,
-                "Press ` to show the tools",
-                egui::FontId::proportional(11.0),
-                t.text_dim,
-            );
-            ui.allocate_rect(full, egui::Sense::click_and_drag());
-            return;
-        }
-
-        // Top row: the selection and what can be done with it, then the view.
-        let bar_h = t.row + 8.0;
-        let bar = egui::Rect::from_min_size(full.min, Vec2::new(full.width(), bar_h));
-        ui.painter().rect_filled(bar, 0.0, overlay(t.header));
-        let mut row = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(bar.shrink2(Vec2::new(8.0, 4.0)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        row.spacing_mut().item_spacing.x = 2.0;
-        row.label(
-            RichText::new(Kind::Character.glyph())
-                .color(Kind::Character.color(self.palette))
-                .size(15.0),
-        );
-        row.label(RichText::new("Simple").color(Color32::WHITE));
-        row.label(RichText::new("Character").color(t.text_dim).size(12.0));
-        row.add_space(10.0);
-        for (g, label) in [
-            (icon::IDENTIFICATION_CARD, "Load card"),
-            (icon::T_SHIRT, "Outfit"),
-            (icon::SMILEY, "Expression"),
-            (icon::PUZZLE_PIECE, "Modules"),
-        ] {
-            let _ = row.add(egui::Button::new(format!("{g}  {label}  {}", icon::CARET_DOWN)).frame(false));
-        }
-        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for (g, label) in [
-                (icon::MAGNET, "Snap"),
-                (icon::SUN, "Lit"),
-                (icon::CAMERA, "Perspective"),
-            ] {
-                let _ = ui.add(egui::Button::new(format!("{g}  {label}")).frame(false));
-            }
-        });
-
-        // Left: the named mode rail, which can fold to a thin edge.
-        let rail_w = if self.overlays.rail { 58.0 } else { 14.0 };
-        let rail = egui::Rect::from_min_max(
-            egui::pos2(full.left(), bar.bottom()),
-            egui::pos2(full.left() + rail_w, full.bottom()),
-        );
-        ui.painter().rect_filled(rail, 0.0, overlay(t.header));
-        if self.overlays.rail {
-            for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
-                let cell = egui::Rect::from_min_size(
-                    rail.min + Vec2::new(0.0, 4.0 + i as f32 * 54.0),
-                    Vec2::new(rail_w, 54.0),
-                );
-                let resp = ui.interact(cell, ui.id().with(("mode", i)), egui::Sense::click());
-                if resp.clicked() {
-                    // The active mode again folds its tools away.
-                    if self.overlays.mode == i {
-                        self.overlays.palette = !self.overlays.palette;
-                    } else {
-                        self.overlays.mode = i;
-                        self.overlays.palette = true;
-                    }
-                }
-                let on = i == self.overlays.mode;
-                let p = ui.painter();
-                if on {
-                    p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.control);
-                } else if resp.hovered() {
-                    p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.panel);
-                }
-                let color = if on { Color32::WHITE } else { t.text_dim };
-                p.text(
-                    cell.center() - Vec2::new(0.0, 8.0),
-                    egui::Align2::CENTER_CENTER,
-                    *g,
-                    egui::FontId::proportional(19.0),
-                    color,
-                );
-                p.text(
-                    cell.center() + Vec2::new(0.0, 13.0),
-                    egui::Align2::CENTER_CENTER,
-                    *name,
-                    egui::FontId::proportional(10.5),
-                    color,
-                );
-            }
-        }
-        let chevron = egui::Rect::from_min_size(egui::pos2(rail.left(), rail.bottom() - 26.0), Vec2::new(rail_w, 26.0));
-        let resp = ui
-            .interact(chevron, ui.id().with("rail"), egui::Sense::click())
-            .on_hover_text(if self.overlays.rail {
-                "Fold the modes away"
-            } else {
-                "Show the modes"
-            });
-        if resp.clicked() {
-            self.overlays.rail = !self.overlays.rail;
-        }
-        let glyph = if self.overlays.rail {
-            icon::CARET_DOUBLE_LEFT
-        } else {
-            icon::CARET_DOUBLE_RIGHT
-        };
-        ui.painter().text(
-            chevron.center(),
-            egui::Align2::CENTER_CENTER,
-            glyph,
-            egui::FontId::proportional(13.0),
-            if resp.hovered() { Color32::WHITE } else { t.text_dim },
-        );
-
-        // The active mode's tools, beside the rail, while they are open.
-        let mut strip_left = rail.right();
-        let tools_of = mode_tools(self.overlays.mode);
-        if self.overlays.rail && self.overlays.palette && !tools_of.1.is_empty() {
-            let pal = egui::Rect::from_min_max(
-                egui::pos2(rail.right() + 1.0, rail.top()),
-                egui::pos2(rail.right() + 1.0 + 210.0, full.bottom()),
-            );
-            ui.painter().rect_filled(pal, 0.0, overlay(t.panel));
-            let mut tools = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(pal.shrink(10.0))
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            tools.label(RichText::new(tools_of.0).size(15.0).color(Color32::WHITE));
-            tools.add_space(6.0);
-            for (section, items) in tools_of.1 {
-                tools.label(RichText::new(*section).size(11.5).color(t.text_dim));
-                for (g, label) in *items {
-                    let _ = tool_row(&mut tools, t, g, label);
-                }
-                tools.add_space(6.0);
-            }
-            strip_left = pal.right();
-        }
-
-        // The transform tools, floating just right of whatever is open.
-        tool_strip(
-            ui,
-            t,
-            egui::Rect::from_min_max(egui::pos2(strip_left, rail.top()), full.max),
-        );
-        ui.allocate_rect(full, egui::Sense::click_and_drag());
-    }
-
-    /// What fits the selection, above the viewport: here a character.
-    fn context_bar(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        egui::Frame::new()
-            .fill(t.header)
-            .inner_margin(egui::Margin::symmetric(6, 3))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(Kind::Character.glyph())
-                            .color(Kind::Character.color(self.palette))
-                            .size(15.0),
-                    );
-                    ui.label(RichText::new("Simple").color(t.text).strong());
-                    ui.label(RichText::new("Character").color(t.text_dim));
-                    ui.separator();
-                    for (g, label) in [
-                        (icon::IDENTIFICATION_CARD, "Load card"),
-                        (icon::T_SHIRT, "Outfit"),
-                        (icon::PERSON_ARMS_SPREAD, "Pose"),
-                        (icon::SMILEY, "Expression"),
-                        (icon::PUZZLE_PIECE, "Modules"),
-                    ] {
-                        let _ = ui.button(format!("{g}  {label}  {}", icon::CARET_DOWN));
-                    }
-                });
-            });
-    }
-
-    fn outliner(&mut self, ui: &mut Ui) {
-        let rows: [(usize, Kind, &str); 11] = [
-            (0, Kind::Scene, "Untitled scene"),
-            (1, Kind::Folder, "Cast"),
-            (2, Kind::Character, "Simple"),
-            (3, Kind::Outfit, "Outfit 1"),
-            (3, Kind::Accessory, "Accessories"),
-            (2, Kind::Pose, "Standing pose"),
-            (1, Kind::Item, "Chair"),
-            (1, Kind::Light, "Key light"),
-            (1, Kind::Camera, "Camera 1"),
-            (1, Kind::Map, "Rooftop"),
-            (1, Kind::Script, "Scene script"),
-        ];
-        search(ui, "Search the scene");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for (i, (depth, kind, name)) in rows.iter().enumerate() {
-                let selected = *self.selected == i;
-                if type_row(
-                    ui,
-                    self.theme,
-                    self.type_icons,
-                    self.palette,
-                    *depth,
-                    *kind,
-                    name,
-                    selected,
-                )
-                .clicked()
-                {
-                    *self.selected = i;
-                }
-            }
-        });
-    }
-
-    fn properties(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        ui.label(
-            RichText::new(format!("{}  Simple", icon::USER))
-                .size(14.0)
-                .color(t.text),
-        );
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new("Transform")
-            .default_open(true)
-            .show(ui, |ui| {
-                egui::Grid::new("transform")
-                    .num_columns(4)
-                    .spacing([4.0, 4.0])
-                    .show(ui, |ui| {
-                        for name in ["Position", "Rotation", "Scale"] {
-                            ui.label(RichText::new(name).color(t.text_dim));
-                            for _ in 0..3 {
-                                let mut v = if name == "Scale" { 1.0_f32 } else { 0.0 };
-                                ui.add_sized(
-                                    [58.0, t.row],
-                                    egui::DragValue::new(&mut v).speed(0.01).fixed_decimals(2),
-                                );
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-        egui::CollapsingHeader::new("Character")
-            .default_open(true)
-            .show(ui, |ui| {
-                egui::Grid::new("character")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Card").color(t.text_dim));
-                        ui.label("Simple.png");
-                        ui.end_row();
-                        ui.label(RichText::new("Outfit").color(t.text_dim));
-                        egui::ComboBox::from_id_salt("outfit")
-                            .selected_text("Outfit 1")
-                            .show_ui(ui, |ui| {
-                                for o in ["Outfit 1", "Outfit 2", "Outfit 3"] {
-                                    let _ = ui.selectable_label(o == "Outfit 1", o);
-                                }
-                            });
-                        ui.end_row();
-                        ui.label(RichText::new("Shoes").color(t.text_dim));
-                        ui.horizontal(|ui| {
-                            let _ = ui.radio(true, "Indoor");
-                            let _ = ui.radio(false, "Outdoor");
-                        });
-                        ui.end_row();
-                        ui.label(RichText::new("Physics").color(t.text_dim));
-                        let mut on = true;
-                        ui.checkbox(&mut on, "Simulate");
-                        ui.end_row();
-                    });
-            });
-        egui::CollapsingHeader::new("Modules")
-            .default_open(false)
-            .show(ui, |ui| {
-                for m in ["MaterialEditor", "ABMX", "Stiletto", "Clothing Unlocker"] {
-                    let mut on = true;
-                    ui.checkbox(&mut on, m);
-                }
-            });
-    }
-
-    fn content(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        search(ui, "Search the project");
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(150.0);
-                for (g, f) in [
-                    (icon::FOLDER_SIMPLE, "Characters"),
-                    (icon::FOLDER_SIMPLE, "Poses"),
-                    (icon::FOLDER_SIMPLE, "Maps"),
-                    (icon::FOLDER_SIMPLE, "Items"),
-                    (icon::FOLDER_SIMPLE, "Scenes"),
-                    (icon::FOLDER_SIMPLE, "Renders"),
-                ] {
-                    let _ = ui.selectable_label(f == "Characters", format!("{g}  {f}"));
-                }
-            });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for name in ["Simple", "Card 2", "Card 3", "Card 4", "Card 5", "Card 6"] {
-                    ui.vertical(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 72.0), egui::Sense::click());
-                        ui.painter().rect_filled(rect, 0.0, t.field);
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            icon::USER,
-                            egui::FontId::proportional(28.0),
-                            t.text_dim,
-                        );
-                        ui.label(RichText::new(name).size(11.5));
-                    });
-                }
-            });
-        });
-    }
-
-    /// Unreal's mode toolkit: the tools of the active mode, here Pose.
-    fn tools(&mut self, ui: &mut Ui) {
-        if self.top_bar == TopBar::CombinedRail {
-            ui.horizontal_top(|ui| {
-                mode_rail(ui, self.theme, 2);
-                ui.vertical(|ui| self.tool_list(ui));
-            });
-        } else {
-            self.tool_list(ui);
-        }
-    }
-
-    fn tool_list(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        ui.label(
-            RichText::new(format!("{}  Pose mode", icon::PERSON_ARMS_SPREAD))
-                .size(14.0)
-                .color(t.text),
-        );
-        ui.add_space(4.0);
-        for (section, items) in [
-            (
-                "Edit",
-                [
-                    (icon::BONE, "Forward kinematics"),
-                    (icon::TARGET, "Inverse kinematics"),
-                    (icon::FLIP_HORIZONTAL, "Mirror pose"),
-                ],
-            ),
-            (
-                "Library",
-                [
-                    (icon::BOOKMARKS_SIMPLE, "Load pose"),
-                    (icon::BOOKMARK_SIMPLE, "Save pose"),
-                    (icon::ARROW_U_UP_LEFT, "Reset pose"),
-                ],
-            ),
-            (
-                "Body",
-                [
-                    (icon::HAND, "Hands"),
-                    (icon::SMILEY, "Expression"),
-                    (icon::EYE, "Look at camera"),
-                ],
-            ),
-        ] {
-            egui::CollapsingHeader::new(section).default_open(true).show(ui, |ui| {
-                for (g, label) in items {
-                    let _ = ui.add_sized(
-                        [ui.available_width(), t.row + 4.0],
-                        egui::Button::new(format!("{g}  {label}")),
-                    );
-                }
-            });
-        }
-    }
-
-    fn console(&mut self, ui: &mut Ui) {
-        let t = self.theme;
-        for (c, line) in [
-            (t.text_dim, "Indexed 2,214 zipmods and the game folder"),
-            (t.text, "Loaded Simple.png in 1.8 s"),
-            (t.active, "Pattern texture missing: no item"),
-        ] {
-            ui.label(RichText::new(line).monospace().color(c));
-        }
-    }
-}
-
-fn search(ui: &mut Ui, hint: &str) {
-    let mut text = String::new();
-    ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .hint_text(format!("{}  {hint}", icon::MAGNIFYING_GLASS))
-            .desired_width(f32::INFINITY),
-    );
-}
-
-/// One full-width list row with the object's type shown in the chosen
-/// style, highlighted edge to edge as in Unity and Unreal.
-#[allow(clippy::too_many_arguments)]
-pub fn type_row(
-    ui: &mut Ui,
-    t: &Theme,
-    style: TypeIcons,
-    palette: TypePalette,
-    depth: usize,
-    kind: Kind,
-    name: &str,
-    selected: bool,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), t.row), egui::Sense::click());
-    let fill = if selected {
-        t.select
-    } else if resp.hovered() {
-        t.control
-    } else {
-        Color32::TRANSPARENT
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, 0.0, fill);
-    let x = rect.left() + 8.0 + depth as f32 * 14.0;
-    let y = rect.center().y;
-    let text = if selected { Color32::WHITE } else { t.text };
-    let glyph_font = egui::FontId::proportional(14.0);
-    match style {
-        TypeIcons::Glyph => {
+        hair_v(p, head.left() + eye_w, head.top() + 4.0, head.bottom() - 4.0, t.hover);
+        let caption = |x: f32, text: &str| {
             p.text(
-                egui::pos2(x, y),
-                egui::Align2::LEFT_CENTER,
-                kind.glyph(),
-                glyph_font,
-                kind.color(palette),
-            );
-        }
-        TypeIcons::Chip => {
-            let chip = egui::Rect::from_center_size(egui::pos2(x + 7.0, y), Vec2::splat(t.row - 6.0));
-            p.rect_filled(chip, 2.0, kind.color(palette));
-            p.text(
-                chip.center(),
-                egui::Align2::CENTER_CENTER,
-                kind.glyph(),
-                egui::FontId::proportional(12.0),
-                t.field,
-            );
-        }
-        TypeIcons::Strip => {
-            let bar = egui::Rect::from_min_size(egui::pos2(x - 5.0, rect.top() + 3.0), Vec2::new(3.0, t.row - 6.0));
-            p.rect_filled(bar, 0.0, kind.color(palette));
-            p.text(
-                egui::pos2(x, y),
-                egui::Align2::LEFT_CENTER,
-                kind.glyph(),
-                glyph_font,
+                Pos2::new(x, head.center().y),
+                Align2::LEFT_CENTER,
                 text,
+                k.small(),
+                t.text,
             );
+        };
+        caption(head.left() + eye_w + 10.0, "Name");
+        hair_v(p, head.right() - type_w, head.top() + 4.0, head.bottom() - 4.0, t.hover);
+        caption(head.right() - type_w + 10.0, "Type");
+    }
+
+    let footer = if k.d.tree == Tree::Columns { 24.0 } else { 0.0 };
+    let indent = if k.d.tree == Tree::Guides { 16.0 } else { 14.0 };
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .max_height(ui.available_height() - footer)
+        .show(ui, |ui| {
+            let mut hide_below: Option<usize> = None;
+            for (i, (depth, kind, name)) in SCENE.iter().enumerate() {
+                if let Some(d) = hide_below {
+                    if *depth > d {
+                        continue;
+                    }
+                    hide_below = None;
+                }
+                if st.folded[i] {
+                    hide_below = Some(*depth);
+                }
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
+                if resp.clicked() {
+                    st.selected = Some(i);
+                }
+                let selected = st.selected == Some(i);
+                let hovered = ui.rect_contains_pointer(rect);
+                let p = ui.painter().clone();
+                if selected {
+                    p.rect_filled(rect, 0.0, t.select);
+                } else if hovered {
+                    p.rect_filled(rect, 0.0, t.row_hover);
+                }
+                let y = rect.center().y;
+                let text = if selected {
+                    Color32::WHITE
+                } else if st.hidden[i] {
+                    t.text_dim
+                } else {
+                    t.text
+                };
+                let faint = if selected { on_selection(t.select) } else { t.text_dim };
+
+                // Visibility: a column, or a button at the right edge.
+                let eye = match k.d.tree {
+                    Tree::Columns => Rect::from_min_size(rect.min, Vec2::new(eye_w, rect.height())),
+                    _ => Rect::from_min_max(Pos2::new(rect.right() - 28.0, rect.top()), rect.max),
+                };
+                let eye_resp = ui.interact(eye, ui.id().with(("eye", i)), Sense::click());
+                if eye_resp.clicked() {
+                    st.hidden[i] = !st.hidden[i];
+                }
+                let show_eye = match k.d.tree {
+                    Tree::Plain => hovered || st.hidden[i],
+                    _ => true,
+                };
+                if show_eye {
+                    let g = if st.hidden[i] { icon::EYE_CLOSED } else { icon::EYE };
+                    let color = if eye_resp.hovered() { text } else { faint };
+                    glyph(&p, k, eye.center(), g, 13.0, color);
+                }
+
+                let x0 = rect.left() + if k.d.tree == Tree::Columns { eye_w + 4.0 } else { 6.0 };
+                if k.d.tree == Tree::Guides && !selected {
+                    for level in 1..*depth {
+                        hair_v(
+                            &p,
+                            x0 + level as f32 * indent - 9.0,
+                            rect.top(),
+                            rect.bottom(),
+                            t.header,
+                        );
+                    }
+                }
+                let x = x0 + *depth as f32 * indent;
+                if has_children(i) {
+                    let fold = Rect::from_center_size(Pos2::new(x + 7.0, y), Vec2::new(16.0, rect.height()));
+                    let fold_resp = ui.interact(fold, ui.id().with(("fold", i)), Sense::click());
+                    if fold_resp.clicked() {
+                        st.folded[i] = !st.folded[i];
+                    }
+                    let g = if st.folded[i] {
+                        icon::CARET_RIGHT
+                    } else {
+                        icon::CARET_DOWN
+                    };
+                    let color = if fold_resp.hovered() { text } else { faint };
+                    glyph(&p, k, Pos2::new(x + 7.0, y), g, 10.0, color);
+                }
+                let tint = if selected {
+                    on_selection(kind.color())
+                } else {
+                    kind.color()
+                };
+                glyph(&p, k, Pos2::new(x + 24.0, y), kind.glyph(), 15.0, tint);
+                let name_end = match k.d.tree {
+                    Tree::Columns => rect.right() - type_w,
+                    _ => rect.right() - 28.0,
+                };
+                let clip = Rect::from_min_max(rect.min, Pos2::new(name_end - 4.0, rect.bottom()));
+                label(&p.with_clip_rect(clip), k, Pos2::new(x + 36.0, y), name, text);
+                if k.d.tree == Tree::Columns {
+                    p.text(
+                        Pos2::new(rect.right() - type_w + 10.0, y),
+                        Align2::LEFT_CENTER,
+                        kind.label(),
+                        k.font(),
+                        faint,
+                    );
+                }
+            }
+        });
+
+    if footer > 0.0 {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), footer), Sense::hover());
+        let p = ui.painter();
+        hair_h(p, rect.left(), rect.right(), rect.top(), t.line);
+        let chosen = if st.selected.is_some() { ", 1 selected" } else { "" };
+        p.text(
+            Pos2::new(rect.left() + 10.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            format!("{} objects{chosen}", SCENE.len()),
+            k.small(),
+            t.text_dim,
+        );
+    }
+}
+
+/// The project's folders: name, the kind of asset inside, the assets.
+const FOLDERS: [(&str, Kind, &[&str]); 6] = [
+    (
+        "Characters",
+        Kind::Character,
+        &["Simple", "Card 2", "Card 3", "Card 4", "Card 5", "Card 6"],
+    ),
+    ("Poses", Kind::Pose, &["Standing pose", "Sitting", "Wave"]),
+    ("Maps", Kind::Map, &["Rooftop", "Classroom"]),
+    ("Items", Kind::Item, &["Chair", "Desk", "Umbrella"]),
+    ("Scenes", Kind::Scene, &["Untitled scene"]),
+    ("Renders", Kind::Camera, &[]),
+];
+
+fn content(ui: &mut Ui, k: &Look, st: &mut State) {
+    let t = &k.t;
+    let (folder, kind, assets) = FOLDERS[st.folder.min(FOLDERS.len() - 1)];
+    let bar = toolbar(ui, k, |ui| {
+        let _ = flat_button(ui, k, Some(icon::PLUS), "Import", true, false);
+        bar_divider(ui, k);
+        ui.add_space(2.0);
+        for part in ["Project", folder] {
+            let last = part == folder;
+            let w = widgets::text_width(ui, part, k.font()).ceil();
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
+            let color = if last { t.text_bright } else { t.text_dim };
+            label(ui.painter(), k, rect.left_center(), part, color);
+            if !last {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, k.field()), Sense::hover());
+                glyph(ui.painter(), k, rect.center(), icon::CARET_RIGHT, 10.0, t.text_dim);
+            }
         }
-        TypeIcons::Plain => {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            widgets::search(ui, k, &mut st.content_search, "Search the project", 240.0);
+        });
+    });
+    hair_h(ui.painter(), bar.left(), bar.right(), bar.bottom() - 1.0, t.line);
+
+    let body = ui.available_rect_before_wrap();
+    let tree_w = 168.0;
+    let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + tree_w, body.bottom()));
+    hair_v(ui.painter(), tree.right(), tree.top(), tree.bottom(), t.line);
+    for (i, (name, kind, _)) in FOLDERS.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(tree.left(), tree.top() + 4.0 + i as f32 * k.d.row),
+            Vec2::new(tree_w, k.d.row),
+        );
+        if row.bottom() > tree.bottom() {
+            break;
+        }
+        let resp = ui.interact(row, ui.id().with(("folder", i)), Sense::click());
+        if resp.clicked() {
+            st.folder = i;
+            st.asset = 0;
+        }
+        let p = ui.painter();
+        let on = st.folder == i;
+        if on {
+            p.rect_filled(row, 0.0, t.control);
+        } else if resp.hovered() {
+            p.rect_filled(row, 0.0, t.row_hover);
+        }
+        let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
+        glyph(
+            p,
+            k,
+            Pos2::new(row.left() + 20.0, row.center().y),
+            g,
+            15.0,
+            kind.color(),
+        );
+        let color = if on { t.text_bright } else { t.text };
+        label(p, k, Pos2::new(row.left() + 34.0, row.center().y), name, color);
+    }
+
+    let grid = Rect::from_min_max(Pos2::new(tree.right() + 1.0, body.top()), body.max);
+    let mut area = ui.new_child(UiBuilder::new().max_rect(grid));
+    area.set_clip_rect(grid.intersect(ui.clip_rect()));
+    if assets.is_empty() {
+        area.painter().text(
+            grid.min + Vec2::new(14.0, 20.0),
+            Align2::LEFT_CENTER,
+            "This folder is empty",
+            k.font(),
+            t.text_dim,
+        );
+    }
+    let thumb = k.d.row * 3.0;
+    let caption = k.d.tree != Tree::Plain;
+    let tile = Vec2::new(thumb + 12.0, thumb + if caption { 40.0 } else { 26.0 });
+    egui::ScrollArea::vertical().auto_shrink(false).show(&mut area, |ui| {
+        let columns = ((ui.available_width() - 12.0) / tile.x).floor().max(1.0) as usize;
+        let rows = assets.len().div_ceil(columns);
+        let (space, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), rows as f32 * tile.y + 12.0),
+            Sense::hover(),
+        );
+        for (i, name) in assets.iter().enumerate() {
+            let cell = Rect::from_min_size(
+                space.min
+                    + Vec2::new(
+                        12.0 + (i % columns) as f32 * tile.x,
+                        10.0 + (i / columns) as f32 * tile.y,
+                    ),
+                tile - Vec2::new(12.0, 0.0),
+            );
+            let resp = ui.interact(cell, ui.id().with(("asset", st.folder, i)), Sense::click());
+            if resp.clicked() {
+                st.asset = i;
+            }
+            let on = st.asset == i;
+            let p = ui.painter();
+            let picture = Rect::from_min_size(cell.min, Vec2::splat(thumb));
+            p.rect_filled(picture, 0.0, t.input);
+            match (&st.viewport_image, kind, i) {
+                // The one card that is loaded shows its own face.
+                (Some(tex), Kind::Character, 0) => {
+                    let uv = Rect::from_min_max(Pos2::new(0.438, 0.078), Pos2::new(0.628, 0.331));
+                    p.image(tex.id(), picture, uv, Color32::WHITE);
+                }
+                _ => glyph(p, k, picture.center(), kind.glyph(), thumb * 0.42, t.hover),
+            }
+            // The type colour along the picture's foot, as Unreal's tiles.
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(picture.left(), picture.bottom() - 2.0), picture.max),
+                0.0,
+                kind.color(),
+            );
+            if on {
+                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Outside);
+                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.hover), StrokeKind::Inside);
+            }
+            let clip = p.with_clip_rect(Rect::from_min_max(
+                Pos2::new(cell.left(), picture.bottom()),
+                Pos2::new(cell.right(), cell.bottom()),
+            ));
+            let color = if on { t.text_bright } else { t.text };
+            label(
+                &clip,
+                k,
+                Pos2::new(cell.left() + 1.0, picture.bottom() + 12.0),
+                name,
+                color,
+            );
+            if caption {
+                clip.text(
+                    Pos2::new(cell.left() + 1.0, picture.bottom() + 27.0),
+                    Align2::LEFT_CENTER,
+                    kind.label(),
+                    k.small(),
+                    t.text_dim,
+                );
+            }
+        }
+    });
+    ui.allocate_rect(body, Sense::hover());
+}
+
+fn console(ui: &mut Ui, k: &Look, st: &mut State) {
+    let t = &k.t;
+    let lines: [(usize, &str, &str); 5] = [
+        (0, "14:02:07", "Indexed 2,214 zipmods and the game folder"),
+        (0, "14:02:11", "Loaded Simple.png in 1.8 s"),
+        (1, "14:02:11", "Pattern texture missing: no item"),
+        (0, "14:02:12", "Physics ready"),
+        (0, "14:02:12", "Scene ready"),
+    ];
+    let levels = [
+        (icon::INFO, "Information", t.text_dim),
+        (icon::WARNING, "Warnings", t.accent),
+        (icon::X_CIRCLE, "Errors", t.stop),
+    ];
+    toolbar(ui, k, |ui| {
+        let _ = flat_button(ui, k, Some(icon::BROOM), "Clear", false, false);
+        bar_divider(ui, k);
+        for (i, (g, name, _)) in levels.iter().enumerate() {
+            let count = lines.iter().filter(|l| l.0 == i).count();
+            if flat_button(ui, k, Some(g), &format!("{name}  {count}"), false, st.levels[i]).clicked() {
+                st.levels[i] = !st.levels[i];
+            }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            widgets::search(ui, k, &mut st.console_search, "Search the log", 240.0);
+        });
+    });
+    let body = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(body, 0.0, t.input);
+    let mut area = ui.new_child(UiBuilder::new().max_rect(body));
+    egui::ScrollArea::vertical().auto_shrink(false).show(&mut area, |ui| {
+        ui.add_space(4.0);
+        for (level, time, text) in lines {
+            if !st.levels[level] {
+                continue;
+            }
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row - 2.0), Sense::hover());
+            let p = ui.painter();
+            if ui.rect_contains_pointer(rect) {
+                p.rect_filled(rect, 0.0, t.well);
+            }
+            let y = rect.center().y;
+            glyph(
+                p,
+                k,
+                Pos2::new(rect.left() + 18.0, y),
+                levels[level].0,
+                14.0,
+                levels[level].2,
+            );
+            let x = p
+                .text(
+                    Pos2::new(rect.left() + 32.0, y),
+                    Align2::LEFT_CENTER,
+                    time,
+                    k.mono(),
+                    t.text_dim,
+                )
+                .right();
+            let color = if level == 0 { t.text } else { levels[level].2 };
+            p.text(Pos2::new(x + 12.0, y), Align2::LEFT_CENTER, text, k.mono(), color);
+        }
+    });
+    ui.allocate_rect(body, Sense::hover());
+}
+
+/// A sketch of the timeline: tracks, a ruler and a playhead. Animation is
+/// a later phase, so nothing here is live.
+fn timeline(ui: &mut Ui, k: &Look) {
+    let t = &k.t;
+    let bar = toolbar(ui, k, |ui| {
+        for g in [icon::SKIP_BACK, icon::PLAY, icon::SKIP_FORWARD] {
+            let _ = icon_button(ui, k, g, false);
+        }
+        bar_divider(ui, k);
+        ui.add_space(2.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, k.field()), Sense::hover());
+        let x = label(ui.painter(), k, rect.left_center(), "Frame 24", t.text_bright);
+        label(
+            ui.painter(),
+            k,
+            Pos2::new(x + 6.0, rect.center().y),
+            "of 120",
+            t.text_dim,
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let text = "The timeline arrives with animation";
+            let w = widgets::text_width(ui, text, k.font()).ceil();
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
+            label(ui.painter(), k, rect.left_center(), text, t.text_dim);
+        });
+    });
+    let body = ui.available_rect_before_wrap();
+    let p = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
+    hair_h(&p, bar.left(), bar.right(), body.top(), t.line);
+    let names_w = 168.0;
+    let ruler = Rect::from_min_max(
+        Pos2::new(body.left() + names_w, body.top() + 1.0),
+        Pos2::new(body.right(), body.top() + 23.0),
+    );
+    p.rect_filled(ruler, 0.0, t.header);
+    hair_v(&p, ruler.left() - 1.0, body.top(), body.bottom(), t.line);
+    let per_frame = (ruler.width() - 24.0) / 120.0;
+    let frame_x = |f: f32| (ruler.left() + 12.0 + f * per_frame).round();
+    for f in (0..=120).step_by(5) {
+        let x = frame_x(f as f32);
+        let major = f % 10 == 0;
+        hair_v(
+            &p,
+            x,
+            ruler.bottom() - if major { 8.0 } else { 4.0 },
+            ruler.bottom(),
+            t.hover,
+        );
+        if major {
             p.text(
-                egui::pos2(x, y),
-                egui::Align2::LEFT_CENTER,
-                kind.glyph(),
-                glyph_font,
+                Pos2::new(x + 3.0, ruler.top() + 8.0),
+                Align2::LEFT_CENTER,
+                f.to_string(),
+                k.small(),
                 t.text_dim,
             );
         }
     }
-    p.text(
-        egui::pos2(x + 22.0, y),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(13.0),
-        text,
-    );
-    resp
-}
-
-/// Unity 6's tool overlay: the transform tools as a vertical strip floating
-/// at the viewport's left edge.
-fn tool_strip(ui: &mut Ui, t: &Theme, viewport: egui::Rect) {
-    let tools = [
-        (icon::HAND, "View"),
-        (icon::CURSOR, "Select"),
-        (icon::ARROWS_OUT_CARDINAL, "Move"),
-        (icon::ARROWS_CLOCKWISE, "Rotate"),
-        (icon::ARROWS_OUT, "Scale"),
-        (icon::BONE, "Pose"),
+    let tracks: [(usize, Kind, &str, &[f32]); 4] = [
+        (0, Kind::Character, "Simple", &[]),
+        (1, Kind::Pose, "Pose", &[0.0, 24.0, 60.0]),
+        (1, Kind::Character, "Expression", &[12.0, 48.0]),
+        (0, Kind::Camera, "Camera 1", &[0.0, 90.0]),
     ];
-    let size = 30.0;
-    let strip = egui::Rect::from_min_size(
-        viewport.min + Vec2::new(8.0, 8.0),
-        Vec2::new(size, size * tools.len() as f32),
-    );
-    let p = ui.painter();
-    p.rect_filled(strip, 0.0, t.header);
-    p.rect_stroke(strip, 0.0, egui::Stroke::new(1.0, t.divider), egui::StrokeKind::Outside);
-    for (i, (g, _)) in tools.iter().enumerate() {
-        let cell = egui::Rect::from_min_size(strip.min + Vec2::new(0.0, i as f32 * size), Vec2::splat(size));
-        if i == 2 {
-            p.rect_filled(cell, 0.0, t.select);
+    for (i, (depth, kind, name, keys)) in tracks.iter().enumerate() {
+        let top = ruler.bottom() + i as f32 * k.d.row;
+        let y = top + k.d.row / 2.0;
+        let x = body.left() + 12.0 + *depth as f32 * 14.0;
+        glyph(&p, k, Pos2::new(x + 8.0, y), kind.glyph(), 15.0, kind.color());
+        label(&p, k, Pos2::new(x + 22.0, y), name, t.text);
+        hair_h(&p, body.left(), body.right(), top + k.d.row - 1.0, t.line);
+        for key in *keys {
+            let c = Pos2::new(frame_x(*key) + 0.5, y);
+            let d = 4.5;
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    c + Vec2::new(0.0, -d),
+                    c + Vec2::new(d, 0.0),
+                    c + Vec2::new(0.0, d),
+                    c + Vec2::new(-d, 0.0),
+                ],
+                t.text,
+                Stroke::NONE,
+            ));
         }
-        p.text(
-            cell.center(),
-            egui::Align2::CENTER_CENTER,
-            *g,
-            egui::FontId::proportional(16.0),
-            t.text,
-        );
     }
-}
-
-/// The modes as a named vertical rail, the active one marked.
-fn mode_rail(ui: &mut Ui, t: &Theme, active: usize) {
-    let w = 64.0;
-    let (rail, _) = ui.allocate_exact_size(Vec2::new(w, 6.0 * 50.0), egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rail, 0.0, t.header);
-    for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
-        let cell = egui::Rect::from_min_size(rail.min + Vec2::new(0.0, i as f32 * 50.0), Vec2::new(w, 50.0));
-        if i == active {
-            p.rect_filled(cell, 0.0, t.panel);
-            p.vline(cell.left() + 1.0, cell.y_range(), egui::Stroke::new(2.0, t.select));
-        }
-        let color = if i == active { t.text } else { t.text_dim };
-        p.text(
-            cell.center() - Vec2::new(0.0, 8.0),
-            egui::Align2::CENTER_CENTER,
-            *g,
-            egui::FontId::proportional(18.0),
-            color,
-        );
-        p.text(
-            cell.center() + Vec2::new(0.0, 13.0),
-            egui::Align2::CENTER_CENTER,
-            *name,
-            egui::FontId::proportional(11.0),
-            color,
-        );
-    }
-}
-
-/// A left-aligned tool row with its icon, highlighted on hover.
-fn tool_row(ui: &mut Ui, t: &Theme, glyph: &str, label: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), t.row), egui::Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, t.control_radius as f32, t.control);
-    }
-    let color = if resp.hovered() { Color32::WHITE } else { t.text };
-    p.text(
-        rect.left_center() + Vec2::new(10.0, 0.0),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(15.0),
-        color,
+    let x = frame_x(24.0);
+    p.rect_filled(
+        Rect::from_min_max(Pos2::new(x - 4.0, ruler.top()), Pos2::new(x + 5.0, ruler.top() + 9.0)),
+        1.0,
+        t.select,
     );
-    p.text(
-        rect.left_center() + Vec2::new(24.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(13.0),
-        color,
-    );
-    resp
-}
-
-type ToolSection = (&'static str, &'static [(&'static str, &'static str)]);
-
-/// The title and tool sections of a mode; empty for modes without tools.
-fn mode_tools(mode: usize) -> (&'static str, &'static [ToolSection]) {
-    match mode {
-        1 => (
-            "Character",
-            &[
-                (
-                    "Card",
-                    &[
-                        (icon::IDENTIFICATION_CARD, "Load card"),
-                        (icon::SWAP, "Replace"),
-                        (icon::ARROWS_COUNTER_CLOCKWISE, "Reload"),
-                    ],
-                ),
-                (
-                    "Wear",
-                    &[
-                        (icon::T_SHIRT, "Outfit"),
-                        (icon::SNEAKER, "Shoes"),
-                        (icon::DIAMOND, "Accessories"),
-                    ],
-                ),
-                ("Face", &[(icon::SMILEY, "Expression"), (icon::EYE, "Gaze")]),
-            ],
-        ),
-        2 => (
-            "Pose",
-            &[
-                (
-                    "Edit",
-                    &[
-                        (icon::BONE, "Forward kinematics"),
-                        (icon::TARGET, "Inverse kinematics"),
-                        (icon::FLIP_HORIZONTAL, "Mirror pose"),
-                    ],
-                ),
-                (
-                    "Library",
-                    &[
-                        (icon::BOOKMARKS_SIMPLE, "Load pose"),
-                        (icon::BOOKMARK_SIMPLE, "Save pose"),
-                        (icon::ARROW_U_UP_LEFT, "Reset pose"),
-                    ],
-                ),
-                (
-                    "Body",
-                    &[
-                        (icon::HAND, "Hands"),
-                        (icon::SMILEY, "Expression"),
-                        (icon::EYE, "Look at camera"),
-                    ],
-                ),
-            ],
-        ),
-        3 => (
-            "Light",
-            &[
-                ("Lights", &[(icon::LIGHTBULB, "Add light"), (icon::SUN, "Key light")]),
-                (
-                    "Effects",
-                    &[
-                        (icon::CIRCLE_HALF, "Ambient occlusion"),
-                        (icon::SPARKLE, "Bloom"),
-                        (icon::APERTURE, "Depth of field"),
-                    ],
-                ),
-            ],
-        ),
-        _ => ("", &[]),
-    }
+    hair_v(&p, x, ruler.top(), body.bottom(), t.select);
+    ui.allocate_rect(body, Sense::hover());
 }

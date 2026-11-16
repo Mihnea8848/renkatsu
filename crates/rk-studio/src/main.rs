@@ -2,29 +2,42 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Renkatsu Studio, the editor. This is the shell prototype from
-//! docs/editor.md: Unity's layout, the ribbon, the menu bar and docked panels
-//! with placeholder content, for judging layout and look.
+//! docs/editor.md: Unity's layout, Unreal's modes drawn over the viewport,
+//! the menu row and docked panels with placeholder content, in the designs
+//! of `design.rs`, for judging layout and look on screenshots.
 
-mod appearance;
+mod chrome;
+mod design;
+mod kinds;
+mod modes;
 mod panels;
-mod ribbon;
+mod properties;
+mod state;
 mod theme;
-mod toolbar;
+mod viewport;
+mod widgets;
 
 use anyhow::{Context, Result};
-use appearance::{Appearance, Tabs, TopBar, TypeIcons, TypePalette};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use design::{Design, Overlays};
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
+use state::{Look, Rail, State, SCENE};
 use std::path::PathBuf;
-use theme::{Theme, THEMES};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Bottom {
+    Content,
+    Console,
+    Timeline,
+}
 
 #[derive(Parser)]
 #[command(name = "renkatsu", version, about = "Renkatsu Studio")]
 struct Cli {
-    /// Theme variant to start with.
-    #[arg(long, default_value = "Unreal 5")]
-    theme: String,
+    /// The design to show.
+    #[arg(long, value_enum, default_value = "a")]
+    design: Design,
     /// Picture to show in the viewport until the live viewport exists.
     #[arg(long)]
     viewport_image: Option<PathBuf>,
@@ -34,249 +47,219 @@ struct Cli {
     /// Window size, as WIDTHxHEIGHT.
     #[arg(long, default_value = "1600x900")]
     size: String,
-    /// The area above the panels.
-    #[arg(long, value_enum, default_value = "combined-rail")]
-    top_bar: TopBar,
-    /// How docked panel tabs are drawn.
-    #[arg(long, value_enum, default_value = "unity")]
-    tabs: Tabs,
-    /// How object types show in lists.
-    #[arg(long, value_enum, default_value = "glyph")]
-    type_icons: TypeIcons,
+    /// The mode to start in, by name.
+    #[arg(long, default_value = "pose")]
+    mode: String,
+    /// The object selected at the start, by name, or "none".
+    #[arg(long, default_value = "Simple")]
+    select: String,
     /// Start with the mode's tool palette folded away.
     #[arg(long)]
     palette_closed: bool,
+    /// Start with the mode rail shrunk to icons.
+    #[arg(long)]
+    rail_icons: bool,
     /// Start with every viewport overlay hidden.
     #[arg(long)]
     overlays_hidden: bool,
-    /// Colours of the object types.
-    #[arg(long, value_enum, default_value = "muted")]
-    palette: TypePalette,
+    /// Start with the viewport taking the whole window.
+    #[arg(long)]
+    maximised: bool,
+    /// The panel shown in the bottom group at the start.
+    #[arg(long, value_enum, default_value = "content")]
+    bottom: Bottom,
+    /// Click at X,Y before the screenshot, to picture menus and states.
+    /// May be given several times; the clicks happen in order.
+    #[arg(long, value_parser = parse_point)]
+    click: Vec<egui::Pos2>,
+    /// Leave the pointer at X,Y for the screenshot, to picture hover.
+    #[arg(long, value_parser = parse_point)]
+    hover: Option<egui::Pos2>,
 }
 
+fn parse_point(text: &str) -> Result<egui::Pos2, String> {
+    text.split_once(',')
+        .and_then(|(x, y)| Some(egui::Pos2::new(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+        .ok_or_else(|| "a point must look like 120,48".to_owned())
+}
+
+/// Frames between two scripted clicks, so that menus have opened.
+const CLICK_FRAMES: u32 = 4;
+
 struct Studio {
-    theme: Theme,
+    look: Look,
+    state: State,
     dock: DockState<Panel>,
-    ribbon: ribbon::Ribbon,
-    viewport_image: Option<egui::TextureHandle>,
-    selected: usize,
+    bottom: Panel,
     screenshot: Option<PathBuf>,
+    clicks: Vec<egui::Pos2>,
+    hover: Option<egui::Pos2>,
     frames: u32,
-    look: Appearance,
-    overlays: panels::Overlays,
 }
 
 impl Studio {
     fn new(cc: &eframe::CreationContext, cli: &Cli) -> Result<Self> {
-        let mut fonts = egui::FontDefinitions::default();
-        // A modern interface font from the system for now; a bundled one
-        // comes once the choice is made.
-        if let Ok(bytes) = std::fs::read("/usr/share/fonts/TTF/OpenSans-Regular.ttf") {
-            fonts.font_data.insert(
-                "interface".into(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                family.insert(0, "interface".into());
-            }
-        }
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        cc.egui_ctx.set_fonts(fonts);
-        let theme = Theme::by_name(&cli.theme).with_context(|| {
-            let names: Vec<_> = THEMES.iter().map(|t| t.name).collect();
-            format!("unknown theme {:?}; there are {}", cli.theme, names.join(", "))
-        })?;
-        let viewport_image = match &cli.viewport_image {
-            Some(path) => Some(load_texture(&cc.egui_ctx, path)?),
-            None => None,
+        let look = Look {
+            t: theme::THEME,
+            d: cli.design.spec(),
         };
-        let studio = Studio {
-            theme,
-            dock: panels::default_layout(cli.top_bar),
-            ribbon: ribbon::Ribbon {
-                tab: 0,
-                collapsed: false,
-            },
-            viewport_image,
-            selected: 1,
-            screenshot: cli.screenshot.clone(),
-            frames: 0,
-            look: Appearance {
-                top_bar: cli.top_bar,
-                tabs: cli.tabs,
-                type_icons: cli.type_icons,
-                palette: cli.palette,
-            },
-            overlays: panels::Overlays {
-                mode: 2,
-                palette: !cli.palette_closed,
-                rail: true,
-                hidden: cli.overlays_hidden,
-            },
-        };
-        studio.apply_theme(&cc.egui_ctx);
-        Ok(studio)
-    }
-
-    fn apply_theme(&self, ctx: &egui::Context) {
-        let theme = self.theme;
-        ctx.all_styles_mut(|s| theme.apply(s));
-    }
-
-    fn next_theme(&mut self, ctx: &egui::Context) {
-        let i = THEMES.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
-        self.theme = THEMES[(i + 1) % THEMES.len()];
-        self.apply_theme(ctx);
-    }
-
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                for item in ["New project", "Open project", "Save", "Save as", "Quit"] {
-                    let _ = ui.button(item);
-                }
-            });
-            ui.menu_button("Edit", |ui| {
-                for item in ["Undo", "Redo", "Preferences"] {
-                    let _ = ui.button(item);
-                }
-            });
-            if matches!(
-                self.look.top_bar,
-                TopBar::Unity | TopBar::UnityOverlay | TopBar::ContextBar
-            ) {
-                toolbar::unity_category_menus(ui);
-            }
-            ui.menu_button("Window", |ui| {
-                for panel in Panel::ALL {
-                    if ui.button(panel.title()).clicked() {
-                        panels::open(&mut self.dock, panel);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui.button("Reset layout").clicked() {
-                    self.dock = panels::default_layout(self.look.top_bar);
-                    ui.close();
-                }
-            });
-            ui.menu_button("Help", |ui| {
-                let _ = ui.button("About Renkatsu");
-            });
-            if matches!(self.look.top_bar, TopBar::Combined | TopBar::CombinedRail) {
-                ui.add_space(24.0);
-                let theme = self.theme;
-                toolbar::menu_bar_tools(ui, &theme, self.look.top_bar == TopBar::Combined);
+        cc.egui_ctx.set_fonts(fonts());
+        cc.egui_ctx.all_styles_mut(|s| {
+            look.t.apply(s, look.d.text);
+            // A picture must not catch a menu halfway through fading in.
+            if cli.screenshot.is_some() {
+                s.animation_time = 0.0;
             }
         });
+
+        let mut state = State::new();
+        state.mode = modes::MODES
+            .iter()
+            .position(|m| m.name.eq_ignore_ascii_case(&cli.mode))
+            .with_context(|| format!("unknown mode {:?}", cli.mode))?;
+        state.selected = if cli.select.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            let row = SCENE
+                .iter()
+                .position(|(_, _, name)| name.eq_ignore_ascii_case(&cli.select))
+                .with_context(|| format!("no object named {:?} in the scene", cli.select))?;
+            Some(row)
+        };
+        state.palette_open = !cli.palette_closed;
+        state.overlays_hidden = cli.overlays_hidden;
+        state.maximised = cli.maximised;
+        if cli.rail_icons {
+            state.rail = Rail::Icons;
+        }
+        if let Some(path) = &cli.viewport_image {
+            let (texture, corner) = load_texture(&cc.egui_ctx, path)?;
+            state.viewport_image = Some(texture);
+            state.backdrop = corner;
+        }
+        let bottom = match cli.bottom {
+            Bottom::Content => Panel::Content,
+            Bottom::Console => Panel::Console,
+            Bottom::Timeline => Panel::Timeline,
+        };
+        Ok(Studio {
+            look,
+            state,
+            dock: panels::default_layout(bottom),
+            bottom,
+            screenshot: cli.screenshot.clone(),
+            clicks: cli.click.clone(),
+            hover: cli.hover,
+            frames: 0,
+        })
     }
 }
 
+/// Open Sans for the interface, in two weights, Noto Sans Mono for the
+/// console and Phosphor for icons. The interface fonts come from the
+/// system for now; bundled ones follow once the choice is made.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    let fallback = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let mut add = |name: &str, path: &str, family: egui::FontFamily| {
+        let list = fonts.families.entry(family).or_insert_with(|| fallback.clone());
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+            list.insert(0, name.into());
+        }
+    };
+    add(
+        "interface",
+        "/usr/share/fonts/TTF/OpenSans-Regular.ttf",
+        egui::FontFamily::Proportional,
+    );
+    add(
+        "interface-semibold",
+        "/usr/share/fonts/TTF/OpenSans-SemiBold.ttf",
+        egui::FontFamily::Name(theme::SEMIBOLD.into()),
+    );
+    add(
+        "console",
+        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+        egui::FontFamily::Monospace,
+    );
+    fonts
+}
+
 impl eframe::App for Studio {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.screenshot.is_some() {
+            self.scripted_pointer(raw_input);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
-        let t = self.theme;
-        egui::Panel::top("menu")
-            .frame(
-                egui::Frame::new()
-                    .fill(t.header)
-                    .inner_margin(egui::Margin::symmetric(6, 2)),
-            )
-            .show(ui, |ui| self.menu_bar(ui));
-        let top_margin = match self.look.top_bar {
-            TopBar::Unreal | TopBar::Unity => egui::Margin::symmetric(6, 3),
-            TopBar::Labelled | TopBar::UnityOverlay | TopBar::UnrealModes => egui::Margin::symmetric(6, 3),
-            TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail => egui::Margin::ZERO,
-            TopBar::SlimRibbon | TopBar::Ribbon | TopBar::ProRibbon | TopBar::ModeBar => egui::Margin::ZERO,
+        let k = self.look;
+        let t = k.t;
+        let bar = |id: &'static str, height: f32| {
+            let panel = if id == "status" {
+                egui::Panel::bottom(id)
+            } else {
+                egui::Panel::top(id)
+            };
+            panel
+                .exact_size(height)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(t.well))
         };
-        if !self.look.top_bar.no_toolbar() {
-            egui::Panel::top("ribbon")
-                .frame(egui::Frame::new().fill(t.header).inner_margin(top_margin))
-                .show(ui, |ui| match self.look.top_bar {
-                    TopBar::Unreal => toolbar::unreal(ui, &t),
-                    TopBar::Unity => toolbar::unity(ui, &t),
-                    TopBar::SlimRibbon => toolbar::slim_ribbon(ui, &t, &mut self.ribbon),
-                    TopBar::Labelled => toolbar::labelled_toolbar(ui, &t),
-                    TopBar::ProRibbon => toolbar::pro_ribbon(ui, &t, &mut self.ribbon),
-                    TopBar::ModeBar => toolbar::mode_bar(ui, &t, &mut self.ribbon),
-                    TopBar::UnityOverlay => toolbar::slim(ui, &t, false),
-                    TopBar::UnrealModes => toolbar::slim(ui, &t, true),
-                    TopBar::ContextBar | TopBar::Combined | TopBar::CombinedRail => {}
-                    TopBar::Ribbon => {
-                        if let ribbon::Action::Pressed(label) = self.ribbon.show(ui, &t) {
-                            match label {
-                                "Next theme" => self.next_theme(ctx),
-                                "Reset" if self.ribbon.tab == ribbon::TABS.len() - 1 => {
-                                    self.dock = panels::default_layout(self.look.top_bar)
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                });
+
+        let mut reset = false;
+        bar("menu", k.d.menu_height).show(ui, |ui| {
+            chrome::menu_row(ui, &k, &mut self.state, &mut self.dock, &mut reset)
+        });
+        if reset {
+            self.dock = panels::default_layout(self.bottom);
+            self.state.maximised = false;
         }
-        egui::Panel::bottom("status")
-            .frame(
-                egui::Frame::new()
-                    .fill(t.header)
-                    .inner_margin(egui::Margin::symmetric(8, 3)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Untitled project").color(t.text_dim));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(format!("Theme: {}", t.name)).color(t.text_dim));
-                    });
-                });
-            });
+        bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &self.state));
+        if k.d.overlays == Overlays::Header && !self.state.overlays_hidden {
+            egui::Panel::left("rail")
+                .exact_size(chrome::window_rail_width(&k, &self.state))
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(t.well))
+                .show(ui, |ui| chrome::window_rail(ui, &k, &mut self.state));
+        }
+
+        // Shift with Space gives the viewport the whole window, as in Unity.
+        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Space)) {
+            self.state.maximised = !self.state.maximised;
+        }
+
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.base))
+            .frame(egui::Frame::new().fill(t.well))
             .show(ui, |ui| {
-                let mut style = egui_dock::Style::from_egui(ui.style().as_ref());
-                style.tab_bar.bg_fill = t.header;
-                style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.tab_body.stroke = egui::Stroke::NONE;
-                style.tab.active.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.focused.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.hovered.corner_radius = egui::CornerRadius::ZERO;
-                style.tab.active.bg_fill = t.panel;
-                style.tab.focused.bg_fill = t.panel;
-                style.tab.inactive.bg_fill = t.header;
-                style.tab.hovered.bg_fill = t.control;
-                match self.look.tabs {
-                    Tabs::Unreal => {
-                        style.tab.hline_below_active_tab_name = true;
-                        style.tab_bar.hline_color = t.select;
-                    }
-                    Tabs::Unity => {
-                        style.tab.hline_below_active_tab_name = false;
-                        style.tab_bar.hline_color = t.header;
-                        style.tab.inactive.text_color = t.text_dim;
-                    }
-                    Tabs::Underline => {
-                        style.tab.hline_below_active_tab_name = true;
-                        style.tab_bar.hline_color = t.select;
-                        style.tab.active.bg_fill = t.header;
-                        style.tab.focused.bg_fill = t.header;
-                        style.tab.inactive.text_color = t.text_dim;
-                    }
+                if self.state.maximised {
+                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    viewport::show(ui, &k, &mut self.state, None);
+                    return;
                 }
-                style.separator.width = 2.0;
-                style.separator.color_idle = t.divider;
-                style.separator.color_hovered = t.select;
-                style.separator.color_dragged = t.select;
-                style.main_surface_border_stroke = egui::Stroke::NONE;
-                style.main_surface_border_rounding = egui::CornerRadius::ZERO;
+                let style = panels::dock_style(ui, &k);
+                let active = self
+                    .dock
+                    .iter_leaves()
+                    .filter_map(|(_, leaf)| leaf.tabs.get(leaf.active.0).copied())
+                    .collect();
+                let focused = self.dock.find_active_focused().map_or(Panel::Viewport, |(_, tab)| *tab);
                 let mut viewer = panels::Viewer {
-                    theme: &t,
-                    viewport_image: self.viewport_image.as_ref(),
-                    selected: &mut self.selected,
-                    type_icons: self.look.type_icons,
-                    palette: self.look.palette,
-                    top_bar: self.look.top_bar,
-                    overlays: &mut self.overlays,
+                    k: &k,
+                    st: &mut self.state,
+                    active,
+                    focused,
+                    tab_rects: Vec::new(),
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
@@ -288,7 +271,7 @@ impl eframe::App for Studio {
 
         self.frames += 1;
         if let Some(path) = self.screenshot.clone() {
-            if self.frames == 5 {
+            if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             }
             let shot = ctx.input(|i| {
@@ -308,7 +291,46 @@ impl eframe::App for Studio {
     }
 }
 
-fn load_texture(ctx: &egui::Context, path: &std::path::Path) -> Result<egui::TextureHandle> {
+impl Studio {
+    /// Feeds the scripted clicks and the resting pointer of `--click` and
+    /// `--hover` to egui as if they came from the mouse.
+    fn scripted_pointer(&self, input: &mut egui::RawInput) {
+        // The real mouse may rest on the window; it must not show in pictures.
+        input.events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::PointerMoved(_)
+                    | egui::Event::PointerButton { .. }
+                    | egui::Event::PointerGone
+                    | egui::Event::MouseMoved(_)
+                    | egui::Event::MouseWheel { .. }
+            )
+        });
+        let step = self.frames.saturating_sub(2);
+        let (index, phase) = ((step / CLICK_FRAMES) as usize, step % CLICK_FRAMES);
+        if self.frames >= 2 {
+            if let Some(pos) = self.clicks.get(index).copied() {
+                input.events.push(egui::Event::PointerMoved(pos));
+                if phase == 1 || phase == 2 {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: phase == 1,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                return;
+            }
+        }
+        if let Some(pos) = self.hover.or(self.clicks.last().copied()) {
+            input.events.push(egui::Event::PointerMoved(pos));
+        }
+    }
+}
+
+/// Loads a PNG as a texture and returns it with the colour of its top
+/// left corner.
+fn load_texture(ctx: &egui::Context, path: &std::path::Path) -> Result<(egui::TextureHandle, egui::Color32)> {
     let decoder = png::Decoder::new(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?);
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size()];
@@ -321,8 +343,12 @@ fn load_texture(ctx: &egui::Context, path: &std::path::Path) -> Result<egui::Tex
             .collect(),
         other => anyhow::bail!("{}: unsupported PNG colour type {other:?}", path.display()),
     };
+    let corner = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
     let image = egui::ColorImage::from_rgba_unmultiplied([info.width as usize, info.height as usize], &rgba);
-    Ok(ctx.load_texture("viewport", image, egui::TextureOptions::LINEAR))
+    Ok((
+        ctx.load_texture("viewport", image, egui::TextureOptions::LINEAR),
+        corner,
+    ))
 }
 
 fn save_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<()> {
