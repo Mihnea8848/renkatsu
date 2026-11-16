@@ -9,7 +9,7 @@
 id = "starter-characters"
 name = "Starter Content: Characters"
 version = "1.1.0"
-description = "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, its default characters, and CharaStudio's colour filters. Characters made of these are built without a Koikatsu install."
+description = "Koikatsu's vanilla characters and everything they wear."
 installed_size = 1069967948
 
 [[package.part]]

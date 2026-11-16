@@ -193,6 +193,10 @@ pub struct State {
     /// The editor runs from a script: it asks nothing and leaves the
     /// user's settings as they are.
     pub scripted: bool,
+    /// A newer Renkatsu on GitHub, when the check at start found one.
+    pub update: Option<rk_packages::update::Release>,
+    /// The check for a newer Renkatsu while it runs.
+    pub update_check: Option<std::sync::mpsc::Receiver<Option<rk_packages::update::Release>>>,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -260,6 +264,34 @@ pub struct State {
 }
 
 impl State {
+    /// Asks GitHub, on a thread of its own, whether a newer Renkatsu is
+    /// out. Nothing waits for the answer.
+    pub fn check_for_update(&mut self, ctx: &egui::Context) {
+        let (send, answer) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let newer = rk_packages::update::latest()
+                .ok()
+                .and_then(|r| rk_packages::update::newer(r, env!("CARGO_PKG_VERSION")));
+            let _ = send.send(newer);
+            ctx.request_repaint();
+        });
+        self.update_check = Some(answer);
+    }
+
+    /// Takes the answer of the update check once it came.
+    pub fn poll_update(&mut self) {
+        let Some(check) = &self.update_check else { return };
+        if let Ok(newer) = check.try_recv() {
+            if let Some(release) = &newer {
+                self.log
+                    .info(format!("Renkatsu {} is out: {}", release.version, release.url));
+            }
+            self.update = newer;
+            self.update_check = None;
+        }
+    }
+
     /// The editor on a project and its scene.
     pub fn new(project: Project, scene: Scene) -> Self {
         State {
@@ -277,6 +309,8 @@ impl State {
             picker: None,
             imports: VecDeque::new(),
             scripted: false,
+            update: None,
+            update_check: None,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,

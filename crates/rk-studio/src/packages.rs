@@ -431,33 +431,21 @@ fn package_card(
         || known.map_or(String::new(), |n| n.version.clone()),
         |r| r.package.manifest.version.clone(),
     );
-    let about = row
-        .map(|r| r.package.manifest.description.as_str())
-        .filter(|d| !d.is_empty())
-        .or(known.map(|n| n.description.as_str()))
+    // The short description of the list Renkatsu ships comes first; the
+    // installed manifest's may be from an older, longer version.
+    let about = known
+        .map(|n| n.description.as_str())
+        .or(row.map(|r| r.package.manifest.description.as_str()))
         .unwrap_or_default()
         .to_owned();
-    let facts = match (row, known) {
-        (Some(r), n) => {
-            let mut facts = format!("Installed, {} on disk", size_text(r.size));
-            let holds = r.package.manifest.holds();
-            if !holds.is_empty() {
-                facts = format!("{facts}: {holds}");
-            }
-            if let (true, Some(n)) = (newer, n) {
-                facts = format!("{facts}. Version {} is a {} download", n.version, size_text(n.size()));
-            }
-            facts
-        }
-        (None, Some(n)) => format!(
-            "Not installed. {} to download, {} on disk",
-            size_text(n.size()),
-            size_text(n.installed_size)
-        ),
+    let size = match (row, known) {
+        (Some(r), _) => size_text(r.size),
+        (None, Some(n)) => format!("{} download", size_text(n.size())),
         (None, None) => String::new(),
     };
+    let facts = format!("Version {version}, {size}");
 
-    let mark = Rect::from_min_size(rect.min + Vec2::new(20.0, 16.0), Vec2::splat(56.0));
+    let mark = Rect::from_min_size(rect.min + Vec2::new(20.0, 14.0), Vec2::splat(52.0));
     let p = ui.painter();
     p.rect_filled(mark, 0.0, t.input);
     crate::widgets::glyph(
@@ -465,43 +453,40 @@ fn package_card(
         k,
         mark.center(),
         egui_phosphor::regular::PACKAGE,
-        26.0,
+        24.0,
         if row.is_some() { t.select_bright } else { t.text_dim },
     );
     let x = mark.right() + 16.0;
     let buttons_w = 3.0 * 96.0 + 2.0 * 8.0;
     let text_w = rect.right() - 20.0 - buttons_w - 16.0 - x;
-    let title = p.text(
-        Pos2::new(x, mark.top() + 9.0),
+    p.text(
+        Pos2::new(x, mark.top() + 8.0),
         egui::Align2::LEFT_CENTER,
         &name,
         k.bold(k.d.text + 1.0),
         t.text_bright,
     );
-    p.text(
-        Pos2::new(title.right() + 8.0, mark.top() + 9.0),
-        egui::Align2::LEFT_CENTER,
-        version,
-        k.small(),
-        t.text_dim,
-    );
-    let galley = ui.painter().layout(about, k.font(), t.text, text_w);
-    let about_h = galley.size().y;
-    ui.painter().galley(Pos2::new(x, mark.top() + 22.0), galley, t.text);
-    crate::selector::line(
-        ui,
-        Pos2::new(x, mark.top() + 32.0 + about_h),
-        text_w,
-        &facts,
-        k.small(),
-        t.text_dim,
-    );
+    crate::selector::line(ui, Pos2::new(x, mark.top() + 27.0), text_w, &about, k.font(), t.text);
+    let under = Pos2::new(x, mark.top() + 45.0);
+    let shown = crate::selector::line_width(ui, &facts, k.small());
+    crate::selector::line(ui, under, text_w, &facts, k.small(), t.text_dim);
+    if let (true, Some(n)) = (newer, known) {
+        let note = format!("Update available: {}", n.version);
+        crate::selector::line(
+            ui,
+            under + Vec2::new(shown + 14.0, 0.0),
+            (text_w - shown - 14.0).max(0.0),
+            &note,
+            k.small(),
+            t.accent,
+        );
+    }
 
     // The buttons, from the right.
     let mut ask = None;
     let mut right = rect.right() - 20.0;
     let mut place = |text: &str, primary: bool, ui: &mut Ui| {
-        let r = Rect::from_min_size(Pos2::new(right - 96.0, mark.top() + 2.0), Vec2::new(96.0, 28.0));
+        let r = Rect::from_min_size(Pos2::new(right - 96.0, mark.top() + 12.0), Vec2::new(96.0, 28.0));
         right -= 104.0;
         crate::selector::button(ui, k, r, text, primary, free)
     };
@@ -574,7 +559,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                     .filter(|row| !packages.known.iter().any(|n| n.id == row.package.manifest.id))
                     .map(|row| (None, Some(row))),
             );
-            const ROW: f32 = 112.0;
+            const ROW: f32 = 80.0;
             let mut y = f.body.top();
             for (known, row) in rows.iter().copied() {
                 let rect = Rect::from_min_size(Pos2::new(f.body.left(), y), Vec2::new(f.body.width(), ROW));

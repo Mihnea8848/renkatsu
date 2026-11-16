@@ -587,6 +587,19 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     }
 
     let mut x = rect.right() - 12.0;
+    // A newer Renkatsu, as the check at start found: a click opens its page.
+    if let Some(release) = &st.update {
+        let text = format!("Renkatsu {} is out", release.version);
+        let r = small(x, Align2::RIGHT_CENTER, &text, t.accent);
+        let resp = ui.interact(r.expand(4.0), ui.id().with("update"), egui::Sense::click());
+        if resp.clicked() {
+            crate::settings::open_url(&release.url);
+        }
+        resp.on_hover_text("Open the release page, with the installers");
+        x = r.left() - 12.0;
+        hair_v(p, x, rect.top() + 6.0, rect.bottom() - 5.0, t.border);
+        x -= 12.0;
+    }
     for text in [
         if st.settings.frame_rate.continuous() && st.frame_time > 0.0 {
             format!("{:.0} fps", 1.0 / st.frame_time)
