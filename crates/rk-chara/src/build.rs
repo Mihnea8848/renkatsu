@@ -61,6 +61,8 @@ pub struct BuildOptions {
     /// Run Copy Cha Body Mat: items made for it draw parts with the body's
     /// own material, so they match the skin.
     pub copy_body_material: bool,
+    /// Run the Dynamic Bone Distribution Editor on accessories.
+    pub dbde: bool,
     /// Run the Pregnancy plugin: the body grows with the stored week.
     pub pregnancy: bool,
     /// Run the Accessory States plugin: accessories bound to clothes
@@ -94,6 +96,7 @@ impl Default for BuildOptions {
             edit_fangs: true,
             clothing_blend_shape: true,
             copy_body_material: true,
+            dbde: true,
             pregnancy: true,
             accessory_states: true,
             uncensor_selector: true,
@@ -151,6 +154,8 @@ struct PhysicsSource {
     shake: bool,
     /// Accessory slot, for the Dynamic Bone Editor's settings.
     slot: Option<usize>,
+    /// The prefab's top object, where paths to DynamicBone roots start.
+    root: usize,
 }
 
 impl<'g> Builder<'g> {
@@ -210,6 +215,7 @@ impl<'g> Builder<'g> {
             copy,
             shake,
             slot: None,
+            root: inst.root,
         });
     }
 
@@ -451,6 +457,7 @@ impl<'g> Builder<'g> {
         top: usize,
         bones: &HashMap<String, usize>,
         edits: &[crate::dynamic_bone_editor::Edit],
+        dbde: &[crate::dbde::Edit],
         colliders: Option<(crate::colliders::Settings, f32)>,
     ) -> crate::physics::Physics {
         use crate::physics::{self, Bone, DynamicBone, Resolve, Ver01, Ver02};
@@ -528,6 +535,19 @@ impl<'g> Builder<'g> {
                         }
                         if let (Some(slot), Some(root)) = (source.slot, def.root) {
                             crate::dynamic_bone_editor::apply(edits, slot, &scene.nodes[root].name, &mut def);
+                            // DBDE loads after the Dynamic Bone Editor and
+                            // finds the bone by its path in the accessory.
+                            if let Some(e) = crate::dbde::find(dbde, slot, &scene.path_below(source.root, root)) {
+                                if let Some(f) = e.force {
+                                    def.force = glam::Vec3::from(f);
+                                }
+                                if let Some(w) = e.weight {
+                                    def.weight = w;
+                                }
+                                if let Some(a) = e.active {
+                                    def.enabled &= a;
+                                }
+                            }
                         }
                         out.bones.push(Bone::Dynamic(DynamicBone::new(def)));
                     }
@@ -2424,7 +2444,12 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             .unwrap_or(0.0);
         (crate::colliders::read(&card.ext), bust)
     });
-    let mut physics = b.read_physics(top, &bones, &bone_edits, collider_plugin);
+    let dbde_edits = if opts.dbde {
+        crate::dbde::for_outfit(&card.ext, outfit)
+    } else {
+        Vec::new()
+    };
+    let mut physics = b.read_physics(top, &bones, &bone_edits, &dbde_edits, collider_plugin);
     if opts.physics {
         physics.start(&mut b.scene);
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);

@@ -13,6 +13,7 @@ pub mod clothing_unlocker;
 pub mod colliders;
 pub mod compose;
 pub mod copy_body_material;
+pub mod dbde;
 pub mod dynamic_bone_editor;
 pub mod edit_fangs;
 pub mod expression;
