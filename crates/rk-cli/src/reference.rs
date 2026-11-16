@@ -233,13 +233,13 @@ pub struct Summary {
 
 /// Builds, renders and compares one card. With `verbose` off nothing is
 /// printed, and the bone listing is skipped.
-#[allow(clippy::too_many_arguments)]
 /// The outfit the character wore in the capture, from `status.coordinate`.
 fn captured_outfit(capture: &str) -> Option<usize> {
     let v: Value = serde_json::from_str(capture).ok()?;
     v["status"]["coordinate"].as_u64().map(|c| c as usize)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     game: &Game,
     renderer: &mut Renderer,
