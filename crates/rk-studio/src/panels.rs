@@ -403,6 +403,7 @@ fn search(ui: &mut Ui, hint: &str) {
 
 /// One full-width list row with the object's type shown in the chosen
 /// style, highlighted edge to edge as in Unity and Unreal.
+#[allow(clippy::too_many_arguments)]
 pub fn type_row(
     ui: &mut Ui,
     t: &Theme,
