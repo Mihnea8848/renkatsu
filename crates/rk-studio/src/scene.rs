@@ -100,10 +100,12 @@ impl Content {
         }
     }
 
+    /// The key light a new scene starts with, a little softer than
+    /// CharaStudio's 1.0.
     pub fn light() -> Content {
         Content::Light {
             from_camera: true,
-            intensity: 1.0,
+            intensity: 0.85,
             shadows: true,
         }
     }

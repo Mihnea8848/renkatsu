@@ -72,6 +72,7 @@ fn capture_effects(v: &Value) -> StudioEffects {
         bloom: on("bloom").then(Default::default),
         color: None,
         vignette: on("vignette").then(Default::default),
+        backdrop: None,
     };
     for component in v["effect_params"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let fields = &component["fields"];

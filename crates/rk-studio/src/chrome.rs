@@ -588,7 +588,6 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
 
     let mut x = rect.right() - 12.0;
     for text in [
-        format!("Design {}", k.d.name),
         if st.settings.frame_rate.continuous() && st.frame_time > 0.0 {
             format!("{:.0} fps", 1.0 / st.frame_time)
         } else {
