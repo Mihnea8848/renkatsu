@@ -58,6 +58,9 @@ pub struct BuildOptions {
     /// Run Clothing BlendShape: clothing made for it takes the blend shape
     /// weights the card saved per outfit.
     pub clothing_blend_shape: bool,
+    /// Run Copy Cha Body Mat: items made for it draw parts with the body's
+    /// own material, so they match the skin.
+    pub copy_body_material: bool,
     /// Run the Pregnancy plugin: the body grows with the stored week.
     pub pregnancy: bool,
     /// Run the Accessory States plugin: accessories bound to clothes
@@ -90,6 +93,7 @@ impl Default for BuildOptions {
             slider_unlocker: true,
             edit_fangs: true,
             clothing_blend_shape: true,
+            copy_body_material: true,
             pregnancy: true,
             accessory_states: true,
             uncensor_selector: true,
@@ -129,6 +133,9 @@ struct Builder<'g> {
     unlocked: bool,
     /// `ChaFileStatus.eyesOpenMax` as set when the character is added.
     eyes_open_max: f32,
+    /// Renderers that a `ChaCopyBodyMaterial` component gives the body's
+    /// material, with the queue it asks for (-1 keeps the body's).
+    body_copies: Vec<(Vec<usize>, i32)>,
 }
 
 /// The scripts of one prefab and how the game treats its DynamicBones.
@@ -216,7 +223,10 @@ impl<'g> Builder<'g> {
             .loader
             .load_prefab(&mut self.scene, ab, data, item.mod_idx, parent, part)
         {
-            Ok(inst) => Some(inst),
+            Ok(inst) => {
+                self.find_body_copies(&inst);
+                Some(inst)
+            }
             Err(e) => {
                 self.loader.warn(format!("{label}: {e:#}"));
                 None
@@ -588,6 +598,33 @@ impl<'g> Builder<'g> {
     /// object, so components further down the prefab are not used.
     fn hair_listed(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
         self.listed(inst, Some("ChaCustomHairComponent"), field, true)
+    }
+
+    /// Records the renderers a Copy Cha Body Mat component on the item
+    /// lists, so they can take the body's material once it is finished.
+    fn find_body_copies(&mut self, inst: &Instance) {
+        for (_, script) in &inst.scripts {
+            if self.script_class(script).as_deref() != Some(crate::copy_body_material::SCRIPT) {
+                continue;
+            }
+            let Ok(obj) = script.read() else { continue };
+            let targets: Vec<usize> = match obj.get("rendTarget") {
+                Some(rk_unityfs::UValue::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| v.as_pptr())
+                    .filter_map(|p| self.game.assets.deref(&script.file, p))
+                    .filter_map(|o| inst.renderer_keys.get(&o.key()).copied())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let queue = obj
+                .get("customRenderQueue")
+                .and_then(rk_unityfs::UValue::as_i64)
+                .unwrap_or(-1) as i32;
+            if !targets.is_empty() {
+                self.body_copies.push((targets, queue));
+            }
+        }
     }
 
     /// Clothing BlendShape on one clothing item: the weights its
@@ -1779,6 +1816,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         hair_gloss: None,
         physics_sources: Vec::new(),
+        body_copies: Vec::new(),
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         eyes_open_max: if opts.eye_control {
@@ -2314,6 +2352,24 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         })
     };
     let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
+
+    if opts.copy_body_material {
+        let body = b
+            .scene
+            .renderers
+            .iter()
+            .find(|r| r.part == Part::Body && r.name == "o_body_a")
+            .and_then(|r| r.materials.first().cloned());
+        if let Some(body) = body {
+            for (targets, queue) in std::mem::take(&mut b.body_copies) {
+                for r in targets {
+                    if let Some(m) = b.scene.renderers[r].materials.first_mut() {
+                        *m = crate::copy_body_material::copy(&body, queue);
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(fangs) = opts.edit_fangs.then(|| crate::edit_fangs::read(&card.ext)).flatten() {
         for r in b.scene.renderers.iter_mut() {
