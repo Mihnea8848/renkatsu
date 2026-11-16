@@ -10,7 +10,7 @@ use crate::design::{Overlays, TitleBar};
 use crate::kinds::Kind;
 use crate::modes::{tool_hint, MODES, PIPELINES, TOOLS};
 use crate::panels::{self, Panel};
-use crate::state::{Look, Physics, Rail, State};
+use crate::state::{Command, Look, Physics, Rail, State};
 use crate::viewport::{self, RailShape};
 use crate::widgets::{self, flat_button, glyph, hair_h, hair_v, label};
 use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
@@ -327,37 +327,30 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
         let _ = item(ui, "Quit", "Ctrl+Q");
     });
     ui.menu_button("Edit", |ui| {
-        let _ = item(ui, "Undo", "Ctrl+Z");
-        let _ = item(ui, "Redo", "Ctrl+Y");
-        ui.separator();
-        let _ = item(ui, "Duplicate", "Ctrl+D");
-        let _ = item(ui, "Delete", "Del");
+        let chosen = st.doc.selected.is_some();
+        for (text, keys, enabled, command) in [
+            ("Undo", "Ctrl+Z", st.doc.can_undo(), Command::Undo),
+            ("Redo", "Ctrl+Y", st.doc.can_redo(), Command::Redo),
+            ("Duplicate", "Ctrl+D", chosen, Command::Duplicate),
+            ("Rename", "F2", chosen, Command::Rename),
+            ("Hide or show", "H", chosen, Command::ToggleHidden),
+            ("Delete", "Del", chosen, Command::Delete),
+        ] {
+            if text == "Duplicate" {
+                ui.separator();
+            }
+            let button = egui::Button::new(text).shortcut_text(keys);
+            if ui.add_enabled(enabled, button).clicked() {
+                st.run(command);
+                ui.close();
+            }
+        }
         ui.separator();
         if item(ui, "Preferences", "").clicked() {
             st.preferences_open = true;
         }
     });
-    ui.menu_button("Add", |ui| {
-        for kind in [
-            Kind::Character,
-            Kind::Item,
-            Kind::Light,
-            Kind::Camera,
-            Kind::Map,
-            Kind::Folder,
-        ] {
-            let mut job = egui::text::LayoutJob::default();
-            let format = |font, color| egui::TextFormat {
-                font_id: font,
-                color,
-                valign: Align::Center,
-                ..Default::default()
-            };
-            job.append(kind.glyph(), 0.0, format(k.icons(15.0), kind.color()));
-            job.append(kind.label(), 8.0, format(k.font(), k.t.text));
-            let _ = ui.button(job);
-        }
-    });
+    ui.menu_button("Add", |ui| panels::add_items(ui, k, st));
     ui.menu_button("View", |ui| {
         if widgets::check_item(ui, k, !st.overlays_hidden, "Viewport tools", "`").clicked() {
             st.overlays_hidden = !st.overlays_hidden;
@@ -528,9 +521,17 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
             "Power saving".to_owned()
         },
         PIPELINES[0].name.to_owned(),
-        match &st.live {
-            Some(live) => format!("Live: {}", live.name),
-            None => "Still picture".to_owned(),
+        match st
+            .doc
+            .scene()
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == Kind::Character)
+            .count()
+        {
+            0 => "No characters".to_owned(),
+            1 => "1 character".to_owned(),
+            n => format!("{n} characters"),
         },
     ] {
         x = small(x, Align2::RIGHT_CENTER, &text, t.text_dim).left() - 12.0;

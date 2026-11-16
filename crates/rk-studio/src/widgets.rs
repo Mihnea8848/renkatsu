@@ -199,13 +199,15 @@ pub enum Marker {
     Letter(Color32, &'static str),
 }
 
-/// A number that is changed by dragging it sideways.
-pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker: Marker, framed: bool) {
+/// A number that is changed by dragging it sideways, by `speed` for each
+/// point of the drag.
+#[allow(clippy::too_many_arguments)]
+pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker: Marker, framed: bool, speed: f32) {
     let resp = ui
         .interact(rect, id, Sense::click_and_drag())
         .on_hover_cursor(CursorIcon::ResizeHorizontal);
     if resp.dragged() {
-        *value += resp.drag_delta().x * 0.01;
+        *value += resp.drag_delta().x * speed;
     }
     let p = ui.painter();
     if framed {

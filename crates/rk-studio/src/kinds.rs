@@ -12,7 +12,11 @@ use egui_phosphor::regular as icon;
 pub enum Kind {
     Scene,
     Character,
+    // A character's parts and scripts are not objects of the scene model
+    // yet; their looks are settled here for when they are.
+    #[allow(dead_code)]
     Outfit,
+    #[allow(dead_code)]
     Accessory,
     Item,
     Light,
@@ -20,6 +24,7 @@ pub enum Kind {
     Map,
     Folder,
     Pose,
+    #[allow(dead_code)]
     Script,
 }
 

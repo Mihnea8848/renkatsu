@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! What the shell remembers between frames: the look in use, the selection,
-//! the state of the viewport's overlays and the placeholder values the
-//! panels edit. A real scene model replaces the placeholder parts later.
+//! the state of the viewport's overlays, the scene being edited and the
+//! commands that change it.
 
 use crate::design::{Spec, TitleBar};
 use crate::kinds::Kind;
+use crate::library::Library;
+use crate::scene::{Content, Document, ObjectId, Scene};
 use crate::theme::{Theme, ICONS, SEMIBOLD};
 use egui::{Color32, FontFamily, FontId, TextureHandle};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 /// The theme and the chosen design, passed to everything that draws.
 #[derive(Debug, Clone, Copy)]
@@ -66,41 +70,58 @@ pub enum Physics {
     Paused,
 }
 
-/// The placeholder scene: depth in the tree, kind and name of each object.
-pub const SCENE: [(usize, Kind, &str); 11] = [
-    (0, Kind::Scene, "Untitled scene"),
-    (1, Kind::Folder, "Cast"),
-    (2, Kind::Character, "Simple"),
-    (3, Kind::Outfit, "Outfit 1"),
-    (3, Kind::Accessory, "Accessories"),
-    (3, Kind::Pose, "Standing pose"),
-    (1, Kind::Item, "Chair"),
-    (1, Kind::Light, "Key light"),
-    (1, Kind::Camera, "Camera 1"),
-    (1, Kind::Map, "Rooftop"),
-    (1, Kind::Script, "Scene script"),
-];
-
-/// Whether a scene row has rows below it in the tree.
-pub fn has_children(row: usize) -> bool {
-    SCENE.get(row + 1).is_some_and(|next| next.0 > SCENE[row].0)
+/// The console's lines: a level (0 information, 1 warning, 2 error), the
+/// time since the editor started and the text.
+pub struct Log {
+    start: std::time::Instant,
+    pub lines: Vec<(usize, String, String)>,
 }
 
-/// The row the camera focuses on for a scene row: the row itself when it
-/// is a character, or the character it belongs to. Other kinds have nothing
-/// in the viewport to focus on yet.
-pub fn focus_row(row: usize) -> Option<usize> {
-    let mut depth = SCENE.get(row)?.0 + 1;
-    for i in (0..=row).rev() {
-        let (d, kind, _) = SCENE[i];
-        if d < depth {
-            if kind == Kind::Character {
-                return Some(i);
-            }
-            depth = d;
+impl Log {
+    pub fn new() -> Log {
+        Log {
+            start: std::time::Instant::now(),
+            lines: Vec::new(),
         }
     }
-    None
+
+    fn line(&mut self, level: usize, text: String) {
+        let seconds = self.start.elapsed().as_secs();
+        let time = format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60);
+        self.lines.push((level, time, text));
+    }
+
+    pub fn info(&mut self, text: impl Into<String>) {
+        self.line(0, text.into());
+    }
+
+    pub fn warn(&mut self, text: impl Into<String>) {
+        self.line(1, text.into());
+    }
+
+    pub fn error(&mut self, text: impl Into<String>) {
+        self.line(2, text.into());
+    }
+}
+
+/// Something the menus, the keys and the panels ask of the scene.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Undo,
+    Redo,
+    /// Delete the selection.
+    Delete,
+    /// Copy the selection.
+    Duplicate,
+    /// Hide the selection, or show it again.
+    ToggleHidden,
+    /// Start renaming the selection in the Outliner.
+    Rename,
+    /// Add an object of a kind. A character needs a card, so asking for
+    /// one shows the cards instead.
+    Add(Kind),
+    /// Add the character of a card.
+    AddCard(PathBuf),
 }
 
 pub struct State {
@@ -109,12 +130,19 @@ pub struct State {
     /// When the fly speed last changed, in egui's seconds, for the meter
     /// that shows it and fades away.
     pub speed_shown: Option<f64>,
-    /// Index into `SCENE` of the selected object.
-    pub selected: Option<usize>,
-    /// Scene rows whose children are folded away.
-    pub folded: [bool; SCENE.len()],
-    /// Scene rows hidden in the viewport.
-    pub hidden: [bool; SCENE.len()],
+    /// The scene being edited, with the selection and the undo history.
+    pub doc: Document,
+    /// Folders whose content is folded away in the Outliner.
+    pub folded: HashSet<ObjectId>,
+    /// The whole scene is folded away in the Outliner.
+    pub scene_folded: bool,
+    /// The object being renamed in the Outliner, with the text so far.
+    pub renaming: Option<(ObjectId, String)>,
+    /// The Content panel was asked for and should come to the front.
+    pub show_content: bool,
+    /// The cards on disk, for the Content panel.
+    pub library: Library,
+    pub log: Log,
 
     /// Index into `modes::MODES`.
     pub mode: usize,
@@ -134,34 +162,25 @@ pub struct State {
     pub snap: bool,
     pub physics: Physics,
 
-    pub transform: [[f32; 3]; 3],
-    pub outfit: usize,
-    pub shoes: usize,
-    pub simulate: bool,
-    pub eyes: usize,
-    pub mouth: usize,
-    pub modules: [bool; 4],
-    pub light_type: usize,
-    pub intensity: f32,
-    pub shadows: bool,
-    pub lens: [f32; 3],
     /// Properties sections that are open.
-    pub sections: [bool; 4],
+    pub sections: [bool; 5],
 
     pub scene_search: String,
     pub property_search: String,
     pub content_search: String,
     pub console_search: String,
     pub command_search: String,
-    /// The folder open in the Content panel.
+    /// The folder open in the Content panel, counted through the card
+    /// folders and then the other kinds of asset.
     pub folder: usize,
-    /// The asset selected in the Content panel.
-    pub asset: usize,
+    /// The card selected in the Content panel.
+    pub asset: Option<PathBuf>,
     /// Console levels shown: information, warnings, errors.
     pub levels: [bool; 3],
 
     pub viewport_image: Option<TextureHandle>,
-    /// The live character, when a card was loaded.
+    /// The scene as the viewport draws it, when the window has a GPU
+    /// device to draw with.
     pub live: Option<crate::live::Live>,
     /// The physics state the last frame saw, to reset on a stop.
     pub last_physics: Physics,
@@ -182,9 +201,13 @@ impl State {
         State {
             title_bar: TitleBar::A,
             speed_shown: None,
-            selected: Some(2),
-            folded: [false; SCENE.len()],
-            hidden: [false; SCENE.len()],
+            doc: Document::new(Scene::new()),
+            folded: HashSet::new(),
+            scene_folded: false,
+            renaming: None,
+            show_content: false,
+            library: Library::new(),
+            log: Log::new(),
             mode: 2,
             mode_tool: [0, 0, 1, 0, 0, 0],
             palette_open: true,
@@ -195,25 +218,14 @@ impl State {
             tool: 2,
             snap: true,
             physics: Physics::Stopped,
-            transform: [[0.0; 3], [0.0; 3], [1.0; 3]],
-            outfit: 0,
-            shoes: 0,
-            simulate: true,
-            eyes: 0,
-            mouth: 0,
-            modules: [true, true, true, false],
-            light_type: 0,
-            intensity: 1.0,
-            shadows: true,
-            lens: [35.0, 0.05, 100.0],
-            sections: [true, true, true, false],
+            sections: [true, true, true, false, true],
             scene_search: String::new(),
             property_search: String::new(),
             content_search: String::new(),
             console_search: String::new(),
             command_search: String::new(),
             folder: 0,
-            asset: 0,
+            asset: None,
             levels: [true; 3],
             viewport_image: None,
             live: None,
@@ -227,9 +239,86 @@ impl State {
     }
 
     /// The kind and name of the selected object.
-    pub fn selection(&self) -> Option<(Kind, &'static str)> {
-        let (_, kind, name) = *SCENE.get(self.selected?)?;
-        Some((kind, name))
+    pub fn selection(&self) -> Option<(Kind, String)> {
+        self.doc.selection().map(|o| (o.kind(), o.name.clone()))
+    }
+
+    /// Carries out a command on the scene.
+    pub fn run(&mut self, command: Command) {
+        let selected = self.doc.selected;
+        match command {
+            Command::Undo => {
+                self.doc.undo();
+            }
+            Command::Redo => {
+                self.doc.redo();
+            }
+            Command::Delete => {
+                if let Some(id) = selected {
+                    self.doc.delete(id);
+                }
+            }
+            Command::Duplicate => {
+                if let Some(id) = selected {
+                    self.doc.duplicate(id);
+                }
+            }
+            Command::ToggleHidden => {
+                if let Some((id, visible)) = self.doc.selection().map(|o| (o.id, o.visible)) {
+                    self.doc.set_visible(id, !visible);
+                }
+            }
+            Command::Rename => {
+                self.renaming = self.doc.selection().map(|o| (o.id, o.name.clone()));
+            }
+            Command::Add(Kind::Character) => self.show_content = true,
+            Command::Add(kind) => {
+                if let Some(content) = Content::of_kind(kind) {
+                    let name = match kind {
+                        Kind::Folder => "Folder",
+                        Kind::Light => "Light",
+                        Kind::Camera => "Camera",
+                        Kind::Item => "Item",
+                        _ => "Map",
+                    };
+                    let id = self.doc.add(name, content);
+                    self.unfold_to(id);
+                }
+            }
+            Command::AddCard(card) => self.add_card(card),
+        }
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|(id, _)| self.doc.scene().get(*id).is_none())
+        {
+            self.renaming = None;
+        }
+    }
+
+    /// Adds the character of a card to the scene, named after the card.
+    fn add_card(&mut self, card: PathBuf) {
+        let stem = card.file_stem().map(|s| s.to_string_lossy().into_owned());
+        let name = match rk_card::Card::load(&card) {
+            Ok(data) => Some(data.full_name()).filter(|n| !n.is_empty()).or(stem),
+            Err(e) => {
+                self.log
+                    .error(format!("{} is not a card that can be read: {e:#}", card.display()));
+                return;
+            }
+        };
+        let id = self.doc.add_character(name.as_deref().unwrap_or("Character"), card);
+        self.unfold_to(id);
+    }
+
+    /// Opens the folders around an object so that its row shows.
+    fn unfold_to(&mut self, id: ObjectId) {
+        self.scene_folded = false;
+        let mut at = self.doc.scene().get(id).and_then(|o| o.parent);
+        while let Some(folder) = at {
+            self.folded.remove(&folder);
+            at = self.doc.scene().get(folder).and_then(|o| o.parent);
+        }
     }
 
     /// Switches to a mode; choosing the active mode again folds its tools.
@@ -240,22 +329,5 @@ impl State {
             self.mode = mode;
             self.palette_open = true;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_character_and_its_parts_focus_the_character() {
-        let row = |name: &str| SCENE.iter().position(|(_, _, n)| *n == name).unwrap();
-        let simple = row("Simple");
-        assert_eq!(focus_row(simple), Some(simple));
-        assert_eq!(focus_row(row("Outfit 1")), Some(simple));
-        assert_eq!(focus_row(row("Standing pose")), Some(simple));
-        assert_eq!(focus_row(row("Cast")), None);
-        assert_eq!(focus_row(row("Chair")), None);
-        assert_eq!(focus_row(SCENE.len()), None);
     }
 }

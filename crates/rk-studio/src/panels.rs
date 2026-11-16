@@ -3,18 +3,20 @@
 
 //! The docked panels and Unity's default layout: the viewport large at the
 //! top left, Outliner over Properties on the right, Content, Console and
-//! Timeline along the bottom. Their content is placeholder until the scene
-//! model exists; the shell is for judging layout and look.
+//! Timeline along the bottom. The Outliner shows the scene model's tree,
+//! the Content panel the cards on disk and the Console the editor's log.
 
 use crate::design::{Tabs, Tree};
 use crate::kinds::Kind;
 use crate::properties;
-use crate::state::{has_children, Look, State, SCENE};
+use crate::scene::{ObjectId, Place};
+use crate::state::{Command, Look, State};
 use crate::viewport;
 use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, label};
 use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use egui_dock::{DockState, NodeIndex, TabViewer};
 use egui_phosphor::regular as icon;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -68,7 +70,7 @@ pub fn default_layout(bottom: Panel) -> DockState<Panel> {
     surface.split_below(right, 0.44, vec![Panel::Properties]);
     let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline];
     let active = tabs.iter().position(|p| *p == bottom).unwrap_or(0);
-    let [top, below] = surface.split_below(left, 0.775, tabs);
+    let [top, below] = surface.split_below(left, 0.75, tabs);
     let path = |node| egui_dock::NodePath {
         surface: egui_dock::SurfaceIndex::main(),
         node,
@@ -249,15 +251,108 @@ fn on_selection(color: Color32) -> Color32 {
     Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
 }
 
+/// An object dragged in the Outliner, to move it in the tree.
+#[derive(Debug, Clone, Copy)]
+struct DragObject(ObjectId);
+
+/// A card dragged out of the Content panel, to add its character.
+#[derive(Debug, Clone)]
+pub struct DragCard(pub PathBuf);
+
+/// What was dropped on `rect` this frame, when it is a `T`.
+pub fn dropped<T: std::any::Any + Send + Sync>(ui: &Ui, rect: Rect) -> Option<std::sync::Arc<T>> {
+    if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_released()) {
+        egui::DragAndDrop::take_payload::<T>(ui.ctx())
+    } else {
+        None
+    }
+}
+
+/// Whether a `T` is being dragged over `rect`.
+pub fn dragged_over<T: std::any::Any + Send + Sync>(ui: &Ui, rect: Rect) -> bool {
+    ui.rect_contains_pointer(rect) && egui::DragAndDrop::has_payload_of_type::<T>(ui.ctx())
+}
+
+/// One row of the Outliner. The scene itself is the first row and has no
+/// object.
+struct Row {
+    depth: usize,
+    id: Option<ObjectId>,
+    kind: Kind,
+    name: String,
+    /// The object's own visibility switch.
+    visible: bool,
+    /// Whether it shows, which also takes the folders around it.
+    shown: bool,
+    parent: bool,
+    folded: bool,
+}
+
+/// What a frame of the Outliner asks for, carried out once it is drawn.
+enum Act {
+    Select(Option<ObjectId>),
+    Fold(Option<ObjectId>),
+    Eye(ObjectId),
+    Rename(ObjectId),
+    Renamed(ObjectId, String),
+    Move(ObjectId, Place),
+    Run(Command),
+}
+
+/// The Outliner's rows: the scene, then its objects in tree order, without
+/// what is folded away. A search lists every object that matches instead.
+fn rows(st: &State) -> Vec<Row> {
+    let scene = st.doc.scene();
+    let search = st.scene_search.trim().to_lowercase();
+    let mut rows = vec![Row {
+        depth: 0,
+        id: None,
+        kind: Kind::Scene,
+        name: scene.name.clone(),
+        visible: true,
+        shown: true,
+        parent: !scene.objects().is_empty(),
+        folded: st.scene_folded,
+    }];
+    let mut hide_below: Option<usize> = st.scene_folded.then_some(0);
+    for (depth, id) in scene.rows() {
+        let Some(object) = scene.get(id) else { continue };
+        let depth = depth + 1;
+        if search.is_empty() {
+            if hide_below.is_some_and(|d| depth > d) {
+                continue;
+            }
+            hide_below = st.folded.contains(&id).then_some(depth);
+        } else if !object.name.to_lowercase().contains(&search) {
+            continue;
+        }
+        rows.push(Row {
+            depth,
+            id: Some(id),
+            kind: object.kind(),
+            name: object.name.clone(),
+            visible: object.visible,
+            shown: scene.shown(id),
+            parent: scene.has_children(id),
+            folded: st.folded.contains(&id),
+        });
+    }
+    rows
+}
+
 fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
     toolbar(ui, k, |ui| {
         if k.d.tree == Tree::Plain {
-            let _ = flat_button(ui, k, Some(icon::PLUS), "", true, false).on_hover_text("Add to the scene");
+            let resp = flat_button(ui, k, Some(icon::PLUS), "", true, false).on_hover_text("Add to the scene");
+            egui::Popup::menu(&resp).show(|ui| add_items(ui, k, st));
         }
         let w = ui.available_width() - k.field() - 4.0;
         widgets::search(ui, k, &mut st.scene_search, "Search the scene", w);
-        let _ = icon_button(ui, k, icon::FUNNEL, false).on_hover_text("Filter by type");
+        let resp = icon_button(ui, k, icon::FOLDER_SIMPLE_PLUS, false).on_hover_text("Add a folder");
+        if resp.clicked() {
+            st.run(Command::Add(Kind::Folder));
+        }
     });
 
     let eye_w = 28.0;
@@ -291,26 +386,21 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
 
     let footer = if k.d.tree == Tree::Columns { 24.0 } else { 0.0 };
     let indent = if k.d.tree == Tree::Guides { 16.0 } else { 14.0 };
+    let rows = rows(st);
+    let mut acts: Vec<Act> = Vec::new();
+    let area = ui.available_rect_before_wrap();
+    let area = area.with_max_y(area.bottom() - footer);
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .max_height(ui.available_height() - footer)
+        .max_height(area.height())
         .show(ui, |ui| {
-            let mut hide_below: Option<usize> = None;
-            for (i, (depth, kind, name)) in SCENE.iter().enumerate() {
-                if let Some(d) = hide_below {
-                    if *depth > d {
-                        continue;
-                    }
-                    hide_below = None;
+            for row in &rows {
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click_and_drag());
+                if resp.clicked() || resp.drag_started() {
+                    acts.push(Act::Select(row.id));
                 }
-                if st.folded[i] {
-                    hide_below = Some(*depth);
-                }
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-                if resp.clicked() {
-                    st.selected = Some(i);
-                }
-                let selected = st.selected == Some(i);
+                let selected = row.id.is_some() && st.doc.selected == row.id;
                 let hovered = ui.rect_contains_pointer(rect);
                 let p = ui.painter().clone();
                 if selected {
@@ -321,35 +411,71 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                 let y = rect.center().y;
                 let text = if selected {
                     Color32::WHITE
-                } else if st.hidden[i] {
+                } else if !row.shown {
                     t.text_dim
                 } else {
                     t.text
                 };
                 let faint = if selected { on_selection(t.select) } else { t.text_dim };
 
-                // Visibility: a column, or a button at the right edge.
-                let eye = match k.d.tree {
-                    Tree::Columns => Rect::from_min_size(rect.min, Vec2::new(eye_w, rect.height())),
-                    _ => Rect::from_min_max(Pos2::new(rect.right() - 28.0, rect.top()), rect.max),
-                };
-                let eye_resp = ui.interact(eye, ui.id().with(("eye", i)), Sense::click());
-                if eye_resp.clicked() {
-                    st.hidden[i] = !st.hidden[i];
-                }
-                let show_eye = match k.d.tree {
-                    Tree::Plain => hovered || st.hidden[i],
-                    _ => true,
-                };
-                if show_eye {
-                    let g = if st.hidden[i] { icon::EYE_CLOSED } else { icon::EYE };
-                    let color = if eye_resp.hovered() { text } else { faint };
-                    glyph(&p, k, eye.center(), g, 13.0, color);
+                if let Some(id) = row.id {
+                    resp.dnd_set_drag_payload(DragObject(id));
+                    if resp.double_clicked() {
+                        acts.push(Act::Rename(id));
+                    }
+                    resp.context_menu(|ui| {
+                        let item = |ui: &mut Ui, text: &str, keys: &str| {
+                            let clicked = ui.add(egui::Button::new(text).shortcut_text(keys)).clicked();
+                            if clicked {
+                                ui.close();
+                            }
+                            clicked
+                        };
+                        let mut command = None;
+                        if item(ui, "Rename", "F2") {
+                            command = Some(Command::Rename);
+                        }
+                        if item(ui, "Duplicate", "Ctrl+D") {
+                            command = Some(Command::Duplicate);
+                        }
+                        if item(ui, if row.visible { "Hide" } else { "Show" }, "H") {
+                            command = Some(Command::ToggleHidden);
+                        }
+                        ui.separator();
+                        if item(ui, "Delete", "Del") {
+                            command = Some(Command::Delete);
+                        }
+                        if let Some(command) = command {
+                            acts.push(Act::Select(Some(id)));
+                            acts.push(Act::Run(command));
+                        }
+                    });
+
+                    // Visibility: a column, or a button at the right edge.
+                    let eye = match k.d.tree {
+                        Tree::Columns => Rect::from_min_size(rect.min, Vec2::new(eye_w, rect.height())),
+                        _ => Rect::from_min_max(Pos2::new(rect.right() - 28.0, rect.top()), rect.max),
+                    };
+                    let eye_resp = ui
+                        .interact(eye, ui.id().with(("eye", id)), Sense::click())
+                        .on_hover_text(if row.visible { "Hide" } else { "Show" });
+                    if eye_resp.clicked() {
+                        acts.push(Act::Eye(id));
+                    }
+                    let show_eye = match k.d.tree {
+                        Tree::Plain => hovered || !row.visible,
+                        _ => true,
+                    };
+                    if show_eye {
+                        let g = if row.visible { icon::EYE } else { icon::EYE_CLOSED };
+                        let color = if eye_resp.hovered() { text } else { faint };
+                        glyph(&p, k, eye.center(), g, 13.0, color);
+                    }
                 }
 
                 let x0 = rect.left() + if k.d.tree == Tree::Columns { eye_w + 4.0 } else { 6.0 };
                 if k.d.tree == Tree::Guides && !selected {
-                    for level in 1..*depth {
+                    for level in 1..row.depth {
                         hair_v(
                             &p,
                             x0 + level as f32 * indent - 9.0,
@@ -359,14 +485,14 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                         );
                     }
                 }
-                let x = x0 + *depth as f32 * indent;
-                if has_children(i) {
+                let x = x0 + row.depth as f32 * indent;
+                if row.parent {
                     let fold = Rect::from_center_size(Pos2::new(x + 7.0, y), Vec2::new(16.0, rect.height()));
-                    let fold_resp = ui.interact(fold, ui.id().with(("fold", i)), Sense::click());
+                    let fold_resp = ui.interact(fold, ui.id().with(("fold", row.id)), Sense::click());
                     if fold_resp.clicked() {
-                        st.folded[i] = !st.folded[i];
+                        acts.push(Act::Fold(row.id));
                     }
-                    let g = if st.folded[i] {
+                    let g = if row.folded {
                         icon::CARET_RIGHT
                     } else {
                         icon::CARET_DOWN
@@ -375,67 +501,227 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     glyph(&p, k, Pos2::new(x + 7.0, y), g, 10.0, color);
                 }
                 let tint = if selected {
-                    on_selection(kind.color())
+                    on_selection(row.kind.color())
                 } else {
-                    kind.color()
+                    row.kind.color()
                 };
-                glyph(&p, k, Pos2::new(x + 24.0, y), kind.glyph(), 15.0, tint);
+                glyph(&p, k, Pos2::new(x + 24.0, y), row.kind.glyph(), 15.0, tint);
                 let name_end = match k.d.tree {
                     Tree::Columns => rect.right() - type_w,
                     _ => rect.right() - 28.0,
                 };
-                let clip = Rect::from_min_max(rect.min, Pos2::new(name_end - 4.0, rect.bottom()));
-                label(&p.with_clip_rect(clip), k, Pos2::new(x + 36.0, y), name, text);
+                match &mut st.renaming {
+                    Some((id, name)) if row.id == Some(*id) => {
+                        let field = Rect::from_min_max(
+                            Pos2::new(x + 32.0, rect.top() + 1.0),
+                            Pos2::new(name_end - 2.0, rect.bottom() - 1.0),
+                        );
+                        p.rect_filled(field, k.radius(), t.input);
+                        p.rect_stroke(field, k.radius(), Stroke::new(1.0, t.select), StrokeKind::Inside);
+                        let edit = ui.put(
+                            field.shrink2(Vec2::new(4.0, 0.0)),
+                            egui::TextEdit::singleline(name)
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
+                                .font(k.font())
+                                .text_color(t.text_bright),
+                        );
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            acts.push(Act::Renamed(*id, String::new()));
+                        } else if edit.lost_focus() {
+                            acts.push(Act::Renamed(*id, name.clone()));
+                        } else if !edit.has_focus() {
+                            edit.request_focus();
+                        }
+                    }
+                    _ => {
+                        let clip = Rect::from_min_max(rect.min, Pos2::new(name_end - 4.0, rect.bottom()));
+                        label(&p.with_clip_rect(clip), k, Pos2::new(x + 36.0, y), &row.name, text);
+                    }
+                }
                 if k.d.tree == Tree::Columns {
                     p.text(
                         Pos2::new(rect.right() - type_w + 10.0, y),
                         Align2::LEFT_CENTER,
-                        kind.label(),
+                        row.kind.label(),
                         k.font(),
                         faint,
                     );
                 }
+
+                // An object dragged over this row: where letting go puts it.
+                if let Some(dragged) = resp.dnd_hover_payload::<DragObject>() {
+                    let at = ui.input(|i| i.pointer.interact_pos()).map_or(y, |pos| pos.y);
+                    let part = (at - rect.top()) / rect.height();
+                    let place = match (row.id, row.kind) {
+                        (None, _) => Place::Into(None),
+                        (Some(id), Kind::Folder) if (0.25..=0.75).contains(&part) => Place::Into(Some(id)),
+                        (Some(id), _) if part < 0.5 => Place::Before(id),
+                        (Some(id), _) => Place::After(id),
+                    };
+                    if st.doc.scene().can_place(dragged.0, place) {
+                        let top = ui
+                            .painter()
+                            .clone()
+                            .with_layer_id(egui::LayerId::new(egui::Order::Foreground, ui.id().with("drop")));
+                        match place {
+                            Place::Into(_) => {
+                                top.rect_stroke(rect, 0.0, Stroke::new(1.0, t.select_bright), StrokeKind::Inside);
+                            }
+                            Place::Before(_) => hair_h(&top, x + 16.0, rect.right(), rect.top(), t.select_bright),
+                            Place::After(_) => {
+                                hair_h(&top, x + 16.0, rect.right(), rect.bottom() - 1.0, t.select_bright)
+                            }
+                        }
+                        if ui.input(|i| i.pointer.any_released()) {
+                            acts.push(Act::Move(dragged.0, place));
+                        }
+                    }
+                }
             }
         });
+    if dragged_over::<DragCard>(ui, area) {
+        ui.painter()
+            .rect_stroke(area, 0.0, Stroke::new(1.0, t.select_bright), StrokeKind::Inside);
+    }
+    if let Some(card) = dropped::<DragCard>(ui, area) {
+        acts.push(Act::Run(Command::AddCard(card.0.clone())));
+    }
+
+    for act in acts {
+        match act {
+            Act::Select(id) => st.doc.selected = id,
+            Act::Fold(None) => st.scene_folded = !st.scene_folded,
+            Act::Fold(Some(id)) => {
+                if !st.folded.remove(&id) {
+                    st.folded.insert(id);
+                }
+            }
+            Act::Eye(id) => {
+                let visible = st.doc.scene().get(id).is_some_and(|o| o.visible);
+                st.doc.set_visible(id, !visible);
+            }
+            Act::Rename(id) => {
+                st.doc.selected = Some(id);
+                st.run(Command::Rename);
+            }
+            Act::Renamed(id, name) => {
+                st.doc.rename(id, &name);
+                st.renaming = None;
+            }
+            Act::Move(id, place) => {
+                if st.doc.place(id, place) {
+                    if let Place::Into(Some(folder)) = place {
+                        st.folded.remove(&folder);
+                    }
+                }
+            }
+            Act::Run(command) => st.run(command),
+        }
+    }
 
     if footer > 0.0 {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), footer), Sense::hover());
         let p = ui.painter();
         hair_h(p, rect.left(), rect.right(), rect.top(), t.line);
-        let chosen = if st.selected.is_some() { ", 1 selected" } else { "" };
+        let chosen = if st.doc.selected.is_some() { ", 1 selected" } else { "" };
         p.text(
             Pos2::new(rect.left() + 10.0, rect.center().y),
             Align2::LEFT_CENTER,
-            format!("{} objects{chosen}", SCENE.len()),
+            format!("{} objects{chosen}", st.doc.scene().objects().len()),
             k.small(),
             t.text_dim,
         );
     }
 }
 
-/// The project's folders: name, the kind of asset inside, the assets.
-const FOLDERS: [(&str, Kind, &[&str]); 6] = [
-    (
-        "Characters",
+/// The kinds the Add menu offers, as menu items with the kind's icon.
+pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
+    for kind in [
         Kind::Character,
-        &["Simple", "Card 2", "Card 3", "Card 4", "Card 5", "Card 6"],
-    ),
-    ("Poses", Kind::Pose, &["Standing pose", "Sitting", "Wave"]),
-    ("Maps", Kind::Map, &["Rooftop", "Classroom"]),
-    ("Items", Kind::Item, &["Chair", "Desk", "Umbrella"]),
-    ("Scenes", Kind::Scene, &["Untitled scene"]),
-    ("Renders", Kind::Camera, &[]),
+        Kind::Item,
+        Kind::Light,
+        Kind::Camera,
+        Kind::Map,
+        Kind::Folder,
+    ] {
+        let mut job = egui::text::LayoutJob::default();
+        let format = |font, color| egui::TextFormat {
+            font_id: font,
+            color,
+            valign: Align::Center,
+            ..Default::default()
+        };
+        job.append(kind.glyph(), 0.0, format(k.icons(15.0), kind.color()));
+        let text = if kind == Kind::Character {
+            "Character from a card"
+        } else {
+            kind.label()
+        };
+        job.append(text, 8.0, format(k.font(), k.t.text));
+        if ui.button(job).clicked() {
+            st.run(Command::Add(kind));
+            ui.close();
+        }
+    }
+}
+
+/// The kinds of asset the project will hold besides cards, each with the
+/// feature it waits for.
+const LATER: [(&str, Kind, &str); 5] = [
+    ("Poses", Kind::Pose, "Poses arrive with posing"),
+    ("Maps", Kind::Map, "Maps arrive with their feature"),
+    ("Items", Kind::Item, "Items arrive with their feature"),
+    ("Scenes", Kind::Scene, "Scenes arrive with project files"),
+    ("Renders", Kind::Camera, "Renders arrive with baking"),
 ];
 
 fn content(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
-    let (folder, kind, assets) = FOLDERS[st.folder.min(FOLDERS.len() - 1)];
+    st.library.begin_frame();
+    let card_folders = st.library.folders.len();
+    st.folder = st.folder.min(card_folders + LATER.len() - 1);
+    let open = st.library.folders.get(st.folder).cloned();
+    // The way to the open folder, for the bar.
+    let mut trail: Vec<String> = Vec::new();
+    match &open {
+        Some(folder) => {
+            let mut depth = folder.depth + 1;
+            for f in st.library.folders[..=st.folder].iter().rev() {
+                if f.depth < depth {
+                    trail.insert(0, f.name.clone());
+                    depth = f.depth;
+                }
+            }
+            trail.insert(0, "Koikatsu".to_owned());
+        }
+        None => {
+            trail.push("Project".to_owned());
+            trail.push(LATER[st.folder - card_folders].0.to_owned());
+        }
+    }
+
+    let mut add: Option<PathBuf> = None;
     let bar = toolbar(ui, k, |ui| {
-        let _ = flat_button(ui, k, Some(icon::PLUS), "Import", true, false);
+        let resp =
+            flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false).on_hover_text(if st.asset.is_some() {
+                "Add the selected card's character to the scene"
+            } else {
+                "Select a card first, or double click one"
+            });
+        if resp.clicked() {
+            add = st.asset.clone();
+        }
+        if icon_button(ui, k, icon::ARROWS_CLOCKWISE, false)
+            .on_hover_text("Read the card folders again")
+            .clicked()
+        {
+            st.library.scan();
+        }
         bar_divider(ui, k);
         ui.add_space(2.0);
-        for part in ["Project", folder] {
-            let last = part == folder;
+        for (i, part) in trail.iter().enumerate() {
+            let last = i + 1 == trail.len();
             let w = widgets::text_width(ui, part, k.font()).ceil();
             let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
             let color = if last { t.text_bright } else { t.text_dim };
@@ -446,152 +732,204 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::search(ui, k, &mut st.content_search, "Search the project", 240.0);
+            widgets::search(ui, k, &mut st.content_search, "Search this folder", 240.0);
         });
     });
     hair_h(ui.painter(), bar.left(), bar.right(), bar.bottom() - 1.0, t.line);
 
     let body = ui.available_rect_before_wrap();
-    let tree_w = 168.0;
+    let tree_w = 188.0;
     let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + tree_w, body.bottom()));
     hair_v(ui.painter(), tree.right(), tree.top(), tree.bottom(), t.line);
-    for (i, (name, kind, _)) in FOLDERS.iter().enumerate() {
-        let row = Rect::from_min_size(
-            Pos2::new(tree.left(), tree.top() + 4.0 + i as f32 * k.d.row),
-            Vec2::new(tree_w, k.d.row),
-        );
-        if row.bottom() > tree.bottom() {
-            break;
-        }
-        let resp = ui.interact(row, ui.id().with(("folder", i)), Sense::click());
-        if resp.clicked() {
-            st.folder = i;
-            st.asset = 0;
-        }
-        let p = ui.painter();
-        let on = st.folder == i;
-        if on {
-            p.rect_filled(row, 0.0, t.control);
-        } else if resp.hovered() {
-            p.rect_filled(row, 0.0, t.row_hover);
-        }
-        let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
-        glyph(
-            p,
-            k,
-            Pos2::new(row.left() + 20.0, row.center().y),
-            g,
-            15.0,
-            kind.color(),
-        );
-        let color = if on { t.text_bright } else { t.text };
-        label(p, k, Pos2::new(row.left() + 34.0, row.center().y), name, color);
-    }
+    let mut side = ui.new_child(UiBuilder::new().max_rect(tree));
+    side.set_clip_rect(tree.intersect(ui.clip_rect()));
+    egui::ScrollArea::vertical()
+        .id_salt("folders")
+        .auto_shrink(false)
+        .show(&mut side, |ui| {
+            ui.add_space(4.0);
+            let folders = st
+                .library
+                .folders
+                .iter()
+                .map(|f| (f.name.as_str(), Kind::Character, f.depth))
+                .chain(LATER.iter().map(|(name, kind, _)| (*name, *kind, 0)));
+            let mut chosen = None;
+            for (i, (name, kind, depth)) in folders.enumerate() {
+                let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
+                if resp.clicked() {
+                    chosen = Some(i);
+                }
+                let p = ui.painter();
+                let on = st.folder == i;
+                if on {
+                    p.rect_filled(row, 0.0, t.control);
+                } else if resp.hovered() {
+                    p.rect_filled(row, 0.0, t.row_hover);
+                }
+                let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
+                let x = row.left() + 20.0 + depth as f32 * 12.0;
+                glyph(p, k, Pos2::new(x, row.center().y), g, 15.0, kind.color());
+                let color = if on { t.text_bright } else { t.text };
+                let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
+                label(&clip, k, Pos2::new(x + 14.0, row.center().y), name, color);
+            }
+            if let Some(i) = chosen {
+                st.folder = i;
+                st.asset = None;
+            }
+        });
 
     let grid = Rect::from_min_max(Pos2::new(tree.right() + 1.0, body.top()), body.max);
     let mut area = ui.new_child(UiBuilder::new().max_rect(grid));
     area.set_clip_rect(grid.intersect(ui.clip_rect()));
-    if assets.is_empty() {
+    let note = |area: &Ui, text: &str| {
         area.painter().text(
             grid.min + Vec2::new(14.0, 20.0),
             Align2::LEFT_CENTER,
-            "This folder is empty",
+            text,
             k.font(),
             t.text_dim,
         );
+    };
+    let search = st.content_search.trim().to_lowercase();
+    let cards: Vec<PathBuf> = match &open {
+        Some(folder) => st
+            .library
+            .cards(&folder.path)
+            .iter()
+            .filter(|c| search.is_empty() || c.to_string_lossy().to_lowercase().contains(&search))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    match (&open, &st.library.problem) {
+        (None, _) => note(&area, LATER[st.folder - card_folders].2),
+        (Some(_), _) if !cards.is_empty() => {}
+        (Some(_), _) if !search.is_empty() => note(&area, "No card in this folder matches the search"),
+        (Some(_), _) => note(&area, "This folder holds no cards"),
     }
-    let thumb = k.d.row * 3.0;
-    let caption = k.d.tree != Tree::Plain;
-    let tile = Vec2::new(thumb + 12.0, thumb + if caption { 40.0 } else { 26.0 });
-    egui::ScrollArea::vertical().auto_shrink(false).show(&mut area, |ui| {
-        let columns = ((ui.available_width() - 12.0) / tile.x).floor().max(1.0) as usize;
-        let rows = assets.len().div_ceil(columns);
-        let (space, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), rows as f32 * tile.y + 12.0),
-            Sense::hover(),
-        );
-        for (i, name) in assets.iter().enumerate() {
-            let cell = Rect::from_min_size(
-                space.min
-                    + Vec2::new(
-                        12.0 + (i % columns) as f32 * tile.x,
-                        10.0 + (i / columns) as f32 * tile.y,
-                    ),
-                tile - Vec2::new(12.0, 0.0),
+    if card_folders == 0 {
+        if let Some(problem) = &st.library.problem {
+            area.painter().text(
+                grid.min + Vec2::new(14.0, 42.0),
+                Align2::LEFT_CENTER,
+                problem,
+                k.font(),
+                t.accent,
             );
-            let resp = ui.interact(cell, ui.id().with(("asset", st.folder, i)), Sense::click());
-            if resp.clicked() {
-                st.asset = i;
-            }
-            let on = st.asset == i;
-            let p = ui.painter();
-            let picture = Rect::from_min_size(cell.min, Vec2::splat(thumb));
-            p.rect_filled(picture, 0.0, t.input);
-            match (&st.viewport_image, kind, i) {
-                // The one card that is loaded shows its own face.
-                (Some(tex), Kind::Character, 0) => {
-                    let uv = Rect::from_min_max(Pos2::new(0.438, 0.078), Pos2::new(0.628, 0.331));
-                    p.image(tex.id(), picture, uv, Color32::WHITE);
-                }
-                _ => glyph(p, k, picture.center(), kind.glyph(), thumb * 0.42, t.hover),
-            }
-            // The type colour along the picture's foot, as Unreal's tiles.
-            p.rect_filled(
-                Rect::from_min_max(Pos2::new(picture.left(), picture.bottom() - 2.0), picture.max),
-                0.0,
-                kind.color(),
-            );
-            if on {
-                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Outside);
-                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Inside);
-            } else if resp.hovered() {
-                p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.hover), StrokeKind::Inside);
-            }
-            let clip = p.with_clip_rect(Rect::from_min_max(
-                Pos2::new(cell.left(), picture.bottom()),
-                Pos2::new(cell.right(), cell.bottom()),
-            ));
-            let color = if on { t.text_bright } else { t.text };
-            label(
-                &clip,
-                k,
-                Pos2::new(cell.left() + 1.0, picture.bottom() + 12.0),
-                name,
-                color,
-            );
-            if caption {
-                clip.text(
-                    Pos2::new(cell.left() + 1.0, picture.bottom() + 27.0),
-                    Align2::LEFT_CENTER,
-                    kind.label(),
-                    k.small(),
-                    t.text_dim,
-                );
-            }
         }
-    });
+    }
+
+    // Cards are portrait pictures, 252 by 352.
+    let thumb = Vec2::new((k.d.row * 2.5).round(), (k.d.row * 2.5 * 352.0 / 252.0).round());
+    let caption = k.d.tree != Tree::Plain;
+    let tile = Vec2::new(thumb.x + 12.0, thumb.y + if caption { 40.0 } else { 26.0 });
+    let kind = Kind::Character;
+    egui::ScrollArea::vertical()
+        .id_salt("cards")
+        .auto_shrink(false)
+        .show(&mut area, |ui| {
+            let columns = ((ui.available_width() - 12.0) / tile.x).floor().max(1.0) as usize;
+            let rows = cards.len().div_ceil(columns);
+            let (space, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), rows as f32 * tile.y + 12.0),
+                Sense::hover(),
+            );
+            for (i, card) in cards.iter().enumerate() {
+                let cell = Rect::from_min_size(
+                    space.min
+                        + Vec2::new(
+                            12.0 + (i % columns) as f32 * tile.x,
+                            10.0 + (i / columns) as f32 * tile.y,
+                        ),
+                    tile - Vec2::new(12.0, 0.0),
+                );
+                if !ui.is_rect_visible(cell) {
+                    continue;
+                }
+                let name = card.file_stem().unwrap_or_default().to_string_lossy();
+                let resp = ui
+                    .interact(cell, ui.id().with(("card", i)), Sense::click_and_drag())
+                    .on_hover_text(format!("{name}\nDouble click or drag into the scene to add"));
+                resp.dnd_set_drag_payload(DragCard(card.clone()));
+                if resp.clicked() || resp.drag_started() {
+                    st.asset = Some(card.clone());
+                }
+                if resp.double_clicked() {
+                    add = Some(card.clone());
+                }
+                let on = st.asset.as_ref() == Some(card);
+                let picture = Rect::from_min_size(cell.min, thumb);
+                let texture = st.library.thumb(ui.ctx(), card).map(|tex| tex.id());
+                let p = ui.painter();
+                p.rect_filled(picture, 0.0, t.input);
+                match texture {
+                    Some(id) => {
+                        p.image(
+                            id,
+                            picture,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    None => glyph(p, k, picture.center(), kind.glyph(), thumb.x * 0.42, t.hover),
+                }
+                // The type colour along the picture's foot, as Unreal's tiles.
+                p.rect_filled(
+                    Rect::from_min_max(Pos2::new(picture.left(), picture.bottom() - 2.0), picture.max),
+                    0.0,
+                    kind.color(),
+                );
+                if on {
+                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Outside);
+                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Inside);
+                } else if resp.hovered() {
+                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.hover), StrokeKind::Inside);
+                }
+                let clip = p.with_clip_rect(Rect::from_min_max(
+                    Pos2::new(cell.left(), picture.bottom()),
+                    Pos2::new(cell.right(), cell.bottom()),
+                ));
+                let color = if on { t.text_bright } else { t.text };
+                label(
+                    &clip,
+                    k,
+                    Pos2::new(cell.left() + 1.0, picture.bottom() + 12.0),
+                    &name,
+                    color,
+                );
+                if caption {
+                    clip.text(
+                        Pos2::new(cell.left() + 1.0, picture.bottom() + 27.0),
+                        Align2::LEFT_CENTER,
+                        kind.label(),
+                        k.small(),
+                        t.text_dim,
+                    );
+                }
+            }
+        });
     ui.allocate_rect(body, Sense::hover());
+    if let Some(card) = add {
+        st.run(Command::AddCard(card));
+    }
 }
 
 fn console(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
-    let lines: [(usize, &str, &str); 5] = [
-        (0, "14:02:07", "Indexed 2,214 zipmods and the game folder"),
-        (0, "14:02:11", "Loaded Simple.png in 1.8 s"),
-        (1, "14:02:11", "Pattern texture missing: no item"),
-        (0, "14:02:12", "Physics ready"),
-        (0, "14:02:12", "Scene ready"),
-    ];
     let levels = [
         (icon::INFO, "Information", t.text_dim),
         (icon::WARNING, "Warnings", t.accent),
         (icon::X_CIRCLE, "Errors", t.stop),
     ];
     toolbar(ui, k, |ui| {
-        let _ = flat_button(ui, k, Some(icon::BROOM), "Clear", false, false);
+        if flat_button(ui, k, Some(icon::BROOM), "Clear", false, false).clicked() {
+            st.log.lines.clear();
+        }
         bar_divider(ui, k);
         for (i, (g, name, _)) in levels.iter().enumerate() {
-            let count = lines.iter().filter(|l| l.0 == i).count();
+            let count = st.log.lines.iter().filter(|l| l.0 == i).count();
             if flat_button(ui, k, Some(g), &format!("{name}  {count}"), false, st.levels[i]).clicked() {
                 st.levels[i] = !st.levels[i];
             }
@@ -603,39 +941,44 @@ fn console(ui: &mut Ui, k: &Look, st: &mut State) {
     let body = ui.available_rect_before_wrap();
     ui.painter().rect_filled(body, 0.0, t.input);
     let mut area = ui.new_child(UiBuilder::new().max_rect(body));
-    egui::ScrollArea::vertical().auto_shrink(false).show(&mut area, |ui| {
-        ui.add_space(4.0);
-        for (level, time, text) in lines {
-            if !st.levels[level] {
-                continue;
+    area.set_clip_rect(body.intersect(ui.clip_rect()));
+    let search = st.console_search.trim().to_lowercase();
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .stick_to_bottom(true)
+        .show(&mut area, |ui| {
+            ui.add_space(4.0);
+            for (level, time, text) in &st.log.lines {
+                if !st.levels[*level] || !(search.is_empty() || text.to_lowercase().contains(&search)) {
+                    continue;
+                }
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row - 2.0), Sense::hover());
+                let p = ui.painter();
+                if ui.rect_contains_pointer(rect) {
+                    p.rect_filled(rect, 0.0, t.well);
+                }
+                let y = rect.center().y;
+                glyph(
+                    p,
+                    k,
+                    Pos2::new(rect.left() + 18.0, y),
+                    levels[*level].0,
+                    14.0,
+                    levels[*level].2,
+                );
+                let x = p
+                    .text(
+                        Pos2::new(rect.left() + 32.0, y),
+                        Align2::LEFT_CENTER,
+                        time,
+                        k.mono(),
+                        t.text_dim,
+                    )
+                    .right();
+                let color = if *level == 0 { t.text } else { levels[*level].2 };
+                p.text(Pos2::new(x + 12.0, y), Align2::LEFT_CENTER, text, k.mono(), color);
             }
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row - 2.0), Sense::hover());
-            let p = ui.painter();
-            if ui.rect_contains_pointer(rect) {
-                p.rect_filled(rect, 0.0, t.well);
-            }
-            let y = rect.center().y;
-            glyph(
-                p,
-                k,
-                Pos2::new(rect.left() + 18.0, y),
-                levels[level].0,
-                14.0,
-                levels[level].2,
-            );
-            let x = p
-                .text(
-                    Pos2::new(rect.left() + 32.0, y),
-                    Align2::LEFT_CENTER,
-                    time,
-                    k.mono(),
-                    t.text_dim,
-                )
-                .right();
-            let color = if level == 0 { t.text } else { levels[level].2 };
-            p.text(Pos2::new(x + 12.0, y), Align2::LEFT_CENTER, text, k.mono(), color);
-        }
-    });
+        });
     ui.allocate_rect(body, Sense::hover());
 }
 

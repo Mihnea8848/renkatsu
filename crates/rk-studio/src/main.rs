@@ -1,20 +1,22 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! Renkatsu Studio, the editor. This is the shell prototype from
-//! the editor design: Unity's layout, Unreal's modes drawn over the viewport,
-//! the menu row and docked panels with placeholder content, in the designs
-//! of `design.rs`, for judging layout and look on screenshots.
+//! Renkatsu Studio, the editor, after the editor design: Unity's layout,
+//! Unreal's modes drawn over the viewport, the menu row and docked panels
+//! in the designs of `design.rs`, on the scene model of `scene.rs`, which
+//! the viewport draws live.
 
 mod camera;
 mod chrome;
 mod design;
 mod kinds;
+mod library;
 mod live;
 mod modes;
 mod panels;
 mod preferences;
 mod properties;
+mod scene;
 mod settings;
 mod state;
 mod theme;
@@ -27,7 +29,7 @@ use design::{Design, Overlays, TitleBar};
 use eframe::egui_wgpu::wgpu;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
-use state::{Look, Rail, State, SCENE};
+use state::{Command, Look, Physics, Rail, State};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -43,12 +45,13 @@ struct Cli {
     /// The design to show.
     #[arg(long, value_enum, default_value = "d")]
     design: Design,
-    /// Picture to show in the viewport when no card is loaded.
+    /// Picture to show in the viewport while the scene has no character.
     #[arg(long)]
     viewport_image: Option<PathBuf>,
-    /// Card to load and draw live in the viewport.
+    /// Card whose character joins the scene at the start. May be given
+    /// several times.
     #[arg(long)]
-    card: Option<PathBuf>,
+    card: Vec<PathBuf>,
     /// Save a picture of the window here after a few frames, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
@@ -58,9 +61,10 @@ struct Cli {
     /// The mode to start in, by name.
     #[arg(long, default_value = "pose")]
     mode: String,
-    /// The object selected at the start, by name, or "none".
-    #[arg(long, default_value = "Simple")]
-    select: String,
+    /// The object selected at the start, by its name or its card's file
+    /// name, or "none". Without it the first `--card` character is.
+    #[arg(long)]
+    select: Option<String>,
     /// Start with the mode's tool palette folded away.
     #[arg(long)]
     palette_closed: bool,
@@ -140,31 +144,70 @@ impl Studio {
             .iter()
             .position(|m| m.name.eq_ignore_ascii_case(&cli.mode))
             .with_context(|| format!("unknown mode {:?}", cli.mode))?;
-        state.selected = if cli.select.eq_ignore_ascii_case("none") {
-            None
-        } else {
-            let row = SCENE
-                .iter()
-                .position(|(_, _, name)| name.eq_ignore_ascii_case(&cli.select))
-                .with_context(|| format!("no object named {:?} in the scene", cli.select))?;
-            Some(row)
-        };
         state.palette_open = !cli.palette_closed;
         state.overlays_hidden = cli.overlays_hidden;
         state.maximised = cli.maximised;
         if cli.rail_icons {
             state.rail = Rail::Icons;
         }
-        if let Some(card) = &cli.card {
-            let render_state = cc
-                .wgpu_render_state
-                .as_ref()
+        state.library.eager = cli.screenshot.is_some();
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            state.live = Some(live::Live::new(render_state)?);
+        }
+        for card in &cli.card {
+            rk_card::Card::load(card).with_context(|| format!("loading {}", card.display()))?;
+            state.run(Command::AddCard(card.clone()));
+        }
+        let first = state
+            .doc
+            .scene()
+            .objects()
+            .iter()
+            .find(|o| o.kind() == kinds::Kind::Character)
+            .map(|o| o.id);
+        state.doc.selected = match cli.select.as_deref() {
+            None => first,
+            Some(name) if name.eq_ignore_ascii_case("none") => None,
+            Some(name) => {
+                let named = |o: &&scene::Object| {
+                    let card = match &o.content {
+                        scene::Content::Character { card, .. } => card.file_stem(),
+                        _ => None,
+                    };
+                    o.name.eq_ignore_ascii_case(name)
+                        || card.is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(name))
+                };
+                let found = state.doc.scene().objects().iter().find(named);
+                Some(
+                    found
+                        .with_context(|| format!("no object named {name:?} in the scene"))?
+                        .id,
+                )
+            }
+        };
+        // What the command line put in the scene is where the history starts.
+        state.doc.clear_history();
+        if !cli.card.is_empty() {
+            let live = state
+                .live
+                .as_mut()
                 .context("the window has no wgpu device to draw the viewport with")?;
-            let row = SCENE
-                .iter()
-                .position(|(_, kind, _)| *kind == kinds::Kind::Character)
-                .context("the scene has no character to show the card as")?;
-            let mut live = live::Live::new(render_state, card, row)?;
+            // Build the characters now, so that a card that does not build
+            // stops the start and the camera flags find a framed view.
+            live.follow(
+                state.doc.scene(),
+                Physics::Stopped,
+                Physics::Stopped,
+                0.0,
+                &mut state.log,
+            );
+            for object in state.doc.scene().objects() {
+                if let Some(why) = live.failure(object.id) {
+                    anyhow::bail!("{} could not be built: {why}", object.name);
+                }
+            }
+        }
+        if let Some(live) = state.live.as_mut() {
             if let Some(drag) = cli.camera_turn {
                 live.cam.orbit_drag(drag.to_vec2());
             }
@@ -176,7 +219,6 @@ impl Studio {
                 // Shown for as long as the window lives, for the picture.
                 state.speed_shown = Some(f64::INFINITY);
             }
-            state.live = Some(live);
         }
         state.title_bar = cli.title_bar;
         if let Some(path) = &cli.viewport_image {
@@ -250,6 +292,12 @@ impl eframe::App for Studio {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let k = self.look;
+        // A drag that changes a value is one step of the history; it ends
+        // when the pointer is let go.
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.state.doc.end_gesture();
+        }
+        self.scene_keys(ctx);
         let t = k.t;
         let bar = |id: &'static str, height: f32| {
             let panel = if id == "status" {
@@ -326,6 +374,16 @@ impl eframe::App for Studio {
 
         preferences::show(ctx, &k, &mut self.state);
 
+        // Something asked for the cards: bring the Content panel forward.
+        if std::mem::take(&mut self.state.show_content) {
+            self.state.maximised = false;
+            self.state.folder = 0;
+            panels::open(&mut self.dock, Panel::Content);
+            if let Some(tab) = self.dock.find_tab(&Panel::Content) {
+                let _ = self.dock.set_active_tab(tab);
+            }
+        }
+
         // Frames come as often as the display shows them unless the user
         // chose to save power, when egui draws only on input.
         if self.state.settings.frame_rate.continuous() {
@@ -358,6 +416,31 @@ impl eframe::App for Studio {
 }
 
 impl Studio {
+    /// The keys that act on the scene: Unity's, where it has them.
+    fn scene_keys(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let redo = Modifiers::COMMAND | Modifiers::SHIFT;
+        let keys = [
+            (redo, Key::Z, Command::Redo),
+            (Modifiers::COMMAND, Key::Y, Command::Redo),
+            (Modifiers::COMMAND, Key::Z, Command::Undo),
+            (Modifiers::COMMAND, Key::D, Command::Duplicate),
+            (Modifiers::NONE, Key::Delete, Command::Delete),
+            (Modifiers::NONE, Key::H, Command::ToggleHidden),
+            (Modifiers::NONE, Key::F2, Command::Rename),
+        ];
+        for (modifiers, key, command) in keys {
+            // Plain letters must not fire while Ctrl or Alt is held.
+            let plain = modifiers != Modifiers::NONE || ctx.input(|i| i.modifiers.is_none());
+            if plain && ctx.input_mut(|i| i.consume_key(modifiers, key)) {
+                self.state.run(command);
+            }
+        }
+    }
+
     /// Feeds the scripted clicks and the resting pointer of `--click` and
     /// `--hover` to egui as if they came from the mouse.
     fn scripted_pointer(&self, input: &mut egui::RawInput) {

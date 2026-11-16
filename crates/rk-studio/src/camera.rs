@@ -5,6 +5,7 @@
 //! how drags, keys and the wheel move it. Nothing here touches the GPU or
 //! the window, so all of it is tested with plain numbers.
 
+use crate::scene::ObjectId;
 use glam::Vec3;
 use rk_render::Camera;
 
@@ -137,8 +138,7 @@ impl Orbit {
 /// What the camera is focused on: an object of the scene and where it is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Focus {
-    /// The object's row in the scene.
-    pub row: usize,
+    pub object: ObjectId,
     pub center: Vec3,
     /// The distance from which the whole object fits the view.
     pub distance: f32,
@@ -183,6 +183,37 @@ impl ViewCamera {
         self.focus = Some(focus);
         self.orbit.target = focus.center;
         self.orbit.distance = focus.distance;
+    }
+
+    /// The object `now` names moved or changed size: a view focused on it
+    /// goes with it, and so does the starting framing, so that moving an
+    /// object does not count as moving the camera.
+    pub fn follow(&mut self, now: Focus) {
+        let carry = |orbit: &mut Orbit, focus: &mut Option<Focus>| {
+            if let Some(was) = focus.filter(|f| f.object == now.object && *f != now) {
+                orbit.target += now.center - was.center;
+                if was.distance > 0.0 {
+                    orbit.distance *= now.distance / was.distance;
+                }
+                *focus = Some(now);
+            }
+        };
+        carry(&mut self.orbit, &mut self.focus);
+        carry(&mut self.home.0, &mut self.home.1);
+    }
+
+    /// What the starting framing is focused on.
+    pub fn home_focus(&self) -> Option<Focus> {
+        self.home.1
+    }
+
+    /// An object left the scene: nothing stays focused on it.
+    pub fn forget(&mut self, object: ObjectId) {
+        for focus in [&mut self.focus, &mut self.home.1] {
+            if focus.is_some_and(|f| f.object == object) {
+                *focus = None;
+            }
+        }
     }
 
     /// Lets go of the focused object; the view stays as it is.
@@ -283,7 +314,7 @@ mod tests {
 
     fn focused() -> ViewCamera {
         let focus = Focus {
-            row: 2,
+            object: ObjectId(2),
             center: Vec3::new(0.0, 1.0, 0.0),
             distance: 2.0,
         };
@@ -357,7 +388,7 @@ mod tests {
         assert_eq!(cam.right_drag(), RightDrag::Explore);
         // Focusing again brings the orbit back.
         cam.focus_on(Focus {
-            row: 2,
+            object: ObjectId(2),
             center: Vec3::new(0.0, 1.0, 0.0),
             distance: 2.0,
         });
@@ -410,7 +441,49 @@ mod tests {
         cam.release();
         cam.reset();
         assert!(!cam.moved());
-        assert_eq!(cam.focus.map(|f| f.row), Some(2));
+        assert_eq!(cam.focus.map(|f| f.object), Some(ObjectId(2)));
+    }
+
+    #[test]
+    fn the_view_goes_with_the_focused_object() {
+        let mut cam = focused();
+        let start = cam.orbit;
+        let moved = Focus {
+            object: ObjectId(2),
+            center: Vec3::new(1.5, 1.0, 0.0),
+            distance: 4.0,
+        };
+        cam.follow(moved);
+        assert_eq!(cam.focus, Some(moved));
+        assert!((cam.orbit.target - (start.target + Vec3::new(1.5, 0.0, 0.0))).length() < 1e-5);
+        assert!((cam.orbit.distance - start.distance * 2.0).abs() < 1e-5);
+        // The object moved, not the camera: there is nothing to reset.
+        assert!(!cam.moved());
+
+        // Another object moving changes nothing.
+        let other = Focus {
+            object: ObjectId(7),
+            ..moved
+        };
+        let before = cam.clone();
+        cam.follow(other);
+        assert_eq!(cam, before);
+
+        // A free camera stays where it is, but its way back follows.
+        cam.release();
+        let free = cam.orbit;
+        cam.follow(Focus {
+            center: Vec3::ZERO,
+            ..moved
+        });
+        assert_eq!(cam.orbit, free);
+        cam.reset();
+        assert_eq!(cam.focus.map(|f| f.center), Some(Vec3::ZERO));
+
+        cam.forget(ObjectId(2));
+        assert_eq!(cam.focus, None);
+        cam.reset();
+        assert_eq!(cam.focus, None);
     }
 
     #[test]

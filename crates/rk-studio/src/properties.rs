@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The Properties panel: everything about the selection in sections of
-//! rows, with names and values aligned in two columns. The values are
-//! placeholders kept in `State` until the scene model exists.
+//! rows, with names and values aligned in two columns. The values are the
+//! selected object's own, from the scene model; what waits for a later
+//! feature is shown greyed, and says what it waits for.
 
 use crate::design::Props;
 use crate::kinds::Kind;
+use crate::scene::Content;
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
 use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
@@ -14,9 +16,14 @@ use egui_phosphor::regular as icon;
 
 const AXES: [&str; 3] = ["X", "Y", "Z"];
 
+/// How far a number moves per point of drag: positions and scales, then
+/// angles in degrees.
+const FINE: f32 = 0.005;
+const ANGLE: f32 = 0.5;
+
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
-    let Some((kind, name)) = st.selection() else {
+    let Some(before) = st.doc.selection().cloned() else {
         let rect = ui.available_rect_before_wrap();
         ui.painter().text(
             rect.center_top() + Vec2::new(0.0, 40.0),
@@ -27,112 +34,216 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         );
         return;
     };
-    header(ui, k, st, kind, name);
+    // The rows edit a copy; a copy that changed goes back to the scene as
+    // one step of the history.
+    let mut object = before.clone();
+    let kind = object.kind();
+    header(ui, k, st, kind, &object.name);
+    let built = st.live.as_ref().and_then(|live| live.built(object.id));
+    let failure = st
+        .live
+        .as_ref()
+        .and_then(|live| live.failure(object.id))
+        .map(str::to_owned);
+    let lights = st.doc.scene().key_light().map(|o| o.id) == Some(object.id);
+    let holds = st.doc.scene().subtree(object.id).len() - 1;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         let id = ui.id();
-        if !matches!(kind, Kind::Scene | Kind::Folder | Kind::Script) && section(ui, k, st, 0, "Transform") {
-            for (i, name) in ["Position", "Rotation", "Scale"].into_iter().enumerate() {
-                row(ui, k, name, |ui, rect| {
-                    vec3(ui, k, rect, id.with(("transform", i)), &mut st.transform[i]);
+        if kind != Kind::Folder && section(ui, k, st, 0, "Transform") {
+            // What each of position, rotation and scale waits for, when it
+            // does nothing yet for this kind of object.
+            let off: [Option<&str>; 3] = match &object.content {
+                Content::Character { .. } => [None; 3],
+                Content::Light { from_camera, .. } => [
+                    Some("A directional light has no position"),
+                    (*from_camera).then_some("The light follows the camera. Choose Own under Direction to turn it"),
+                    Some("A light has no size"),
+                ],
+                Content::Camera { .. } => [Some("Shot cameras arrive with baking"); 3],
+                _ => [Some("Items and maps arrive with their feature"); 3],
+            };
+            let transform = &mut object.transform;
+            let values = [
+                ("Position", &mut transform.position, FINE),
+                ("Rotation", &mut transform.rotation, ANGLE),
+                ("Scale", &mut transform.scale, FINE),
+            ];
+            for (i, (name, value, speed)) in values.into_iter().enumerate() {
+                row(ui, k, name, off[i], |ui, rect| {
+                    vec3(ui, k, rect, id.with(("transform", i)), value, speed);
                 });
             }
             section_end(ui, k);
         }
-        match kind {
-            Kind::Character => character(ui, k, st, id),
-            Kind::Light => {
-                if section(ui, k, st, 1, "Light") {
-                    row(ui, k, "Type", |ui, rect| {
-                        let options = ["Directional", "Point", "Spot"];
-                        widgets::combo(ui, k, rect, id.with("light"), &mut st.light_type, &options);
+        match &mut object.content {
+            Content::Character {
+                card,
+                outfit,
+                outdoor_shoes,
+                simulate,
+            } => {
+                if section(ui, k, st, 1, "Character") {
+                    row(ui, k, "Card", None, |ui, rect| {
+                        let side = rect.height();
+                        let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+                        let file = card.file_name().unwrap_or_default().to_string_lossy();
+                        widgets::value_box(ui, k, field, &file);
+                        ui.interact(field, id.with("card"), Sense::hover())
+                            .on_hover_text(card.display().to_string());
+                        let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
+                        let resp = ui
+                            .interact(button, id.with("browse"), Sense::click())
+                            .on_hover_text("Show the cards in the Content panel");
+                        let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                        ui.painter().rect_filled(button, k.radius(), fill);
+                        glyph(ui.painter(), k, button.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
+                        if resp.clicked() {
+                            st.show_content = true;
+                        }
                     });
-                    row(ui, k, "Colour", |ui, rect| {
-                        widgets::value_box(ui, k, rect, "       FFF4E0");
-                        let swatch =
-                            Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-                        ui.painter()
-                            .rect_filled(swatch, 1.0, Color32::from_rgb(0xff, 0xf4, 0xe0));
+                    let outfits: Vec<String> = (1..=built.map_or(1, |b| b.outfits.max(1)))
+                        .map(|n| format!("Outfit {n}"))
+                        .collect();
+                    let outfits: Vec<&str> = outfits.iter().map(String::as_str).collect();
+                    let waiting = built.is_none().then_some("The character is not built");
+                    row(ui, k, "Outfit", waiting, |ui, rect| {
+                        widgets::combo(ui, k, rect, id.with("outfit"), outfit, &outfits);
                     });
-                    row(ui, k, "Intensity", |ui, rect| {
-                        widgets::number(ui, k, rect, id.with("intensity"), &mut st.intensity, Marker::None, true);
+                    row(ui, k, "Shoes", waiting, |ui, rect| {
+                        let mut chosen = usize::from(*outdoor_shoes);
+                        widgets::segmented(ui, k, rect, id.with("shoes"), &mut chosen, &["Indoor", "Outdoor"]);
+                        *outdoor_shoes = chosen == 1;
                     });
-                    row(ui, k, "Shadows", |ui, rect| {
-                        widgets::checkbox(ui, k, rect, id.with("shadows"), &mut st.shadows, "Cast");
+                    row(ui, k, "Physics", None, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("physics"), simulate, "Simulate");
                     });
+                    if let Some(why) = &failure {
+                        row(ui, k, "Problem", None, |ui, rect| {
+                            ui.interact(rect, id.with("problem"), Sense::hover()).on_hover_text(why);
+                            let text = format!("Could not be built: {why}");
+                            label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
+                        });
+                    } else if let Some(count) = built.map(|b| b.warnings).filter(|n| *n > 0) {
+                        row(ui, k, "Warnings", None, |ui, rect| {
+                            let text = format!("{count}, listed in the Console");
+                            label(
+                                &ui.painter().with_clip_rect(rect),
+                                k,
+                                rect.left_center(),
+                                &text,
+                                t.accent,
+                            );
+                        });
+                    }
                     section_end(ui, k);
                 }
-            }
-            Kind::Camera => {
-                if section(ui, k, st, 1, "Lens") {
-                    for (i, name) in ["Focal length", "Near", "Far"].into_iter().enumerate() {
-                        row(ui, k, name, |ui, rect| {
-                            widgets::number(ui, k, rect, id.with(("lens", i)), &mut st.lens[i], Marker::None, true);
+                if section(ui, k, st, 2, "Expression") {
+                    let later = Some("Expressions arrive with posing");
+                    for name in ["Eyes", "Mouth"] {
+                        row(ui, k, name, later, |ui, rect| {
+                            widgets::combo(ui, k, rect, id.with(name), &mut 0, &["Default"]);
+                        });
+                    }
+                    section_end(ui, k);
+                }
+                if section(ui, k, st, 3, "Modules") {
+                    let later =
+                        Some("Every module runs for every character for now; choosing arrives with the Modules panel");
+                    for name in ["MaterialEditor", "ABMX", "Stiletto", "Clothing Unlocker"] {
+                        row(ui, k, name, later, |ui, rect| {
+                            widgets::checkbox(ui, k, rect, id.with(name), &mut true, "");
                         });
                     }
                     section_end(ui, k);
                 }
             }
-            _ => {
+            Content::Light {
+                from_camera,
+                intensity,
+                shadows,
+            } => {
+                if section(ui, k, st, 1, "Light") {
+                    row(ui, k, "Type", Some("Point and spot lights arrive later"), |ui, rect| {
+                        widgets::combo(ui, k, rect, id.with("light"), &mut 0, &["Directional"]);
+                    });
+                    row(ui, k, "Colour", Some("The light's colour arrives later"), |ui, rect| {
+                        widgets::value_box(ui, k, rect, "       FFFFFF");
+                        let swatch =
+                            Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
+                        ui.painter().rect_filled(swatch, 1.0, Color32::WHITE);
+                    });
+                    row(ui, k, "Direction", None, |ui, rect| {
+                        let mut chosen = usize::from(!*from_camera);
+                        let options = ["From camera", "Own"];
+                        widgets::segmented(ui, k, rect, id.with("direction"), &mut chosen, &options);
+                        *from_camera = chosen == 0;
+                    });
+                    row(ui, k, "Intensity", None, |ui, rect| {
+                        widgets::number(ui, k, rect, id.with("intensity"), intensity, Marker::None, true, FINE);
+                        *intensity = intensity.clamp(0.0, 2.0);
+                    });
+                    row(ui, k, "Shadows", None, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("shadows"), shadows, "Cast");
+                    });
+                    if !lights {
+                        row(ui, k, "In use", None, |ui, rect| {
+                            let text = "No: the first light that shows lights the scene";
+                            ui.interact(rect, id.with("in-use"), Sense::hover())
+                                .on_hover_text("The renderer has one light for now");
+                            label(
+                                &ui.painter().with_clip_rect(rect),
+                                k,
+                                rect.left_center(),
+                                text,
+                                t.text_dim,
+                            );
+                        });
+                    }
+                    section_end(ui, k);
+                }
+            }
+            Content::Camera {
+                focal_length,
+                near,
+                far,
+            } => {
+                if section(ui, k, st, 1, "Lens") {
+                    let later = Some("Shot cameras arrive with baking");
+                    let values = [("Focal length", focal_length), ("Near", near), ("Far", far)];
+                    for (i, (name, value)) in values.into_iter().enumerate() {
+                        row(ui, k, name, later, |ui, rect| {
+                            widgets::number(ui, k, rect, id.with(("lens", i)), value, Marker::None, true, FINE);
+                        });
+                    }
+                    section_end(ui, k);
+                }
+            }
+            Content::Folder | Content::Item | Content::Map => {
                 if section(ui, k, st, 1, "Object") {
-                    row(ui, k, "Name", |ui, rect| widgets::value_box(ui, k, rect, name));
-                    row(ui, k, "Type", |ui, rect| {
+                    row(ui, k, "Name", None, |ui, rect| {
+                        widgets::value_box(ui, k, rect, &before.name)
+                    });
+                    row(ui, k, "Type", None, |ui, rect| {
                         label(ui.painter(), k, rect.left_center(), kind.label(), t.text_dim);
                     });
+                    if kind == Kind::Folder {
+                        row(ui, k, "Holds", None, |ui, rect| {
+                            let text = match holds {
+                                1 => "1 object".to_owned(),
+                                n => format!("{n} objects"),
+                            };
+                            label(ui.painter(), k, rect.left_center(), &text, t.text_dim);
+                        });
+                    }
                     section_end(ui, k);
                 }
             }
         }
     });
-}
-
-fn character(ui: &mut Ui, k: &Look, st: &mut State, id: Id) {
-    if section(ui, k, st, 1, "Character") {
-        row(ui, k, "Card", |ui, rect| {
-            let side = rect.height();
-            let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
-            widgets::value_box(ui, k, field, "Simple.png");
-            let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
-            let resp = ui
-                .interact(button, id.with("browse"), Sense::click())
-                .on_hover_text("Choose a card");
-            let fill = if resp.hovered() { k.t.hover } else { k.t.control };
-            ui.painter().rect_filled(button, k.radius(), fill);
-            glyph(ui.painter(), k, button.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
-        });
-        row(ui, k, "Outfit", |ui, rect| {
-            let options = ["Outfit 1", "Outfit 2", "Outfit 3"];
-            widgets::combo(ui, k, rect, id.with("outfit"), &mut st.outfit, &options);
-        });
-        row(ui, k, "Shoes", |ui, rect| {
-            widgets::segmented(ui, k, rect, id.with("shoes"), &mut st.shoes, &["Indoor", "Outdoor"]);
-        });
-        row(ui, k, "Physics", |ui, rect| {
-            widgets::checkbox(ui, k, rect, id.with("physics"), &mut st.simulate, "Simulate");
-        });
-        section_end(ui, k);
-    }
-    if section(ui, k, st, 2, "Expression") {
-        row(ui, k, "Eyes", |ui, rect| {
-            let options = ["Default", "Smiling", "Closed", "Wink"];
-            widgets::combo(ui, k, rect, id.with("eyes"), &mut st.eyes, &options);
-        });
-        row(ui, k, "Mouth", |ui, rect| {
-            let options = ["Default", "Smiling", "Open", "Pout"];
-            widgets::combo(ui, k, rect, id.with("mouth"), &mut st.mouth, &options);
-        });
-        section_end(ui, k);
-    }
-    if section(ui, k, st, 3, "Modules") {
-        for (i, name) in ["MaterialEditor", "ABMX", "Stiletto", "Clothing Unlocker"]
-            .into_iter()
-            .enumerate()
-        {
-            row(ui, k, name, |ui, rect| {
-                widgets::checkbox(ui, k, rect, id.with(("module", i)), &mut st.modules[i], "");
-            });
-        }
-        section_end(ui, k);
+    if object != before {
+        let held = ui.input(|i| i.pointer.any_down());
+        st.doc.edit(object, held);
     }
 }
 
@@ -258,9 +369,11 @@ fn section_end(ui: &mut Ui, k: &Look) {
 }
 
 /// One property: its name in the left column, and `add` drawing the value
-/// into the rectangle of the right column.
-fn row(ui: &mut Ui, k: &Look, name: &str, add: impl FnOnce(&mut Ui, Rect)) {
+/// into the rectangle of the right column. `off` greys the value and takes
+/// it out of use, and is what the pointer is told about why.
+fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&mut Ui, Rect)) {
     let t = &k.t;
+    let name_color = if off.is_some() { t.text_dim } else { t.text };
     let (h, share, least) = match k.d.props {
         Props::Details => (k.d.row + 2.0, 0.38, 108.0),
         Props::Inspector => (k.d.row + 2.0, 0.34, 100.0),
@@ -276,13 +389,13 @@ fn row(ui: &mut Ui, k: &Look, name: &str, add: impl FnOnce(&mut Ui, Rect)) {
             if ui.rect_contains_pointer(rect) {
                 p.rect_filled(rect, 0.0, t.row_hover);
             }
-            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, t.text);
+            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, name_color);
             hair_v(p, split, rect.top(), rect.bottom(), t.line);
             hair_h(p, rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
             (split + 9.0, rect.right() - 10.0)
         }
         Props::Inspector => {
-            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, t.text);
+            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, name_color);
             (split, rect.right() - 8.0)
         }
         Props::Joined => {
@@ -301,11 +414,20 @@ fn row(ui: &mut Ui, k: &Look, name: &str, add: impl FnOnce(&mut Ui, Rect)) {
         Pos2::new(from, (y - half).round()),
         Pos2::new(to, (y - half).round() + k.field()),
     );
-    add(ui, value);
+    match off {
+        None => add(ui, value),
+        Some(why) => {
+            let mut greyed = ui.new_child(UiBuilder::new().max_rect(value));
+            greyed.disable();
+            add(&mut greyed, value);
+            ui.interact(value, ui.id().with(("off", name)), Sense::hover())
+                .on_hover_text(why);
+        }
+    }
 }
 
 /// Three numbers for the X, Y and Z axes, marked in the axis colours.
-fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3]) {
+fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed: f32) {
     let t = &k.t;
     match k.d.props {
         Props::Details => {
@@ -316,7 +438,7 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3]) {
                     Pos2::new(rect.left() + i as f32 * (w + gap), rect.top()),
                     Vec2::new(w, rect.height()),
                 );
-                widgets::number(ui, k, cell, id.with(i), value, Marker::Bar(t.axis[i]), true);
+                widgets::number(ui, k, cell, id.with(i), value, Marker::Bar(t.axis[i]), true, speed);
             }
         }
         Props::Inspector => {
@@ -333,7 +455,7 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3]) {
                     t.axis[i],
                 );
                 let cell = Rect::from_min_max(Pos2::new(left + letter, rect.top()), Pos2::new(left + w, rect.bottom()));
-                widgets::number(ui, k, cell, id.with(i), value, Marker::None, true);
+                widgets::number(ui, k, cell, id.with(i), value, Marker::None, true, speed);
             }
         }
         Props::Joined => {
@@ -366,6 +488,7 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3]) {
                     value,
                     Marker::Letter(t.axis[i], AXES[i]),
                     false,
+                    speed,
                 );
             }
         }

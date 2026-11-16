@@ -15,7 +15,8 @@
 use crate::camera::RightDrag;
 use crate::design::Overlays;
 use crate::modes::{actions, pipeline_missing, Pipeline, MODES, PIPELINES, TOOLS};
-use crate::state::{focus_row, Look, Rail, State, SCENE};
+use crate::panels::{dragged_over, dropped, DragCard};
+use crate::state::{Command, Look, Rail, State};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, icon_cell};
 use egui::{Align, Align2, Color32, Key, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
@@ -34,7 +35,9 @@ pub enum RailShape {
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, st.backdrop);
-    if st.live.is_some() {
+    // A still picture stands in only until the scene has a character.
+    let still = st.viewport_image.is_some() && !st.live.as_ref().is_some_and(|live| live.has_characters());
+    if st.live.is_some() && !still {
         live_picture(ui, st, full);
     } else if let Some(tex) = &st.viewport_image {
         let size = tex.size_vec2();
@@ -49,6 +52,18 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     }
     let scene = ui.interact(full, ui.id().with("scene"), Sense::click_and_drag());
     navigate(ui, st, &scene, full);
+    // A card dragged from the Content panel and let go here joins the scene.
+    if dragged_over::<DragCard>(ui, full) {
+        ui.painter().rect_stroke(
+            full,
+            0.0,
+            egui::Stroke::new(2.0, k.t.select_bright),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(card) = dropped::<DragCard>(ui, full) {
+        st.run(Command::AddCard(card.0.clone()));
+    }
     if (scene.clicked() || scene.drag_started()) && !st.palette_pinned {
         st.palette_open = false;
     }
@@ -374,7 +389,7 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 20.0), Sense::hover());
     glyph(ui.painter(), k, rect.center(), kind.glyph(), 16.0, kind.color());
     ui.add_space(4.0);
-    bar_text(ui, name, k.bold(k.d.text), k.t.text_bright);
+    bar_text(ui, &name, k.bold(k.d.text), k.t.text_bright);
     ui.add_space(5.0);
     bar_text(ui, kind.label(), k.font(), k.t.text_dim);
     ui.add_space(4.0);
@@ -382,7 +397,11 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     ui.add_space(2.0);
     for (g, text, menu) in actions(kind) {
         let resp = flat_button(ui, k, Some(g), text, *menu, false);
-        if *menu {
+        if *text == "Load card" {
+            if resp.on_hover_text("Show the cards in the Content panel").clicked() {
+                st.show_content = true;
+            }
+        } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(format!("{text} arrives with its feature")).color(k.t.text_dim));
             });
@@ -695,7 +714,7 @@ fn pipeline_row(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, pipelin
 /// object is something the viewport draws.
 fn focus_selection(st: &mut State) {
     let Some(live) = st.live.as_mut() else { return };
-    if let Some(focus) = st.selected.and_then(focus_row).and_then(|row| live.subject(row)) {
+    if let Some(focus) = st.doc.selected.and_then(|id| live.subject(id)) {
         live.cam.focus_on(focus);
     }
 }
@@ -707,10 +726,14 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     let Some(live) = st.live.as_ref() else { return };
     let m = 8.0;
     let h = k.d.row + 6.0;
-    let focus = live.cam.focus.and_then(|f| SCENE.get(f.row).copied());
+    let focus = live
+        .cam
+        .focus
+        .and_then(|f| st.doc.scene().get(f.object))
+        .map(|o| (o.kind(), o.name.clone()));
     let moved = live.cam.moved();
-    let name = match focus {
-        Some((_, _, name)) => name,
+    let name = match &focus {
+        Some((_, name)) => name.as_str(),
         None => "Free camera",
     };
     // The target, then the object's kind and name; the reset button joins
@@ -722,9 +745,9 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     let whole = if moved { cell.union(reset) } else { cell };
     block(ui, k, whole);
 
-    let can_focus = st.selected.and_then(focus_row).and_then(|row| live.subject(row));
-    let tip = match (focus, can_focus) {
-        (Some((_, kind, name)), _) => format!(
+    let can_focus = st.doc.selected.and_then(|id| live.subject(id));
+    let tip = match (&focus, can_focus) {
+        (Some((kind, name)), _) => format!(
             "The camera is focused on the {} {name}: it orbits around it. Click to let go",
             kind.label().to_lowercase()
         ),
@@ -739,8 +762,8 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
         p.rect_filled(cell.shrink(3.0), 2.0, k.t.control);
     }
     let y = cell.center().y;
-    match focus {
-        Some((_, kind, name)) => {
+    match &focus {
+        Some((kind, name)) => {
             glyph(
                 p,
                 k,
@@ -932,19 +955,15 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
     rect
 }
 
-/// Draws the live character into the viewport, stepping the physics while
-/// it plays and putting it back to rest when it is stopped.
+/// Draws the scene's characters into the viewport, after bringing them
+/// in line with the scene: stepping the physics while it plays and putting
+/// it back to rest when it is stopped.
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     let Some(live) = st.live.as_mut() else { return };
-    match (st.last_physics, st.physics) {
-        (_, crate::state::Physics::Playing) => {
-            let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
-            live.step(dt);
-            ui.ctx().request_repaint();
-        }
-        (crate::state::Physics::Stopped, crate::state::Physics::Stopped) => {}
-        (_, crate::state::Physics::Stopped) => live.reset(),
-        _ => {}
+    let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
+    live.follow(st.doc.scene(), st.last_physics, st.physics, dt, &mut st.log);
+    if st.physics == crate::state::Physics::Playing {
+        ui.ctx().request_repaint();
     }
     st.last_physics = st.physics;
     let ppp = ui.ctx().pixels_per_point();
@@ -952,7 +971,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         (full.width() * ppp).round() as u32,
         (full.height() * ppp).round() as u32,
     ];
-    match live.paint(size, [0.22, 0.22, 0.23, 1.0]) {
+    match live.paint(st.doc.scene(), size, [0.22, 0.22, 0.23, 1.0]) {
         Ok(id) => {
             ui.painter().image(
                 id,
