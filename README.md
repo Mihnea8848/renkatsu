@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.1, on the
+The latest version is 0.1.2, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -42,8 +42,12 @@ The latest version is 0.1.1, on the
   light, and the formulas come from the game's own code and shaders, not from
   tuning.
 - 0.1.1 adds Renkatsu Studio, the editor, with installers.
-- Next: CharaStudio's screen effects, so characters look as they do in the
-  game, then posing.
+- 0.1.2 draws CharaStudio's screen effects (ambient occlusion, bloom, the
+  colour filter and the vignette), so characters look as they do in Studio:
+  99.0% body and 99.4% face against captures with the effects on. It adds
+  packages, and Starter Content: Characters, Koikatsu's own vanilla
+  character content, so Renkatsu works without a Koikatsu install.
+- Next: posing.
 
 ## Renkatsu Studio
 
@@ -101,18 +105,18 @@ The latest version is 0.1.1, on the
 ## Known problems
 
 - Characters stand in a T-pose. Posing comes next
-- CharaStudio's screen effects (ambient occlusion, bloom, vignette, colour
-  filter) are not drawn yet, so characters look paler than in the game
-- Characters need a Koikatsu install. Renkatsu itself runs without one, and a
-  later version keeps imported characters in the project so they open
-  without the game too
+- Without a Koikatsu install, characters come from Starter Content only.
+  Cards that use mods need the mods, which come with a Koikatsu install
+- CharaStudio's depth of field, fog and sun shafts (off by default) are not
+  drawn yet
 - Koikatsu Sunshine content is not supported
 
 ## Requirements
 
 - A GPU with Vulkan, Metal or DirectX 12
-- To use Koikatsu characters, your own Koikatsu install. Renkatsu ships no
-  game files and reads everything from your copy
+- Characters come from Starter Content (a download Renkatsu offers on first
+  start) or from your own Koikatsu install, which Renkatsu reads and never
+  changes
 - To build from source, Rust 1.95. `rustup` installs it on its own from
   `rust-toolchain.toml`
 
@@ -123,12 +127,15 @@ Download Renkatsu from the
 
 - Windows: `Renkatsu-<version>-windows-x64-setup.exe` installs Renkatsu
   Studio with a Start menu entry. A portable `.zip` is there too
-- Linux: `Renkatsu-<version>-linux-x86_64.AppImage` runs as it is after
-  `chmod +x`. The `.tar.gz` holds the same programs with an `install.sh` that
-  adds Renkatsu Studio to the application menu (`install.sh --uninstall`
-  removes it)
+- Linux: `Renkatsu-<version>-linux-x86_64-installer` installs Renkatsu
+  Studio for your user (run it after `chmod +x`, or open it from the file
+  manager), with an application menu entry and an optional desktop
+  shortcut. `uninstall.sh` in `~/.local/share/renkatsu/app` removes it. The
+  portable `.tar.gz` holds the same programs with an `install.sh`
 
-Both include the `rk` command line tools.
+Both include the `rk` command line tools, and both installers can download
+Starter Content: Characters on the way. Renkatsu Studio also offers it in
+the project selector and in Window, Packages.
 
 To build from source instead:
 
@@ -237,12 +244,12 @@ Renkatsu Character Maker with everything the Koikatsu maker can do.
 
 1. Character look: Koikatsu shaders, card colours, texture compositing,
    overlays and the other plugin data that cards depend on. Done in 0.1.0,
-   except CharaStudio's screen effects
+   with CharaStudio's screen effects in 0.1.2
 2. The studio: a docked editor with a viewport, scene tree and inspector,
    and scene and project files stored as readable text, done in 0.1.1. Next
    in this step: posing characters (static poses and CharaStudio's FK and IK)
-   and characters kept in the project in Renkatsu's own format, so projects
-   open without Koikatsu
+   and characters kept in the project in Renkatsu's own format. Packages and
+   Starter Content, so Renkatsu works without Koikatsu, came in 0.1.2
 3. Import of existing CharaStudio scenes
 4. The Ren'Py link: baked images and video that are rendered again when a
    character changes
@@ -288,5 +295,6 @@ in [LICENSES/GPL-3.0-or-later.txt](LICENSES/GPL-3.0-or-later.txt).
 The interface font, Open Sans, is under the SIL Open Font License 1.1, in
 [LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).
 
-Renkatsu ships no game files and reads everything from your own copy of
-Koikatsu.
+The Renkatsu repository holds no game files. Starter Content, a separate
+download, carries Koikatsu's own vanilla character content and default
+characters, without mods, community cards, voices or H content.
