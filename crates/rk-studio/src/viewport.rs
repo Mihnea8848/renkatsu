@@ -33,7 +33,9 @@ pub enum RailShape {
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, st.backdrop);
-    if let Some(tex) = &st.viewport_image {
+    if st.live.is_some() {
+        live_picture(ui, st, full);
+    } else if let Some(tex) = &st.viewport_image {
         let size = tex.size_vec2();
         let scale = (full.width() / size.x).min(full.height() / size.y);
         let fit = Rect::from_center_size(full.center(), (size * scale).round());
@@ -45,6 +47,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
         );
     }
     let scene = ui.interact(full, ui.id().with("scene"), Sense::click_and_drag());
+    if let Some(live) = st.live.as_mut() {
+        navigate(ui, live, &scene, full);
+    }
     if (scene.clicked() || scene.drag_started()) && !st.palette_pinned {
         st.palette_open = false;
     }
@@ -679,4 +684,66 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
         }
     }
     rect
+}
+
+/// Draws the live character into the viewport, stepping the physics while
+/// it plays and putting it back to rest when it is stopped.
+fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
+    let Some(live) = st.live.as_mut() else { return };
+    match (st.last_physics, st.physics) {
+        (_, crate::state::Physics::Playing) => {
+            let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
+            live.step(dt);
+            ui.ctx().request_repaint();
+        }
+        (crate::state::Physics::Stopped, crate::state::Physics::Stopped) => {}
+        (_, crate::state::Physics::Stopped) => live.reset(),
+        _ => {}
+    }
+    st.last_physics = st.physics;
+    let ppp = ui.ctx().pixels_per_point();
+    let size = [
+        (full.width() * ppp).round() as u32,
+        (full.height() * ppp).round() as u32,
+    ];
+    match live.paint(size, [0.22, 0.22, 0.23, 1.0]) {
+        Ok(id) => {
+            ui.painter().image(
+                id,
+                full,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        Err(e) => {
+            ui.painter().text(
+                full.center(),
+                Align2::CENTER_CENTER,
+                format!("The viewport could not draw: {e:#}"),
+                egui::FontId::proportional(13.0),
+                Color32::LIGHT_RED,
+            );
+        }
+    }
+}
+
+/// Unity's viewport navigation: the right button, or Alt with the left,
+/// orbits; the middle button pans; the wheel zooms; F frames the character.
+fn navigate(ui: &Ui, live: &mut crate::live::Live, scene: &egui::Response, full: Rect) {
+    let alt = ui.input(|i| i.modifiers.alt);
+    let delta = scene.drag_delta();
+    if scene.dragged_by(egui::PointerButton::Secondary) || (alt && scene.dragged_by(egui::PointerButton::Primary)) {
+        live.orbit.rotate(delta);
+    } else if scene.dragged_by(egui::PointerButton::Middle) {
+        live.orbit.pan(delta, full.height());
+    }
+    if scene.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            live.orbit.zoom(scroll);
+        }
+        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::F) && i.modifiers.is_none()) {
+            live.frame();
+        }
+    }
 }

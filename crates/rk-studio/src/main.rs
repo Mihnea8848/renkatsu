@@ -9,6 +9,7 @@
 mod chrome;
 mod design;
 mod kinds;
+mod live;
 mod modes;
 mod panels;
 mod properties;
@@ -38,9 +39,12 @@ struct Cli {
     /// The design to show.
     #[arg(long, value_enum, default_value = "d")]
     design: Design,
-    /// Picture to show in the viewport until the live viewport exists.
+    /// Picture to show in the viewport when no card is loaded.
     #[arg(long)]
     viewport_image: Option<PathBuf>,
+    /// Card to load and draw live in the viewport.
+    #[arg(long)]
+    card: Option<PathBuf>,
     /// Save a picture of the window here after a few frames, then quit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
@@ -131,6 +135,13 @@ impl Studio {
         state.maximised = cli.maximised;
         if cli.rail_icons {
             state.rail = Rail::Icons;
+        }
+        if let Some(card) = &cli.card {
+            let render_state = cc
+                .wgpu_render_state
+                .as_ref()
+                .context("the window has no wgpu device to draw the viewport with")?;
+            state.live = Some(live::Live::new(render_state, card)?);
         }
         if let Some(path) = &cli.viewport_image {
             let (texture, corner) = load_texture(&cc.egui_ctx, path)?;

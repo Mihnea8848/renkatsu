@@ -139,6 +139,10 @@ pub struct State {
     pub levels: [bool; 3],
 
     pub viewport_image: Option<TextureHandle>,
+    /// The live character, when a card was loaded.
+    pub live: Option<crate::live::Live>,
+    /// The physics state the last frame saw, to reset on a stop.
+    pub last_physics: Physics,
     /// What surrounds the still picture, taken from its corner so that it
     /// reads as a viewport filled edge to edge.
     pub backdrop: Color32,
@@ -181,6 +185,8 @@ impl State {
             asset: 0,
             levels: [true; 3],
             viewport_image: None,
+            live: None,
+            last_physics: Physics::Stopped,
             backdrop: Color32::from_rgb(0x0f, 0x0f, 0x0f),
         }
     }

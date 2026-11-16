@@ -302,7 +302,10 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     for text in [
         format!("Design {}", k.d.name),
         "Koikatsu look".to_owned(),
-        "Still picture: the live viewport comes next".to_owned(),
+        match &st.live {
+            Some(live) => format!("Live: {}", live.name),
+            None => "Still picture".to_owned(),
+        },
     ] {
         x = small(x, Align2::RIGHT_CENTER, &text, t.text_dim).left() - 12.0;
         hair_v(p, x, rect.top() + 6.0, rect.bottom() - 5.0, t.border);

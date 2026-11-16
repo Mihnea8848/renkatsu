@@ -2832,7 +2832,13 @@ dependencies = [
  "egui",
  "egui-phosphor",
  "egui_dock",
+ "glam",
  "png 0.17.16",
+ "rk-card",
+ "rk-chara",
+ "rk-core",
+ "rk-render",
+ "rk-vfs",
 ]
 
 [[package]]
