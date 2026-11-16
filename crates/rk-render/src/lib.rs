@@ -385,28 +385,28 @@ impl Renderer {
     }
 
     async fn new_async() -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
-            .ok_or_else(|| anyhow!("no graphics adapter found"))?;
+            .map_err(|e| anyhow!("no graphics adapter found: {e}"))?;
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("renkatsu"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits {
-                        max_texture_dimension_2d: 8192,
-                        ..Default::default()
-                    },
-                    memory_hints: wgpu::MemoryHints::default(),
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("renkatsu"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: 8192,
+                    ..Default::default()
                 },
-                None,
-            )
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -452,8 +452,8 @@ impl Renderer {
         });
         let mask_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow mask"),
-            bind_group_layouts: &[&mask_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&mask_layout)],
+            immediate_size: 0,
         });
         let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow mask"),
@@ -473,7 +473,7 @@ impl Renderer {
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         // Hardware comparison with bilinear blending, as the game's shadow
@@ -498,8 +498,8 @@ impl Renderer {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("toon"),
-            bind_group_layouts: &[&globals_layout, &material_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&globals_layout), Some(&material_layout)],
+            immediate_size: 0,
         });
         let sampler = |mode| {
             device.create_sampler(&wgpu::SamplerDescriptor {
@@ -507,7 +507,7 @@ impl Renderer {
                 address_mode_v: mode,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 anisotropy_clamp: 8,
                 ..Default::default()
             })
@@ -567,11 +567,11 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &self.shader,
                 entry_point: Some(vs),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4, 7 => Float32x4],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -593,8 +593,8 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: key.zwrite,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(key.zwrite),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState {
                     front: face,
                     back: face,
@@ -618,7 +618,7 @@ impl Renderer {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }
@@ -631,11 +631,11 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &self.shader,
                 entry_point: Some("vs_caster"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4, 7 => Float32x4],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -656,8 +656,8 @@ impl Renderer {
                 } else {
                     SHADOW_MAP_FORMAT
                 },
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: Default::default(),
                 // The passes state `Offset 1, 1`.
                 bias: wgpu::DepthBiasState {
@@ -667,7 +667,7 @@ impl Renderer {
                 },
             }),
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }
@@ -1072,6 +1072,7 @@ impl Renderer {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 }
             }
             let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
@@ -1203,6 +1204,7 @@ impl Renderer {
                     label: Some("shadow mask"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &mask,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
@@ -1212,6 +1214,7 @@ impl Renderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(&self.mask_pipeline);
                 pass.set_bind_group(0, &group, &[]);
@@ -1234,6 +1237,7 @@ impl Renderer {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &msaa,
+                    depth_slice: None,
                     resolve_target: Some(&target_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1258,6 +1262,7 @@ impl Renderer {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_bind_group(0, &globals_bg, &[]);
             let mut current = None;
@@ -1311,9 +1316,9 @@ impl Renderer {
         let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| drop(tx.send(r)));
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
         rx.recv()??;
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range()?;
         let mut out = Vec::with_capacity((row * height) as usize);
         for y in 0..height {
             let start = (y * padded) as usize;
