@@ -3,100 +3,13 @@
 
 //! The live viewport: a character built from a card, drawn by Renkatsu's
 //! renderer on the window's own GPU device into a texture that egui shows,
-//! every frame, with an orbit camera and the physics stepping while it plays.
+//! every frame, through the camera of `camera.rs`, and the physics stepping while it plays.
 
+use crate::camera::{Focus, Orbit, ViewCamera};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
-use glam::Vec3;
 use rk_render::{bounds, Camera, Environment, Renderer};
 use std::path::Path;
-
-/// Where the camera looks from: angles around a point, at a distance.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Orbit {
-    pub target: Vec3,
-    /// Around the vertical axis, radians.
-    pub yaw: f32,
-    /// Above the horizon, radians.
-    pub pitch: f32,
-    pub distance: f32,
-    pub fov_y_deg: f32,
-}
-
-impl Orbit {
-    /// The orbit that sees a camera's view: the same eye, target and lens.
-    pub fn from_camera(c: &Camera) -> Orbit {
-        let v = c.eye - c.target;
-        let distance = v.length().max(1e-3);
-        Orbit {
-            target: c.target,
-            yaw: v.x.atan2(-v.z),
-            pitch: (v.y / distance).clamp(-1.0, 1.0).asin(),
-            distance,
-            fov_y_deg: c.fov_y_deg,
-        }
-    }
-
-    pub fn camera(&self) -> Camera {
-        let dir = Vec3::new(
-            self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-            -self.yaw.cos() * self.pitch.cos(),
-        );
-        Camera {
-            eye: self.target + dir * self.distance,
-            target: self.target,
-            fov_y_deg: self.fov_y_deg,
-        }
-    }
-
-    /// Turns around the target, by a drag in points: dragging right turns
-    /// the view right and dragging down tilts it down, as in Unity.
-    pub fn rotate(&mut self, drag: egui::Vec2) {
-        self.turn(drag, 0.008);
-    }
-
-    fn turn(&mut self, drag: egui::Vec2, rate: f32) {
-        self.yaw -= drag.x * rate;
-        self.pitch = (self.pitch + drag.y * rate).clamp(-1.5, 1.5);
-    }
-
-    /// Turns the camera where it stands, by a drag in points, as holding
-    /// the right button does in Unity: the eye stays and the target moves.
-    pub fn look(&mut self, drag: egui::Vec2) {
-        let eye = self.camera().eye;
-        self.turn(drag, 0.004);
-        let to_eye = self.camera().eye - self.target;
-        self.target = eye - to_eye;
-    }
-
-    /// Flies the camera and its target together. `along` is right, up and
-    /// forward, each -1 to 1; the speed follows the distance to the target
-    /// so it suits a close-up and a whole room alike.
-    pub fn fly(&mut self, along: Vec3, dt: f32, fast: bool) {
-        let cam = self.camera();
-        let forward = (cam.target - cam.eye).normalize_or_zero();
-        let right = Vec3::Y.cross(forward).normalize_or_zero();
-        let speed = self.distance.max(0.5) * if fast { 3.0 } else { 1.0 };
-        self.target += (right * along.x + Vec3::Y * along.y + forward * along.z) * speed * dt;
-    }
-
-    /// Moves the target across the view, by a drag in points.
-    pub fn pan(&mut self, drag: egui::Vec2, view_height: f32) {
-        let cam = self.camera();
-        let forward = (cam.target - cam.eye).normalize_or_zero();
-        let right = Vec3::Y.cross(forward).normalize_or_zero();
-        let up = forward.cross(right);
-        // The distance a point covers on screen at the target's depth.
-        let scale = 2.0 * self.distance * (self.fov_y_deg.to_radians() / 2.0).tan() / view_height.max(1.0);
-        self.target += (-right * drag.x + up * drag.y) * scale;
-    }
-
-    /// Moves closer for a positive scroll, farther for a negative one.
-    pub fn zoom(&mut self, scroll: f32) {
-        self.distance = (self.distance * (-scroll * 0.002).exp()).clamp(0.05, 50.0);
-    }
-}
 
 struct Target {
     texture: wgpu::Texture,
@@ -110,9 +23,11 @@ pub struct Live {
     chara: rk_chara::Character,
     env: Environment,
     target: Option<Target>,
-    pub orbit: Orbit,
-    /// The framing the character was loaded with, for F.
-    home: Orbit,
+    /// The camera, focused on the character at the start.
+    pub cam: ViewCamera,
+    /// The character as something to focus on: its scene row, its middle
+    /// and the distance that fits it.
+    subject: Focus,
     /// Every node's local transform as loaded, which a stop goes back to.
     rest: Vec<rk_chara::scene::Trs>,
     pub name: String,
@@ -120,7 +35,8 @@ pub struct Live {
 
 impl Live {
     /// Builds the card's character and a renderer on the window's device.
-    pub fn new(render_state: &egui_wgpu::RenderState, card: &Path) -> Result<Live> {
+    /// `row` is the character's row in the scene.
+    pub fn new(render_state: &egui_wgpu::RenderState, card: &Path, row: usize) -> Result<Live> {
         let game = rk_vfs::Game::open(&rk_core::Config::load()?)?;
         let card_data = rk_card::Card::load(card).with_context(|| format!("loading {}", card.display()))?;
         let chara = rk_chara::build(&game, &card_data, &rk_chara::BuildOptions::default())?;
@@ -132,22 +48,28 @@ impl Live {
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Orbit::from_camera(&Camera::frame(min, max, 16.0 / 9.0, 0.0));
+        let subject = Focus {
+            row,
+            center: home.target,
+            distance: home.distance,
+        };
         Ok(Live {
             renderer,
             render_state: render_state.clone(),
             chara,
             env,
             target: None,
-            orbit: home,
-            home,
+            cam: ViewCamera::new(home, Some(subject)),
+            subject,
             rest,
             name: card_data.full_name(),
         })
     }
 
-    /// Back to the framing the character was loaded with.
-    pub fn frame(&mut self) {
-        self.orbit = self.home;
+    /// What the camera can focus on for a scene row: the character, when
+    /// the row is the character's.
+    pub fn subject(&self, row: usize) -> Option<Focus> {
+        (row == self.subject.row).then_some(self.subject)
     }
 
     /// Advances the physics by `dt` seconds.
@@ -209,60 +131,7 @@ impl Live {
         let target = self.target.as_ref().expect("made above");
         let draws = self.chara.scene.pose();
         self.renderer
-            .render_to(&target.texture, &draws, &self.orbit.camera(), &self.env, background)?;
+            .render_to(&target.texture, &draws, &self.cam.orbit.camera(), &self.env, background)?;
         Ok(target.id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_orbit_keeps_the_camera_it_was_made_from() {
-        let c = Camera {
-            eye: Vec3::new(0.3, 1.4, -2.5),
-            target: Vec3::new(0.0, 0.9, 0.0),
-            fov_y_deg: 30.0,
-        };
-        let back = Orbit::from_camera(&c).camera();
-        assert!((back.eye - c.eye).length() < 1e-4, "{:?}", back.eye);
-        assert_eq!(back.target, c.target);
-    }
-
-    #[test]
-    fn zoom_and_pitch_stay_in_range() {
-        let mut o = Orbit {
-            target: Vec3::ZERO,
-            yaw: 0.0,
-            pitch: 0.0,
-            distance: 2.0,
-            fov_y_deg: 30.0,
-        };
-        o.zoom(1.0e6);
-        assert!(o.distance >= 0.05);
-        o.rotate(egui::Vec2::new(0.0, -1.0e4));
-        assert!(o.pitch <= 1.5);
-        o.rotate(egui::Vec2::new(0.0, 1.0e4));
-        assert!(o.pitch >= -1.5);
-    }
-
-    #[test]
-    fn looking_keeps_the_eye_and_flying_moves_both() {
-        let mut o = Orbit {
-            target: Vec3::new(0.0, 1.0, 0.0),
-            yaw: 0.3,
-            pitch: 0.2,
-            distance: 2.0,
-            fov_y_deg: 30.0,
-        };
-        let eye = o.camera().eye;
-        o.look(egui::Vec2::new(40.0, -25.0));
-        assert!((o.camera().eye - eye).length() < 1e-4);
-        let (eye, target) = (o.camera().eye, o.target);
-        o.fly(Vec3::new(0.0, 0.0, 1.0), 0.5, false);
-        let moved = o.target - target;
-        assert!(moved.length() > 0.1);
-        assert!(((o.camera().eye - eye) - moved).length() < 1e-4);
     }
 }

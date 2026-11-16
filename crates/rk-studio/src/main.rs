@@ -6,6 +6,7 @@
 //! the menu row and docked panels with placeholder content, in the designs
 //! of `design.rs`, for judging layout and look on screenshots.
 
+mod camera;
 mod chrome;
 mod design;
 mod kinds;
@@ -20,7 +21,7 @@ mod widgets;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use design::{Design, Overlays};
+use design::{Design, Overlays, TitleBar};
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
 use state::{Look, Rail, State, SCENE};
@@ -79,6 +80,19 @@ struct Cli {
     /// Leave the pointer at X,Y for the screenshot, to picture hover.
     #[arg(long, value_parser = parse_point)]
     hover: Option<egui::Pos2>,
+    /// The window's title bar, of the three offered.
+    #[arg(long, value_enum, default_value = "a")]
+    title_bar: TitleBar,
+    /// Start with the camera turned around the character by a drag of
+    /// X,Y points, to picture a view that left its starting framing.
+    #[arg(long, value_parser = parse_point, allow_hyphen_values = true)]
+    camera_turn: Option<egui::Pos2>,
+    /// Start with the camera focused on nothing.
+    #[arg(long)]
+    free_camera: bool,
+    /// Start with this fly speed and its meter showing.
+    #[arg(long)]
+    fly_speed: Option<f32>,
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -141,8 +155,25 @@ impl Studio {
                 .wgpu_render_state
                 .as_ref()
                 .context("the window has no wgpu device to draw the viewport with")?;
-            state.live = Some(live::Live::new(render_state, card)?);
+            let row = SCENE
+                .iter()
+                .position(|(_, kind, _)| *kind == kinds::Kind::Character)
+                .context("the scene has no character to show the card as")?;
+            let mut live = live::Live::new(render_state, card, row)?;
+            if let Some(drag) = cli.camera_turn {
+                live.cam.orbit_drag(drag.to_vec2());
+            }
+            if cli.free_camera {
+                live.cam.release();
+            }
+            if let Some(speed) = cli.fly_speed {
+                live.cam.speed = speed.clamp(camera::SPEED_RANGE.0, camera::SPEED_RANGE.1);
+                // Shown for as long as the window lives, for the picture.
+                state.speed_shown = Some(f64::INFINITY);
+            }
+            state.live = Some(live);
         }
+        state.title_bar = cli.title_bar;
         if let Some(path) = &cli.viewport_image {
             let (texture, corner) = load_texture(&cc.egui_ctx, path)?;
             state.viewport_image = Some(texture);
@@ -227,6 +258,13 @@ impl eframe::App for Studio {
                 .frame(egui::Frame::new().fill(t.well))
         };
 
+        // The title bar is a strip of its own, a shade darker than the menu
+        // row under it.
+        egui::Panel::top("title")
+            .exact_size(self.state.title_bar.height())
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(t.input))
+            .show(ui, |ui| chrome::title_bar(ui, &k, &self.state));
         let mut reset = false;
         bar("menu", k.d.menu_height).show(ui, |ui| {
             chrome::menu_row(ui, &k, &mut self.state, &mut self.dock, &mut reset)

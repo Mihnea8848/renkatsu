@@ -25,6 +25,29 @@ pub enum Design {
     D,
 }
 
+/// The window's title bar, the strip above the menu row that moves the
+/// window and carries its buttons. Three are offered for comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TitleBar {
+    /// The mark at the left, the project and the application's name in
+    /// the centre.
+    A,
+    /// The mark and the application's name at the left, then the project
+    /// and the scene as breadcrumbs.
+    B,
+    /// A slim strip with the title only; the mark stays in the menu row.
+    C,
+}
+
+impl TitleBar {
+    pub fn height(self) -> f32 {
+        match self {
+            TitleBar::A | TitleBar::B => 30.0,
+            TitleBar::C => 22.0,
+        }
+    }
+}
+
 /// How the tabs of docked panels are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tabs {

@@ -1,14 +1,14 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The parts of the window around the docked panels: the menu row with the
-//! project, the physics play controls and the command search; the status
+//! The parts of the window around the docked panels: the title bar; the
+//! menu row with the physics play controls and the command search; the status
 //! bar; and, in the design that keeps the viewport clean, the mode rail at
 //! the window's left edge.
 
-use crate::design::Overlays;
+use crate::design::{Overlays, TitleBar};
 use crate::kinds::Kind;
-use crate::modes::{tool_hint, MODES, TOOLS};
+use crate::modes::{tool_hint, MODES, PIPELINES, TOOLS};
 use crate::panels::{self, Panel};
 use crate::state::{Look, Physics, Rail, State};
 use crate::viewport::{self, RailShape};
@@ -17,14 +17,48 @@ use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuil
 use egui_dock::DockState;
 use egui_phosphor::regular as icon;
 
-/// The menu row. Sets `reset` when the layout should return to default.
-pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, reset: &mut bool) {
+/// The placeholder names of the open project and scene.
+const PROJECT: &str = "Untitled project";
+const SCENE_NAME: &str = "Untitled scene";
+const APP: &str = "Renkatsu Studio";
+
+/// The application's mark, centred on `center`. Returns its rectangle.
+fn mark(ui: &Ui, k: &Look, center: Pos2) -> Rect {
+    let rect = Rect::from_center_size(center, Vec2::splat(18.0));
+    ui.painter().rect_filled(rect, 2.0, k.t.accent);
+    ui.painter().text(
+        rect.center() + Vec2::new(0.5, 0.0),
+        Align2::CENTER_CENTER,
+        "R",
+        k.bold(13.0),
+        k.t.input,
+    );
+    rect
+}
+
+/// The project and the scene as breadcrumbs from `x`, with the dot of
+/// unsaved changes after the scene. `project` leaves the project out when
+/// it is already named elsewhere.
+fn breadcrumbs(ui: &Ui, k: &Look, mut x: f32, y: f32, project: bool) {
+    let t = &k.t;
+    let p = ui.painter();
+    if project {
+        x = label(p, k, Pos2::new(x, y), PROJECT, t.text_dim);
+        glyph(p, k, Pos2::new(x + 9.0, y + 0.5), icon::CARET_RIGHT, 9.0, t.text_dim);
+        x += 18.0;
+    }
+    let x = label(p, k, Pos2::new(x, y), SCENE_NAME, t.text);
+    // Unsaved changes: one of the few places for the orange.
+    p.circle_filled(Pos2::new(x + 9.0, y + 0.5), 3.0, t.accent);
+}
+
+/// The window's title bar: a strip of its own above the menu row, which
+/// moves the window when dragged, maximises or restores it on a double
+/// click, and carries the window's buttons at its right end. What else it
+/// shows depends on the variant.
+pub fn title_bar(ui: &mut Ui, k: &Look, st: &State) {
     let t = &k.t;
     let rect = ui.max_rect();
-    hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.divider);
-    // The row is the window's title bar: its empty parts move the window and
-    // a double click maximises or restores it. Everything drawn on top of it
-    // takes its own clicks first.
     let title = ui.interact(rect, ui.id().with("title bar"), Sense::click_and_drag());
     if title.drag_started_by(egui::PointerButton::Primary) {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -34,27 +68,76 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
 
-    // The mark, then the menus and the project. In the design with the
-    // rail in the window, the mark sits over the rail's icons.
-    let mark_x = if k.d.overlays == Overlays::Header {
-        (window_rail_width(k, st) / 2.0).floor()
-    } else {
-        21.0
-    };
-    let mark = Rect::from_center_size(Pos2::new(rect.left() + mark_x, rect.center().y), Vec2::splat(18.0));
-    ui.painter().rect_filled(mark, 2.0, t.accent);
-    ui.painter().text(
-        mark.center() + Vec2::new(0.5, 0.0),
-        Align2::CENTER_CENTER,
-        "R",
-        k.bold(13.0),
-        t.input,
+    let slim = st.title_bar == TitleBar::C;
+    let mut right = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::right_to_left(Align::Center)),
     );
+    window_buttons(&mut right, k, if slim { 38.0 } else { 46.0 });
+
+    let y = rect.center().y;
+    let rest = format!(" - {APP}");
+    match st.title_bar {
+        TitleBar::A => {
+            mark(ui, k, Pos2::new(rect.left() + 21.0, y));
+            let w = widgets::text_width(ui, PROJECT, k.font()) + widgets::text_width(ui, &rest, k.font());
+            let p = ui.painter();
+            let x = label(p, k, Pos2::new((rect.center().x - w / 2.0).round(), y), PROJECT, t.text);
+            label(p, k, Pos2::new(x, y), &rest, t.text_dim);
+        }
+        TitleBar::B => {
+            let m = mark(ui, k, Pos2::new(rect.left() + 21.0, y));
+            let p = ui.painter();
+            let x = p
+                .text(
+                    Pos2::new(m.right() + 10.0, y),
+                    Align2::LEFT_CENTER,
+                    APP,
+                    k.bold(k.d.text),
+                    t.text_bright,
+                )
+                .right();
+            hair_v(p, x + 12.0, y - 7.0, y + 7.0, t.border);
+            breadcrumbs(ui, k, x + 25.0, y, true);
+        }
+        TitleBar::C => {
+            ui.painter().text(
+                Pos2::new(rect.center().x.round(), y),
+                Align2::CENTER_CENTER,
+                format!("{PROJECT}{rest}"),
+                k.small(),
+                t.text_dim,
+            );
+        }
+    }
+}
+
+/// The menu row under the title bar: the menus, the scene, the physics
+/// play controls in the centre, the command search and the layout menu.
+/// Sets `reset` when the layout should return to default.
+pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, reset: &mut bool) {
+    let t = &k.t;
+    let rect = ui.max_rect();
+    hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.divider);
+
+    // The slim title bar has no room for the mark, so it stays here. In the
+    // design with the rail in the window, it sits over the rail's icons.
+    let mut start = rect.left() + 6.0;
+    if st.title_bar == TitleBar::C {
+        let mark_x = if k.d.overlays == Overlays::Header {
+            (window_rail_width(k, st) / 2.0).floor()
+        } else {
+            21.0
+        };
+        let m = mark(ui, k, Pos2::new(rect.left() + mark_x, rect.center().y));
+        start = m.right() + mark_x - 9.0 - 4.0;
+    }
     let limit = rect.center().x - 90.0;
     let mut left = ui.new_child(
         UiBuilder::new()
             .max_rect(Rect::from_min_max(
-                Pos2::new(mark.right() + mark_x - 9.0 - 4.0, rect.top() - 2.0),
+                Pos2::new(start, rect.top() - 2.0),
                 Pos2::new(limit, rect.bottom() - 3.0),
             ))
             .layout(Layout::left_to_right(Align::Center)),
@@ -66,18 +149,16 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
         menus(ui, k, st, dock, reset);
         end = ui.cursor().left();
     });
-    let scene = "Untitled scene";
-    let project = "Untitled project";
-    let need = widgets::text_width(ui, scene, k.font()) + widgets::text_width(ui, project, k.font()) + 60.0;
-    if end + need < limit {
+    // What the title bar already names is not repeated here.
+    let project = st.title_bar == TitleBar::C;
+    let mut need = widgets::text_width(ui, SCENE_NAME, k.font()) + 42.0;
+    if project {
+        need += widgets::text_width(ui, PROJECT, k.font()) + 18.0;
+    }
+    if st.title_bar != TitleBar::B && end + need < limit {
         let y = rect.center().y;
-        let p = ui.painter();
-        hair_v(p, end + 8.0, y - 8.0, y + 8.0, t.border);
-        let x = label(p, k, Pos2::new(end + 22.0, y), project, t.text_dim);
-        glyph(p, k, Pos2::new(x + 9.0, y + 0.5), icon::CARET_RIGHT, 9.0, t.text_dim);
-        let x = label(p, k, Pos2::new(x + 18.0, y), scene, t.text);
-        // Unsaved changes: one of the few places for the orange.
-        p.circle_filled(Pos2::new(x + 9.0, y + 0.5), 3.0, t.accent);
+        hair_v(ui.painter(), end + 8.0, y - 8.0, y + 8.0, t.border);
+        breadcrumbs(ui, k, end + 22.0, y, project);
     }
 
     play_group(ui, k, st, rect.center());
@@ -86,12 +167,11 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
         UiBuilder::new()
             .max_rect(Rect::from_min_max(
                 Pos2::new(rect.center().x + 80.0, rect.top()),
-                Pos2::new(rect.right(), rect.bottom() - 1.0),
+                Pos2::new(rect.right() - 8.0, rect.bottom() - 1.0),
             ))
             .layout(Layout::right_to_left(Align::Center)),
     );
     right.spacing_mut().item_spacing.x = 6.0;
-    window_buttons(&mut right, k);
     let resp = flat_button(&mut right, k, Some(icon::LAYOUT), "Layout", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         if ui.button("Reset layout").clicked() {
@@ -105,8 +185,9 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
 }
 
 /// Minimise, maximise or restore, and close, at the title bar's right end,
-/// flat as in Unreal; close turns red under the pointer.
-fn window_buttons(ui: &mut Ui, k: &Look) {
+/// flat as in Unreal; close turns red under the pointer. `width` is that of
+/// one button.
+fn window_buttons(ui: &mut Ui, k: &Look, width: f32) {
     let t = &k.t;
     let h = ui.available_height();
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -120,10 +201,9 @@ fn window_buttons(ui: &mut Ui, k: &Look) {
         ),
         (icon::MINUS, "Minimise", egui::ViewportCommand::Minimized(true)),
     ];
-    let saved = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 0.0;
     for (i, (glyph_name, tip, command)) in buttons.into_iter().enumerate() {
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, h), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
         let resp = resp.on_hover_text(tip);
         let close = i == 0;
         let p = ui.painter();
@@ -141,14 +221,6 @@ fn window_buttons(ui: &mut Ui, k: &Look) {
             ui.ctx().send_viewport_cmd(command);
         }
     }
-    ui.spacing_mut().item_spacing.x = saved;
-    bar_gap(ui, h);
-}
-
-/// A thin divider between the window buttons and the rest of the row.
-fn bar_gap(ui: &mut Ui, h: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(9.0, h), Sense::hover());
-    let _ = rect;
 }
 
 /// The window's edges and corners resize it, now that the system frame is
@@ -448,7 +520,7 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     let mut x = rect.right() - 12.0;
     for text in [
         format!("Design {}", k.d.name),
-        "Koikatsu look".to_owned(),
+        PIPELINES[0].name.to_owned(),
         match &st.live {
             Some(live) => format!("Live: {}", live.name),
             None => "Still picture".to_owned(),

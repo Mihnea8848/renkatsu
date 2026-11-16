@@ -12,9 +12,10 @@
 //! shrinks it to icons. The backtick key or the eye button hides every
 //! overlay, and Shift with Space gives the viewport the whole window.
 
+use crate::camera::RightDrag;
 use crate::design::Overlays;
-use crate::modes::{actions, MODES, TOOLS};
-use crate::state::{Look, Rail, State};
+use crate::modes::{actions, pipeline_missing, Pipeline, MODES, PIPELINES, TOOLS};
+use crate::state::{focus_row, Look, Rail, State, SCENE};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, icon_cell};
 use egui::{Align, Align2, Color32, Key, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
@@ -47,9 +48,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
         );
     }
     let scene = ui.interact(full, ui.id().with("scene"), Sense::click_and_drag());
-    if let Some(live) = st.live.as_mut() {
-        navigate(ui, live, &scene, full);
-    }
+    navigate(ui, st, &scene, full);
     if (scene.clicked() || scene.drag_started()) && !st.palette_pinned {
         st.palette_open = false;
     }
@@ -89,7 +88,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
             Overlays::Header => clean(ui, k, st, full, header),
             Overlays::Blocks => blocks(ui, k, st, full, header),
         }
+        // The camera's corner is the bottom left one, clear of a rail that
+        // runs down the whole left edge.
+        let mut corner = full.left_bottom();
+        if k.d.overlays == Overlays::Docked {
+            corner.x += rail_width(k, st, RailShape::Stacked);
+        }
+        camera_corner(ui, k, st, corner);
     }
+    speed_meter(ui, k, st, full);
     ui.allocate_rect(full, Sense::hover());
 }
 
@@ -109,6 +116,16 @@ fn keys(ui: &Ui, st: &mut State) {
     {
         if pressed(key) {
             st.pick_mode(i);
+        }
+    }
+    // F focuses the camera on the selection and frames it; Home goes back
+    // to the starting view.
+    if pressed(Key::F) {
+        focus_selection(st);
+    }
+    if pressed(Key::Home) {
+        if let Some(live) = st.live.as_mut() {
+            live.cam.reset();
         }
     }
     // While the right button is held these keys fly the camera instead.
@@ -387,14 +404,6 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     {
         st.maximised = !st.maximised;
     }
-    if let Some(live) = st.live.as_mut() {
-        if icon_button(ui, k, icon::ARROWS_COUNTER_CLOCKWISE, false)
-            .on_hover_text("Reset the view to the starting framing (Home)")
-            .clicked()
-        {
-            live.frame();
-        }
-    }
     if icon_button(ui, k, icon::EYE_SLASH, st.overlays_hidden)
         .on_hover_text("Hide or show the viewport tools (`)")
         .clicked()
@@ -421,6 +430,23 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         });
     }
+    // The rendering pipeline, by its abbreviation: the bar has little room.
+    let active = &PIPELINES[0];
+    let resp = flat_button(ui, k, Some(icon::STACK), active.short, true, false)
+        .on_hover_text(format!("Rendering pipeline: {}", active.name));
+    egui::Popup::menu(&resp).show(|ui| {
+        for pipeline in &PIPELINES {
+            let text = format!("{} ({})", pipeline.name, pipeline.short);
+            let on = pipeline.short == active.short;
+            let item = ui
+                .add_enabled_ui(pipeline.available, |ui| widgets::check_item(ui, k, on, &text, ""))
+                .inner
+                .on_disabled_hover_text(pipeline_missing(pipeline));
+            if item.clicked() {
+                ui.close();
+            }
+        }
+    });
 }
 
 /// Width of the rail for a shape and the rail's state.
@@ -633,13 +659,221 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                 Pos2::new(rect.left() + 6.0, y + 1.0),
                 Vec2::new(rect.width() - 12.0, palette_row(k) - 2.0),
             );
-            let on = st.mode_tool[st.mode] == index;
-            if widgets::tool_row(ui, k, row, ui.id().with(("tool", st.mode, index)), g, name, on).clicked() {
-                st.mode_tool[st.mode] = index;
+            let id = ui.id().with(("tool", st.mode, index));
+            if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
+                pipeline_row(ui, k, row, id, g, pipeline);
+            } else {
+                let on = st.mode_tool[st.mode] == index;
+                if widgets::tool_row(ui, k, row, id, g, name, on).clicked() {
+                    st.mode_tool[st.mode] = index;
+                }
             }
             y += palette_row(k);
             index += 1;
         }
+    }
+}
+
+/// A rendering pipeline among a mode's tools: the one in use carries a
+/// check mark, and one that does not exist yet is greyed and says so.
+fn pipeline_row(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, pipeline: &Pipeline) {
+    let at = Pos2::new(row.right() - 14.0, row.center().y);
+    if pipeline.available {
+        widgets::tool_row(ui, k, row, id, g, pipeline.tool, false).on_hover_text(pipeline.name);
+        glyph(ui.painter(), k, at, icon::CHECK, 12.0, k.t.select_bright);
+    } else {
+        ui.interact(row, id, Sense::hover())
+            .on_hover_text(pipeline_missing(pipeline));
+        let faint = Theme::glass(k.t.text_dim, 150);
+        let p = ui.painter();
+        glyph(p, k, Pos2::new(row.left() + 16.0, row.center().y), g, 16.0, faint);
+        widgets::label(p, k, Pos2::new(row.left() + 32.0, row.center().y), pipeline.tool, faint);
+    }
+}
+
+/// Focuses the camera on the selected object and frames it, when the
+/// object is something the viewport draws.
+fn focus_selection(st: &mut State) {
+    let Some(live) = st.live.as_mut() else { return };
+    if let Some(focus) = st.selected.and_then(focus_row).and_then(|row| live.subject(row)) {
+        live.cam.focus_on(focus);
+    }
+}
+
+/// The camera's corner of the viewport, at the bottom left: what the
+/// camera is focused on, and, once the view has left its starting framing,
+/// the button that goes back to it. `corner` is the bottom left point.
+fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
+    let Some(live) = st.live.as_ref() else { return };
+    let m = 8.0;
+    let h = k.d.row + 6.0;
+    let focus = live.cam.focus.and_then(|f| SCENE.get(f.row).copied());
+    let moved = live.cam.moved();
+    let name = match focus {
+        Some((_, _, name)) => name,
+        None => "Free camera",
+    };
+    // The target, then the object's kind and name; the reset button joins
+    // at the right end so that nothing shifts when it appears.
+    let name_x = if focus.is_some() { 54.0 } else { 32.0 };
+    let w = (name_x + widgets::text_width(ui, name, k.font()) + 10.0).ceil();
+    let cell = Rect::from_min_size(Pos2::new(corner.x + m, corner.y - m - h), Vec2::new(w, h));
+    let reset = Rect::from_min_size(cell.right_top(), Vec2::new(h, h));
+    let whole = if moved { cell.union(reset) } else { cell };
+    block(ui, k, whole);
+
+    let can_focus = st.selected.and_then(focus_row).and_then(|row| live.subject(row));
+    let tip = match (focus, can_focus) {
+        (Some((_, kind, name)), _) => format!(
+            "The camera is focused on the {} {name}: it orbits around it. Click to let go",
+            kind.label().to_lowercase()
+        ),
+        (None, Some(_)) => "The camera is free. Click or press F to focus on the selection".to_owned(),
+        (None, None) => "The camera is free. Select a character and press F to focus on it".to_owned(),
+    };
+    let resp = ui
+        .interact(cell, ui.id().with("camera-focus"), Sense::click())
+        .on_hover_text(tip);
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(cell.shrink(3.0), 2.0, k.t.control);
+    }
+    let y = cell.center().y;
+    match focus {
+        Some((_, kind, name)) => {
+            glyph(
+                p,
+                k,
+                Pos2::new(cell.left() + 16.0, y),
+                icon::GPS_FIX,
+                16.0,
+                k.t.select_bright,
+            );
+            glyph(p, k, Pos2::new(cell.left() + 39.0, y), kind.glyph(), 15.0, kind.color());
+            widgets::label(p, k, Pos2::new(cell.left() + name_x, y), name, k.t.text_bright);
+        }
+        None => {
+            glyph(
+                p,
+                k,
+                Pos2::new(cell.left() + 16.0, y),
+                icon::GPS_SLASH,
+                16.0,
+                k.t.text_dim,
+            );
+            widgets::label(p, k, Pos2::new(cell.left() + name_x, y), name, k.t.text_dim);
+        }
+    }
+    let toggled = resp.clicked();
+
+    let mut go_home = false;
+    if moved {
+        let resp = ui
+            .interact(reset, ui.id().with("camera-reset"), Sense::click())
+            .on_hover_text("Reset the view to the starting framing (Home)");
+        let p = ui.painter();
+        hair_v(
+            p,
+            reset.left(),
+            reset.top() + 6.0,
+            reset.bottom() - 6.0,
+            Theme::glass(k.t.hover, 110),
+        );
+        if resp.hovered() {
+            p.rect_filled(reset.shrink(3.0), 2.0, k.t.control);
+        }
+        let color = if resp.hovered() { Color32::WHITE } else { k.t.text };
+        glyph(p, k, reset.center(), icon::ARROWS_COUNTER_CLOCKWISE, 16.0, color);
+        go_home = resp.clicked();
+    }
+
+    if go_home {
+        if let Some(live) = st.live.as_mut() {
+            live.cam.reset();
+        }
+    } else if toggled {
+        if focus.is_some() {
+            if let Some(live) = st.live.as_mut() {
+                live.cam.release();
+            }
+        } else {
+            focus_selection(st);
+        }
+    }
+}
+
+/// How long the speed meter stays after the speed changed, then how long
+/// it takes to fade, in seconds.
+const METER_HOLD: f64 = 1.0;
+const METER_FADE: f64 = 0.5;
+
+/// The fly speed as a small meter at the bottom of the viewport, shown
+/// when the speed changes and fading away a moment later.
+fn speed_meter(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
+    let (Some(shown), Some(live)) = (st.speed_shown, st.live.as_ref()) else {
+        return;
+    };
+    let age = ui.input(|i| i.time) - shown;
+    if age >= METER_HOLD + METER_FADE {
+        st.speed_shown = None;
+        return;
+    }
+    let alpha = (1.0 - (age - METER_HOLD) / METER_FADE).clamp(0.0, 1.0) as f32;
+    ui.ctx().request_repaint();
+
+    let h = k.d.row + 6.0;
+    let rect = Rect::from_center_size(
+        Pos2::new(full.center().x.round(), full.bottom() - 8.0 - h / 2.0),
+        Vec2::new(176.0, h),
+    );
+    let fade = |c: Color32| c.gamma_multiply(alpha);
+    let p = ui.painter();
+    p.rect_filled(rect, k.radius(), fade(glass(k)));
+    p.rect_stroke(
+        rect,
+        k.radius(),
+        Stroke::new(1.0, fade(Theme::glass(k.t.hover, 110))),
+        StrokeKind::Inside,
+    );
+    let y = rect.center().y;
+    glyph(
+        p,
+        k,
+        Pos2::new(rect.left() + 16.0, y),
+        icon::GAUGE,
+        16.0,
+        fade(k.t.text),
+    );
+    // A track from the slowest to the fastest speed, with a notch at the
+    // usual one in its middle.
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 32.0, y - 1.5),
+        Pos2::new(rect.right() - 52.0, y + 1.5),
+    );
+    p.rect_filled(track, 1.0, fade(k.t.control));
+    let reach = track.left() + track.width() * live.cam.speed_fraction();
+    p.rect_filled(
+        Rect::from_min_max(track.min, Pos2::new(reach, track.bottom())),
+        1.0,
+        fade(k.t.select_bright),
+    );
+    hair_v(p, track.center().x.round(), y - 4.0, y + 4.0, fade(k.t.text_dim));
+    p.text(
+        Pos2::new(rect.right() - 10.0, y),
+        Align2::RIGHT_CENTER,
+        speed_text(live.cam.speed),
+        k.bold(k.d.text),
+        fade(k.t.text_bright),
+    );
+}
+
+/// The fly speed as it is written on the meter: a multiple of the usual
+/// speed, with more digits below it.
+fn speed_text(speed: f32) -> String {
+    if speed < 1.0 {
+        format!("{speed:.2}x")
+    } else {
+        format!("{speed:.1}x")
     }
 }
 
@@ -742,9 +976,11 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
 /// What a drag in the viewport is doing, as in Unity.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Nav {
-    /// Right button: turn where the camera stands, and fly with W A S D.
-    Look,
-    /// Alt and the left button: turn around the target.
+    /// Right button with a movement key, or with nothing focused: turn
+    /// where the camera stands, and fly with W A S D.
+    Explore,
+    /// Right button, or Alt and the left button: go around the focused
+    /// object.
     Orbit,
     /// Middle button: slide the view.
     Pan,
@@ -754,11 +990,11 @@ enum Nav {
 
 impl Nav {
     /// The symbol the pointer turns into, after Unity's: an eye while
-    /// looking, a turning arrow while orbiting, a hand while panning and a
-    /// magnifier while zooming. Drawn with our own icon font.
+    /// exploring, a turning arrow while orbiting, a hand while panning and
+    /// a magnifier while zooming. Drawn with our own icon font.
     fn glyph(self) -> &'static str {
         match self {
-            Nav::Look => icon::EYE,
+            Nav::Explore => icon::EYE,
             Nav::Orbit => icon::ARROWS_CLOCKWISE,
             Nav::Pan => icon::HAND_GRABBING,
             Nav::Zoom => icon::MAGNIFYING_GLASS,
@@ -766,58 +1002,63 @@ impl Nav {
     }
 }
 
-/// Unity's viewport navigation. The right button looks around and, while
-/// it is held, W A S D fly, Q and E go down and up, Shift goes faster; Alt
-/// with the left button orbits; the middle button pans; Alt with the right
-/// button or the wheel zooms; F frames the character and Home resets the
-/// view.
-fn navigate(ui: &Ui, live: &mut crate::live::Live, scene: &egui::Response, full: Rect) {
+/// The viewport's navigation, Unity's with a focused object. Holding the
+/// right button goes around the focused object; a movement key pressed
+/// during the hold (W A S D, Q and E for down and up) switches to
+/// exploring, which looks around where the camera stands and flies, faster
+/// with Shift, until the button is let go. With nothing focused the right
+/// button explores from the start. The wheel zooms, and while the right
+/// button is held it changes the fly speed instead. Alt with the left
+/// button orbits, the middle button pans, Alt with the right button zooms.
+fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     use egui::PointerButton::{Middle, Primary, Secondary};
-    let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
+    let Some(live) = st.live.as_mut() else { return };
+    let cam = &mut live.cam;
+    let (alt, shift, right_down) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.pointer.secondary_down()));
     let delta = scene.drag_delta();
-    let nav = if scene.dragged_by(Secondary) {
-        Some(if alt { Nav::Zoom } else { Nav::Look })
-    } else if alt && scene.dragged_by(Primary) {
-        Some(Nav::Orbit)
-    } else if scene.dragged_by(Middle) {
-        Some(Nav::Pan)
-    } else {
-        None
-    };
-    match nav {
-        Some(Nav::Look) => live.orbit.look(delta),
-        Some(Nav::Orbit) => live.orbit.rotate(delta),
-        Some(Nav::Pan) => live.orbit.pan(delta, full.height()),
-        Some(Nav::Zoom) => live.orbit.zoom((delta.x - delta.y) * 2.0),
-        None => {}
-    }
-    if nav == Some(Nav::Look) {
-        let held = |key: Key| if ui.input(|i| i.key_down(key)) { 1.0 } else { 0.0 };
+    let right = right_down && (scene.dragged_by(Secondary) || scene.is_pointer_button_down_on());
+    let nav = if right && alt {
+        cam.orbit.zoom((delta.x - delta.y) * 2.0);
+        Some(Nav::Zoom)
+    } else if right {
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let held = |key: Key| {
+            if !typing && ui.input(|i| i.key_down(key)) {
+                1.0
+            } else {
+                0.0
+            }
+        };
         let along = glam::Vec3::new(
             held(Key::D) - held(Key::A),
             held(Key::E) - held(Key::Q),
             held(Key::W) - held(Key::S),
         );
-        if along != glam::Vec3::ZERO {
-            let dt = ui.input(|i| i.stable_dt).min(1.0 / 20.0);
-            live.orbit.fly(along, dt, shift);
-        }
+        let dt = ui.input(|i| i.stable_dt).min(1.0 / 20.0);
         // Keep drawing while the button is held, so flying is smooth.
         ui.ctx().request_repaint();
+        Some(match cam.right_held(delta, along, dt, shift) {
+            RightDrag::Orbit => Nav::Orbit,
+            RightDrag::Explore => Nav::Explore,
+        })
+    } else if alt && scene.dragged_by(Primary) {
+        cam.orbit_drag(delta);
+        Some(Nav::Orbit)
+    } else if scene.dragged_by(Middle) {
+        cam.orbit.pan(delta, full.height());
+        Some(Nav::Pan)
+    } else {
+        None
+    };
+    if !right_down {
+        cam.right_released();
     }
-    if scene.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            live.orbit.zoom(scroll);
-        }
-        if !ui.ctx().egui_wants_keyboard_input() {
-            if ui.input(|i| i.key_pressed(Key::F) && i.modifiers.is_none()) {
-                live.frame();
-            }
-            if ui.input(|i| i.key_pressed(Key::Home)) {
-                live.frame();
-            }
-        }
+    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+    if scroll != 0.0 && right {
+        cam.scroll_speed(scroll);
+        st.speed_shown = Some(ui.input(|i| i.time));
+    } else if scroll != 0.0 && scene.hovered() {
+        cam.orbit.zoom(scroll);
     }
     if let Some(nav) = nav {
         nav_cursor(ui, nav);

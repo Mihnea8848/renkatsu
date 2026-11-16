@@ -18,6 +18,39 @@ pub struct Mode {
     pub sections: &'static [(&'static str, &'static [Entry])],
 }
 
+/// A rendering pipeline: what turns the scene into the picture.
+pub struct Pipeline {
+    /// The abbreviation, for places with little room.
+    pub short: &'static str,
+    pub name: &'static str,
+    /// Its name as a tool of the Light mode.
+    pub tool: &'static str,
+    /// Whether it exists yet.
+    pub available: bool,
+}
+
+/// The pipelines on offer. KRP reproduces Koikatsu's picture; RRP will be
+/// the project's own look and does not exist yet.
+pub const PIPELINES: [Pipeline; 2] = [
+    Pipeline {
+        short: "KRP",
+        name: "Koikatsu Rendering Pipeline",
+        tool: "Koikatsu (KRP)",
+        available: true,
+    },
+    Pipeline {
+        short: "RRP",
+        name: "Renkatsu Rendering Pipeline",
+        tool: "Renkatsu (RRP)",
+        available: false,
+    },
+];
+
+/// The tip of a pipeline that cannot be picked yet.
+pub fn pipeline_missing(pipeline: &Pipeline) -> String {
+    format!("The {} ({}) is not available yet", pipeline.name, pipeline.short)
+}
+
 pub const MODES: [Mode; 6] = [
     Mode {
         glyph: icon::CURSOR,
@@ -108,8 +141,11 @@ pub const MODES: [Mode; 6] = [
                 ],
             ),
             (
-                "Look",
-                &[(icon::PAINT_BRUSH, "Koikatsu look"), (icon::SPHERE, "Modern look")],
+                "Rendering pipeline",
+                &[
+                    (icon::PAINT_BRUSH, PIPELINES[0].tool),
+                    (icon::SPHERE, PIPELINES[1].tool),
+                ],
             ),
         ],
     },

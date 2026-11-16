@@ -5,7 +5,7 @@
 //! the state of the viewport's overlays and the placeholder values the
 //! panels edit. A real scene model replaces the placeholder parts later.
 
-use crate::design::Spec;
+use crate::design::{Spec, TitleBar};
 use crate::kinds::Kind;
 use crate::theme::{Theme, ICONS, SEMIBOLD};
 use egui::{Color32, FontFamily, FontId, TextureHandle};
@@ -86,7 +86,29 @@ pub fn has_children(row: usize) -> bool {
     SCENE.get(row + 1).is_some_and(|next| next.0 > SCENE[row].0)
 }
 
+/// The row the camera focuses on for a scene row: the row itself when it
+/// is a character, or the character it belongs to. Other kinds have nothing
+/// in the viewport to focus on yet.
+pub fn focus_row(row: usize) -> Option<usize> {
+    let mut depth = SCENE.get(row)?.0 + 1;
+    for i in (0..=row).rev() {
+        let (d, kind, _) = SCENE[i];
+        if d < depth {
+            if kind == Kind::Character {
+                return Some(i);
+            }
+            depth = d;
+        }
+    }
+    None
+}
+
 pub struct State {
+    /// The window's title bar.
+    pub title_bar: TitleBar,
+    /// When the fly speed last changed, in egui's seconds, for the meter
+    /// that shows it and fades away.
+    pub speed_shown: Option<f64>,
     /// Index into `SCENE` of the selected object.
     pub selected: Option<usize>,
     /// Scene rows whose children are folded away.
@@ -151,6 +173,8 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         State {
+            title_bar: TitleBar::A,
+            speed_shown: None,
             selected: Some(2),
             folded: [false; SCENE.len()],
             hidden: [false; SCENE.len()],
@@ -205,5 +229,22 @@ impl State {
             self.mode = mode;
             self.palette_open = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_character_and_its_parts_focus_the_character() {
+        let row = |name: &str| SCENE.iter().position(|(_, _, n)| *n == name).unwrap();
+        let simple = row("Simple");
+        assert_eq!(focus_row(simple), Some(simple));
+        assert_eq!(focus_row(row("Outfit 1")), Some(simple));
+        assert_eq!(focus_row(row("Standing pose")), Some(simple));
+        assert_eq!(focus_row(row("Cast")), None);
+        assert_eq!(focus_row(row("Chair")), None);
+        assert_eq!(focus_row(SCENE.len()), None);
     }
 }
