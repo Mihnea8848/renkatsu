@@ -109,6 +109,8 @@ pub enum Pick {
     Icon,
     /// The user's Koikatsu install.
     GameFolder,
+    /// A package file to install.
+    Package,
 }
 
 /// A system file dialog that is open. It runs on a thread of its own, so
@@ -130,6 +132,7 @@ impl Picker {
                 Pick::Folder => "Project location",
                 Pick::Icon => "Project icon",
                 Pick::GameFolder => "Koikatsu folder",
+                Pick::Package => "Install package",
             });
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
@@ -141,6 +144,10 @@ impl Picker {
                     .pick_file(),
                 Pick::Folder | Pick::GameFolder => dialog.pick_folder(),
                 Pick::Icon => dialog.add_filter("PNG pictures", &["png"]).pick_file(),
+                // A package, or the first part of one that was cut into parts.
+                Pick::Package => dialog
+                    .add_filter("Renkatsu packages", &[rk_packages::EXTENSION, "001"])
+                    .pick_file(),
             };
             let _ = send.send(picked);
             ctx.request_repaint();

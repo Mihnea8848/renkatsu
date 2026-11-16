@@ -186,7 +186,14 @@ impl Assets {
             return Ok(b.clone());
         }
         let bundle = match loc.mod_idx {
-            None => Bundle::open(self.index.game_dir.join("abdata").join(&loc.path))?,
+            None => {
+                let root = self
+                    .index
+                    .roots
+                    .get(loc.root as usize)
+                    .ok_or_else(|| anyhow!("{vpath} is in a folder that is not indexed"))?;
+                Bundle::open(root.join(&loc.path))?
+            }
             Some(m) => {
                 let zip_path = self.index.game_dir.join(&self.index.mods[m as usize].path);
                 let mut zip = zip::ZipArchive::new(std::fs::File::open(&zip_path)?)?;
@@ -478,7 +485,24 @@ impl Game {
     /// As [`Game::open`], with the zipmods of `extra` folders searched
     /// together with the game's own.
     pub fn open_with(cfg: &rk_core::Config, extra: &[std::path::PathBuf]) -> Result<Self> {
-        let index = Arc::new(Index::load_with(cfg, extra).context("building content index")?);
+        Self::open_sources(&crate::index::Sources {
+            game: Some(cfg.clone()),
+            packages: Vec::new(),
+            mods: extra.to_vec(),
+        })
+    }
+
+    /// Opens what this user has: the Koikatsu folder when one is chosen,
+    /// the installed packages, and the zipmods of `extra` folders. Works
+    /// with packages alone.
+    pub fn open_user(extra: &[std::path::PathBuf]) -> Result<Self> {
+        Self::open_sources(&crate::index::Sources::detect(extra))
+    }
+
+    /// Opens the game, the packages and the folders of mods that
+    /// `sources` names.
+    pub fn open_sources(sources: &crate::index::Sources) -> Result<Self> {
+        let index = Arc::new(Index::load_sources(sources).context("building content index")?);
         let items = crate::items::ItemDb::build(&index);
         Ok(Self {
             assets: Assets::new(index),

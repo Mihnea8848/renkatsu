@@ -721,6 +721,12 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
             {
                 st.ask(Command::ImportCard, ui.ctx());
             }
+            if flat_button(ui, k, Some(icon::PACKAGE), "From a package", false, false)
+                .on_hover_text("Choose characters of the installed packages and copy their cards into the project")
+                .clicked()
+            {
+                st.ask(Command::ImportFromPackage, ui.ctx());
+            }
             let resp = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false).on_hover_text(
                 if st.asset.is_some() {
                     "Add the selected character to the scene"

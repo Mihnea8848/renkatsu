@@ -10,6 +10,7 @@ mod bench;
 mod bundle;
 mod card;
 mod compare;
+mod package;
 mod reference;
 mod render;
 mod state;
@@ -146,6 +147,38 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BundleCmd,
     },
+    /// Build, install and check packages such as Starter Content.
+    Package {
+        #[command(subcommand)]
+        cmd: PackageCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PackageCmd {
+    /// Build Starter Content: Characters from the Koikatsu install: the
+    /// game's own character parts and default characters, without mods.
+    StarterCharacters {
+        /// The folder the package is written to.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only say what the package would hold.
+        #[arg(long)]
+        list: bool,
+        /// Cut the package into parts of at most this many megabytes.
+        #[arg(long)]
+        part_size: Option<u64>,
+    },
+    /// Install a package from its file.
+    Install { file: PathBuf },
+    /// Download a package Renkatsu knows about and install it.
+    Download { id: String },
+    /// List the installed packages and the ones that can be downloaded.
+    List,
+    /// Check an installed package against its checksums.
+    Verify { id: String },
+    /// Remove an installed package.
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]
@@ -189,6 +222,16 @@ fn main() -> Result<()> {
             cmd: CardCmd::Dump { path, ext },
         } => card::dump(&path, ext),
         Cmd::Index => vfs::index(),
+        Cmd::Package { cmd } => match cmd {
+            PackageCmd::StarterCharacters { out, list, part_size } => {
+                package::starter_characters(&out, list, part_size.map(|mb| mb * 1024 * 1024))
+            }
+            PackageCmd::Install { file } => package::install(&file),
+            PackageCmd::Download { id } => package::download(&id),
+            PackageCmd::List => package::list(),
+            PackageCmd::Verify { id } => package::verify(&id),
+            PackageCmd::Remove { id } => package::remove(&id),
+        },
         Cmd::Reference {
             card,
             capture,

@@ -217,6 +217,11 @@ pub struct Selector {
     /// The Koikatsu install characters are read from; `None` until the
     /// user chooses it.
     pub game: Option<PathBuf>,
+    /// The default card an installed package brings, which new projects
+    /// start with where the game is missing.
+    pub starter: Option<PathBuf>,
+    /// What the window shows of the packages, as of this frame.
+    pub offer: crate::packages::Offer,
 }
 
 impl Selector {
@@ -236,9 +241,24 @@ impl Selector {
             age: 0.0,
             window_age: 0.0,
             game: rk_core::Config::load().ok().map(|c| c.game_dir),
+            starter: None,
+            offer: Default::default(),
         };
         selector.refresh(settings);
         selector
+    }
+
+    /// Tells the selector the default card the installed packages bring,
+    /// or that they bring none.
+    pub fn set_starter(&mut self, card: Option<PathBuf>) {
+        self.starter = card;
+        self.default_card = None;
+    }
+
+    /// Whether a new project can start with Renkatsu-Chan: with the game
+    /// or with a package that brings a default card.
+    pub fn has_default_character(&self) -> bool {
+        self.game.is_some() || self.starter.is_some()
     }
 
     /// Lists the recent projects again, with their pictures. The selection
@@ -301,15 +321,12 @@ impl Selector {
         self.thumbs.get(file).cloned().flatten()
     }
 
-    /// The game's default card, for the picture of the start it stands for.
+    /// The default card, of the game or else of Starter Content, for the
+    /// picture of the start it stands for.
     fn default_card(&mut self) -> Option<PathBuf> {
+        let starter = self.starter.clone();
         self.default_card
-            .get_or_insert_with(|| {
-                rk_core::Config::load()
-                    .ok()
-                    .map(|c| c.userdata().join("chara").join("female").join("Simple.png"))
-                    .filter(|p| p.is_file())
-            })
+            .get_or_insert_with(|| crate::state::default_card(rk_core::Config::load().ok().as_ref(), starter))
             .clone()
     }
 }
@@ -332,6 +349,10 @@ enum Act {
     View(ProjectView),
     /// Pick the Koikatsu install.
     ChooseGame,
+    /// Show the Packages window.
+    Packages,
+    /// Download Starter Content: Characters and install it.
+    GetStarter,
 }
 
 fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
@@ -358,6 +379,12 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
         Act::ChooseGame => {
             let start = st.selector.as_ref().and_then(|s| s.game.clone());
             st.pick(Pick::GameFolder, start, ctx);
+        }
+        Act::Packages => st.packages.open = true,
+        Act::GetStarter => {
+            // The window shows how far the download is and can stop it.
+            st.packages.open = true;
+            st.packages.download(rk_packages::STARTER_CHARACTERS, ctx);
         }
         Act::Browse => {
             let folder = st.selector.as_ref().map(|s| s.form.folder.clone());
@@ -396,7 +423,8 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
     sel.age += dt;
     sel.window_age += dt;
-    let free = st.modal.is_none() && st.picker.is_none();
+    sel.offer = st.packages.offer();
+    let free = st.modal.is_none() && st.picker.is_none() && !st.packages.open;
     let act = window(ui, k, &mut sel, st.settings.project_view, settings::now(), free);
     st.selector = Some(sel);
     if let Some(act) = act {
@@ -408,7 +436,7 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// One line of text from `pos`, centred on it vertically and cut with an
 /// ellipsis at `width`.
-fn line(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32) {
+pub(crate) fn line(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32) {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping {
         max_width: width.max(0.0),
@@ -423,7 +451,7 @@ fn line(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32
 
 /// A boxed button; the primary one of a view is filled with the selection
 /// colour. Returns whether it was clicked.
-fn button(ui: &mut Ui, k: &Look, rect: Rect, text: &str, primary: bool, enabled: bool) -> bool {
+pub(crate) fn button(ui: &mut Ui, k: &Look, rect: Rect, text: &str, primary: bool, enabled: bool) -> bool {
     let t = &k.t;
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(rect, ui.id().with(("selector button", text)), sense);
@@ -721,6 +749,44 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     let open = row(2.0).translate(Vec2::new(0.0, 17.0));
     if side_row(ui, k, open, icon::FOLDER_OPEN, "Open project", "Ctrl+O", false) {
         act = Some(Act::OpenOther);
+    }
+    // Packages bring content for every project. Without the game and
+    // without Starter Content there are no characters at all, so the
+    // window offers to get it, and says how large the download is.
+    let offer = sel.offer.clone();
+    let packages = Rect::from_min_size(
+        Pos2::new(side.left(), side.bottom() - 138.0),
+        Vec2::new(SIDE - 1.0, 36.0),
+    );
+    if side_row(ui, k, packages, icon::PACKAGE, "Packages", "", false) {
+        act = Some(Act::Packages);
+    }
+    let under = match (&offer.busy, offer.starter) {
+        (Some(busy), _) => busy.clone(),
+        (None, true) => "Starter Content is installed".to_owned(),
+        (None, false) => "Content for every project".to_owned(),
+    };
+    line(
+        ui,
+        Pos2::new(side.left() + 18.0, packages.bottom() + 2.0),
+        SIDE - 32.0,
+        &under,
+        k.small(),
+        t.text_dim,
+    );
+    if let (None, false, None, Some(size)) = (&sel.game, offer.starter, &offer.busy, offer.download) {
+        let get = packages.translate(Vec2::new(0.0, -54.0));
+        if side_row(ui, k, get, icon::DOWNLOAD_SIMPLE, "Get Starter Content", "", false) {
+            act = Some(Act::GetStarter);
+        }
+        line(
+            ui,
+            Pos2::new(side.left() + 18.0, get.bottom() + 2.0),
+            SIDE - 32.0,
+            &format!("Characters, {} download", rk_packages::size_text(size)),
+            k.small(),
+            t.accent,
+        );
     }
     // Koikatsu cards are built from the user's own install. Renkatsu works
     // without it; the folder only adds Koikatsu characters.
@@ -1155,13 +1221,14 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
         t.text,
     );
     let tile = Vec2::new(256.0, 144.0 + CAPTION);
-    // Renkatsu-Chan is the game's default card: without the Koikatsu
-    // folder there is none, and projects start empty.
-    if sel.game.is_none() {
+    // Renkatsu-Chan is the default card of the game or of Starter Content:
+    // with neither there is none, and projects start empty.
+    let has_default = sel.has_default_character();
+    if !has_default {
         sel.form.start = Start::Empty;
     }
     for (n, start) in Start::ALL.into_iter().enumerate() {
-        let available = start == Start::Empty || sel.game.is_some();
+        let available = start == Start::Empty || has_default;
         let rect = Rect::from_min_size(Pos2::new(x + n as f32 * (tile.x + GAP), top + 44.0), tile);
         let sense = if available { Sense::click() } else { Sense::hover() };
         let resp = ui.interact(rect, ui.id().with(("start", n)), sense);
@@ -1206,7 +1273,7 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
             mix(t.text_bright, Color32::WHITE, on),
         );
         let under = match start {
-            Start::RenkatsuChan if !available => "Needs the Koikatsu folder",
+            Start::RenkatsuChan if !available => "Needs Koikatsu or Starter Content",
             Start::RenkatsuChan => "The default character",
             Start::Empty => "The key light only",
         };
@@ -1244,7 +1311,7 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
     )));
     let about = match sel.form.start {
         Start::RenkatsuChan => {
-            "The project starts with Renkatsu-Chan, the game's default character, standing under a key light. \
+            "The project starts with Renkatsu-Chan, Koikatsu's default character, standing under a key light. \
              Her card is copied into the project."
         }
         Start::Empty => {

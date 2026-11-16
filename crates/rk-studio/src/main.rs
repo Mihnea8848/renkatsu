@@ -18,6 +18,7 @@ mod library;
 mod live;
 mod modes;
 mod mods;
+mod packages;
 mod panels;
 mod preferences;
 mod project;
@@ -81,6 +82,13 @@ struct Cli {
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
     project_selector: bool,
+    /// Start with the Packages window open, to picture it.
+    #[arg(long, hide = true)]
+    packages: bool,
+    /// Start with the window that imports from a package open, to
+    /// picture it.
+    #[arg(long, hide = true)]
+    package_browser: bool,
     /// The mode to start in, by name.
     #[arg(long, default_value = "select")]
     mode: String,
@@ -274,6 +282,10 @@ impl Studio {
             state.rail = Rail::Icons;
         }
         state.library.eager = cli.screenshot.is_some();
+        state.packages.open = cli.packages;
+        if cli.package_browser {
+            state.packages.browse();
+        }
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             let mut live = live::Live::new(render_state)?;
             if state.scripted {
@@ -518,6 +530,8 @@ impl eframe::App for Studio {
         }
 
         preferences::show(ctx, &k, &mut self.state);
+        packages::show(ctx, &k, &mut self.state);
+        packages::browser(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);
         self.window(ctx);

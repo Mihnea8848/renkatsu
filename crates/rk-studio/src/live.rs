@@ -154,6 +154,12 @@ impl Live {
         !self.actors.is_empty()
     }
 
+    /// Gives the characters that could not be built another try, after
+    /// the content they are built from changed.
+    pub fn retry(&mut self) {
+        self.failed.clear();
+    }
+
     /// What the camera can focus on for an object: a built character.
     pub fn subject(&self, id: ObjectId) -> Option<Focus> {
         self.actors.iter().find(|a| a.id == id).map(Actor::subject)

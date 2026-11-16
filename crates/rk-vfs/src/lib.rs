@@ -11,7 +11,7 @@ pub mod resolve;
 pub mod uncensor;
 
 pub use assets::{AssetFile, Assets, Game, LoadedBundle, ObjRef};
-pub use index::{png_key, Index, ModInfo};
+pub use index::{png_key, Index, ModInfo, Sources};
 pub use items::{resolve_infos, Item, ItemDb, Lookup, ResolveInfo};
 
 /// Item list categories (`ChaListDefine.CategoryNo` in the game).
