@@ -8,11 +8,11 @@
 [[package]]
 id = "starter-characters"
 name = "Starter Content: Characters"
-version = "1.0.0"
-description = "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, and its default characters. Characters made of these are built without a Koikatsu install."
-installed_size = 1068797697
+version = "1.1.0"
+description = "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, its default characters, and CharaStudio's colour filters. Characters made of these are built without a Koikatsu install."
+installed_size = 1069967948
 
 [[package.part]]
-url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-characters-1.0.0.rkpkg"
-size = 833713409
-sha256 = "2b6d829c839bd6bd1425213e2b483a051a1ee953cd9a19bedab6ec6e3a9a03f8"
+url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-characters-1.1.0.rkpkg"
+size = 834598093
+sha256 = "1a71c5f81929a696bcbc9cbe2446221ae95bd17ba9c89595235b5f7ac4abf438"
