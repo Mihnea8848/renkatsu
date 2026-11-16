@@ -6,6 +6,13 @@ ignore = [
     # paste is a compile-time macro crate pulled in by texture2ddecoder.
     # It is finished, not broken, and has no replacement there yet.
     { id = "RUSTSEC-2024-0436", reason = "build-time macro used by texture2ddecoder" },
+    # The zbus helper crates were merged into zbus 6. AccessKit, which gives
+    # the editor screen reader support on Linux through egui, still uses
+    # zbus 5; they are unmaintained, not vulnerable. Remove these once
+    # AccessKit moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via AccessKit until it moves to zbus 6" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via AccessKit until it moves to zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via AccessKit until it moves to zbus 6" },
 ]
 
 [bans]
