@@ -1188,11 +1188,14 @@ impl<'g> Builder<'g> {
 
     /// Applies the masks a top brings for what is worn under it: one cuts
     /// the body, one the bra, one the inner layer of the top itself. A top
-    /// can also rule out a bra altogether.
+    /// can also rule out a bra altogether. `tops` holds the top, then the
+    /// parts of a sailor or jacket top with their part number: as
+    /// ChangeClothesTopParts does, the first part clears the body and bra
+    /// masks and loads its own, the second does the same for the inner one.
     fn hide_under_top(
         &mut self,
         body: &Instance,
-        tops: &[&Item],
+        tops: &[(&Item, Option<usize>)],
         top_insts: &[Instance],
         bra: Option<&(Instance, &Item)>,
     ) {
@@ -1203,9 +1206,26 @@ impl<'g> Builder<'g> {
             ("OverInnerMaskAB", "OverInnerMask"),
         ];
         let mut no_bra = false;
-        for item in tops {
+        // The first part of a sailor or jacket top sets the body mask even
+        // when it has none, which removes the one the body material stores.
+        let first_part = tops.iter().any(|&(_, part)| part == Some(0));
+        for &(item, part) in tops {
             no_bra |= self.list_int(item, "NotBra") == Some(1);
+            let which: &[usize] = match part {
+                None => &[0, 1, 2],
+                Some(0) => &[0, 1],
+                Some(1) => &[2],
+                Some(_) => &[],
+            };
+            if part.is_some() {
+                for &k in which {
+                    masks[k] = None;
+                }
+            }
             for (k, (ab, tex)) in columns.iter().enumerate() {
+                if !which.contains(&k) {
+                    continue;
+                }
                 if let (Some(ab), Some(tex)) = (item.get(ab), item.get(tex)) {
                     if let Some(image) = self.loader.image_by_name(ab, tex, item.mod_idx) {
                         masks[k] = Some(image);
@@ -1249,6 +1269,15 @@ impl<'g> Builder<'g> {
         };
         if let Some(image) = &body_mask {
             put(&mut self.scene, body, &["o_body_a"], image, [1.0, 1.0], [0.0, 0.0]);
+        } else if first_part {
+            for &ri in &body.renderers {
+                let r = &mut self.scene.renderers[ri];
+                if r.name == "o_body_a" {
+                    if let Some(m) = r.materials.first_mut() {
+                        m.textures.remove("_AlphaMask");
+                    }
+                }
+            }
         }
         if let Some((inst, item)) = bra {
             if no_bra {
@@ -2060,7 +2089,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         if opts.clothes {
             // What the top (and its sub-parts) and the bra say about the
             // pieces around them.
-            let mut top_items: Vec<&Item> = Vec::new();
+            let mut top_items: Vec<(&Item, Option<usize>)> = Vec::new();
             let mut top_insts: Vec<Instance> = Vec::new();
             let mut bra: Option<(Instance, &Item)> = None;
             let (mut no_bottom, mut no_shorts) = (false, false);
@@ -2130,7 +2159,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 match (i, inst) {
                     (0, inst) => {
                         no_bottom = one_piece;
-                        top_items.push(item);
+                        top_items.push((item, None));
                         top_insts.extend(inst);
                     }
                     (2, Some(inst)) => {
@@ -2187,7 +2216,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             b.emblems(&inst, cp, &top_prop);
                             top_insts.push(inst);
                         }
-                        top_items.push(sub);
+                        top_items.push((sub, Some(k)));
                     }
                 }
             }
@@ -2351,8 +2380,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 .collect(),
         })
     };
-    let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
-
+    // The component copies the body material when the item starts, before
+    // MaterialEditor has changed the body.
     if opts.copy_body_material {
         let body = b
             .scene
@@ -2370,6 +2399,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
         }
     }
+
+    let material_edits = crate::material_editor::apply(&mut b.scene, &card.ext, outfit, &targets, &shaders);
 
     if let Some(fangs) = opts.edit_fangs.then(|| crate::edit_fangs::read(&card.ext)).flatten() {
         for r in b.scene.renderers.iter_mut() {
