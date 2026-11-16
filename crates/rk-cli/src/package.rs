@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The version of the Starter Content packages this build makes.
-const STARTER_VERSION: &str = "1.0.0";
+const STARTER_VERSION: &str = "1.1.0";
 /// The release the packages are uploaded to, apart from the app's own.
 const RELEASE: &str = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1";
 /// GitHub takes release files under 2 GB; parts stay well below.
@@ -76,13 +76,17 @@ pub fn never(path: &str) -> bool {
 }
 
 /// What Starter Content: Characters is made of: every part a character
-/// wears or is made of, the lists that name the parts, and the shape
-/// tables.
+/// wears or is made of, the lists that name the parts, the shape tables,
+/// and CharaStudio's colour filters (the sheets in `studio/info` and the
+/// tables in `studio/filter`), without which the CharaStudio look has no
+/// colour filter.
 pub fn character_part(path: &str) -> bool {
     path.starts_with("chara/")
         || path.starts_with("list/characustom/")
         || path.starts_with("list/shapecorrect/")
         || path == "list/customshape.unity3d"
+        || path.starts_with("studio/info/")
+        || path.starts_with("studio/filter/")
 }
 
 /// The bundles that hold the game's own characters as cards.
@@ -586,6 +590,9 @@ mod tests {
             BTreeSet::from([("h/common/00_00.unity3d".to_owned(), "chara/mm_base.unity3d".to_owned())])
         );
         assert!(take.iter().all(|p| !never(p)));
+        // The CharaStudio look's colour filter comes along.
+        assert!(character_part("studio/info/00.unity3d") && character_part("studio/filter/00.unity3d"));
+        assert!(!character_part("studio/map/00.unity3d"));
     }
 
     #[test]
