@@ -120,6 +120,8 @@ mod tests {
         out.into_inner()
     }
 
+    // The installer is for Linux: file modes and desktop paths are Unix ones.
+    #[cfg(unix)]
     #[test]
     fn a_payload_is_found_after_the_program_and_read_back() {
         let zip = zip_of(&[("renkatsu", b"app", 0o755), ("LICENSES/OFL-1.1.txt", b"ofl", 0o644)]);

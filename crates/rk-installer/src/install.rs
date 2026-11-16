@@ -186,6 +186,8 @@ fn make_executable(_: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // The installer is for Linux: file modes and desktop paths are Unix ones.
+    #[cfg(unix)]
     #[test]
     fn the_desktop_folder_comes_from_the_desktop_settings() {
         let home = Path::new("/home/someone");
