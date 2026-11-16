@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The game's DynamicBone physics: hair, ribbons, tails and accessories
 //! (`DynamicBone`), node chains (`DynamicBone_Ver01`) and the bust and hips

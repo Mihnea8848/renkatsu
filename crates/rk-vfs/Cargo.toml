@@ -2,7 +2,7 @@
 name = "rk-vfs"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "LicenseRef-PolyForm-Shield-1.0.0 AND GPL-3.0-or-later"
 publish = false
 
 [dependencies]

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Body and face sliders. Each slider samples a table of keyed bone values
 //! shipped with the game; rule tables then combine those samples into local

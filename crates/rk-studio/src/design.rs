@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The complete designs offered for comparison. They share the theme, the
 //! layout and every feature; a design decides sizes and how the parts are

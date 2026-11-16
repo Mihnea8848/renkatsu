@@ -65,9 +65,12 @@ A bug fix should come with a unit test that fails without the fix.
 
 ## Code style
 
-- Every source file starts with a copyright line and
-  `SPDX-License-Identifier: GPL-3.0-or-later`. Add your own copyright line to
-  files you write; keep the existing ones.
+- Every source file starts with a copyright line and an SPDX line:
+  `SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0` for Renkatsu's
+  own code, or `SPDX-License-Identifier: GPL-3.0-or-later` for the files that
+  reimplement GPL-3.0 community plugins. Keep the identifier a file already
+  has. Add your own copyright line to files you write; keep the existing ones.
+  Contributions are licensed under the same terms as the file they change.
 - Rust: formatted with `cargo fmt`, no compiler or clippy warnings.
 - Parsers return an error on damaged input. They do not panic and do not
   silently drop data.
@@ -79,6 +82,7 @@ A bug fix should come with a unit test that fails without the fix.
 
 ## License
 
-By contributing you agree that your work is published under the GNU General
-Public License, version 3 or later, like the rest of the project. You keep the
-copyright to your changes.
+By contributing you agree that your work is published under the license of
+the files you change: the PolyForm Shield License 1.0.0 for Renkatsu's own
+code, or the GNU General Public License, version 3 or later, for the files
+that say so in their header. You keep the copyright to your changes.

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Face expressions. The head prefab carries a script with three controllers
 //! (eyebrows, eyes, mouth). Each lists the meshes it moves and, per expression

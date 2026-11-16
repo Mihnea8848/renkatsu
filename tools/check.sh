@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 #
 # Full local check. CI has no game folder, so the corpus tests and the
 # contact sheet only run here. Needs renkatsu.toml or RENKATSU_GAME_DIR.

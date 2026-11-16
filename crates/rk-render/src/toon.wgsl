@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 // Koikatsu reference shading. One module serves every material kind; the kind
 // is a uniform so the pipeline count stays small. The game renders in linear

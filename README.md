@@ -207,11 +207,22 @@ coffee on [Ko-fi](https://ko-fi.com/mihnea8848).
 
 ## License
 
-Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848). Free software under the GNU
-General Public License, version 3 or later: you can use, change and share it,
-and anything you distribute based on it must stay under the same license, with
-source code. See [LICENSE](LICENSE).
+Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848).
 
-The plugin behaviour that Renkatsu
-reimplements comes from GPL-3.0 community plugins (BepisPlugins, ABMX,
-KK_Plugins).
+Renkatsu is source-available under the
+[PolyForm Shield License 1.0.0](LICENSE). In short, and the license text is
+what counts:
+
+- You can use Renkatsu for free, read its code, change it, and contribute.
+- You can't sell Renkatsu or a changed copy of it, and you can't use it to
+  build a product that competes with it.
+- What you make with Renkatsu is yours. You can sell visual novels, renders,
+  videos and other work created with it.
+
+Some files reimplement the behaviour of GPL-3.0 community plugins
+(BepisPlugins, ABMX, KK_Plugins and others). Those files say
+`GPL-3.0-or-later` in their header and stay under that license, whose text is
+in [LICENSES/GPL-3.0-or-later.txt](LICENSES/GPL-3.0-or-later.txt).
+
+Renkatsu ships no game files and reads everything from your own copy of
+Koikatsu.

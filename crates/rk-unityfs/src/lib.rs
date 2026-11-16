@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Reader for Unity asset bundle files (`.unity3d`), the container format all
 //! Koikatsu assets and mods are stored in. This is a file-format decoder

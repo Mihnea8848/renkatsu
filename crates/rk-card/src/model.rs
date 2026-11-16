@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Typed views of the card's MessagePack blocks. Field names follow the
 //! game's own (camelCase on the wire). Unknown fields are ignored and missing

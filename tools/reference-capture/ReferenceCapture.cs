@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 //
 // BepInEx plugin for CharaStudio. On a hotkey it loads each card from a list,
 // saves two pictures of it and a JSON file describing the camera, lights,
