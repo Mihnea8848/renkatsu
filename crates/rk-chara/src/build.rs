@@ -55,6 +55,9 @@ pub struct BuildOptions {
     pub slider_unlocker: bool,
     /// Run Edit Fangs: the card sets the length and spacing of each fang.
     pub edit_fangs: bool,
+    /// Run Clothing BlendShape: clothing made for it takes the blend shape
+    /// weights the card saved per outfit.
+    pub clothing_blend_shape: bool,
     /// Run the Pregnancy plugin: the body grows with the stored week.
     pub pregnancy: bool,
     /// Run the Accessory States plugin: accessories bound to clothes
@@ -86,6 +89,7 @@ impl Default for BuildOptions {
             eye_control: true,
             slider_unlocker: true,
             edit_fangs: true,
+            clothing_blend_shape: true,
             pregnancy: true,
             accessory_states: true,
             uncensor_selector: true,
@@ -584,6 +588,59 @@ impl<'g> Builder<'g> {
     /// object, so components further down the prefab are not used.
     fn hair_listed(&mut self, inst: &Instance, field: &str) -> Vec<usize> {
         self.listed(inst, Some("ChaCustomHairComponent"), field, true)
+    }
+
+    /// Clothing BlendShape on one clothing item: the weights its
+    /// `ChaClothesBlendShape` component lists, from the card's entries.
+    fn clothing_blend_shape(
+        &mut self,
+        inst: &Instance,
+        entries: &[crate::clothing_blend_shape::Entry],
+        outfit: usize,
+        category: i32,
+        kind: usize,
+    ) {
+        use crate::clothing_blend_shape as cbs;
+        let Some(script) = inst
+            .scripts
+            .iter()
+            .find(|(_, s)| self.script_class(s).as_deref() == Some(cbs::SCRIPT))
+            .map(|(_, s)| s.clone())
+        else {
+            return;
+        };
+        let Ok(obj) = script.read() else { return };
+        let mut slots = Vec::new();
+        for n in 1..=4 {
+            let named = obj
+                .get(&format!("ItemName0{n}"))
+                .and_then(rk_unityfs::UValue::as_str)
+                .is_some_and(|s| !s.is_empty());
+            let shape = obj
+                .get(&format!("BlendShapeIndex0{n}"))
+                .and_then(rk_unityfs::UValue::as_i64)
+                .unwrap_or(0)
+                .max(0) as usize;
+            let meshes = match obj.get(&format!("Meshes0{n}")) {
+                Some(rk_unityfs::UValue::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| v.as_pptr())
+                    .filter_map(|p| self.game.assets.deref(&script.file, p))
+                    .filter_map(|o| inst.renderer_keys.get(&o.key()).copied())
+                    .map(|r| (r, self.scene.renderers[r].mesh.blend_shapes.len()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            slots.push(cbs::Slot { named, meshes, shape });
+        }
+        let weights = cbs::weights_for(entries, outfit, category, kind);
+        for (r, shape, w) in cbs::settle(&slots, weights) {
+            let sw = &mut self.scene.renderers[r].shape_weights;
+            if sw.len() <= shape {
+                sw.resize(shape + 1, 0.0);
+            }
+            sw[shape] = w;
+        }
     }
 
     /// Renderers a field of the accessory's ChaAccessoryComponent lists; the
@@ -1970,6 +2027,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             let mut bra: Option<(Instance, &Item)> = None;
             let (mut no_bottom, mut no_shorts) = (false, false);
             let mut kinds = crate::pushup::StateKinds::default();
+            let blend_shapes = crate::clothing_blend_shape::read(&card.ext);
             for (i, cp) in co.clothes.parts.iter().enumerate().take(9) {
                 // Only one of indoor (7) and outdoor (8) shoes is worn.
                 if (i == 7 && opts.outdoor_shoes) || (i == 8 && !opts.outdoor_shoes) {
@@ -1987,6 +2045,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 let inst = b.part(&label, item, Some(top), Part::Clothes(i as u8));
                 let pattern_prop = format!("outfit{outfit}.ChaFileClothes.{}Pattern", cat::CLOTHES_PROPS[i]);
                 if let Some(inst) = &inst {
+                    if opts.clothing_blend_shape {
+                        b.clothing_blend_shape(inst, &blend_shapes, outfit, item.category, i);
+                    }
                     // The game copies DynamicBone roots onto the body
                     // skeleton for tops and bottoms only.
                     b.physics_source(inst, true, i < 2, true);
@@ -2074,6 +2135,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             _ => {}
                         }
                         if let Some(inst) = b.part(&sub_label, sub, Some(top), Part::Clothes(0)) {
+                            if opts.clothing_blend_shape {
+                                b.clothing_blend_shape(&inst, &blend_shapes, outfit, sub.category, 0);
+                            }
                             b.physics_source(&inst, true, true, true);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             hide_undressed_states(&mut b.scene, &inst);

@@ -8,6 +8,7 @@ pub mod abmx;
 pub mod accessory_clothes;
 pub mod accessory_states;
 pub mod build;
+pub mod clothing_blend_shape;
 pub mod clothing_unlocker;
 pub mod colliders;
 pub mod compose;
