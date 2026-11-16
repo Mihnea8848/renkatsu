@@ -457,6 +457,23 @@ impl Scene {
     }
 
     /// Name to node for a subtree; the first node with a name wins.
+    /// Names from below `from` down to `to`, joined by `/`, as Unity's
+    /// path from a transform to one of its children reads. Empty when `to`
+    /// is not under `from`.
+    pub fn path_below(&self, from: usize, to: usize) -> String {
+        let mut names = Vec::new();
+        let mut n = to;
+        while n != from {
+            names.push(self.nodes[n].name.as_str());
+            match self.nodes[n].parent {
+                Some(p) => n = p,
+                None => return String::new(),
+            }
+        }
+        names.reverse();
+        names.join("/")
+    }
+
     pub fn name_map(&self, from: usize) -> HashMap<String, usize> {
         let mut map = HashMap::new();
         for n in self.subtree(from) {

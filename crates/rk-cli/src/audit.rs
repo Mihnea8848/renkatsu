@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Plugin data keys that the builder reads.
-const HANDLED: [&str; 20] = [
+const HANDLED: [&str; 21] = [
     rk_vfs::items::RESOLVER_KEY,
     rk_chara::uncensor_selector::KEY,
     rk_chara::invisible_body::KEY,
@@ -30,6 +30,7 @@ const HANDLED: [&str; 20] = [
     rk_chara::overlays::COBOC_KEY,
     rk_chara::edit_fangs::KEY,
     rk_chara::clothing_blend_shape::KEY,
+    rk_chara::dbde::KEY,
     rk_chara::abmx::KEY,
     rk_chara::material_editor::KEY,
     rk_chara::more_accessories::KEY,
