@@ -100,8 +100,8 @@ mod tests {
         let starter = packages
             .iter()
             .find(|p| p.id == crate::STARTER_CHARACTERS)
-            .expect("Starter Content: Characters is listed");
-        assert_eq!(starter.name, "Starter Content: Characters");
+            .expect("Starter Content: Characters & Clothing is listed");
+        assert_eq!(starter.name, "Starter Content: Characters & Clothing");
         assert!(starter.size() > 0);
         // A release file on GitHub stays under 2 GB.
         assert!(starter.parts.iter().all(|p| p.size < 2_000_000_000));

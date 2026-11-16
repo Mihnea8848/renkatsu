@@ -75,7 +75,7 @@ pub fn never(path: &str) -> bool {
         || path.starts_with("chara/thumb/ao_kokan")
 }
 
-/// What Starter Content: Characters is made of: every part a character
+/// What Starter Content: Characters & Clothing is made of: every part a character
 /// wears or is made of, the lists that name the parts, the shape tables,
 /// and CharaStudio's colour filters (the sheets in `studio/info` and the
 /// tables in `studio/filter`), without which the CharaStudio look has no
@@ -270,7 +270,7 @@ fn on_disk(abdata: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
-/// Builds Starter Content: Characters from the configured Koikatsu
+/// Builds Starter Content: Characters & Clothing from the configured Koikatsu
 /// install into `out`, or only says what it would hold.
 pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
     let cfg = rk_core::Config::load()?;
@@ -305,7 +305,7 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
     let mut manifest = Manifest {
         format: FORMAT,
         id: rk_packages::STARTER_CHARACTERS.to_owned(),
-        name: "Starter Content: Characters".to_owned(),
+        name: "Starter Content: Characters & Clothing".to_owned(),
         version: STARTER_VERSION.to_owned(),
         kind: "starter-content".to_owned(),
         description: "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, \

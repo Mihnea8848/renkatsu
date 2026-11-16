@@ -156,7 +156,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum PackageCmd {
-    /// Build Starter Content: Characters from the Koikatsu install: the
+    /// Build Starter Content: Characters & Clothing from the Koikatsu install: the
     /// game's own character parts and default characters, without mods.
     StarterCharacters {
         /// The folder the package is written to.

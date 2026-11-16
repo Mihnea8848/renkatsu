@@ -79,7 +79,7 @@ pub struct Packages {
 /// What the project selector shows of the packages.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Offer {
-    /// Starter Content: Characters is installed.
+    /// Starter Content: Characters & Clothing is installed.
     pub starter: bool,
     /// Bytes its download takes, when Renkatsu knows where to get it.
     pub download: Option<u64>,
@@ -116,7 +116,13 @@ pub fn cards_of(packages: &[Installed]) -> Vec<PackageCard> {
         for path in package.cards() {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             let name = rk_card::Card::load(&path).ok().map(|c| c.full_name());
-            found.push((path, package.manifest.name.clone(), (stem, name)));
+            // The name in the list Renkatsu ships, as the Packages window
+            // shows it, else the package's own.
+            let package_name = rk_packages::index::known()
+                .into_iter()
+                .find(|k| k.id == package.manifest.id)
+                .map_or_else(|| package.manifest.name.clone(), |k| k.name);
+            found.push((path, package_name, (stem, name)));
         }
     }
     let names: Vec<(String, Option<String>)> = found.iter().map(|f| f.2.clone()).collect();
@@ -415,9 +421,11 @@ fn package_card(
     free: bool,
 ) -> Option<Ask> {
     let t = &k.t;
+    // The name in the list Renkatsu ships comes first, so a renamed
+    // package reads the same installed or not.
     let (id, name) = match (row, known) {
-        (Some(r), _) => (r.package.manifest.id.clone(), r.package.manifest.name.clone()),
-        (None, Some(n)) => (n.id.clone(), n.name.clone()),
+        (_, Some(n)) => (n.id.clone(), n.name.clone()),
+        (Some(r), None) => (r.package.manifest.id.clone(), r.package.manifest.name.clone()),
         (None, None) => return None,
     };
     let newer = match (row, known) {
@@ -803,7 +811,7 @@ pub fn browser(ctx: &egui::Context, k: &Look, st: &mut State) {
                 ui.painter().text(
                     c - Vec2::new(0.0, 8.0),
                     egui::Align2::CENTER_CENTER,
-                    "Starter Content: Characters brings Koikatsu's own characters.",
+                    "Starter Content: Characters & Clothing brings Koikatsu's own characters.",
                     k.font(),
                     t.text_dim,
                 );
@@ -993,7 +1001,7 @@ mod tests {
         PackageCard {
             path: PathBuf::from("/packages/starter/cards/female").join(file),
             name: name.to_owned(),
-            package: "Starter Content: Characters".to_owned(),
+            package: "Starter Content: Characters & Clothing".to_owned(),
         }
     }
 
@@ -1014,7 +1022,7 @@ mod tests {
         let manifest = rk_packages::Manifest {
             format: rk_packages::FORMAT,
             id: rk_packages::STARTER_CHARACTERS.to_owned(),
-            name: "Starter Content: Characters".to_owned(),
+            name: "Starter Content: Characters & Clothing".to_owned(),
             version: "1.0.0".to_owned(),
             kind: "starter-content".to_owned(),
             description: String::new(),
@@ -1063,8 +1071,8 @@ mod tests {
         assert_eq!(
             listed,
             [
-                ("Default female", "Starter Content: Characters"),
-                ("Story player", "Starter Content: Characters"),
+                ("Default female", "Starter Content: Characters & Clothing"),
+                ("Story player", "Starter Content: Characters & Clothing"),
             ]
         );
 

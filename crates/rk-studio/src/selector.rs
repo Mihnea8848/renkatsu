@@ -354,7 +354,7 @@ enum Act {
     ChooseGame,
     /// Show the Packages window.
     Packages,
-    /// Download Starter Content: Characters and install it.
+    /// Download Starter Content: Characters & Clothing and install it.
     GetStarter,
     /// Open a web page.
     OpenUrl(String),
@@ -801,7 +801,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
             ui,
             Pos2::new(side.left() + 18.0, get.bottom() + 2.0),
             SIDE - 32.0,
-            &format!("Characters, {} download", rk_packages::size_text(size)),
+            &format!("Characters & clothing, {} download", rk_packages::size_text(size)),
             k.small(),
             t.accent,
         );
