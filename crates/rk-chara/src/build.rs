@@ -261,6 +261,68 @@ pub fn ramp(game: &Game, id: i32) -> Option<Arc<Image>> {
     ramp_image(&mut Loader::new(game), id)
 }
 
+/// Rows of a Studio colour filter sheet (`Filter_<bundle>`, an `ExcelData`):
+/// the filter's number, its bundle and the texture's name. The first row
+/// holds the column titles, and the second column the name shown.
+fn filter_rows(sheet: &rk_unityfs::UObject) -> Vec<(i32, String, String)> {
+    let cells = |row: &rk_unityfs::UValue| -> Option<(i32, String, String)> {
+        let cells = row.as_object()?.array("list")?;
+        let text = |i: usize| cells.get(i).and_then(|c| c.as_str());
+        Some((text(0)?.trim().parse().ok()?, text(2)?.to_owned(), text(3)?.to_owned()))
+    };
+    sheet
+        .array("list")
+        .unwrap_or_default()
+        .iter()
+        .skip(1)
+        .filter_map(cells)
+        .collect()
+}
+
+/// The colour table of a Studio colour filter by its number in the scene
+/// (`SceneInfo.aceNo`), as `Studio.Info` and `SystemButtonCtrl.SetACE` find
+/// it: every bundle under `studio/info/`, in name order, may list filters,
+/// and a later sheet replaces an earlier one's number.
+pub fn color_filter(game: &Game, id: i32) -> Option<Arc<Image>> {
+    let mut paths: Vec<&String> = game
+        .assets
+        .index
+        .bundles
+        .keys()
+        .filter(|p| p.starts_with("studio/info/"))
+        .collect();
+    paths.sort();
+    let mut found = None;
+    for path in paths {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+        let sheet = game
+            .assets
+            .find(
+                path,
+                &format!("Filter_{stem}"),
+                Some(rk_unityfs::class::MONO_BEHAVIOUR),
+                None,
+            )
+            .and_then(|obj| obj.read().ok());
+        let Some(sheet) = sheet else { continue };
+        if let Some(row) = filter_rows(&sheet).into_iter().rfind(|r| r.0 == id) {
+            found = Some(row);
+        }
+    }
+    let (_, bundle, name) = found?;
+    let image = Loader::new(game).image_by_name(&bundle, &name, None)?;
+    // The effect reads the table as data, whatever the texture says.
+    Some(Arc::new(Image {
+        name: image.name.clone(),
+        width: image.width,
+        height: image.height,
+        rgba: image.rgba.clone(),
+        srgb: false,
+        repeat: false,
+    }))
+}
+
 /// Bundle and texture name the game tries first for a head type other than
 /// the first: the bundle name with its last two characters replaced by `50`,
 /// and the texture name with `_<head>` appended.
@@ -2507,6 +2569,39 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_sheets_list_number_bundle_and_texture() {
+        use rk_unityfs::{UObject, UValue};
+        let row = |cells: &[&str]| {
+            UValue::Object(Box::new(UObject {
+                ty: "Param".into(),
+                fields: vec![(
+                    "list".into(),
+                    UValue::Array(cells.iter().map(|c| UValue::Str((*c).into())).collect()),
+                )],
+            }))
+        };
+        let sheet = UObject {
+            ty: "ExcelData".into(),
+            fields: vec![(
+                "list".into(),
+                UValue::Array(vec![
+                    row(&["number", "name", "bundle", "file"]),
+                    row(&["0", "day", "studio/filter/00.unity3d", "Lut_A"]),
+                    row(&["x", "broken"]),
+                    row(&["7", "flat", "studio/filter/00.unity3d", "Lut_B"]),
+                ]),
+            )],
+        };
+        assert_eq!(
+            filter_rows(&sheet),
+            [
+                (0, "studio/filter/00.unity3d".to_owned(), "Lut_A".to_owned()),
+                (7, "studio/filter/00.unity3d".to_owned(), "Lut_B".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn a_detail_texture_keeps_the_materials_placement() {

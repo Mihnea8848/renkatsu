@@ -17,8 +17,10 @@ use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
 use rk_chara::scene::Trs;
-use rk_render::{bounds, Camera, Environment, Renderer};
+use rk_chara::Image;
+use rk_render::{bounds, Camera, Environment, Renderer, StudioEffects};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 struct Target {
     texture: wgpu::Texture,
@@ -106,7 +108,13 @@ pub struct Live {
     pub cam: ViewCamera,
     /// The camera was framed on a character once.
     framed: bool,
+    /// The colour table of Studio's first colour filter, once it was looked
+    /// for in the game; the inner `None` when the game has none.
+    filter: Option<Option<Arc<Image>>>,
 }
+
+/// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
+const DEFAULT_COLOR_FILTER: i32 = 0;
 
 impl Live {
     /// A renderer on the window's device, with nothing to draw yet.
@@ -122,6 +130,7 @@ impl Live {
             target: None,
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
             framed: false,
+            filter: None,
         })
     }
 
@@ -137,6 +146,7 @@ impl Live {
             self.cam.forget(focus.object);
         }
         self.framed = false;
+        self.filter = None;
     }
 
     /// Whether any character is built.
@@ -226,6 +236,10 @@ impl Live {
             let started = std::time::Instant::now();
             match Self::build(games, &project.mods_dir(), id, &recipe) {
                 Ok(actor) => {
+                    if self.filter.is_none() {
+                        let game = games.get(&project.mods_dir()).ok();
+                        self.filter = Some(game.and_then(|g| rk_chara::build::color_filter(g, DEFAULT_COLOR_FILTER)));
+                    }
                     let file = recipe.card.file_name().unwrap_or_default().to_string_lossy();
                     log.info(format!(
                         "Loaded {name} from {file} in {:.1} s",
@@ -297,9 +311,12 @@ impl Live {
 
     /// The light and the look of the scene for the renderer: the key light
     /// of the scene, or no light at all when the scene has none that shows.
+    /// The Koikatsu pipeline draws with the screen effects a new CharaStudio
+    /// scene has on.
     fn environment(&self, scene: &Scene) -> Environment {
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
+            effects: Some(StudioEffects::studio(self.filter.clone().flatten())),
             ..Default::default()
         };
         match scene.key_light() {

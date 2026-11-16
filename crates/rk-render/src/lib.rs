@@ -4,6 +4,7 @@
 //! wgpu renderer for assembled characters. Scene data stays in the stored
 //! conventions: left-handed, Y up, clockwise front faces.
 
+pub mod effects;
 pub mod material;
 pub mod shadow;
 pub mod xukmi;
@@ -11,6 +12,7 @@ mod xukmi_defaults;
 
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
+pub use effects::StudioEffects;
 use glam::{Mat4, Vec3};
 use material::{MaterialDesc, MaterialUniform};
 use rk_chara::{Blend, DrawMesh, Image, ShadowCasting, Skinning, Stencil};
@@ -94,14 +96,15 @@ impl Camera {
         (self.target - self.eye).try_normalize().unwrap_or(Vec3::Z)
     }
 
-    fn view_proj(&self, aspect: f32) -> Mat4 {
+    /// Near and far clip distances.
+    fn clip_planes(&self) -> (f32, f32) {
         let dist = (self.eye - self.target).length();
-        let proj = Mat4::perspective_lh(
-            self.fov_y_deg.to_radians(),
-            aspect,
-            (dist * 0.05).max(0.01),
-            dist * 4.0 + 10.0,
-        );
+        ((dist * 0.05).max(0.01), dist * 4.0 + 10.0)
+    }
+
+    fn view_proj(&self, aspect: f32) -> Mat4 {
+        let (near, far) = self.clip_planes();
+        let proj = Mat4::perspective_lh(self.fov_y_deg.to_radians(), aspect, near, far);
         proj * Mat4::look_at_lh(self.eye, self.target, Vec3::Y)
     }
 }
@@ -187,6 +190,8 @@ pub struct Environment {
     pub light_dir: Option<[f32; 3]>,
     /// Real-time shadows of the light. Switch `enabled` off for none.
     pub shadows: ShadowSettings,
+    /// CharaStudio's screen effects. `None` draws the plain picture.
+    pub effects: Option<StudioEffects>,
 }
 
 impl Default for Environment {
@@ -204,6 +209,7 @@ impl Default for Environment {
             ambient_light: [0.212, 0.227, 0.259],
             light_dir: None,
             shadows: ShadowSettings::default(),
+            effects: None,
         }
     }
 }
@@ -241,6 +247,8 @@ pub struct Renderer {
     shadow_map: Option<(u32, wgpu::TextureView)>,
     /// Counts frames, to drop what a frame no longer used.
     frame: u64,
+    /// The screen effects' pipelines and targets, once a frame used them.
+    effects: Option<effects::Gpu>,
 }
 
 struct MeshBuffers {
@@ -426,11 +434,14 @@ struct PipelineKey {
     blend: Blend,
     zwrite: bool,
     stencil: Stencil,
+    /// Drawn into the half-float target the screen effects read.
+    hdr: bool,
 }
 
 impl PipelineKey {
-    fn surface(desc: &MaterialDesc) -> Self {
+    fn surface(desc: &MaterialDesc, hdr: bool) -> Self {
         Self {
+            hdr,
             outline: false,
             blend: desc.blend,
             zwrite: desc.zwrite,
@@ -440,8 +451,9 @@ impl PipelineKey {
 
     /// Outlines are solid and write depth. They respect marked pixels the
     /// way their surface does, and never mark any themselves.
-    fn outline(desc: &MaterialDesc) -> Self {
+    fn outline(desc: &MaterialDesc, hdr: bool) -> Self {
         Self {
+            hdr,
             outline: true,
             blend: Blend::Off,
             zwrite: true,
@@ -706,6 +718,7 @@ impl Renderer {
             targets: None,
             shadow_map: None,
             frame: 0,
+            effects: None,
         })
     }
 
@@ -747,7 +760,7 @@ impl Renderer {
                 module: &self.shader,
                 entry_point: Some(fs),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: COLOR_FORMAT,
+                    format: if key.hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
                     blend: blend_state(key.blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1020,6 +1033,10 @@ impl Renderer {
             None => (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize(),
         };
         let cast = env.shadows.enabled && light.length_squared() > 0.0;
+        // The screen effects read a half-float picture, and occlusion reads
+        // the camera's depth texture.
+        let hdr = env.effects.is_some();
+        let occlude = env.effects.as_ref().is_some_and(|fx| fx.ao.is_some());
         let base = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
@@ -1035,6 +1052,11 @@ impl Renderer {
             Some(image) => self.texture(image),
             None => self.hard_ramp.clone(),
         };
+        let lut = env
+            .effects
+            .as_ref()
+            .and_then(|fx| fx.color.as_ref())
+            .map(|c| self.texture(&c.lut));
         // One set of globals per view the meshes are drawn from.
         let globals_group = |r: &Self, globals: Globals, mask: &wgpu::TextureView| {
             let buf = r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1229,7 +1251,7 @@ impl Renderer {
                 let bind = binds.len();
                 binds.push(self.material_bind_group(&desc));
                 let role = shadow::role(d.renderer.cast_shadows, desc.shadow, desc.queue);
-                if cast && (role.shadow_map.is_some() || role.depth.is_some()) {
+                if (cast && role.shadow_map.is_some()) || ((cast || occlude) && role.depth.is_some()) {
                     casters.push(Caster {
                         batch: batches.len(),
                         first: sm.first_index,
@@ -1248,8 +1270,8 @@ impl Renderer {
                     count: sm.index_count,
                     queue: desc.queue,
                     outline: desc.outline,
-                    surface_key: PipelineKey::surface(&desc),
-                    outline_key: PipelineKey::outline(&desc),
+                    surface_key: PipelineKey::surface(&desc, hdr),
+                    outline_key: PipelineKey::outline(&desc, hdr),
                     stencil_ref: desc.stencil_ref as u32,
                     bind,
                 });
@@ -1311,23 +1333,7 @@ impl Renderer {
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
         }
-        let mask = if cast {
-            let draw = |pass: &mut wgpu::RenderPass, r: &Self, depth_texture: bool| {
-                for c in &casters {
-                    let role = if depth_texture { c.role.depth } else { c.role.shadow_map };
-                    let Some(cull_back) = role else { continue };
-                    let key = CasterKey {
-                        depth_texture,
-                        cull_back,
-                    };
-                    pass.set_pipeline(&r.caster_pipelines[&key]);
-                    let b: &Batch = &batches[c.batch];
-                    pass.set_vertex_buffer(0, b.vb.slice(..));
-                    pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_bind_group(1, &binds[c.bind], &[]);
-                    pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
-                }
-            };
+        if cast || occlude {
             for depth_texture in [false, true] {
                 for cull_back in [false, true] {
                     let key = CasterKey {
@@ -1340,23 +1346,49 @@ impl Renderer {
                     }
                 }
             }
-            fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
-                wgpu::RenderPassDescriptor {
-                    label: Some("shadow caster"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                }
+        }
+        let draw = |pass: &mut wgpu::RenderPass, r: &Self, depth_texture: bool| {
+            for c in &casters {
+                let role = if depth_texture { c.role.depth } else { c.role.shadow_map };
+                let Some(cull_back) = role else { continue };
+                let key = CasterKey {
+                    depth_texture,
+                    cull_back,
+                };
+                pass.set_pipeline(&r.caster_pipelines[&key]);
+                let b: &Batch = &batches[c.batch];
+                pass.set_vertex_buffer(0, b.vb.slice(..));
+                pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(1, &binds[c.bind], &[]);
+                pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
             }
+        };
+        fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
+            wgpu::RenderPassDescriptor {
+                label: Some("shadow caster"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }
+        }
+        if !cast && occlude {
+            // Without shadows the depth texture is still drawn, as the
+            // game's occlusion effect asks the camera for it.
+            let group = globals_group(self, base, &self.white);
+            let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
+            pass.set_bind_group(0, &group, &[]);
+            draw(&mut pass, self, true);
+        }
+        let mask = if cast {
             let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
 
             // The light's shadow map: four cascades side by side.
@@ -1516,13 +1548,48 @@ impl Renderer {
             },
             mask.as_ref().unwrap_or(&self.white),
         );
+        // With screen effects the picture goes to a half-float target first.
+        let mut fx_gpu = hdr.then(|| {
+            self.effects
+                .take()
+                .unwrap_or_else(|| effects::Gpu::new(&self.device, COLOR_FORMAT, DEPTH_FORMAT, SAMPLES))
+        });
+        let hdr_views = fx_gpu
+            .as_mut()
+            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT));
+        let (near, far) = camera.clip_planes();
+        let fx_frame = env.effects.as_ref().map(|fx| effects::Frame {
+            fx,
+            width,
+            height,
+            fov_y_deg: camera.fov_y_deg,
+            near,
+            far,
+            depth: &depth_texture,
+            white: &self.white,
+            lut: lut.as_ref(),
+        });
+        // The game's occlusion effect multiplies the picture after the
+        // solid queues (CameraEvent.BeforeImageEffectsOpaque).
+        let occlusion = match (&fx_gpu, &fx_frame) {
+            (Some(gpu), Some(frame)) => gpu.occlusion(&self.device, &mut encoder, frame),
+            _ => None,
+        };
+        let solid_steps = steps
+            .iter()
+            .take_while(|s| items[s.item].queue <= shadow::LAST_SOLID_QUEUE)
+            .count();
+        let (color_view, resolve_view) = match &hdr_views {
+            Some((msaa, resolved)) => (msaa, resolved),
+            None => (&msaa, target_view),
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &msaa,
+                    view: color_view,
                     depth_slice: None,
-                    resolve_target: Some(target_view),
+                    resolve_target: Some(resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: srgb_to_linear(background[0]),
@@ -1550,7 +1617,19 @@ impl Renderer {
             });
             pass.set_bind_group(0, &globals_bg, &[]);
             let mut current = None;
-            for step in &steps {
+            let occlude = |pass: &mut wgpu::RenderPass| {
+                if let Some((pipeline, group)) = &occlusion {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, group, &[]);
+                    pass.draw(0..3, 0..1);
+                    pass.set_bind_group(0, &globals_bg, &[]);
+                }
+            };
+            for (i, step) in steps.iter().enumerate() {
+                if i == solid_steps {
+                    occlude(&mut pass);
+                    current = None;
+                }
                 let item = &items[step.item];
                 let key = if step.outline {
                     item.outline_key
@@ -1568,6 +1647,16 @@ impl Renderer {
                 pass.set_bind_group(1, &binds[item.bind], &[]);
                 pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
             }
+            if solid_steps == steps.len() {
+                occlude(&mut pass);
+            }
+        }
+        if let (Some(gpu), Some(frame)) = (&fx_gpu, &fx_frame) {
+            gpu.finish(&self.device, &mut encoder, frame, COLOR_FORMAT, target_view);
+        }
+        drop(occlusion);
+        if fx_gpu.is_some() {
+            self.effects = fx_gpu;
         }
         Ok(encoder)
     }

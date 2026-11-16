@@ -59,7 +59,7 @@ fn split_outfit(line: &str) -> (&str, Option<usize>) {
     }
 }
 
-pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> Result<()> {
+pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String], studio: bool) -> Result<()> {
     let cfg = Config::load()?;
     let root = cfg.game_dir.join("UserData/chara/female");
     let game = Game::open(&cfg)?;
@@ -94,14 +94,36 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> R
             continue;
         }
         let out = out_dir.join(format!("{stem}.png"));
-        match run(&game, &mut renderer, &card, &capture, &out, &opts, &[], true, false) {
+        match run(
+            &game,
+            &mut renderer,
+            &card,
+            &capture,
+            &out,
+            &opts,
+            &[],
+            true,
+            studio,
+            false,
+        ) {
             Ok(s) => {
                 let views: Vec<String> = s
                     .views
                     .iter()
-                    .map(|(n, mean, outline)| {
+                    .enumerate()
+                    .map(|(i, (n, mean, outline))| {
+                        let effects = s.studio.get(i).map_or(String::new(), |score| {
+                            format!(
+                                " {}",
+                                ui::dim(format!(
+                                    "(without effects {:.1}%, whole picture {:.1}%)",
+                                    ui::match_percent(score.without),
+                                    ui::match_percent(score.whole)
+                                ))
+                            )
+                        });
                         format!(
-                            "{} {} {}",
+                            "{} {}{effects} {}",
                             ui::dim(n),
                             ui::mean(*mean),
                             ui::dim(format!("outline {:.1}% off", outline * 100.0))
@@ -156,10 +178,15 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> R
         ),
     );
     let mut views: BTreeMap<&str, (f32, f32, usize)> = BTreeMap::new();
+    let mut effects: BTreeMap<&str, (f32, f32)> = BTreeMap::new();
     for s in &summaries {
-        for (name, mean, outline) in &s.views {
+        for (i, (name, mean, outline)) in s.views.iter().enumerate() {
             let v = views.entry(name.as_str()).or_default();
             *v = (v.0 + mean, v.1 + outline, v.2 + 1);
+            if let Some(score) = s.studio.get(i) {
+                let e = effects.entry(name.as_str()).or_default();
+                *e = (e.0 + score.without, e.1 + score.whole);
+            }
         }
     }
     for (name, (mean, outline, n)) in views {
@@ -172,6 +199,18 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String]) -> R
                 100.0 * outline / n
             ),
         );
+        if let Some((without, whole)) = effects.get(name) {
+            ui::status(
+                "Average",
+                format!(
+                    "{name} with Studio's effects: {:.2}% match ({:.2}% off) on the character, {:.2}% without our effects, {:.2}% over the whole picture",
+                    ui::match_percent(mean / n),
+                    mean / n / 2.55,
+                    ui::match_percent(without / n),
+                    ui::match_percent(whole / n)
+                ),
+            );
+        }
     }
     let counts = tally(&summaries);
     if !counts.is_empty() {

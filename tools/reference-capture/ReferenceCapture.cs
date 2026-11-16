@@ -393,6 +393,15 @@ namespace Renkatsu
             }
             s.Append("],\n");
 
+            // The public fields of each effect, so that the comparison uses
+            // the values of this scene and not the ones Studio starts with.
+            s.Append("\"effect_params\": [");
+            for (int i = 0; i < effects.Count; i++)
+            {
+                s.Append(i == 0 ? "\n" : ",\n").Append(EffectFields(effects[i]));
+            }
+            s.Append("],\n");
+
             s.Append("\"studio\": {");
             s.Append("\"ace_no\": ").Append(scene.aceNo);
             s.Append(", \"ace_blend\": ").Append(F(scene.aceBlend));
@@ -660,6 +669,56 @@ namespace Renkatsu
                 first = false;
             }
             s.Append("}");
+        }
+
+        // Type, state and public fields of one image effect: numbers,
+        // switches, enum names, colours, and the names of the textures and
+        // shaders it refers to (the colour table of Amplify Color is one).
+        private static string EffectFields(Behaviour effect)
+        {
+            StringBuilder s = new StringBuilder();
+            s.Append("{\"type\": ").Append(Str(effect.GetType().FullName));
+            s.Append(", \"enabled\": ").Append(B(effect.enabled));
+            s.Append(", \"fields\": {");
+            bool first = true;
+            foreach (FieldInfo field in effect.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                object v = field.GetValue(effect);
+                string text = null;
+                if (v is float)
+                {
+                    text = F((float)v);
+                }
+                else if (v is int)
+                {
+                    text = ((int)v).ToString(CultureInfo.InvariantCulture);
+                }
+                else if (v is bool)
+                {
+                    text = B((bool)v);
+                }
+                else if (v is Enum)
+                {
+                    text = Str(v.ToString());
+                }
+                else if (v is Color)
+                {
+                    text = C((Color)v);
+                }
+                else if (typeof(UnityEngine.Object).IsAssignableFrom(field.FieldType))
+                {
+                    UnityEngine.Object o = v as UnityEngine.Object;
+                    text = Str(o != null ? o.name : "");
+                }
+                if (text == null)
+                {
+                    continue;
+                }
+                s.Append(first ? "" : ", ").Append(Str(field.Name)).Append(": ").Append(text);
+                first = false;
+            }
+            s.Append("}}");
+            return s.ToString();
         }
 
         private static string F(float v)

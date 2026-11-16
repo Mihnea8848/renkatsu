@@ -11,7 +11,7 @@ use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_core::Config;
 use rk_render::shadow::ShadowSettings;
-use rk_render::{load_png, save_png, Camera, Environment, Renderer};
+use rk_render::{load_png, save_png, Camera, Environment, Renderer, StudioEffects};
 use rk_vfs::Game;
 use serde_json::Value;
 use std::path::Path;
@@ -55,6 +55,61 @@ pub struct Capture {
     pub line_width: Option<f32>,
     /// `RenderSettings.ambientLight` of the scene.
     pub ambient_light: Option<[f32; 3]>,
+    /// The scene's screen effects, without the colour table.
+    pub effects: StudioEffects,
+    /// Number of the scene's colour filter (`ace_no`).
+    pub color_filter: Option<i32>,
+}
+
+/// The screen effects a capture's scene had on. The switches come from
+/// `studio`; `effect_params`, which newer captures carry, lists each effect
+/// component's public fields and replaces the Studio scene's stored values.
+fn capture_effects(v: &Value) -> StudioEffects {
+    let studio = &v["studio"];
+    let on = |key: &str| studio[key].as_bool().unwrap_or(false);
+    let mut fx = StudioEffects {
+        ao: on("ao").then(Default::default),
+        bloom: on("bloom").then(Default::default),
+        color: None,
+        vignette: on("vignette").then(Default::default),
+    };
+    for component in v["effect_params"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let fields = &component["fields"];
+        let float = |key: &str, slot: &mut f32| {
+            if let Some(n) = fields[key].as_f64() {
+                *slot = n as f32;
+            }
+        };
+        let kind = component["type"].as_str().unwrap_or_default();
+        if kind.ends_with("AmplifyOcclusionEffect") {
+            if let Some(ao) = &mut fx.ao {
+                if let Ok(tint) = floats::<4>(&fields["Tint"]) {
+                    ao.tint = [tint[0], tint[1], tint[2]];
+                }
+                float("Intensity", &mut ao.intensity);
+                float("Radius", &mut ao.radius);
+                float("PowerExponent", &mut ao.power_exponent);
+                float("Bias", &mut ao.bias);
+                float("BlurSharpness", &mut ao.blur_sharpness);
+            }
+        } else if kind.ends_with("BloomAndFlares") {
+            if let Some(bloom) = &mut fx.bloom {
+                float("bloomIntensity", &mut bloom.intensity);
+                float("bloomThreshold", &mut bloom.threshold);
+                float("sepBlurSpread", &mut bloom.blur_spread);
+                if let Some(n) = fields["bloomBlurIterations"].as_u64() {
+                    bloom.iterations = n as u32;
+                }
+            }
+        } else if kind.ends_with("VignetteAndChromaticAberration") {
+            if let Some(vignette) = &mut fx.vignette {
+                float("intensity", &mut vignette.intensity);
+                float("blur", &mut vignette.blur);
+                float("blurSpread", &mut vignette.blur_spread);
+            }
+        }
+    }
+    fx
 }
 
 impl Capture {
@@ -110,6 +165,8 @@ impl Capture {
             ambient_light: floats::<4>(&v["globals"]["ambient_light"])
                 .ok()
                 .map(|c| [c[0], c[1], c[2]]),
+            effects: capture_effects(&v),
+            color_filter: v["studio"]["ace_no"].as_i64().map(|n| n as i32),
         })
     }
 }
@@ -150,6 +207,36 @@ pub fn difference(a: &[u8], b: &[u8], background: [u8; 3]) -> Difference {
         mean: sum as f32 / n,
         map,
     }
+}
+
+/// Mean colour difference, 0 to 255, over the pixels `covered` marks.
+pub fn mean_over(a: &[u8], b: &[u8], covered: impl Fn(usize) -> bool) -> f32 {
+    let (mut n, mut sum) = (0usize, 0u64);
+    for (i, (pa, pb)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
+        if covered(i) {
+            n += 1;
+            sum += (0..3).map(|c| pa[c].abs_diff(pb[c]) as u64).sum::<u64>() / 3;
+        }
+    }
+    sum as f32 / n.max(1) as f32
+}
+
+/// The pixels that are not background in at least one of two pictures.
+pub fn character(a: &[u8], b: &[u8], background: [u8; 3]) -> Vec<bool> {
+    let is_back = |p: &[u8]| (0..3).all(|c| p[c].abs_diff(background[c]) <= 6);
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .map(|(pa, pb)| !(is_back(pa) && is_back(pb)))
+        .collect()
+}
+
+/// How a picture with Studio's screen effects compares, per view.
+pub struct StudioScore {
+    /// Mean difference of our plain picture from the game's picture with
+    /// effects, over the character.
+    pub without: f32,
+    /// Mean difference with our effects over the whole picture.
+    pub whole: f32,
 }
 
 /// How well the game's cast shadows are met.
@@ -204,6 +291,7 @@ pub fn reference(
     opts: &BuildOptions,
     watch: &[String],
     shadows: bool,
+    studio: bool,
 ) -> Result<()> {
     let game = Game::open(&Config::load()?)?;
     let mut renderer = Renderer::new()?;
@@ -216,6 +304,7 @@ pub fn reference(
         opts,
         watch,
         shadows,
+        studio,
         true,
     )?;
     Ok(())
@@ -226,6 +315,8 @@ pub struct Summary {
     pub name: String,
     /// Mean colour difference and outline mismatch per view.
     pub views: Vec<(String, f32, f32)>,
+    /// With Studio's effects compared: one more score per view.
+    pub studio: Vec<StudioScore>,
     pub queues_differ: usize,
     pub state: crate::state::Report,
     pub warnings: Vec<String>,
@@ -249,6 +340,7 @@ pub fn run(
     opts: &BuildOptions,
     watch: &[String],
     shadows: bool,
+    studio: bool,
     verbose: bool,
 ) -> Result<Summary> {
     macro_rules! say { ($($t:tt)*) => { if verbose { println!($($t)*); } } }
@@ -303,14 +395,57 @@ pub fn run(
     say!("{}: game, Renkatsu, difference", card.full_name());
     let mut views = Vec::new();
 
+    // With `studio` the pictures taken with Studio's screen effects are
+    // compared, with the scene's effects on our side.
+    let fx_env = studio.then(|| Environment {
+        effects: Some(StudioEffects {
+            color: cap
+                .color_filter
+                .and_then(|id| rk_chara::build::color_filter(game, id))
+                .map(|lut| rk_render::effects::ColorFilter { lut, exposure: 1.0 }),
+            ..cap.effects.clone()
+        }),
+        ..env.clone()
+    });
+    if let Some(fx) = fx_env.as_ref().and_then(|e| e.effects.as_ref()) {
+        say!(
+            "  effects: occlusion {}, bloom {}, colour filter {:?} ({}), vignette {}",
+            fx.ao.is_some(),
+            fx.bloom.is_some(),
+            cap.color_filter,
+            fx.color.as_ref().map_or("not found", |c| c.lut.name.as_str()),
+            fx.vignette.is_some()
+        );
+    }
+    let mut scores = Vec::new();
+
     for (name, camera) in &cap.views {
-        let picture = capture_path.with_extension(format!("{name}.plain.png"));
-        let (gw, gh, game_px) = load_png(&std::fs::read(&picture).with_context(|| picture.display().to_string())?)?;
-        if (gw, gh) != (w, h) {
-            bail!("{} is {gw}x{gh}, the capture says {w}x{h}", picture.display());
+        let load = |kind: &str| -> Result<Vec<u8>> {
+            let picture = capture_path.with_extension(format!("{name}.{kind}.png"));
+            let (gw, gh, px) = load_png(&std::fs::read(&picture).with_context(|| picture.display().to_string())?)?;
+            if (gw, gh) != (w, h) {
+                bail!("{} is {gw}x{gh}, the capture says {w}x{h}", picture.display());
+            }
+            Ok(px)
+        };
+        let mut game_px = load("plain")?;
+        let mut ours = renderer.render(&draws, camera, &env, w, h, back)?;
+        let mut diff = difference(&game_px, &ours, back8);
+        if let Some(fx_env) = &fx_env {
+            // The character's pixels are told from the background in the
+            // plain pictures, where the background is one colour.
+            let covered = character(&game_px, &ours, back8);
+            let game_fx = load("studio")?;
+            let ours_fx = renderer.render(&draws, camera, fx_env, w, h, back)?;
+            scores.push(StudioScore {
+                without: mean_over(&game_fx, &ours, |i| covered[i]),
+                whole: mean_over(&game_fx, &ours_fx, |_| true),
+            });
+            diff.mean = mean_over(&game_fx, &ours_fx, |i| covered[i]);
+            diff.map = difference(&game_fx, &ours_fx, back8).map;
+            game_px = game_fx;
+            ours = ours_fx;
         }
-        let ours = renderer.render(&draws, camera, &env, w, h, back)?;
-        let diff = difference(&game_px, &ours, back8);
 
         // White is equal, red is far apart.
         let sheet_w = 3 * w + 4 * GAP;
@@ -332,7 +467,8 @@ pub fn run(
             }
         }
         let stem = out.file_stem().unwrap_or_default().to_string_lossy();
-        let file = out.with_file_name(format!("{stem}-{name}.png"));
+        let suffix = if studio { "-studio" } else { "" };
+        let file = out.with_file_name(format!("{stem}-{name}{suffix}.png"));
         save_png(&file, sheet_w, sheet_h, &sheet)?;
         say!("  {name} -> {}", file.display());
         say!(
@@ -350,7 +486,14 @@ pub fn run(
             diff.mean
         );
         views.push((name.clone(), diff.mean, diff.outline_mismatch));
-        if env.shadows.enabled {
+        if let Some(score) = scores.last() {
+            say!(
+                "    without our effects: {:.1}%; with them over the whole picture: {:.1}%",
+                crate::ui::match_percent(score.without),
+                crate::ui::match_percent(score.whole)
+            );
+        }
+        if env.shadows.enabled && !studio {
             let plain_env = Environment {
                 shadows: ShadowSettings {
                     enabled: false,
@@ -382,6 +525,7 @@ pub fn run(
     Ok(Summary {
         name: card.full_name(),
         views,
+        studio: scores,
         queues_differ,
         state,
         warnings: chara.warnings.clone(),
@@ -590,6 +734,47 @@ mod tests {
             {"type": "Directional", "direction": [0, -0.6, -0.8], "intensity": 2, "shadows": "Soft", "shadow_strength": 0.75}
         ]
     }"#;
+
+    #[test]
+    fn capture_effects_follow_the_scene() {
+        // A capture without the switches has no effects.
+        let none = Capture::parse(SAMPLE).unwrap();
+        assert!(none.effects.ao.is_none() && none.effects.bloom.is_none() && none.effects.vignette.is_none());
+        assert_eq!(none.color_filter, None);
+        // The switches turn Studio's stored values on.
+        let studio = r#""studio": {"ramp_g": 2, "ace_no": 4, "ao": true, "bloom": true, "vignette": false}"#;
+        let on = Capture::parse(&SAMPLE.replace(r#""studio": {"ramp_g": 2}"#, studio)).unwrap();
+        assert_eq!(on.color_filter, Some(4));
+        assert_eq!(on.effects.ao, Some(Default::default()));
+        assert_eq!(on.effects.bloom, Some(Default::default()));
+        assert!(on.effects.vignette.is_none());
+        // The dumped fields of a component replace them.
+        let params = format!(
+            r#"{studio}, "effect_params": [
+                {{"type": "AmplifyOcclusionEffect", "enabled": true,
+                  "fields": {{"Radius": 0.5, "Tint": [0.1, 0.2, 0.3, 1], "SampleCount": "Medium"}}}},
+                {{"type": "UnityStandardAssets.ImageEffects.BloomAndFlares", "enabled": true,
+                  "fields": {{"bloomIntensity": 1.5, "bloomBlurIterations": 3}}}}]"#
+        );
+        let set = Capture::parse(&SAMPLE.replace(r#""studio": {"ramp_g": 2}"#, &params)).unwrap();
+        let ao = set.effects.ao.unwrap();
+        assert_eq!((ao.radius, ao.tint, ao.bias), (0.5, [0.1, 0.2, 0.3], 0.25));
+        let bloom = set.effects.bloom.unwrap();
+        assert_eq!((bloom.intensity, bloom.iterations, bloom.threshold), (1.5, 3, 0.6));
+    }
+
+    #[test]
+    fn scores_count_only_the_marked_pixels() {
+        let back = [200, 200, 200];
+        let a = [200, 200, 200, 255, 10, 20, 30, 255, 200, 200, 200, 255];
+        let b = [200, 200, 200, 255, 13, 26, 39, 255, 50, 50, 50, 255];
+        let covered = character(&a, &b, back);
+        assert_eq!(covered, [false, true, true]);
+        assert_eq!(mean_over(&a, &b, |i| i == 1), 6.0);
+        assert_eq!(mean_over(&a, &b, |i| covered[i]), (6.0 + 150.0) / 2.0);
+        assert_eq!(mean_over(&a, &b, |_| true), (6.0 + 150.0) / 3.0);
+        assert_eq!(mean_over(&a, &b, |_| false), 0.0);
+    }
 
     #[test]
     fn capture_camera_and_light() {
