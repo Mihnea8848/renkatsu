@@ -6,10 +6,13 @@
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mihnea8848)
 
-Renkatsu is a game engine for Koikatsu content, written from scratch in Rust
-on wgpu. It reads character cards, zipmods and the data that plugins save into
-cards, and draws the characters with its own renderer. It does not use Unity
-and does not patch the game.
+Renkatsu is a game engine and editor for Koikatsu content, written from
+scratch in Rust on wgpu. It reads character cards, zipmods and the data that
+plugins save into cards, and draws the characters with its own renderer. It
+does not use Unity and does not patch the game.
+
+Renkatsu Studio is the editor: projects that own their characters, a scene
+you build in a live viewport, and installers for Windows and Linux.
 
 ## Why I made this
 
@@ -28,14 +31,41 @@ attempt at one.
 
 ## Status
 
-Version 0.1.0 covers character import. Renkatsu builds a character from a card
-the way Koikatsu and its plugins do, and draws it with the game's shaders. On
-41 reference cards, pictures match CharaStudio at about 99.1% for the full body
-and 99.3% for the face, counting colour error per pixel. Every change is
-checked against captures made in CharaStudio with the same camera and light,
-and the formulas come from the game's own code and shaders, not from tuning.
+The latest version is 0.1.1, on the
+[releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
-## What works
+- 0.1.0 covered character import. Renkatsu builds a character from a card the
+  way Koikatsu and its plugins do, and draws it with the game's shaders. On
+  41 reference cards, pictures match CharaStudio at about 99.1% for the full
+  body and 99.3% for the face, counting colour error per pixel. Every change
+  is checked against captures made in CharaStudio with the same camera and
+  light, and the formulas come from the game's own code and shaders, not from
+  tuning.
+- 0.1.1 adds Renkatsu Studio, the editor, with installers.
+- Next: CharaStudio's screen effects, so characters look as they do in the
+  game, then posing.
+
+## Renkatsu Studio
+
+- A project selector at start, with recent projects as tiles or a list, each
+  with its icon or a picture of its last scene
+- Projects are plain folders: a readable `.rkproj` file with Characters,
+  Poses, Maps, Items, Scenes, Renders and Mods folders, so a project can be
+  moved, copied or backed up as it is
+- Importing a card copies it into the project with every mod it needs, after
+  showing how many and how large they are. A project uses its own mods when
+  it opens
+- New projects can start with Renkatsu-Chan, the game's default character
+- A scene with an Outliner, Properties and a Content browser: several
+  characters, the key light, folders, undo and redo, rename, hide, duplicate
+  and delete
+- A live viewport at the display's refresh rate, with physics, Unity style
+  navigation and eased focus, and characters skinned on the GPU
+- Unreal Engine 5's dark look, with the window's own title bar and border
+- Renkatsu runs without Koikatsu. The Koikatsu folder, chosen in the project
+  selector or in Preferences, is only needed for Koikatsu characters
+
+## Characters
 
 - Reading character cards and coordinate files
 - Reading Unity asset bundle files. This is a file format reader, no Unity
@@ -67,10 +97,6 @@ and the formulas come from the game's own code and shaders, not from tuning.
   Edit Fangs, Clothing BlendShape, Copy Cha Body Mat and Stiletto heels
 - Rendering to a PNG file, side by side comparisons with captures from the
   game, and a bench that compares a whole list of cards at once
-
-Version 0.1.1 adds Renkatsu Studio, the editor: projects that own their
-characters and the mods those need, a scene with an Outliner, Properties and
-a Content browser, and a live viewport running at the display's refresh rate.
 
 ## Known problems
 
@@ -131,6 +157,13 @@ A `renkatsu.toml` in the folder you run the tools from, or the
 `RENKATSU_GAME_DIR` environment variable, take precedence.
 
 ## Usage
+
+Start Renkatsu Studio from the Start menu or application menu, or run
+`renkatsu`. `renkatsu --project path/to/project` opens a project directly.
+
+### Command line tools
+
+The `rk` command works on cards and the game folder without a window.
 
 Scan the game folder and the mods, and print a summary. The first run takes a
 while, later runs use a cache:
@@ -203,10 +236,13 @@ Renkatsu will be one app with two parts: Renkatsu Studio for scenes, and later
 Renkatsu Character Maker with everything the Koikatsu maker can do.
 
 1. Character look: Koikatsu shaders, card colours, texture compositing,
-   overlays and the other plugin data that cards depend on
+   overlays and the other plugin data that cards depend on. Done in 0.1.0,
+   except CharaStudio's screen effects
 2. The studio: a docked editor with a viewport, scene tree and inspector,
-   posing characters (static poses and CharaStudio's FK and IK), and scene
-   and project files stored as readable text
+   and scene and project files stored as readable text, done in 0.1.1. Next
+   in this step: posing characters (static poses and CharaStudio's FK and IK)
+   and characters kept in the project in Renkatsu's own format, so projects
+   open without Koikatsu
 3. Import of existing CharaStudio scenes
 4. The Ren'Py link: baked images and video that are rendered again when a
    character changes
@@ -248,6 +284,9 @@ Some files reimplement the behaviour of GPL-3.0 community plugins
 (BepisPlugins, ABMX, KK_Plugins and others). Those files say
 `GPL-3.0-or-later` in their header and stay under that license, whose text is
 in [LICENSES/GPL-3.0-or-later.txt](LICENSES/GPL-3.0-or-later.txt).
+
+The interface font, Open Sans, is under the SIL Open Font License 1.1, in
+[LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).
 
 Renkatsu ships no game files and reads everything from your own copy of
 Koikatsu.

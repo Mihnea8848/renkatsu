@@ -825,6 +825,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    // `user-dirs.dirs` is a Linux desktop file with Linux paths, which
+    // Windows does not take as absolute.
+    #[cfg(not(windows))]
     #[test]
     fn the_documents_folder_comes_from_the_desktop() {
         let home = Path::new("/home/someone");
