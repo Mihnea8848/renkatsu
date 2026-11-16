@@ -13,7 +13,7 @@
 use crate::dialogs::{Import, Pick};
 use crate::state::{Look, State};
 use crate::widgets::hair_h;
-use egui::{Align, Color32, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
 use rk_packages::{size_text, Installed, Known, Stage, Store, Task};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -319,15 +319,6 @@ fn progress_text(task: &Task) -> String {
     }
 }
 
-fn dim(k: &Look, text: impl Into<String>) -> RichText {
-    RichText::new(text).font(k.small()).color(k.t.text_dim)
-}
-
-fn button(ui: &mut Ui, text: &str, enabled: bool) -> bool {
-    let button = egui::Button::new(text).min_size(Vec2::new(84.0, 24.0));
-    ui.add_enabled(enabled, button).clicked()
-}
-
 /// What the user asked of a package in the list.
 enum Ask {
     Download(String),
@@ -335,11 +326,95 @@ enum Ask {
     Remove(String),
 }
 
-/// One package of the list: its name and version, what it is, its size,
-/// and what can be done with it at the right.
-fn package_row(ui: &mut Ui, k: &Look, known: Option<&Known>, row: Option<&Row>, free: bool) -> Option<Ask> {
+/// The editor dims behind a window drawn like the project selector, and
+/// takes no clicks. Returns whether the dimmed part was clicked.
+fn veil(ctx: &egui::Context, id: &str) -> bool {
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::new((id, "veil")))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(120));
+            resp.clicked()
+        })
+        .inner
+}
+
+/// The parts of such a window: its header, body and foot.
+struct Frame {
+    head: Rect,
+    body: Rect,
+    foot: Rect,
+}
+
+const HEAD: f32 = 52.0;
+const FOOT: f32 = 56.0;
+
+/// Paints the window's panels and its header, and says whether its close
+/// cell was clicked.
+fn frame(ui: &mut Ui, k: &Look, window: Rect, title: &str, under: &str) -> (Frame, bool) {
     let t = &k.t;
-    let mut ask = None;
+    let head = Rect::from_min_size(window.min, Vec2::new(window.width(), HEAD));
+    let foot = Rect::from_min_max(Pos2::new(window.left(), window.bottom() - FOOT), window.max);
+    let body = Rect::from_min_max(head.left_bottom(), foot.right_top());
+    let p = ui.painter();
+    p.rect_filled(window, 0.0, t.panel);
+    p.rect_filled(foot, 0.0, t.header);
+    hair_h(p, head.left(), head.right(), head.bottom() - 1.0, t.line);
+    hair_h(p, foot.left(), foot.right(), foot.top(), t.divider);
+    p.rect_stroke(window, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+    p.text(
+        Pos2::new(head.left() + 20.0, head.center().y - 8.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        k.bold(15.0),
+        t.text_bright,
+    );
+    p.text(
+        Pos2::new(head.left() + 20.0, head.center().y + 10.0),
+        egui::Align2::LEFT_CENTER,
+        under,
+        k.small(),
+        t.text_dim,
+    );
+    let cell = Rect::from_center_size(Pos2::new(head.right() - 26.0, head.center().y), Vec2::splat(28.0));
+    let x = ui.interact(cell, ui.id().with((title, "close")), Sense::click());
+    if x.hovered() {
+        ui.painter().rect_filled(cell, k.radius(), t.control);
+    }
+    crate::widgets::glyph(
+        ui.painter(),
+        k,
+        cell.center(),
+        egui_phosphor::regular::X,
+        14.0,
+        if x.hovered() { t.text_bright } else { t.text_dim },
+    );
+    (Frame { head, body, foot }, x.clicked())
+}
+
+/// The window's place: centred, as large as `want` where the screen allows.
+fn placed(ctx: &egui::Context, want: Vec2, least: Vec2) -> Rect {
+    let screen = ctx.content_rect();
+    let size = Vec2::new(
+        (screen.width() - 80.0).clamp(least.x, want.x),
+        (screen.height() - 80.0).clamp(least.y, want.y),
+    );
+    Rect::from_center_size(screen.center(), size)
+}
+
+/// One package in the window: its mark, name, version, what it is, its
+/// sizes, and the buttons that act on it. Returns what was asked for.
+fn package_card(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    known: Option<&Known>,
+    row: Option<&Row>,
+    free: bool,
+) -> Option<Ask> {
+    let t = &k.t;
     let (id, name) = match (row, known) {
         (Some(r), _) => (r.package.manifest.id.clone(), r.package.manifest.name.clone()),
         (None, Some(n)) => (n.id.clone(), n.name.clone()),
@@ -352,76 +427,91 @@ fn package_row(ui: &mut Ui, k: &Look, known: Option<&Known>, row: Option<&Row>, 
         }
         _ => false,
     };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(&name).font(k.bold(k.d.text)).color(t.text_bright));
-        let version = row.map_or_else(
-            || known.map_or(String::new(), |n| n.version.clone()),
-            |r| r.package.manifest.version.clone(),
-        );
-        ui.label(dim(k, version));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match row {
-            Some(_) => {
-                if button(ui, "Remove", free) {
-                    ask = Some(Ask::Remove(id.clone()));
-                }
-                if button(ui, "Verify", free) {
-                    ask = Some(Ask::Verify(id.clone()));
-                }
-                if newer && button(ui, "Update", free) {
-                    ask = Some(Ask::Download(id.clone()));
-                }
-            }
-            None => {
-                if button(ui, "Download", free) {
-                    ask = Some(Ask::Download(id.clone()));
-                }
-            }
-        });
-    });
-    let about = row
-        .map(|r| r.package.manifest.description.as_str())
-        .filter(|d| !d.is_empty())
-        .or(known.map(|n| n.description.as_str()))
-        .unwrap_or_default();
-    if !about.is_empty() {
-        ui.label(RichText::new(about).color(t.text));
-    }
-    let facts = match (row, known) {
-        (Some(r), n) => {
-            let mut facts = format!("Installed, {} on disk", size_text(r.size));
-            let holds = r.package.manifest.holds();
-            if !holds.is_empty() {
-                facts = format!("{facts}: {holds}");
-            }
-            if let (true, Some(n)) = (newer, n) {
-                facts = format!("{facts}. Version {} is a {} download", n.version, size_text(n.size()));
-            }
-            facts
-        }
-        (None, Some(n)) => format!(
-            "Not installed. {} to download, {} on disk",
-            size_text(n.size()),
-            size_text(n.installed_size)
-        ),
+    let version = row.map_or_else(
+        || known.map_or(String::new(), |n| n.version.clone()),
+        |r| r.package.manifest.version.clone(),
+    );
+    // The short description of the list Renkatsu ships comes first; the
+    // installed manifest's may be from an older, longer version.
+    let about = known
+        .map(|n| n.description.as_str())
+        .or(row.map(|r| r.package.manifest.description.as_str()))
+        .unwrap_or_default()
+        .to_owned();
+    let size = match (row, known) {
+        (Some(r), _) => size_text(r.size),
+        (None, Some(n)) => format!("{} download", size_text(n.size())),
         (None, None) => String::new(),
     };
-    ui.label(dim(k, facts));
+    let facts = format!("Version {version}, {size}");
+
+    let mark = Rect::from_min_size(rect.min + Vec2::new(20.0, 14.0), Vec2::splat(52.0));
+    let p = ui.painter();
+    p.rect_filled(mark, 0.0, t.input);
+    crate::widgets::glyph(
+        p,
+        k,
+        mark.center(),
+        egui_phosphor::regular::PACKAGE,
+        24.0,
+        if row.is_some() { t.select_bright } else { t.text_dim },
+    );
+    let x = mark.right() + 16.0;
+    let buttons_w = 3.0 * 96.0 + 2.0 * 8.0;
+    let text_w = rect.right() - 20.0 - buttons_w - 16.0 - x;
+    p.text(
+        Pos2::new(x, mark.top() + 8.0),
+        egui::Align2::LEFT_CENTER,
+        &name,
+        k.bold(k.d.text + 1.0),
+        t.text_bright,
+    );
+    crate::selector::line(ui, Pos2::new(x, mark.top() + 27.0), text_w, &about, k.font(), t.text);
+    let under = Pos2::new(x, mark.top() + 45.0);
+    let shown = crate::selector::line_width(ui, &facts, k.small());
+    crate::selector::line(ui, under, text_w, &facts, k.small(), t.text_dim);
+    if let (true, Some(n)) = (newer, known) {
+        let note = format!("Update available: {}", n.version);
+        crate::selector::line(
+            ui,
+            under + Vec2::new(shown + 14.0, 0.0),
+            (text_w - shown - 14.0).max(0.0),
+            &note,
+            k.small(),
+            t.accent,
+        );
+    }
+
+    // The buttons, from the right.
+    let mut ask = None;
+    let mut right = rect.right() - 20.0;
+    let mut place = |text: &str, primary: bool, ui: &mut Ui| {
+        let r = Rect::from_min_size(Pos2::new(right - 96.0, mark.top() + 12.0), Vec2::new(96.0, 28.0));
+        right -= 104.0;
+        crate::selector::button(ui, k, r, text, primary, free)
+    };
+    match row {
+        Some(_) => {
+            if place("Remove", false, ui) {
+                ask = Some(Ask::Remove(id.clone()));
+            }
+            if place("Verify", false, ui) {
+                ask = Some(Ask::Verify(id.clone()));
+            }
+            if newer && place("Update", true, ui) {
+                ask = Some(Ask::Download(id.clone()));
+            }
+        }
+        None => {
+            if place("Download", true, ui) {
+                ask = Some(Ask::Download(id.clone()));
+            }
+        }
+    }
     ask
 }
 
-/// A progress bar with square ends, in the selection colour.
-fn bar(ui: &mut Ui, k: &Look, fraction: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, 0.0, k.t.input);
-    let done = Rect::from_min_size(
-        rect.min,
-        Vec2::new(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
-    );
-    p.rect_filled(done, 0.0, k.t.select);
-}
-
-/// The Packages window.
+/// The Packages window, drawn like the project selector.
 pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     st.packages.poll();
     if let Some(file) = st.packages.picked.take() {
@@ -434,95 +524,138 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     if !st.packages.open {
         return;
     }
-    let t = &k.t;
-    let mut open = true;
+    let t = k.t;
+    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape)) | veil(ctx, "packages");
     let mut ask = None;
     let mut pick = false;
     let mut cancel = false;
     let packages = &st.packages;
     let free = !packages.busy() && st.picker.is_none();
-    egui::Window::new("Packages")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .default_width(560.0)
+    let window = placed(ctx, Vec2::new(760.0, 520.0), Vec2::new(560.0, 380.0));
+    egui::Area::new(egui::Id::new("packages"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(window.min)
         .show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.label(
-                RichText::new("Content installed once and used by every project.")
-                    .font(k.small())
-                    .color(t.text_dim),
+            ui.set_min_size(window.size());
+            let (f, x) = frame(
+                ui,
+                k,
+                window,
+                "Packages",
+                "Content installed once and used by every project",
             );
-            ui.add_space(8.0);
+            close |= x;
+
             // The packages Renkatsu knows, then the others that are installed.
-            let mut shown = 0;
-            let rule = |ui: &mut Ui, shown: &mut usize| {
-                if *shown > 0 {
-                    ui.add_space(8.0);
-                    let rect = ui.available_rect_before_wrap();
-                    hair_h(ui.painter(), rect.left(), rect.right(), rect.top(), t.border);
-                    ui.add_space(9.0);
-                }
-                *shown += 1;
-            };
-            for known in &packages.known {
-                rule(ui, &mut shown);
-                if let Some(a) = package_row(ui, k, Some(known), packages.find(&known.id), free) {
+            let mut rows: Vec<(Option<&Known>, Option<&Row>)> = packages
+                .known
+                .iter()
+                .map(|known| (Some(known), packages.find(&known.id)))
+                .collect();
+            rows.extend(
+                packages
+                    .installed
+                    .iter()
+                    .filter(|row| !packages.known.iter().any(|n| n.id == row.package.manifest.id))
+                    .map(|row| (None, Some(row))),
+            );
+            const ROW: f32 = 80.0;
+            let mut y = f.body.top();
+            for (known, row) in rows.iter().copied() {
+                let rect = Rect::from_min_size(Pos2::new(f.body.left(), y), Vec2::new(f.body.width(), ROW));
+                if let Some(a) = package_card(ui, k, rect, known, row, free) {
                     ask = Some(a);
                 }
+                hair_h(
+                    ui.painter(),
+                    rect.left() + 20.0,
+                    rect.right() - 20.0,
+                    rect.bottom() - 1.0,
+                    t.line,
+                );
+                y += ROW;
             }
-            for row in &packages.installed {
-                if packages.known.iter().any(|n| n.id == row.package.manifest.id) {
-                    continue;
+            if rows.is_empty() {
+                ui.painter().text(
+                    f.body.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "No package is installed",
+                    k.font(),
+                    t.text_dim,
+                );
+            }
+            // What a check found wrong.
+            if packages.job.is_none() && !packages.problems.is_empty() {
+                let mut py = y + 14.0;
+                for problem in packages.problems.iter().take(6) {
+                    crate::selector::line(
+                        ui,
+                        Pos2::new(f.body.left() + 20.0, py),
+                        f.body.width() - 40.0,
+                        problem,
+                        k.small(),
+                        t.text_dim,
+                    );
+                    py += 16.0;
                 }
-                rule(ui, &mut shown);
-                if let Some(a) = package_row(ui, k, None, Some(row), free) {
-                    ask = Some(a);
+                if packages.problems.len() > 6 {
+                    let more = format!("and {} more", packages.problems.len() - 6);
+                    crate::selector::line(
+                        ui,
+                        Pos2::new(f.body.left() + 20.0, py),
+                        f.body.width() - 40.0,
+                        &more,
+                        k.small(),
+                        t.text_dim,
+                    );
                 }
             }
-            if shown == 0 {
-                ui.label(RichText::new("No package is installed.").color(t.text_dim));
-            }
-            ui.add_space(12.0);
+
+            // The foot: the work under way with its bar, or the last
+            // result, or where packages are kept; and Install from a file.
+            let install = Rect::from_min_size(
+                Pos2::new(f.foot.right() - 20.0 - 150.0, f.foot.center().y - 15.0),
+                Vec2::new(150.0, 30.0),
+            );
+            let left = f.foot.left() + 20.0;
+            let text_w = install.left() - 20.0 - left;
             if let Some(job) = &packages.job {
                 let (_, done, total) = job.task.progress();
                 let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-                bar(ui, k, fraction);
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}: {}", job.name, progress_text(&job.task)));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if button(ui, "Stop", !job.task.cancelled()) {
-                            cancel = true;
-                        }
-                    });
-                });
+                let stop = install;
+                let text = format!("{}: {}", job.name, progress_text(&job.task));
+                crate::selector::line(
+                    ui,
+                    Pos2::new(left, f.foot.center().y - 7.0),
+                    text_w - 110.0,
+                    &text,
+                    k.font(),
+                    t.text,
+                );
+                let bar = Rect::from_min_size(Pos2::new(left, f.foot.center().y + 9.0), Vec2::new(text_w - 110.0, 4.0));
+                ui.painter().rect_filled(bar, 0.0, t.input);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(bar.min, Vec2::new(bar.width() * fraction.clamp(0.0, 1.0), bar.height())),
+                    0.0,
+                    t.select,
+                );
+                if crate::selector::button(ui, k, stop, "Stop", false, !job.task.cancelled()) {
+                    cancel = true;
+                }
                 // The numbers move while the work goes on.
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-            } else if let Some((text, failed)) = &packages.note {
-                let color = if *failed { t.accent } else { t.text };
-                ui.label(RichText::new(text).color(color));
-                for problem in packages.problems.iter().take(8) {
-                    ui.label(dim(k, problem.as_str()));
-                }
-                if packages.problems.len() > 8 {
-                    ui.label(dim(k, format!("and {} more", packages.problems.len() - 8)));
-                }
-            }
-            ui.add_space(8.0);
-            let rect = ui.available_rect_before_wrap();
-            hair_h(ui.painter(), rect.left(), rect.right(), rect.top(), t.border);
-            ui.add_space(9.0);
-            ui.horizontal(|ui| {
-                if button(ui, "Install from a file", free) {
+            } else {
+                let (text, color) = match (&packages.note, &packages.store) {
+                    (Some((text, failed)), _) => (text.clone(), if *failed { t.accent } else { t.text }),
+                    (None, Some(store)) => (format!("Packages are kept in {}", store.dir.display()), t.text_dim),
+                    (None, None) => (String::new(), t.text_dim),
+                };
+                crate::selector::line(ui, Pos2::new(left, f.foot.center().y), text_w, &text, k.font(), color);
+                if crate::selector::button(ui, k, install, "Install from a file", false, free) {
                     pick = true;
                 }
-            });
-            if let Some(store) = &packages.store {
-                ui.add_space(4.0);
-                ui.label(dim(k, format!("Packages are kept in {}", store.dir.display())));
             }
+            let _ = f.head;
         });
     if cancel {
         if let Some(job) = &st.packages.job {
@@ -538,7 +671,9 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     if pick {
         st.pick(Pick::Package, None, ctx);
     }
-    st.packages.open = open;
+    if close {
+        st.packages.open = false;
+    }
 }
 
 /// The cards the search leaves, as indices.

@@ -22,6 +22,7 @@ pub mod index;
 pub mod manifest;
 pub mod pack;
 pub mod store;
+pub mod update;
 
 pub use index::{known, Known, Part};
 pub use manifest::{Manifest, EXTENSION, FORMAT};

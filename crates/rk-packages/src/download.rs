@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     // rustls with ring, and the certificates the system trusts. Another
     // part of the program may have chosen the provider already.
     let _ = rustls::crypto::ring::default_provider().install_default();

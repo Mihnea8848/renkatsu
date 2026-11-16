@@ -99,6 +99,20 @@ impl From<RecentText> for Recent {
     }
 }
 
+/// Opens a web page in the user's browser.
+pub fn open_url(url: &str) {
+    let opened = if cfg!(windows) {
+        std::process::Command::new("explorer").arg(url).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = opened {
+        eprintln!("could not open {url}: {e}");
+    }
+}
+
 /// Now, in seconds since 1970.
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -116,6 +130,8 @@ pub struct Settings {
     pub project_view: ProjectView,
     /// The projects opened last, the latest first.
     pub recent_projects: Vec<Recent>,
+    /// Ask GitHub at start whether a newer Renkatsu is out.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -125,6 +141,7 @@ impl Default for Settings {
             show_project_selector: true,
             project_view: ProjectView::default(),
             recent_projects: Vec::new(),
+            check_updates: true,
         }
     }
 }
@@ -208,6 +225,7 @@ mod tests {
             show_project_selector: false,
             project_view: ProjectView::List,
             recent_projects: Vec::new(),
+            check_updates: false,
         };
         s.opened_at(
             std::path::Path::new("/home/someone/Documents/Renkatsu/First"),

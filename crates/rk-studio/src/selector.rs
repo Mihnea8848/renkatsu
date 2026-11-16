@@ -217,6 +217,8 @@ pub struct Selector {
     /// The Koikatsu install characters are read from; `None` until the
     /// user chooses it.
     pub game: Option<PathBuf>,
+    /// A newer Renkatsu, when the check at start found one.
+    pub update: Option<rk_packages::update::Release>,
     /// The default card an installed package brings, which new projects
     /// start with where the game is missing.
     pub starter: Option<PathBuf>,
@@ -241,6 +243,7 @@ impl Selector {
             age: 0.0,
             window_age: 0.0,
             game: rk_core::Config::load().ok().map(|c| c.game_dir),
+            update: None,
             starter: None,
             offer: Default::default(),
         };
@@ -353,6 +356,8 @@ enum Act {
     Packages,
     /// Download Starter Content: Characters and install it.
     GetStarter,
+    /// Open a web page.
+    OpenUrl(String),
 }
 
 fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
@@ -381,6 +386,7 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
             st.pick(Pick::GameFolder, start, ctx);
         }
         Act::Packages => st.packages.open = true,
+        Act::OpenUrl(url) => settings::open_url(&url),
         Act::GetStarter => {
             // The window shows how far the download is and can stop it.
             st.packages.open = true;
@@ -420,6 +426,7 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
 pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
     let Some(mut sel) = st.selector.take() else { return };
     sel.loaded = false;
+    sel.update = st.update.clone();
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
     sel.age += dt;
     sel.window_age += dt;
@@ -436,6 +443,14 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// One line of text from `pos`, centred on it vertically and cut with an
 /// ellipsis at `width`.
+/// How wide a line of text is drawn.
+pub(crate) fn line_width(ui: &Ui, text: &str, font: FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::WHITE)
+        .size()
+        .x
+}
+
 pub(crate) fn line(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32) {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping {
@@ -750,12 +765,15 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     if side_row(ui, k, open, icon::FOLDER_OPEN, "Open project", "Ctrl+O", false) {
         act = Some(Act::OpenOther);
     }
+    // A newer Renkatsu sits just above the version, and the rows of the
+    // foot of the column move up by one to make room.
+    let lift = if sel.update.is_some() { 54.0 } else { 0.0 };
     // Packages bring content for every project. Without the game and
     // without Starter Content there are no characters at all, so the
     // window offers to get it, and says how large the download is.
     let offer = sel.offer.clone();
     let packages = Rect::from_min_size(
-        Pos2::new(side.left(), side.bottom() - 138.0),
+        Pos2::new(side.left(), side.bottom() - 138.0 - lift),
         Vec2::new(SIDE - 1.0, 36.0),
     );
     if side_row(ui, k, packages, icon::PACKAGE, "Packages", "", false) {
@@ -791,7 +809,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     // Koikatsu cards are built from the user's own install. Renkatsu works
     // without it; the folder only adds Koikatsu characters.
     let game = Rect::from_min_size(
-        Pos2::new(side.left(), side.bottom() - 84.0),
+        Pos2::new(side.left(), side.bottom() - 84.0 - lift),
         Vec2::new(SIDE - 1.0, 36.0),
     );
     let (glyph_name, text) = match &sel.game {
@@ -813,6 +831,23 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         k.small(),
         color,
     );
+    if let Some(release) = &sel.update {
+        let row = Rect::from_min_size(
+            Pos2::new(side.left(), side.bottom() - 84.0),
+            Vec2::new(SIDE - 1.0, 36.0),
+        );
+        if side_row(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", "", false) {
+            act = Some(Act::OpenUrl(release.url.clone()));
+        }
+        line(
+            ui,
+            Pos2::new(side.left() + 18.0, row.bottom() + 2.0),
+            SIDE - 32.0,
+            &format!("Renkatsu {} is out", release.version),
+            k.small(),
+            t.accent,
+        );
+    }
     ui.painter().text(
         Pos2::new(side.left() + 18.0, side.bottom() - 18.0),
         Align2::LEFT_CENTER,

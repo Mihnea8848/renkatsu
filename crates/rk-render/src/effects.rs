@@ -107,6 +107,11 @@ pub struct StudioEffects {
     pub bloom: Option<Bloom>,
     pub color: Option<ColorFilter>,
     pub vignette: Option<Vignette>,
+    /// A plain colour (sRGB) for the parts of the picture where nothing
+    /// was drawn, kept out of the effects: the editor's grey when the
+    /// scene has no map. `None` puts the effects on the whole picture, as
+    /// CharaStudio does.
+    pub backdrop: Option<[f64; 4]>,
 }
 
 impl StudioEffects {
@@ -118,6 +123,7 @@ impl StudioEffects {
             bloom: Some(Bloom::default()),
             color: lut.map(|lut| ColorFilter { lut, exposure: 1.0 }),
             vignette: Some(Vignette::default()),
+            backdrop: None,
         }
     }
 }
@@ -266,6 +272,9 @@ pub(crate) struct Frame<'a> {
     pub far: f32,
     /// The camera's depth texture.
     pub depth: &'a wgpu::TextureView,
+    /// The depth aspect of the main pass's multisampled depth, which tells
+    /// the backdrop where something was drawn.
+    pub scene_depth: &'a wgpu::TextureView,
     pub white: &'a wgpu::TextureView,
     /// The colour table, uploaded.
     pub lut: Option<&'a wgpu::TextureView>,
@@ -318,6 +327,8 @@ struct Targets {
     quarter: [wgpu::TextureView; 3],
     ldr: wgpu::TextureView,
     ldr_half: [wgpu::TextureView; 2],
+    /// The finished effects, before the backdrop goes under them.
+    done: wgpu::TextureView,
 }
 
 /// The effects' GPU side, made the first time a frame asks for effects.
@@ -326,6 +337,8 @@ pub(crate) struct Gpu {
     sampler: wgpu::Sampler,
     pipelines: HashMap<(&'static str, wgpu::TextureFormat), wgpu::RenderPipeline>,
     ao_apply: wgpu::RenderPipeline,
+    backdrop_layout: wgpu::BindGroupLayout,
+    backdrop: wgpu::RenderPipeline,
     targets: Option<Targets>,
 }
 
@@ -454,6 +467,61 @@ impl Gpu {
             }),
             samples,
         );
+        let backdrop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("backdrop"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                texture(1, float),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("backdrop"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("backdrop.wgsl").into()),
+        });
+        let backdrop = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("backdrop"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("backdrop"),
+                bind_group_layouts: &[Some(&backdrop_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &backdrop_shader,
+                entry_point: Some("vs_backdrop"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &backdrop_shader,
+                entry_point: Some("fs_backdrop"),
+                targets: &[Some(ldr_format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("effects"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -465,6 +533,8 @@ impl Gpu {
             sampler,
             pipelines,
             ao_apply,
+            backdrop_layout,
+            backdrop,
             targets: None,
         }
     }
@@ -514,6 +584,7 @@ impl Gpu {
                 quarter: std::array::from_fn(|_| make(qw, qh, HDR_FORMAT, 1)),
                 ldr: make(width, height, ldr_format, 1),
                 ldr_half: std::array::from_fn(|_| make(hw, hh, ldr_format, 1)),
+                done: make(width, height, ldr_format, 1),
             });
         }
         let t = self.targets.as_ref().expect("made above");
@@ -660,6 +731,9 @@ impl Gpu {
         target: &wgpu::TextureView,
     ) {
         let Some(t) = self.targets.as_ref() else { return };
+        // With a backdrop the effects finish in `done`, and the backdrop
+        // pass then writes the target.
+        let out = if f.fx.backdrop.is_some() { &t.done } else { target };
         let base = f.uniform();
         let (w, h) = (f.width as f32, f.height as f32);
         let aspect = w / h;
@@ -730,7 +804,8 @@ impl Gpu {
         };
 
         let Some(vignette) = &f.fx.vignette else {
-            self.pass(device, encoder, f, "fs_color", ldr_format, target, base, &t.hdr, bloom);
+            self.pass(device, encoder, f, "fs_color", ldr_format, out, base, &t.hdr, bloom);
+            self.under(device, encoder, f, target);
             return;
         };
         self.pass(device, encoder, f, "fs_color", ldr_format, &t.ldr, base, &t.hdr, bloom);
@@ -771,13 +846,95 @@ impl Gpu {
                 f.white,
             );
         }
-        self.pass(device, encoder, f, "fs_vignette", ldr_format, target, base, &t.ldr, a);
+        self.pass(device, encoder, f, "fs_vignette", ldr_format, out, base, &t.ldr, a);
+        self.under(device, encoder, f, target);
     }
+
+    /// Puts the backdrop under the finished effects, when the frame has one.
+    fn under(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, f: &Frame, target: &wgpu::TextureView) {
+        let (Some(colour), Some(t)) = (f.fx.backdrop, self.targets.as_ref()) else {
+            return;
+        };
+        let linear = backdrop_linear(colour);
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("backdrop"),
+            contents: bytemuck::bytes_of(&linear),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("backdrop"),
+            layout: &self.backdrop_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&t.done),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(f.scene_depth),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("backdrop"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.backdrop);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// A backdrop colour as the shader takes it: linear, since the target
+/// stores sRGB.
+fn backdrop_linear(c: [f64; 4]) -> [f32; 4] {
+    let lin = |x: f64| {
+        let x = x.clamp(0.0, 1.0);
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [lin(c[0]) as f32, lin(c[1]) as f32, lin(c[2]) as f32, c[3] as f32]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backdrop_shader_is_valid_wgsl_and_its_colour_is_linear() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("backdrop.wgsl")).expect("parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("validates");
+        let grey = backdrop_linear([0.22, 0.22, 0.23, 1.0]);
+        assert!(
+            (grey[0] - 0.0395).abs() < 0.001 && (grey[3] - 1.0).abs() < 1e-6,
+            "{grey:?}"
+        );
+        assert_eq!(backdrop_linear([0.0, 1.0, 2.0, 1.0])[..3], [0.0, 1.0, 1.0]);
+    }
 
     #[test]
     fn effects_shader_is_valid_wgsl() {

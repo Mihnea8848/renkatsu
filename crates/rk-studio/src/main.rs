@@ -82,6 +82,9 @@ struct Cli {
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
     project_selector: bool,
+    /// Show a newer Renkatsu as found, to picture the notice.
+    #[arg(long, hide = true)]
+    pretend_update: Option<String>,
     /// Start with the Packages window open, to picture it.
     #[arg(long, hide = true)]
     packages: bool,
@@ -267,6 +270,15 @@ impl Studio {
         state.vsync_at_start = settings.frame_rate.vsync();
         state.settings = settings;
         state.scripted = cli.screenshot.is_some();
+        if !state.scripted && state.settings.check_updates {
+            state.check_for_update(&cc.egui_ctx);
+        }
+        if let Some(version) = &cli.pretend_update {
+            state.update = Some(rk_packages::update::Release {
+                version: version.clone(),
+                url: "https://github.com/Mihnea8848/renkatsu/releases".to_owned(),
+            });
+        }
         let selecting = state.project.is_none();
         if selecting {
             state.show_selector();
@@ -549,6 +561,7 @@ impl eframe::App for Studio {
 
         // Frames come as often as the display shows them unless the user
         // chose to save power, when egui draws only on input.
+        self.state.poll_update();
         if self.state.settings.frame_rate.continuous() {
             ctx.request_repaint();
         }

@@ -355,6 +355,8 @@ struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// The depth aspect of `depth`, which the backdrop pass reads.
+    depth_only: wgpu::TextureView,
     depth_texture: wgpu::TextureView,
     mask: wgpu::TextureView,
 }
@@ -1316,6 +1318,7 @@ impl Renderer {
         let Targets {
             msaa,
             depth,
+            depth_only,
             depth_texture,
             mask,
             ..
@@ -1566,9 +1569,13 @@ impl Renderer {
             near,
             far,
             depth: &depth_texture,
+            scene_depth: &depth_only,
             white: &self.white,
             lut: lut.as_ref(),
         });
+        // A backdrop keeps the effects off the empty parts of the picture,
+        // which the depth of the main pass tells.
+        let keep_depth = env.effects.as_ref().is_some_and(|fx| fx.backdrop.is_some());
         // The game's occlusion effect multiplies the picture after the
         // solid queues (CameraEvent.BeforeImageEffectsOpaque).
         let occlusion = match (&fx_gpu, &fx_frame) {
@@ -1604,7 +1611,11 @@ impl Renderer {
                     view: &depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if keep_depth {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0),
@@ -1682,10 +1693,28 @@ impl Renderer {
                 .create_view(&Default::default())
         };
         let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: SAMPLES,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: attachment,
+            view_formats: &[],
+        });
         Targets {
             size: [width, height],
             msaa: make(COLOR_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT),
-            depth: make(DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT),
+            depth: depth.create_view(&Default::default()),
+            depth_only: depth.create_view(&wgpu::TextureViewDescriptor {
+                aspect: wgpu::TextureAspect::DepthOnly,
+                ..Default::default()
+            }),
             depth_texture: make(DEPTH_TEXTURE_FORMAT, 1, attachment),
             mask: make(MASK_FORMAT, 1, attachment),
         }

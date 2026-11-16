@@ -56,6 +56,14 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                 };
                 ui.label(RichText::new(hint).font(k.small()).color(t.text_dim));
             });
+            ui.checkbox(&mut st.settings.check_updates, "Check for a newer Renkatsu at start");
+            ui.indent("update hint", |ui| {
+                ui.label(
+                    RichText::new("Asks GitHub for the latest release. Nothing about you is sent.")
+                        .font(k.small())
+                        .color(t.text_dim),
+                );
+            });
             ui.add_space(8.0);
             ui.label(RichText::new("Viewport").font(k.bold(k.d.text)).color(t.text_bright));
             ui.add_space(4.0);

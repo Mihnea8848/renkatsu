@@ -318,11 +318,19 @@ impl Live {
     /// The light and the look of the scene for the renderer: the key light
     /// of the scene, or no light at all when the scene has none that shows.
     /// The Koikatsu pipeline draws with the screen effects a new CharaStudio
-    /// scene has on.
-    fn environment(&self, scene: &Scene) -> Environment {
+    /// scene has on. Without a map the effects stay on what is drawn, and
+    /// the empty parts keep the plain `background`; a map takes the whole
+    /// picture, as in CharaStudio.
+    fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
+        let map = scene
+            .objects()
+            .iter()
+            .any(|o| matches!(o.content, Content::Map) && scene.shown(o.id));
+        let mut effects = StudioEffects::studio(self.filter.clone().flatten());
+        effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
-            effects: Some(StudioEffects::studio(self.filter.clone().flatten())),
+            effects: Some(effects),
             ..Default::default()
         };
         match scene.key_light() {
@@ -390,7 +398,7 @@ impl Live {
             self.target = Some(Target { texture, id, size });
         }
         let target = self.target.as_ref().expect("made above");
-        let env = self.environment(scene);
+        let env = self.environment(scene, background);
         let draws: Vec<_> = self
             .actors
             .iter()
@@ -416,7 +424,7 @@ impl Live {
         if draws.is_empty() {
             return Ok(None);
         }
-        let env = self.environment(scene);
+        let env = self.environment(scene, background);
         let camera = self.cam.destination().camera();
         self.renderer
             .render(&draws, &camera, &env, size[0], size[1], background)
