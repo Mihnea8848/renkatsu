@@ -1,12 +1,15 @@
 name: Release
 
 # A tag such as v0.1.1 builds the installers and attaches them to a draft
-# release of that tag, which is published by hand after a look. Running the
-# workflow by hand, or a pull request that changes the packaging, builds the
-# same files as artifacts only, to try them.
+# release of that tag, which is published by hand after a look. A push to
+# main, running the workflow by hand, or a pull request that changes the
+# packaging builds the same files as artifacts only.
 on:
   push:
     tags: ["v*"]
+    # Builds on main keep the build cache warm: a tag can only use caches
+    # saved on main, and a cold Windows build takes about seven minutes.
+    branches: [main]
   workflow_dispatch:
   # a change to the packaging builds the installers once before it lands
   pull_request:
