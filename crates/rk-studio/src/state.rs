@@ -137,6 +137,11 @@ pub enum Command {
     OpenProject(Option<PathBuf>),
     /// Pick a card and bring it into the project.
     ImportCard,
+    /// Choose cards of the installed packages and bring them into the
+    /// project.
+    ImportFromPackage,
+    /// Show the Packages window.
+    Packages,
     /// Close the project and go back to the project selector.
     ProjectSelector,
     /// Pick a picture as the project's icon.
@@ -148,6 +153,14 @@ pub enum Command {
 /// the name its character goes by.
 const DEFAULT_CARD: &str = "Simple.png";
 const DEFAULT_NAME: &str = "Renkatsu-Chan";
+
+/// The card new projects start with: the default card of the game when
+/// the game has it, else the one a package brings.
+pub fn default_card(game: Option<&rk_core::Config>, package: Option<PathBuf>) -> Option<PathBuf> {
+    game.map(|c| c.userdata().join("chara").join("female").join(DEFAULT_CARD))
+        .filter(|card| card.is_file())
+        .or(package)
+}
 
 pub struct State {
     /// The window's title bar.
@@ -169,6 +182,8 @@ pub struct State {
     saved: Scene,
     /// The game's files, opened with the project's mods.
     pub games: Games,
+    /// The user's installed packages, with their windows.
+    pub packages: crate::packages::Packages,
     /// The question that is open over the window.
     pub modal: Option<Modal>,
     /// The system file dialog that is open.
@@ -257,6 +272,7 @@ impl State {
             saved: scene.clone(),
             doc: Document::new(scene),
             games: Games::default(),
+            packages: crate::packages::Packages::new(),
             modal: None,
             picker: None,
             imports: VecDeque::new(),
@@ -354,6 +370,8 @@ impl State {
             | Command::NewProject
             | Command::OpenProject(_)
             | Command::ImportCard
+            | Command::ImportFromPackage
+            | Command::Packages
             | Command::ProjectSelector
             | Command::SetIcon
             | Command::Quit => {}
@@ -395,6 +413,8 @@ impl State {
                     .map(|c| c.userdata().join("chara").join("female"));
                 self.pick(Pick::Card, cards, ctx);
             }
+            Command::ImportFromPackage => self.packages.browse(),
+            Command::Packages => self.packages.open = true,
             other => self.run(other),
         }
     }
@@ -500,6 +520,7 @@ impl State {
                 name: None,
             }),
             Pick::Project => self.open_or_tell(&path),
+            Pick::Package => self.packages.picked = Some(path),
             Pick::Icon => {
                 let set = match self.selector.as_mut().and_then(|s| s.icon_for.take()) {
                     Some(root) => project::set_icon_in(&root, Some(&path)),
@@ -517,6 +538,7 @@ impl State {
                 Ok(cfg) => {
                     self.log
                         .info(format!("Characters are read from {} now", cfg.game_dir.display()));
+                    self.content_changed();
                     if let Some(selector) = &mut self.selector {
                         selector.game = Some(cfg.game_dir);
                         selector.problem = None;
@@ -569,8 +591,10 @@ impl State {
         self.adopt(Project::none(), Scene::new());
         self.modal = None;
         self.preferences_open = false;
+        self.packages.browser = None;
         let mut selector = Selector::new(&self.settings);
         selector.eager = self.scripted;
+        selector.set_starter(self.packages.default_card());
         self.selector = Some(selector);
     }
 
@@ -648,25 +672,43 @@ impl State {
         Ok(())
     }
 
-    /// Imports the game's default card as Renkatsu-Chan and puts her in
-    /// the scene. The card is read from the user's own game; without it
-    /// the project starts with the key light alone.
+    /// What characters are built from changed: the Koikatsu folder was
+    /// chosen, or a package was installed or removed. The content is
+    /// opened again at its next use, and the characters that could not be
+    /// built get another try.
+    pub fn content_changed(&mut self) {
+        self.games.reset();
+        if let Some(live) = self.live.as_mut() {
+            live.retry();
+        }
+    }
+
+    /// A package was installed or removed.
+    pub fn packages_changed(&mut self) {
+        self.content_changed();
+        let card = self.packages.default_card();
+        if let Some(selector) = &mut self.selector {
+            selector.set_starter(card);
+        }
+    }
+
+    /// The card new projects start with: the default card of the user's
+    /// own game, else the one of Starter Content.
+    pub fn default_card(&self) -> Option<PathBuf> {
+        default_card(rk_core::Config::load().ok().as_ref(), self.packages.default_card())
+    }
+
+    /// Imports the default card as Renkatsu-Chan and puts her in the
+    /// scene. Without the game and without Starter Content the project
+    /// starts with the key light alone.
     fn add_default_character(&mut self) {
-        let card = match rk_core::Config::load() {
-            Ok(config) => config.userdata().join("chara").join("female").join(DEFAULT_CARD),
-            Err(e) => {
-                self.log
-                    .warn(format!("The project starts without {DEFAULT_NAME}: {e:#}"));
-                return;
-            }
-        };
-        if !card.is_file() {
+        let Some(card) = self.default_card() else {
             self.log.warn(format!(
-                "The project starts without {DEFAULT_NAME}: the game has no {}",
-                card.display()
+                "The project starts without {DEFAULT_NAME}: choose the Koikatsu folder or install Starter Content: \
+                 Characters, under Window, Packages"
             ));
             return;
-        }
+        };
         self.begin_import(Import {
             path: card,
             place: true,

@@ -4,7 +4,6 @@
 use anyhow::Result;
 use rk_card::Card;
 use rk_chara::BuildOptions;
-use rk_core::Config;
 use rk_render::shadow::ShadowSettings;
 use rk_render::{bounds, save_png, Camera, Environment, Renderer};
 use rk_vfs::Game;
@@ -29,7 +28,7 @@ pub struct Args<'a> {
 
 pub fn render(a: Args) -> Result<()> {
     let t = Instant::now();
-    let game = Game::open(&Config::load()?)?;
+    let game = Game::open_user(&[])?;
     let card = Card::load(a.card)?;
     let opts = BuildOptions {
         outfit: a.outfit,

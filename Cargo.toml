@@ -23,6 +23,7 @@ rk-core = { path = "crates/rk-core" }
 rk-card = { path = "crates/rk-card" }
 rk-unityfs = { path = "crates/rk-unityfs" }
 rk-vfs = { path = "crates/rk-vfs" }
+rk-packages = { path = "crates/rk-packages" }
 rk-chara = { path = "crates/rk-chara" }
 rk-render = { path = "crates/rk-render" }
 glam = "0.29"

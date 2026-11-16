@@ -3,14 +3,13 @@
 
 use anyhow::Result;
 use rk_card::Card;
-use rk_core::Config;
 use rk_vfs::{resolve::card_items, Game, Lookup};
 use std::path::Path;
 use std::time::Instant;
 
 pub fn index() -> Result<()> {
     let t = Instant::now();
-    let game = Game::open(&Config::load()?)?;
+    let game = Game::open_user(&[])?;
     let idx = &game.assets.index;
     let (vanilla, modded) = game.items.counts();
     println!("indexed in {:.1}s", t.elapsed().as_secs_f32());
@@ -40,7 +39,7 @@ pub fn index() -> Result<()> {
 }
 
 pub fn resolve(path: &Path, all_outfits: bool) -> Result<()> {
-    let game = Game::open(&Config::load()?)?;
+    let game = Game::open_user(&[])?;
     let card = Card::load(path)?;
     let items = card_items(&game.items, &card);
     println!(

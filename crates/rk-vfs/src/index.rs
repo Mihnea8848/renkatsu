@@ -116,7 +116,36 @@ pub struct ListData {
 pub struct BundleLoc {
     /// `None`: `path` is relative to `abdata`. `Some`: entry name inside that zipmod.
     pub mod_idx: Option<u32>,
+    /// For a loose file, the `abdata` folder it is in, as an index into
+    /// [`Index::roots`].
+    #[serde(default)]
+    pub root: u32,
     pub path: String,
+}
+
+/// Where content is read from. Any part may be missing, but not both the
+/// game and the packages.
+#[derive(Debug, Clone, Default)]
+pub struct Sources {
+    /// The user's Koikatsu install.
+    pub game: Option<Config>,
+    /// Installed packages, as their folders; their `abdata` folders are
+    /// read after the game's.
+    pub packages: Vec<PathBuf>,
+    /// Folders of zipmods outside the game, such as a project's own.
+    pub mods: Vec<PathBuf>,
+}
+
+impl Sources {
+    /// What this user has: the Koikatsu folder when one is chosen, the
+    /// installed packages, and the given folders of mods.
+    pub fn detect(mods: &[PathBuf]) -> Sources {
+        Sources {
+            game: Config::load().ok(),
+            packages: rk_core::package_roots(),
+            mods: mods.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -159,7 +188,11 @@ struct Cache {
 
 #[derive(Debug, Default)]
 pub struct Index {
+    /// The Koikatsu install; empty when content comes from packages alone.
     pub game_dir: PathBuf,
+    /// The `abdata` folders loose bundles are read from: the game's first
+    /// when there is one, then each installed package's.
+    pub roots: Vec<PathBuf>,
     pub mods: Vec<ModInfo>,
     /// Virtual path under `abdata` (lowercase, forward slashes) to its
     /// sources, zipmods first.
@@ -442,6 +475,70 @@ struct ExtraCache {
     zips: HashMap<String, ZipScan>,
 }
 
+/// Scans the bundles under an `abdata` folder into `known`, which holds
+/// what was scanned before: only files that changed are read again, and
+/// files that are gone are forgotten. Says whether `known` changed.
+fn scan_tree(abdata: &Path, known: &mut HashMap<String, GameScan>) -> bool {
+    let mut files = Vec::new();
+    rk_core::walk_files(abdata, "unity3d", &mut files);
+    let todo: Vec<&PathBuf> = files
+        .iter()
+        .filter(|p| !known.get(&rel(abdata, p)).is_some_and(|s| same(&s.stamp, &stamp(p))))
+        .collect();
+    let scanned: Vec<(String, GameScan)> = todo
+        .par_iter()
+        .map(|p| {
+            let key = rel(abdata, p);
+            let is_list = norm(&key).starts_with("list/characustom/");
+            let scan = scan_game_bundle(p, is_list).unwrap_or_else(|_| GameScan {
+                stamp: stamp(p),
+                ..Default::default()
+            });
+            (key, scan)
+        })
+        .collect();
+    let mut dirty = !scanned.is_empty();
+    known.extend(scanned);
+    let live: std::collections::HashSet<String> = files.iter().map(|p| rel(abdata, p)).collect();
+    let before = known.len();
+    known.retain(|k, _| live.contains(k));
+    dirty |= before != known.len();
+    dirty
+}
+
+/// What the bundles of one installed package hold, remembered in a cache
+/// file of the package's own.
+#[derive(Default, Serialize, Deserialize)]
+struct PackageCache {
+    version: u32,
+    files: HashMap<String, GameScan>,
+}
+
+/// The scans of the bundles of the package in `dir`, by path under its
+/// `abdata` folder.
+fn scan_package(dir: &Path, abdata: &Path) -> HashMap<String, GameScan> {
+    scan_package_with(abdata, &cache_file(dir, "package"))
+}
+
+/// As `scan_package`, with the cache file named.
+fn scan_package_with(abdata: &Path, file: &Path) -> HashMap<String, GameScan> {
+    let mut cache: PackageCache = std::fs::read(file)
+        .ok()
+        .and_then(|b| rmp_serde::from_slice(&b).ok())
+        .filter(|c: &PackageCache| c.version == CACHE_VERSION)
+        .unwrap_or_default();
+    cache.version = CACHE_VERSION;
+    if scan_tree(abdata, &mut cache.files) {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Ok(bytes) = rmp_serde::to_vec(&cache) {
+            std::fs::write(file, bytes).ok();
+        }
+    }
+    cache.files
+}
+
 /// The scans of the zipmods under `dir`, by absolute path, rescanning only
 /// the files that changed.
 fn scan_extra(dir: &Path) -> HashMap<String, ZipScan> {
@@ -490,6 +587,48 @@ impl Index {
     /// their absolute paths and take part in the same choice by GUID and
     /// version as the game's.
     pub fn load_with(cfg: &Config, extra: &[PathBuf]) -> Result<Self> {
+        Self::load_sources(&Sources {
+            game: Some(cfg.clone()),
+            packages: Vec::new(),
+            mods: extra.to_vec(),
+        })
+    }
+
+    /// Loads the index of everything `sources` names: the game when there
+    /// is one, the installed packages, and the zipmods of the game and of
+    /// the folders of mods. Each is scanned once and remembered in a cache
+    /// file of its own, so adding or removing a package or a project
+    /// leaves the others' caches as they are.
+    pub fn load_sources(sources: &Sources) -> Result<Self> {
+        anyhow::ensure!(
+            sources.game.is_some() || !sources.packages.is_empty(),
+            "there is nothing to build characters from: no Koikatsu folder is chosen and no package is installed"
+        );
+        let mut trees = Vec::new();
+        let mut zips = HashMap::new();
+        let mut game_dir = PathBuf::new();
+        if let Some(cfg) = &sources.game {
+            let cache = Self::scan_game(cfg)?;
+            game_dir = cfg.game_dir.clone();
+            trees.push((cfg.abdata(), cache.game));
+            zips = cache.zips;
+        }
+        for package in &sources.packages {
+            let abdata = package.join("abdata");
+            if abdata.is_dir() {
+                let files = scan_package(package, &abdata);
+                trees.push((abdata, files));
+            }
+        }
+        for dir in &sources.mods {
+            zips.extend(scan_extra(dir));
+        }
+        Ok(Self::build(game_dir, trees, zips))
+    }
+
+    /// The game's bundles and zipmods, from its cache where they did not
+    /// change.
+    fn scan_game(cfg: &Config) -> Result<Cache> {
         let cache_file = cache_path(&cfg.game_dir);
         let mut cache: Cache = std::fs::read(&cache_file)
             .ok()
@@ -498,39 +637,9 @@ impl Index {
             .unwrap_or_default();
         cache.version = CACHE_VERSION;
         cache.game_dir = cfg.game_dir.to_string_lossy().into_owned();
-        let mut dirty = false;
 
         // Game bundles.
-        let abdata = cfg.abdata();
-        let mut files = Vec::new();
-        rk_core::walk_files(&abdata, "unity3d", &mut files);
-        let todo: Vec<&PathBuf> = files
-            .iter()
-            .filter(|p| {
-                !cache
-                    .game
-                    .get(&rel(&abdata, p))
-                    .is_some_and(|s| same(&s.stamp, &stamp(p)))
-            })
-            .collect();
-        let scanned: Vec<(String, GameScan)> = todo
-            .par_iter()
-            .map(|p| {
-                let key = rel(&abdata, p);
-                let is_list = norm(&key).starts_with("list/characustom/");
-                let scan = scan_game_bundle(p, is_list).unwrap_or_else(|_| GameScan {
-                    stamp: stamp(p),
-                    ..Default::default()
-                });
-                (key, scan)
-            })
-            .collect();
-        dirty |= !scanned.is_empty();
-        cache.game.extend(scanned);
-        let live: std::collections::HashSet<String> = files.iter().map(|p| rel(&abdata, p)).collect();
-        let before = cache.game.len();
-        cache.game.retain(|k, _| live.contains(k));
-        dirty |= before != cache.game.len();
+        let mut dirty = scan_tree(&cfg.abdata(), &mut cache.game);
 
         // Zipmods.
         let mut zips = Vec::new();
@@ -563,35 +672,50 @@ impl Index {
             }
             std::fs::write(&cache_file, rmp_serde::to_vec(&cache)?).ok();
         }
-        for dir in extra {
-            cache.zips.extend(scan_extra(dir));
-        }
-        Ok(Self::build(cfg, cache))
+        Ok(cache)
     }
 
-    fn build(cfg: &Config, cache: Cache) -> Self {
+    /// Puts the scans together. `trees` are the `abdata` folders in the
+    /// order they answer: the game's first, then each package's. `zips`
+    /// are the zipmods by path.
+    fn build(
+        game_dir: PathBuf,
+        trees: Vec<(PathBuf, HashMap<String, GameScan>)>,
+        zips: HashMap<String, ZipScan>,
+    ) -> Self {
         let mut idx = Index {
-            game_dir: cfg.game_dir.clone(),
+            game_dir,
             ..Default::default()
         };
 
         // Game files, in path order so "first list wins" matches the game.
-        let mut game: Vec<_> = cache.game.into_iter().collect();
-        game.sort_by_key(|g| norm(&g.0));
-        for (path, scan) in game {
-            let vpath = norm(&path);
-            for cab in scan.cabs {
-                idx.cabs.entry(cab).or_insert_with(|| vpath.clone());
+        // A bundle path belongs to the first folder that has it: the game
+        // before the packages, as the user's own install is what they see
+        // in the game, and a package before the next. A package's copy of a
+        // bundle the game has is not read at all, nor are the lists in it.
+        for (root, (abdata, files)) in trees.into_iter().enumerate() {
+            idx.roots.push(abdata);
+            let mut files: Vec<_> = files.into_iter().collect();
+            files.sort_by_key(|g| norm(&g.0));
+            for (path, scan) in files {
+                let vpath = norm(&path);
+                if idx.bundles.contains_key(&vpath) {
+                    continue;
+                }
+                for cab in scan.cabs {
+                    idx.cabs.entry(cab).or_insert_with(|| vpath.clone());
+                }
+                idx.bundles.entry(vpath).or_default().push(BundleLoc {
+                    mod_idx: None,
+                    root: root as u32,
+                    path,
+                });
+                idx.lists.extend(scan.lists);
             }
-            idx.bundles
-                .entry(vpath)
-                .or_default()
-                .push(BundleLoc { mod_idx: None, path });
-            idx.lists.extend(scan.lists);
         }
 
         // Zipmods: one per GUID, the highest version wins.
-        let mut zips: Vec<_> = cache.zips.into_iter().collect();
+        let mut zips: Vec<_> = zips.into_iter().collect();
         zips.sort_by(|a, b| a.0.cmp(&b.0));
         let mut best: HashMap<String, usize> = HashMap::new();
         for (i, (path, scan)) in zips.iter().enumerate() {
@@ -627,6 +751,7 @@ impl Index {
                     0,
                     BundleLoc {
                         mod_idx: Some(mod_idx),
+                        root: 0,
                         path: entry,
                     },
                 );
@@ -634,6 +759,7 @@ impl Index {
             for (key, entry) in scan.pngs {
                 idx.pngs.entry(key).or_insert(BundleLoc {
                     mod_idx: Some(mod_idx),
+                    root: 0,
                     path: entry,
                 });
             }
@@ -706,10 +832,7 @@ mod tests {
         ] {
             cache.zips.insert(path.to_string(), zip(guid, version));
         }
-        let cfg = Config {
-            game_dir: PathBuf::from("/game"),
-        };
-        let idx = Index::build(&cfg, cache);
+        let idx = Index::build(PathBuf::from("/game"), Vec::new(), cache.zips);
         let file = |guid: &str| {
             let info = idx.mods.iter().find(|m| m.guid == guid).unwrap();
             idx.game_dir.join(&info.path)
@@ -719,6 +842,129 @@ mod tests {
         assert_eq!(file("top"), Path::new("/game/mods/top.zipmod"));
         assert_eq!(file("only"), Path::new("/project/mods/only.zipmod"));
         assert_eq!(idx.skipped.len(), 2);
+    }
+
+    /// A scanned bundle that holds one serialized file and maybe one list.
+    fn scanned(cab: &str, list: Option<i32>) -> GameScan {
+        GameScan {
+            cabs: vec![cab.to_string()],
+            lists: list
+                .map(|category| ListData {
+                    category,
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn tree(root: &str, files: &[(&str, GameScan)]) -> (PathBuf, HashMap<String, GameScan>) {
+        (
+            PathBuf::from(root),
+            files.iter().map(|(p, s)| (p.to_string(), s.clone())).collect(),
+        )
+    }
+
+    #[test]
+    fn the_game_answers_before_packages_and_zipmods_before_both() {
+        let game = tree(
+            "/game/abdata",
+            &[
+                ("chara/oo_base.unity3d", scanned("cab-base-game", None)),
+                ("list/characustom/00.unity3d", scanned("cab-list-game", Some(105))),
+            ],
+        );
+        let starter = tree(
+            "/packages/starter-characters/abdata",
+            &[
+                ("Chara/oo_base.unity3d", scanned("cab-base-starter", None)),
+                ("chara/co_top_50.unity3d", scanned("cab-top-starter", None)),
+                ("list/characustom/00.unity3d", scanned("cab-list-starter", Some(106))),
+                ("list/characustom/50.unity3d", scanned("cab-list-50", Some(107))),
+            ],
+        );
+        let maps = tree(
+            "/packages/starter-maps/abdata",
+            &[
+                ("chara/co_top_50.unity3d", scanned("cab-top-maps", None)),
+                ("map/school.unity3d", scanned("cab-school", None)),
+            ],
+        );
+        let zips = HashMap::from([(
+            "/project/Mods/top.zipmod".to_string(),
+            ZipScan {
+                info: Some(ModInfo {
+                    guid: "some.top".to_string(),
+                    ..Default::default()
+                }),
+                bundles: vec![(
+                    "chara/co_top_50.unity3d".to_string(),
+                    "abdata/chara/co_top_50.unity3d".to_string(),
+                )],
+                ..Default::default()
+            },
+        )]);
+        let idx = Index::build(PathBuf::from("/game"), vec![game, starter, maps], zips);
+        assert_eq!(idx.roots.len(), 3);
+        let sources = |vpath: &str| -> Vec<(Option<u32>, u32)> {
+            idx.bundles[vpath].iter().map(|l| (l.mod_idx, l.root)).collect()
+        };
+        // The game's own file, and nothing of the package's copy.
+        assert_eq!(sources("chara/oo_base.unity3d"), [(None, 0)]);
+        assert_eq!(idx.cabs["cab-base-game"], "chara/oo_base.unity3d");
+        assert!(!idx.cabs.contains_key("cab-base-starter"));
+        // What the game lacks comes from the first package that has it,
+        // and a zipmod at the same path is searched before it.
+        assert_eq!(sources("chara/co_top_50.unity3d"), [(Some(0), 0), (None, 1)]);
+        assert!(!idx.cabs.contains_key("cab-top-maps"));
+        assert_eq!(sources("map/school.unity3d"), [(None, 2)]);
+        // Lists follow their bundles: the package's copy of a list bundle
+        // the game has adds nothing.
+        let mut categories: Vec<i32> = idx.lists.iter().map(|l| l.category).collect();
+        categories.sort();
+        assert_eq!(categories, [105, 107]);
+    }
+
+    #[test]
+    fn packages_alone_make_an_index() {
+        let starter = tree(
+            "/packages/starter-characters/abdata",
+            &[("chara/oo_base.unity3d", scanned("cab-base", Some(100)))],
+        );
+        let idx = Index::build(PathBuf::new(), vec![starter], HashMap::new());
+        assert_eq!(idx.game_dir, PathBuf::new());
+        assert_eq!(idx.roots, [PathBuf::from("/packages/starter-characters/abdata")]);
+        assert_eq!(idx.bundles["chara/oo_base.unity3d"][0].root, 0);
+        assert_eq!(idx.lists.len(), 1);
+        assert!(idx.mods.is_empty());
+        // With neither a game nor a package there is nothing to index.
+        assert!(Index::load_sources(&Sources::default()).is_err());
+    }
+
+    #[test]
+    fn a_packages_bundles_are_scanned_once_and_followed_when_they_change() {
+        let dir = std::env::temp_dir().join(format!("renkatsu-vfs-package-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let abdata = dir.join("pack").join("abdata");
+        std::fs::create_dir_all(abdata.join("chara")).unwrap();
+        // Not real bundles: they are listed all the same, with nothing in them.
+        std::fs::write(abdata.join("chara/a.unity3d"), b"a").unwrap();
+        std::fs::write(abdata.join("chara/b.unity3d"), b"b").unwrap();
+        let cache = dir.join("cache").join("package.bin");
+        let first = scan_package_with(&abdata, &cache);
+        let mut names: Vec<&String> = first.keys().collect();
+        names.sort();
+        assert_eq!(names, ["chara/a.unity3d", "chara/b.unity3d"]);
+        assert!(cache.is_file());
+        let written = std::fs::metadata(&cache).unwrap().modified().unwrap();
+        // Nothing changed: the cache answers and is left alone.
+        assert_eq!(scan_package_with(&abdata, &cache).len(), 2);
+        assert_eq!(std::fs::metadata(&cache).unwrap().modified().unwrap(), written);
+        // A file that went is forgotten.
+        std::fs::remove_file(abdata.join("chara/b.unity3d")).unwrap();
+        assert_eq!(scan_package_with(&abdata, &cache).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

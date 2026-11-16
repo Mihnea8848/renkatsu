@@ -1,0 +1,18 @@
+# The packages Renkatsu knows where to download. This list ships inside
+# the app. The files are assets of a release of their own, apart from the
+# app's releases, so that an app release does not carry them again.
+#
+# `rk package starter-characters --out DIR` builds the archive and prints
+# the entry to put here.
+
+[[package]]
+id = "starter-characters"
+name = "Starter Content: Characters"
+version = "1.0.0"
+description = "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, and its default characters. Characters made of these are built without a Koikatsu install."
+installed_size = 1068797697
+
+[[package.part]]
+url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-characters-1.0.0.rkpkg"
+size = 833713409
+sha256 = "2b6d829c839bd6bd1425213e2b483a051a1ee953cd9a19bedab6ec6e3a9a03f8"

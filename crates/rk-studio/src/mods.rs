@@ -248,8 +248,9 @@ pub fn count_text(n: usize) -> String {
     }
 }
 
-/// The game's files, opened when they are first needed, with the mods of
-/// one project searched together with the game's own.
+/// The content characters are built from, opened when it is first needed:
+/// the Koikatsu install when one is chosen, then the installed packages,
+/// with the mods of one project searched together with the game's own.
 #[derive(Default)]
 pub struct Games {
     game: Option<Game>,
@@ -257,16 +258,21 @@ pub struct Games {
 }
 
 impl Games {
-    /// The game with the zipmods of `mods_dir`. Another folder than last
-    /// time opens the game again; the index cache makes that quick.
+    /// The content with the zipmods of `mods_dir`. Another folder than
+    /// last time opens it again; the index caches make that quick.
     pub fn get(&mut self, mods_dir: &Path) -> Result<&Game> {
         if self.game.is_none() || self.mods != mods_dir {
             self.game = None;
-            let config = rk_core::Config::load()?;
-            self.game = Some(Game::open_with(&config, &[mods_dir.to_owned()])?);
+            self.game = Some(Game::open_user(&[mods_dir.to_owned()])?);
             self.mods = mods_dir.to_owned();
         }
         Ok(self.game.as_ref().expect("opened above"))
+    }
+
+    /// Forgets what is open, after the Koikatsu folder or the installed
+    /// packages changed: the next use opens what is there then.
+    pub fn reset(&mut self) {
+        self.game = None;
     }
 }
 

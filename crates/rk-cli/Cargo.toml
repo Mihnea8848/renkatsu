@@ -18,6 +18,7 @@ rk-card.workspace = true
 rmpv.workspace = true
 rk-unityfs.workspace = true
 rk-vfs.workspace = true
+rk-packages.workspace = true
 rk-chara.workspace = true
 rk-render.workspace = true
 glam.workspace = true

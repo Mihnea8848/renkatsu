@@ -358,6 +358,7 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             ("Save", "Ctrl+S", Command::Save),
             ("Save as", "Ctrl+Shift+S", Command::SaveAs),
             ("Import card", "Ctrl+I", Command::ImportCard),
+            ("Import from a package", "", Command::ImportFromPackage),
             ("Set project icon", "", Command::SetIcon),
             ("Project selector", "", Command::ProjectSelector),
             ("Quit", "Ctrl+Q", Command::Quit),
@@ -452,6 +453,11 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
                 panels::open(dock, panel);
                 ui.close();
             }
+        }
+        ui.separator();
+        if ui.button("Packages").clicked() {
+            st.ask(Command::Packages, ui.ctx());
+            ui.close();
         }
         ui.separator();
         if ui.button("Reset layout").clicked() {

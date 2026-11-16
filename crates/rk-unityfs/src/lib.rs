@@ -51,4 +51,5 @@ pub mod class {
     pub const SKINNED_MESH_RENDERER: i32 = 137;
     pub const ASSET_BUNDLE: i32 = 142;
     pub const RECT_TRANSFORM: i32 = 224;
+    pub const ASSET_BUNDLE_MANIFEST: i32 = 290;
 }
