@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Renkatsu Studio, the editor. This is the shell prototype from
-//! docs/editor.md: Unity's layout, Unreal's modes drawn over the viewport,
+//! the editor design: Unity's layout, Unreal's modes drawn over the viewport,
 //! the menu row and docked panels with placeholder content, in the designs
 //! of `design.rs`, for judging layout and look on screenshots.
 

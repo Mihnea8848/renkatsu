@@ -5,3 +5,4 @@ renkatsu.toml
 !docs/**/*.png
 tools/reference-capture/bin/
 tools/reference-capture/obj/
+notes/
