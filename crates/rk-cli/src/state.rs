@@ -193,7 +193,7 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
             rep.compared += 1;
             let game: Vec<[f32; 3]> = verts
                 .iter()
-                .filter_map(|v| floats(v))
+                .filter_map(floats)
                 .filter(|v| v.len() == 3)
                 .map(|v| [v[0], v[1], v[2]])
                 .collect();
