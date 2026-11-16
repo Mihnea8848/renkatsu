@@ -30,6 +30,58 @@ impl Report {
     pub fn differences(&self) -> usize {
         self.groups.values().map(Vec::len).sum()
     }
+
+    /// Adds another report's counts and lines to this one.
+    pub fn merge(&mut self, other: Report) {
+        self.compared += other.compared;
+        self.unknown += other.unknown;
+        for (kind, lines) in other.groups {
+            self.groups.entry(kind).or_default().extend(lines);
+        }
+    }
+}
+
+/// Largest gap in percent two blend shape weights may have.
+const SHAPE_TOLERANCE: f32 = 0.05;
+
+/// Blend shape weights on clothing, game against ours, in percent. Face
+/// shapes are left out: they come from Studio's expression, which `rk
+/// reference` copies from the capture.
+pub fn compare_clothing_shapes(capture: &Value, scene: &Scene) -> Report {
+    let mut rep = Report::default();
+    let rank = hierarchy_order(scene);
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for r in capture["renderers"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let key = (
+            r["name"].as_str().unwrap_or("").to_string(),
+            bare(r["materials"][0]["name"].as_str().unwrap_or("")).to_string(),
+        );
+        let nth = seen.entry(key).or_insert(0);
+        let ours = renderer_for(r, scene, &rank, *nth);
+        *nth += 1;
+        let Some(ours) = ours else { continue };
+        if !matches!(ours.part, rk_chara::scene::Part::Clothes(_)) || ours.mesh.blend_shapes.is_empty() {
+            continue;
+        }
+        let mut game = vec![0.0f32; ours.mesh.blend_shapes.len()];
+        for s in r["shapes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            if let (Some(i), Some(w)) = (s[0].as_u64(), s[1].as_f64()) {
+                if let Some(slot) = game.get_mut(i as usize) {
+                    *slot = w as f32;
+                }
+            }
+        }
+        let rname = r["name"].as_str().unwrap_or("");
+        for (i, g) in game.iter().enumerate() {
+            let mine = ours.shape_weights.get(i).copied().unwrap_or(0.0) * 100.0;
+            rep.compared += 1;
+            if (g - mine).abs() > SHAPE_TOLERANCE {
+                let name = &ours.mesh.blend_shapes[i].name;
+                rep.differ("blend shape", format!("{rname} {name}: game {g:.1}%, ours {mine:.1}%"));
+            }
+        }
+    }
+    rep
 }
 
 fn floats(v: &Value) -> Option<Vec<f32>> {
@@ -134,6 +186,30 @@ pub fn compare(capture: &Value, scene: &Scene) -> Report {
                 rep.differ(
                     "receive shadows",
                     format!("{rname}: game {receive}, ours {}", ours.receive_shadows),
+                );
+            }
+        }
+        if let Some(verts) = r["vertices"].as_array() {
+            rep.compared += 1;
+            let game: Vec<[f32; 3]> = verts
+                .iter()
+                .filter_map(|v| floats(v))
+                .filter(|v| v.len() == 3)
+                .map(|v| [v[0], v[1], v[2]])
+                .collect();
+            let far = game
+                .iter()
+                .zip(&ours.mesh.positions)
+                .map(|(a, b)| (0..3).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max))
+                .fold(0.0f32, f32::max);
+            if game.len() != ours.mesh.positions.len() || far > 1e-4 {
+                rep.differ(
+                    "mesh vertices",
+                    format!(
+                        "{rname}: {} in the game, {} ours, apart by up to {far:.5}",
+                        game.len(),
+                        ours.mesh.positions.len()
+                    ),
                 );
             }
         }

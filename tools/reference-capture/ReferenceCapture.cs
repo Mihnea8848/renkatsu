@@ -523,6 +523,18 @@ namespace Renkatsu
                     }
                     s.Append("]");
                 }
+                if (skinned != null && skinned.sharedMesh != null && r.name == "cf_O_canine")
+                {
+                    // The fang mesh as Edit Fangs left it, in mesh space.
+                    s.Append(", \"vertices\": [");
+                    Vector3[] vs = skinned.sharedMesh.vertices;
+                    for (int i = 0; i < vs.Length; i++)
+                    {
+                        s.Append(i == 0 ? "" : ", ").Append("[").Append(F(vs[i].x)).Append(", ")
+                            .Append(F(vs[i].y)).Append(", ").Append(F(vs[i].z)).Append("]");
+                    }
+                    s.Append("]");
+                }
                 s.Append(", \"materials\": [");
                 Material[] mats = r.sharedMaterials;
                 for (int i = 0; i < mats.Length; i++)
