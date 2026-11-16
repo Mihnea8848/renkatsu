@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Renkatsu Studio
+GenericName=Scene editor for Koikatsu characters
+Comment=Pose and render Koikatsu characters
+Exec=renkatsu
+Icon=renkatsu
+Terminal=false
+Categories=Graphics;3DGraphics;
+StartupWMClass=renkatsu

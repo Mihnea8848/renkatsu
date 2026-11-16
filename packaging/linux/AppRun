@@ -1,0 +1,6 @@
+#!/bin/sh
+# Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
+# SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
+# Starts Renkatsu Studio from inside the AppImage.
+here="$(dirname "$(readlink -f "$0")")"
+exec "$here/usr/bin/renkatsu" "$@"

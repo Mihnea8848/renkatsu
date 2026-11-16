@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "rk-card"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lz4_flex",
  "rayon",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "rk-chara"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "glam",
@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "rk-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "rk-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "rk-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "rk-studio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "rk-unityfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lz4_flex",
  "lzma-rs",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "rk-vfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "parking_lot 0.13.0",

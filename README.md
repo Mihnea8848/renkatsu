@@ -68,43 +68,67 @@ and the formulas come from the game's own code and shaders, not from tuning.
 - Rendering to a PNG file, side by side comparisons with captures from the
   game, and a bench that compares a whole list of cards at once
 
+Version 0.1.1 adds Renkatsu Studio, the editor: projects that own their
+characters and the mods those need, a scene with an Outliner, Properties and
+a Content browser, and a live viewport running at the display's refresh rate.
+
 ## Known problems
 
-- `rk render` draws the character in a T-pose. Poses only come from captures
-  for now
+- Characters stand in a T-pose. Posing comes next
 - CharaStudio's screen effects (ambient occlusion, bloom, vignette, colour
-  filter) are not drawn yet
-- There is no editor and no window, only command line tools
+  filter) are not drawn yet, so characters look paler than in the game
+- Characters need a Koikatsu install. Renkatsu itself runs without one, and a
+  later version keeps imported characters in the project so they open
+  without the game too
 - Koikatsu Sunshine content is not supported
 
 ## Requirements
 
-- Rust 1.95. `rustup` installs it on its own from `rust-toolchain.toml`
 - A GPU with Vulkan, Metal or DirectX 12
-- Your own Koikatsu install. Renkatsu ships no game files and reads everything
-  from your copy
+- To use Koikatsu characters, your own Koikatsu install. Renkatsu ships no
+  game files and reads everything from your copy
+- To build from source, Rust 1.95. `rustup` installs it on its own from
+  `rust-toolchain.toml`
 
 ## Installation
+
+Download Renkatsu from the
+[releases page](https://github.com/Mihnea8848/renkatsu/releases):
+
+- Windows: `Renkatsu-<version>-windows-x64-setup.exe` installs Renkatsu
+  Studio with a Start menu entry. A portable `.zip` is there too
+- Linux: `Renkatsu-<version>-linux-x86_64.AppImage` runs as it is after
+  `chmod +x`. The `.tar.gz` holds the same programs with an `install.sh` that
+  adds Renkatsu Studio to the application menu (`install.sh --uninstall`
+  removes it)
+
+Both include the `rk` command line tools.
+
+To build from source instead:
 
 ```sh
 git clone https://github.com/Mihnea8848/renkatsu.git
 cd renkatsu
+cargo install --path crates/rk-studio
 cargo install --path crates/rk-cli
 ```
 
-This builds the `rk` command and puts it in Cargo's bin folder
-(`~/.cargo/bin`). While working on Renkatsu itself, `cargo build --release`
-and `./target/release/rk` do the same without installing.
+This puts `renkatsu` (the studio) and `rk` in Cargo's bin folder
+(`~/.cargo/bin`).
 
 ## Configuration
 
-Create a `renkatsu.toml` in the folder you run the tools from:
+Renkatsu Studio asks for your Koikatsu folder in the project selector
+("Add Koikatsu folder"), and Edit, Preferences can change it. It is saved in
+`renkatsu.toml` in your configuration folder (`~/.config/renkatsu` on Linux,
+`%APPDATA%\Renkatsu` on Windows), where the `rk` tools find it too:
 
 ```toml
 game_dir = "/path/to/Koikatsu"
 ```
 
-You can also set the `RENKATSU_GAME_DIR` environment variable.
+A `renkatsu.toml` in the folder you run the tools from, or the
+`RENKATSU_GAME_DIR` environment variable, take precedence.
 
 ## Usage
 
@@ -171,6 +195,7 @@ The code is split into crates, each with one job:
 | `rk-chara` | Builds a character from a card |
 | `rk-render` | wgpu renderer |
 | `rk-cli` | Command line tools |
+| `rk-studio` | Renkatsu Studio, the editor |
 
 ## Roadmap
 

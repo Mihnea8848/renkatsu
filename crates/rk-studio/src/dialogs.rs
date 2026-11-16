@@ -107,6 +107,8 @@ pub enum Pick {
     Folder,
     /// The picture that becomes a project's icon.
     Icon,
+    /// The user's Koikatsu install.
+    GameFolder,
 }
 
 /// A system file dialog that is open. It runs on a thread of its own, so
@@ -127,6 +129,7 @@ impl Picker {
                 Pick::Project => "Open project",
                 Pick::Folder => "Project location",
                 Pick::Icon => "Project icon",
+                Pick::GameFolder => "Koikatsu folder",
             });
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
@@ -136,7 +139,7 @@ impl Picker {
                 Pick::Project => dialog
                     .add_filter("Renkatsu projects", &[crate::project::EXTENSION])
                     .pick_file(),
-                Pick::Folder => dialog.pick_folder(),
+                Pick::Folder | Pick::GameFolder => dialog.pick_folder(),
                 Pick::Icon => dialog.add_filter("PNG pictures", &["png"]).pick_file(),
             };
             let _ = send.send(picked);

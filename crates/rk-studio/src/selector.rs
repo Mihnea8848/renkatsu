@@ -15,6 +15,7 @@ use crate::dialogs::{Pick, ProjectForm};
 use crate::project::{self, Start};
 use crate::settings::{self, ProjectView, Recent, Settings};
 use crate::state::{Look, State};
+use crate::theme::Theme;
 use crate::widgets::{self, boxed, glyph, hair_h, hair_v};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as icon;
@@ -213,6 +214,9 @@ pub struct Selector {
     age: f32,
     /// Seconds the window has been showing, for its fade.
     window_age: f32,
+    /// The Koikatsu install characters are read from; `None` until the
+    /// user chooses it.
+    pub game: Option<PathBuf>,
 }
 
 impl Selector {
@@ -231,6 +235,7 @@ impl Selector {
             default_card: None,
             age: 0.0,
             window_age: 0.0,
+            game: rk_core::Config::load().ok().map(|c| c.game_dir),
         };
         selector.refresh(settings);
         selector
@@ -325,6 +330,8 @@ enum Act {
     ClearIcon(PathBuf),
     /// Show the recent projects as tiles or as rows.
     View(ProjectView),
+    /// Pick the Koikatsu install.
+    ChooseGame,
 }
 
 fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
@@ -348,6 +355,10 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
             save(st);
         }
         Act::OpenOther => st.proceed(crate::dialogs::After::Open(None), ctx),
+        Act::ChooseGame => {
+            let start = st.selector.as_ref().and_then(|s| s.game.clone());
+            st.pick(Pick::GameFolder, start, ctx);
+        }
         Act::Browse => {
             let folder = st.selector.as_ref().map(|s| s.form.folder.clone());
             st.pick(Pick::Folder, folder, ctx);
@@ -711,6 +722,31 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     if side_row(ui, k, open, icon::FOLDER_OPEN, "Open project", "Ctrl+O", false) {
         act = Some(Act::OpenOther);
     }
+    // Koikatsu cards are built from the user's own install. Renkatsu works
+    // without it; the folder only adds Koikatsu characters.
+    let game = Rect::from_min_size(
+        Pos2::new(side.left(), side.bottom() - 84.0),
+        Vec2::new(SIDE - 1.0, 36.0),
+    );
+    let (glyph_name, text) = match &sel.game {
+        Some(_) => (icon::FOLDER_SIMPLE, "Koikatsu folder"),
+        None => (icon::FOLDER_SIMPLE, "Add Koikatsu folder"),
+    };
+    if side_row(ui, k, game, glyph_name, text, "", false) {
+        act = Some(Act::ChooseGame);
+    }
+    let (under, color) = match &sel.game {
+        Some(dir) => (shown_path(dir), t.text_dim),
+        None => ("Optional, to import Koikatsu cards".to_owned(), t.text_dim),
+    };
+    line(
+        ui,
+        Pos2::new(side.left() + 18.0, game.bottom() + 2.0),
+        SIDE - 32.0,
+        &under,
+        k.small(),
+        color,
+    );
     ui.painter().text(
         Pos2::new(side.left() + 18.0, side.bottom() - 18.0),
         Align2::LEFT_CENTER,
@@ -1119,9 +1155,16 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
         t.text,
     );
     let tile = Vec2::new(256.0, 144.0 + CAPTION);
+    // Renkatsu-Chan is the game's default card: without the Koikatsu
+    // folder there is none, and projects start empty.
+    if sel.game.is_none() {
+        sel.form.start = Start::Empty;
+    }
     for (n, start) in Start::ALL.into_iter().enumerate() {
+        let available = start == Start::Empty || sel.game.is_some();
         let rect = Rect::from_min_size(Pos2::new(x + n as f32 * (tile.x + GAP), top + 44.0), tile);
-        let resp = ui.interact(rect, ui.id().with(("start", n)), Sense::click());
+        let sense = if available { Sense::click() } else { Sense::hover() };
+        let resp = ui.interact(rect, ui.id().with(("start", n)), sense);
         if resp.clicked() {
             sel.form.start = start;
         }
@@ -1163,6 +1206,7 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
             mix(t.text_bright, Color32::WHITE, on),
         );
         let under = match start {
+            Start::RenkatsuChan if !available => "Needs the Koikatsu folder",
             Start::RenkatsuChan => "The default character",
             Start::Empty => "The key light only",
         };
@@ -1180,6 +1224,9 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
             Stroke::new(2.0, t.select.gamma_multiply(on)),
             StrokeKind::Inside,
         );
+        if !available {
+            ui.painter().rect_filled(rect, 0.0, Theme::glass(t.panel, 150));
+        }
     }
     let notes = Pos2::new(x + 2.0 * (tile.x + GAP) + 12.0, top + 56.0);
     let width = body.right() - 20.0 - notes.x;

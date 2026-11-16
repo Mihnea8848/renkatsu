@@ -513,6 +513,20 @@ impl State {
                     (Err(e), None) => self.log.error(format!("The icon could not be set: {e:#}")),
                 }
             }
+            Pick::GameFolder => match rk_core::Config::save_user(&path) {
+                Ok(cfg) => {
+                    self.log
+                        .info(format!("Characters are read from {} now", cfg.game_dir.display()));
+                    if let Some(selector) = &mut self.selector {
+                        selector.game = Some(cfg.game_dir);
+                        selector.problem = None;
+                    }
+                }
+                Err(e) => match &mut self.selector {
+                    Some(selector) => selector.problem = Some(format!("{e:#}")),
+                    None => self.log.error(format!("{e:#}")),
+                },
+            },
             Pick::Folder => {
                 let form = match (&mut self.modal, &mut self.selector) {
                     (Some(Modal::Project(form)), _) => Some(form),

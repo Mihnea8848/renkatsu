@@ -6,6 +6,9 @@
 //! in the designs of `design.rs`, on the scene model of `scene.rs`, which
 //! the viewport draws live.
 
+// A window program on Windows: no console opens beside it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod camera;
 mod chrome;
 mod design;
@@ -411,28 +414,35 @@ fn fonts() -> egui::FontDefinitions {
         .get(&egui::FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let mut add = |name: &str, path: &str, family: egui::FontFamily| {
+    let mut add = |name: &str, bytes: Option<Vec<u8>>, family: egui::FontFamily| {
         let list = fonts.families.entry(family).or_insert_with(|| fallback.clone());
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Some(bytes) = bytes {
             fonts
                 .font_data
                 .insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
             list.insert(0, name.into());
         }
     };
+    // The interface font ships inside the program (Open Sans, under the SIL
+    // Open Font License in assets/fonts), so it looks the same everywhere.
     add(
         "interface",
-        "/usr/share/fonts/TTF/OpenSans-Regular.ttf",
+        Some(include_bytes!("../assets/fonts/OpenSans-Regular.ttf").to_vec()),
         egui::FontFamily::Proportional,
     );
     add(
         "interface-semibold",
-        "/usr/share/fonts/TTF/OpenSans-SemiBold.ttf",
+        Some(include_bytes!("../assets/fonts/OpenSans-SemiBold.ttf").to_vec()),
         egui::FontFamily::Name(theme::SEMIBOLD.into()),
     );
     add(
         "console",
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+        [
+            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+            "C:\\Windows\\Fonts\\consola.ttf",
+        ]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok()),
         egui::FontFamily::Monospace,
     );
     // Card, item and mod names are often Japanese, which the interface font
@@ -783,6 +793,21 @@ fn save_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let result = run();
+    // Without a console nobody reads the error, so it is shown in a box.
+    if let Err(e) = &result {
+        if cfg!(windows) {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Renkatsu Studio")
+                .set_description(format!("{e:#}"))
+                .show();
+        }
+    }
+    result
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let settings = settings::Settings::load();
     let mut size = editor_size(&cli)?;

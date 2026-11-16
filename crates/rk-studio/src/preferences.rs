@@ -22,6 +22,26 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         .default_width(360.0)
         .show(ctx, |ui| {
             let before = st.settings.clone();
+            ui.label(RichText::new("Koikatsu").font(k.bold(k.d.text)).color(t.text_bright));
+            ui.add_space(4.0);
+            let game = rk_core::Config::load().ok().map(|c| c.game_dir);
+            ui.horizontal(|ui| {
+                match &game {
+                    Some(dir) => ui.label(dir.display().to_string()),
+                    None => ui.label(RichText::new("No folder chosen").color(t.accent)),
+                };
+                if ui.button("Browse").clicked() {
+                    st.pick(crate::dialogs::Pick::GameFolder, game.clone(), ui.ctx());
+                }
+            });
+            ui.indent("game hint", |ui| {
+                ui.label(
+                    RichText::new("Characters and mods are read from this install, never changed.")
+                        .font(k.small())
+                        .color(t.text_dim),
+                );
+            });
+            ui.add_space(8.0);
             ui.label(RichText::new("Start").font(k.bold(k.d.text)).color(t.text_bright));
             ui.add_space(4.0);
             ui.checkbox(
