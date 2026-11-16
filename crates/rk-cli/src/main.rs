@@ -108,6 +108,10 @@ enum Cmd {
         /// Leave out the light's real-time shadows.
         #[arg(long)]
         no_shadows: bool,
+        /// Compare with the picture taken with Studio's screen effects on
+        /// (`<name>.<view>.studio.png`), with the scene's effects on ours.
+        #[arg(long)]
+        studio: bool,
     },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
@@ -133,6 +137,9 @@ enum Cmd {
         /// property or texture, such as `_MainTex` or `skinning bones`.
         #[arg(long)]
         show: Vec<String>,
+        /// Compare with the pictures taken with Studio's screen effects on.
+        #[arg(long)]
+        studio: bool,
     },
     /// Inspect Unity asset bundle files.
     Bundle {
@@ -190,6 +197,7 @@ fn main() -> Result<()> {
             settle_frames,
             bones,
             no_shadows,
+            studio,
         } => {
             // Captures are made in Studio, which is also the default.
             let mut opts = rk_chara::BuildOptions {
@@ -199,7 +207,7 @@ fn main() -> Result<()> {
             if let Some(frames) = settle_frames {
                 opts.settle_frames = frames;
             }
-            reference::reference(&card, &capture, &out, &opts, &bones, !no_shadows)
+            reference::reference(&card, &capture, &out, &opts, &bones, !no_shadows, studio)
         }
         Cmd::Audit { count, threads } => audit::audit(count, threads),
         Cmd::Bench {
@@ -207,7 +215,8 @@ fn main() -> Result<()> {
             captures,
             out,
             show,
-        } => bench::bench(&list, &captures, &out, &show),
+            studio,
+        } => bench::bench(&list, &captures, &out, &show, studio),
         Cmd::Compare {
             cards,
             count,
