@@ -13,7 +13,9 @@ mod kinds;
 mod live;
 mod modes;
 mod panels;
+mod preferences;
 mod properties;
+mod settings;
 mod state;
 mod theme;
 mod viewport;
@@ -22,6 +24,7 @@ mod widgets;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use design::{Design, Overlays, TitleBar};
+use eframe::egui_wgpu::wgpu;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
 use state::{Look, Rail, State, SCENE};
@@ -116,7 +119,7 @@ struct Studio {
 }
 
 impl Studio {
-    fn new(cc: &eframe::CreationContext, cli: &Cli) -> Result<Self> {
+    fn new(cc: &eframe::CreationContext, cli: &Cli, settings: settings::Settings) -> Result<Self> {
         let look = Look {
             t: theme::THEME,
             d: cli.design.spec(),
@@ -131,6 +134,8 @@ impl Studio {
         });
 
         let mut state = State::new();
+        state.settings = settings;
+        state.vsync_at_start = settings.frame_rate.vsync();
         state.mode = modes::MODES
             .iter()
             .position(|m| m.name.eq_ignore_ascii_case(&cli.mode))
@@ -319,6 +324,17 @@ impl eframe::App for Studio {
                     .show_inside(ui, &mut viewer);
             });
 
+        preferences::show(ctx, &k, &mut self.state);
+
+        // Frames come as often as the display shows them unless the user
+        // chose to save power, when egui draws only on input.
+        if self.state.settings.frame_rate.continuous() {
+            ctx.request_repaint();
+        }
+        let dt = ctx.input(|i| i.unstable_dt);
+        let ft = &mut self.state.frame_time;
+        *ft = if *ft == 0.0 { dt } else { *ft + (dt - *ft) * 0.05 };
+
         self.frames += 1;
         if let Some(path) = self.screenshot.clone() {
             if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES {
@@ -419,7 +435,8 @@ fn main() -> Result<()> {
         .split_once('x')
         .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
         .context("--size must look like 1600x900")?;
-    let options = eframe::NativeOptions {
+    let settings = settings::Settings::load();
+    let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("Renkatsu Studio")
@@ -429,11 +446,16 @@ fn main() -> Result<()> {
             .with_decorations(false),
         ..Default::default()
     };
+    options.wgpu_options.surface.present_mode = if settings.frame_rate.vsync() {
+        wgpu::PresentMode::AutoVsync
+    } else {
+        wgpu::PresentMode::AutoNoVsync
+    };
     let mut error = None;
     eframe::run_native(
         "Renkatsu Studio",
         options,
-        Box::new(|cc| match Studio::new(cc, &cli) {
+        Box::new(|cc| match Studio::new(cc, &cli, settings) {
             Ok(s) => Ok(Box::new(s)),
             Err(e) => {
                 error = Some(e);

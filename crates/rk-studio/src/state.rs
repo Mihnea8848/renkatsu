@@ -168,6 +168,13 @@ pub struct State {
     /// What surrounds the still picture, taken from its corner so that it
     /// reads as a viewport filled edge to edge.
     pub backdrop: Color32,
+    /// The user's settings, saved when the Preferences window changes them.
+    pub settings: crate::settings::Settings,
+    /// Whether the window waits for the display, as chosen when it opened.
+    pub vsync_at_start: bool,
+    pub preferences_open: bool,
+    /// Seconds per frame, smoothed, for the status bar.
+    pub frame_time: f32,
 }
 
 impl State {
@@ -212,6 +219,10 @@ impl State {
             live: None,
             last_physics: Physics::Stopped,
             backdrop: Color32::from_rgb(0x0f, 0x0f, 0x0f),
+            settings: Default::default(),
+            vsync_at_start: true,
+            preferences_open: false,
+            frame_time: 0.0,
         }
     }
 

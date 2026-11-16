@@ -2839,6 +2839,8 @@ dependencies = [
  "rk-core",
  "rk-render",
  "rk-vfs",
+ "serde",
+ "toml",
 ]
 
 [[package]]
