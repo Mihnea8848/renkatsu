@@ -491,6 +491,9 @@ pub const MODES: [(&str, &str); 6] = [
 /// `modes`, the mode selector and Add, then play controls, command search
 /// and the layout menu.
 pub fn menu_bar_tools(ui: &mut Ui, theme: &Theme, modes: bool) {
+    if !modes {
+        centred_play(ui, theme);
+    }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.menu_button(format!("{}  Layout  {}", icon::LAYOUT, icon::CARET_DOWN), |ui| {
             let _ = ui.button("Reset layout");
@@ -514,8 +517,56 @@ pub fn menu_bar_tools(ui: &mut Ui, theme: &Theme, modes: bool) {
                 );
                 category_menu(ui, icon::PLUS_CIRCLE, "Add", 0);
                 divider(ui, theme);
+                play_controls(ui, theme);
             }
-            play_controls(ui, theme);
         });
     });
+}
+
+/// Unreal 5's play group, centred in the row: a dark segmented box with a
+/// green play triangle, pause, and a red stop that resets the physics.
+pub fn centred_play(ui: &mut Ui, theme: &Theme) {
+    let row = ui.max_rect();
+    let seg = Vec2::new(34.0, row.height().min(26.0));
+    let group = egui::Rect::from_center_size(row.center(), Vec2::new(seg.x * 3.0 + 2.0, seg.y));
+    let p = ui.painter().clone();
+    p.rect_filled(group, theme.control_radius as f32, theme.field);
+    p.rect_stroke(
+        group,
+        theme.control_radius as f32,
+        egui::Stroke::new(1.0, theme.control),
+        egui::StrokeKind::Inside,
+    );
+    let green = Color32::from_rgb(0x6a, 0xc9, 0x4c);
+    let red = Color32::from_rgb(0xe0, 0x50, 0x48);
+    for (i, (glyph, color, tip)) in [
+        (icon::PLAY, green, "Play physics"),
+        (icon::PAUSE, theme.text, "Pause"),
+        (icon::STOP, red, "Stop and reset"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cell = egui::Rect::from_min_size(group.min + Vec2::new(1.0 + i as f32 * seg.x, 0.0), seg);
+        let resp = ui
+            .interact(cell, ui.id().with(("play", i)), Sense::click())
+            .on_hover_text(tip);
+        if resp.hovered() {
+            p.rect_filled(cell.shrink(2.0), theme.control_radius as f32, theme.control);
+        }
+        if i > 0 {
+            p.vline(
+                cell.left(),
+                (cell.top() + 5.0)..=(cell.bottom() - 5.0),
+                egui::Stroke::new(1.0, theme.control),
+            );
+        }
+        p.text(
+            cell.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(15.0),
+            color,
+        );
+    }
 }

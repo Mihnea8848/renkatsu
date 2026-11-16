@@ -62,9 +62,9 @@ impl Panel {
 pub fn default_layout(top_bar: TopBar) -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
     let surface = state.main_surface_mut();
-    let [left, right] = surface.split_right(NodeIndex::root(), 0.76, vec![Panel::Outliner]);
+    let [left, right] = surface.split_right(NodeIndex::root(), 0.8, vec![Panel::Outliner]);
     surface.split_below(right, 0.42, vec![Panel::Properties]);
-    let [top, _] = surface.split_below(left, 0.70, vec![Panel::Content, Panel::Console, Panel::Timeline]);
+    let [top, _] = surface.split_below(left, 0.76, vec![Panel::Content, Panel::Console, Panel::Timeline]);
     // Unreal's modes keep the active mode's tools in a panel on the left.
     if top_bar.has_tools_panel() {
         surface.split_left(top, 0.2, vec![Panel::Tools]);
@@ -80,6 +80,18 @@ pub fn open(state: &mut DockState<Panel>, panel: Panel) {
     let _ = SurfaceIndex::main();
 }
 
+/// What the viewport's overlays show, kept between frames.
+pub struct Overlays {
+    /// Index into `toolbar::MODES`.
+    pub mode: usize,
+    /// The active mode's tool palette is open.
+    pub palette: bool,
+    /// The mode rail is shown; folded it is a thin edge.
+    pub rail: bool,
+    /// Every overlay is hidden.
+    pub hidden: bool,
+}
+
 pub struct Viewer<'a> {
     pub theme: &'a Theme,
     pub viewport_image: Option<&'a TextureHandle>,
@@ -87,6 +99,7 @@ pub struct Viewer<'a> {
     pub type_icons: TypeIcons,
     pub palette: TypePalette,
     pub top_bar: TopBar,
+    pub overlays: &'a mut Overlays,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -185,6 +198,21 @@ impl Viewer<'_> {
             );
         }
         let overlay = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 235);
+        // The backtick key hides every overlay, for a clean viewport.
+        if ui.input(|i| i.key_pressed(egui::Key::Backtick)) {
+            self.overlays.hidden = !self.overlays.hidden;
+        }
+        if self.overlays.hidden {
+            ui.painter().text(
+                full.right_top() + Vec2::new(-10.0, 10.0),
+                egui::Align2::RIGHT_TOP,
+                "Press ` to show the tools",
+                egui::FontId::proportional(11.0),
+                t.text_dim,
+            );
+            ui.allocate_rect(full, egui::Sense::click_and_drag());
+            return;
+        }
 
         // Top row: the selection and what can be done with it, then the view.
         let bar_h = t.row + 8.0;
@@ -222,92 +250,108 @@ impl Viewer<'_> {
             }
         });
 
-        // Left: the named mode rail.
-        let rail_w = 58.0;
+        // Left: the named mode rail, which can fold to a thin edge.
+        let rail_w = if self.overlays.rail { 58.0 } else { 14.0 };
         let rail = egui::Rect::from_min_max(
             egui::pos2(full.left(), bar.bottom()),
             egui::pos2(full.left() + rail_w, full.bottom()),
         );
         ui.painter().rect_filled(rail, 0.0, overlay(t.header));
-        let active = 2;
-        for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
-            let cell = egui::Rect::from_min_size(
-                rail.min + Vec2::new(0.0, 4.0 + i as f32 * 54.0),
-                Vec2::new(rail_w, 54.0),
-            );
-            let p = ui.painter();
-            if i == active {
-                p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.control);
+        if self.overlays.rail {
+            for (i, (g, name)) in crate::toolbar::MODES.iter().enumerate() {
+                let cell = egui::Rect::from_min_size(
+                    rail.min + Vec2::new(0.0, 4.0 + i as f32 * 54.0),
+                    Vec2::new(rail_w, 54.0),
+                );
+                let resp = ui.interact(cell, ui.id().with(("mode", i)), egui::Sense::click());
+                if resp.clicked() {
+                    // The active mode again folds its tools away.
+                    if self.overlays.mode == i {
+                        self.overlays.palette = !self.overlays.palette;
+                    } else {
+                        self.overlays.mode = i;
+                        self.overlays.palette = true;
+                    }
+                }
+                let on = i == self.overlays.mode;
+                let p = ui.painter();
+                if on {
+                    p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.control);
+                } else if resp.hovered() {
+                    p.rect_filled(cell.shrink2(Vec2::new(6.0, 3.0)), t.control_radius as f32, t.panel);
+                }
+                let color = if on { Color32::WHITE } else { t.text_dim };
+                p.text(
+                    cell.center() - Vec2::new(0.0, 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    *g,
+                    egui::FontId::proportional(19.0),
+                    color,
+                );
+                p.text(
+                    cell.center() + Vec2::new(0.0, 13.0),
+                    egui::Align2::CENTER_CENTER,
+                    *name,
+                    egui::FontId::proportional(10.5),
+                    color,
+                );
             }
-            let color = if i == active { Color32::WHITE } else { t.text_dim };
-            p.text(
-                cell.center() - Vec2::new(0.0, 8.0),
-                egui::Align2::CENTER_CENTER,
-                *g,
-                egui::FontId::proportional(19.0),
-                color,
-            );
-            p.text(
-                cell.center() + Vec2::new(0.0, 13.0),
-                egui::Align2::CENTER_CENTER,
-                *name,
-                egui::FontId::proportional(10.5),
-                color,
-            );
         }
+        let chevron = egui::Rect::from_min_size(egui::pos2(rail.left(), rail.bottom() - 26.0), Vec2::new(rail_w, 26.0));
+        let resp = ui
+            .interact(chevron, ui.id().with("rail"), egui::Sense::click())
+            .on_hover_text(if self.overlays.rail {
+                "Fold the modes away"
+            } else {
+                "Show the modes"
+            });
+        if resp.clicked() {
+            self.overlays.rail = !self.overlays.rail;
+        }
+        let glyph = if self.overlays.rail {
+            icon::CARET_DOUBLE_LEFT
+        } else {
+            icon::CARET_DOUBLE_RIGHT
+        };
+        ui.painter().text(
+            chevron.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(13.0),
+            if resp.hovered() { Color32::WHITE } else { t.text_dim },
+        );
 
-        // The active mode's tools, beside the rail.
-        let pal_w = 210.0;
-        let pal = egui::Rect::from_min_max(
-            egui::pos2(rail.right() + 1.0, rail.top()),
-            egui::pos2(rail.right() + 1.0 + pal_w, full.bottom()),
-        );
-        ui.painter().rect_filled(pal, 0.0, overlay(t.panel));
-        let mut tools = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(pal.shrink(10.0))
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        tools.label(RichText::new("Pose").size(15.0).color(Color32::WHITE));
-        tools.add_space(6.0);
-        for (section, items) in [
-            (
-                "Edit",
-                [
-                    (icon::BONE, "Forward kinematics"),
-                    (icon::TARGET, "Inverse kinematics"),
-                    (icon::FLIP_HORIZONTAL, "Mirror pose"),
-                ],
-            ),
-            (
-                "Library",
-                [
-                    (icon::BOOKMARKS_SIMPLE, "Load pose"),
-                    (icon::BOOKMARK_SIMPLE, "Save pose"),
-                    (icon::ARROW_U_UP_LEFT, "Reset pose"),
-                ],
-            ),
-            (
-                "Body",
-                [
-                    (icon::HAND, "Hands"),
-                    (icon::SMILEY, "Expression"),
-                    (icon::EYE, "Look at camera"),
-                ],
-            ),
-        ] {
-            tools.label(RichText::new(section).size(11.5).color(t.text_dim));
-            for (g, label) in items {
-                let _ = tool_row(&mut tools, t, g, label);
-            }
+        // The active mode's tools, beside the rail, while they are open.
+        let mut strip_left = rail.right();
+        let tools_of = mode_tools(self.overlays.mode);
+        if self.overlays.rail && self.overlays.palette && !tools_of.1.is_empty() {
+            let pal = egui::Rect::from_min_max(
+                egui::pos2(rail.right() + 1.0, rail.top()),
+                egui::pos2(rail.right() + 1.0 + 210.0, full.bottom()),
+            );
+            ui.painter().rect_filled(pal, 0.0, overlay(t.panel));
+            let mut tools = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(pal.shrink(10.0))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            tools.label(RichText::new(tools_of.0).size(15.0).color(Color32::WHITE));
             tools.add_space(6.0);
+            for (section, items) in tools_of.1 {
+                tools.label(RichText::new(*section).size(11.5).color(t.text_dim));
+                for (g, label) in *items {
+                    let _ = tool_row(&mut tools, t, g, label);
+                }
+                tools.add_space(6.0);
+            }
+            strip_left = pal.right();
         }
 
-        // The transform tools, floating just right of the palette.
+        // The transform tools, floating just right of whatever is open.
         tool_strip(
             ui,
             t,
-            egui::Rect::from_min_max(egui::pos2(pal.right(), pal.top()), full.max),
+            egui::Rect::from_min_max(egui::pos2(strip_left, rail.top()), full.max),
         );
         ui.allocate_rect(full, egui::Sense::click_and_drag());
     }
@@ -729,4 +773,78 @@ fn tool_row(ui: &mut Ui, t: &Theme, glyph: &str, label: &str) -> egui::Response 
         color,
     );
     resp
+}
+
+type ToolSection = (&'static str, &'static [(&'static str, &'static str)]);
+
+/// The title and tool sections of a mode; empty for modes without tools.
+fn mode_tools(mode: usize) -> (&'static str, &'static [ToolSection]) {
+    match mode {
+        1 => (
+            "Character",
+            &[
+                (
+                    "Card",
+                    &[
+                        (icon::IDENTIFICATION_CARD, "Load card"),
+                        (icon::SWAP, "Replace"),
+                        (icon::ARROWS_COUNTER_CLOCKWISE, "Reload"),
+                    ],
+                ),
+                (
+                    "Wear",
+                    &[
+                        (icon::T_SHIRT, "Outfit"),
+                        (icon::SNEAKER, "Shoes"),
+                        (icon::DIAMOND, "Accessories"),
+                    ],
+                ),
+                ("Face", &[(icon::SMILEY, "Expression"), (icon::EYE, "Gaze")]),
+            ],
+        ),
+        2 => (
+            "Pose",
+            &[
+                (
+                    "Edit",
+                    &[
+                        (icon::BONE, "Forward kinematics"),
+                        (icon::TARGET, "Inverse kinematics"),
+                        (icon::FLIP_HORIZONTAL, "Mirror pose"),
+                    ],
+                ),
+                (
+                    "Library",
+                    &[
+                        (icon::BOOKMARKS_SIMPLE, "Load pose"),
+                        (icon::BOOKMARK_SIMPLE, "Save pose"),
+                        (icon::ARROW_U_UP_LEFT, "Reset pose"),
+                    ],
+                ),
+                (
+                    "Body",
+                    &[
+                        (icon::HAND, "Hands"),
+                        (icon::SMILEY, "Expression"),
+                        (icon::EYE, "Look at camera"),
+                    ],
+                ),
+            ],
+        ),
+        3 => (
+            "Light",
+            &[
+                ("Lights", &[(icon::LIGHTBULB, "Add light"), (icon::SUN, "Key light")]),
+                (
+                    "Effects",
+                    &[
+                        (icon::CIRCLE_HALF, "Ambient occlusion"),
+                        (icon::SPARKLE, "Bloom"),
+                        (icon::APERTURE, "Depth of field"),
+                    ],
+                ),
+            ],
+        ),
+        _ => ("", &[]),
+    }
 }

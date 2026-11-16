@@ -43,6 +43,12 @@ struct Cli {
     /// How object types show in lists.
     #[arg(long, value_enum, default_value = "glyph")]
     type_icons: TypeIcons,
+    /// Start with the mode's tool palette folded away.
+    #[arg(long)]
+    palette_closed: bool,
+    /// Start with every viewport overlay hidden.
+    #[arg(long)]
+    overlays_hidden: bool,
     /// Colours of the object types.
     #[arg(long, value_enum, default_value = "muted")]
     palette: TypePalette,
@@ -57,6 +63,7 @@ struct Studio {
     screenshot: Option<PathBuf>,
     frames: u32,
     look: Appearance,
+    overlays: panels::Overlays,
 }
 
 impl Studio {
@@ -99,6 +106,12 @@ impl Studio {
                 tabs: cli.tabs,
                 type_icons: cli.type_icons,
                 palette: cli.palette,
+            },
+            overlays: panels::Overlays {
+                mode: 2,
+                palette: !cli.palette_closed,
+                rail: true,
+                hidden: cli.overlays_hidden,
             },
         };
         studio.apply_theme(&cc.egui_ctx);
@@ -263,6 +276,7 @@ impl eframe::App for Studio {
                     type_icons: self.look.type_icons,
                     palette: self.look.palette,
                     top_bar: self.look.top_bar,
+                    overlays: &mut self.overlays,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
