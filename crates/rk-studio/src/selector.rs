@@ -765,27 +765,15 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     if side_row(ui, k, open, icon::FOLDER_OPEN, "Open project", "Ctrl+O", false) {
         act = Some(Act::OpenOther);
     }
-    // A newer Renkatsu, as the check at start found.
-    if let Some(release) = &sel.update {
-        let row = open.translate(Vec2::new(0.0, 44.0));
-        if side_row(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", "", false) {
-            act = Some(Act::OpenUrl(release.url.clone()));
-        }
-        line(
-            ui,
-            Pos2::new(side.left() + 18.0, row.bottom() + 2.0),
-            SIDE - 32.0,
-            &format!("Renkatsu {} is out", release.version),
-            k.small(),
-            t.accent,
-        );
-    }
+    // A newer Renkatsu sits just above the version, and the rows of the
+    // foot of the column move up by one to make room.
+    let lift = if sel.update.is_some() { 54.0 } else { 0.0 };
     // Packages bring content for every project. Without the game and
     // without Starter Content there are no characters at all, so the
     // window offers to get it, and says how large the download is.
     let offer = sel.offer.clone();
     let packages = Rect::from_min_size(
-        Pos2::new(side.left(), side.bottom() - 138.0),
+        Pos2::new(side.left(), side.bottom() - 138.0 - lift),
         Vec2::new(SIDE - 1.0, 36.0),
     );
     if side_row(ui, k, packages, icon::PACKAGE, "Packages", "", false) {
@@ -821,7 +809,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     // Koikatsu cards are built from the user's own install. Renkatsu works
     // without it; the folder only adds Koikatsu characters.
     let game = Rect::from_min_size(
-        Pos2::new(side.left(), side.bottom() - 84.0),
+        Pos2::new(side.left(), side.bottom() - 84.0 - lift),
         Vec2::new(SIDE - 1.0, 36.0),
     );
     let (glyph_name, text) = match &sel.game {
@@ -843,6 +831,23 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         k.small(),
         color,
     );
+    if let Some(release) = &sel.update {
+        let row = Rect::from_min_size(
+            Pos2::new(side.left(), side.bottom() - 84.0),
+            Vec2::new(SIDE - 1.0, 36.0),
+        );
+        if side_row(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", "", false) {
+            act = Some(Act::OpenUrl(release.url.clone()));
+        }
+        line(
+            ui,
+            Pos2::new(side.left() + 18.0, row.bottom() + 2.0),
+            SIDE - 32.0,
+            &format!("Renkatsu {} is out", release.version),
+            k.small(),
+            t.accent,
+        );
+    }
     ui.painter().text(
         Pos2::new(side.left() + 18.0, side.bottom() - 18.0),
         Align2::LEFT_CENTER,
