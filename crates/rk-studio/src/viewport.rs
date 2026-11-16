@@ -28,7 +28,7 @@ pub enum RailShape {
 }
 
 /// Draws the viewport into the space left in `ui`. `header` is the free
-/// part of the viewport's tab row, which one design uses for the selection
+/// part of the viewport's tab row, which some designs use for the selection
 /// bar; without it that bar is drawn over the picture's top edge.
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     let full = ui.available_rect_before_wrap();
@@ -53,9 +53,16 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     if st.overlays_hidden {
         match header {
             // The header row keeps its eye button, which brings them back.
-            Some(header) => in_header(ui, header, |ui| bar_contents(ui, k, st, header)),
+            Some(header) if k.d.overlays == Overlays::Header => {
+                in_header(ui, header, |ui| bar_contents(ui, k, st, header));
+            }
             // Otherwise one small handle stays, so the tools can be found.
-            None => {
+            // A selection bar in the header row is not over the picture
+            // and stays as well.
+            _ => {
+                if let Some(header) = header {
+                    in_header(ui, header, |ui| context_row(ui, k, st, header));
+                }
                 let handle = Rect::from_min_size(
                     Pos2::new(full.right() - 10.0 - k.field(), full.top() + 10.0),
                     Vec2::splat(k.field()),
@@ -75,6 +82,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
             Overlays::Docked => docked(ui, k, st, full),
             Overlays::Floating => floating(ui, k, st, full),
             Overlays::Header => clean(ui, k, st, full, header),
+            Overlays::Blocks => blocks(ui, k, st, full, header),
         }
     }
     ui.allocate_rect(full, Sense::hover());
@@ -163,6 +171,28 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
 /// tool strip, the selection bar and the view options along the top, the
 /// rail below the strip and the palette beside the rail.
 fn floating(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
+    floating_blocks(ui, k, st, full, true);
+}
+
+/// The floating blocks with the selection bar built into the top: in the
+/// viewport's header row, or without one in a bar along the top edge.
+fn blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>) {
+    let mut area = full;
+    match header {
+        Some(header) => in_header(ui, header, |ui| context_row(ui, k, st, header)),
+        None => {
+            let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), k.d.row + 8.0));
+            ui.painter().rect_filled(bar, 0.0, glass(k));
+            context_row(ui, k, st, bar);
+            area.min.y = bar.bottom();
+        }
+    }
+    floating_blocks(ui, k, st, area, false);
+}
+
+/// The blocks over `full`. `selection` adds the selection bar as a block
+/// of its own.
+fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection: bool) {
     let m = 8.0;
     let h = k.d.row + 6.0;
     let top = full.top() + m;
@@ -188,7 +218,7 @@ fn floating(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
     set_block(ui, k, slot, view);
 
     // The selection bar, centred when there is room for it.
-    if st.selection().is_some() {
+    if selection && st.selection().is_some() {
         let id = ui.id().with("context-width");
         let known: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(420.0);
         let w = known + 16.0;
@@ -285,6 +315,20 @@ fn bar_contents(ui: &mut Ui, k: &Look, st: &mut State, bar: Rect) {
     left.spacing_mut().item_spacing.x = 2.0;
     left.add_space(4.0);
     context_items(&mut left, k, st);
+}
+
+/// The selection and its actions alone, from the left of `bar`.
+fn context_row(ui: &mut Ui, k: &Look, st: &mut State, bar: Rect) {
+    let inner = bar.shrink2(Vec2::new(8.0, 0.0));
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.set_clip_rect(row.clip_rect().intersect(inner));
+    row.spacing_mut().item_spacing.x = 2.0;
+    row.add_space(4.0);
+    context_items(&mut row, k, st);
 }
 
 /// A piece of text in a bar, centred on the row.

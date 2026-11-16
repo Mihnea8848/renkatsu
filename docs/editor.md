@@ -100,7 +100,10 @@ Three more things lie over the viewport:
 - The transform tool strip, as Unity's tool overlay: view, select, move,
   rotate, scale, pose.
 - The selection bar: the selected object and the actions that fit its kind
-  (a character offers Load card, Outfit, Expression, Modules).
+  (a character offers Load card, Outfit, Expression, Modules). In the
+  default design it sits in the viewport's header row, not over the
+  picture, and falls back to a bar along the viewport's top edge when the
+  viewport has no header row.
 - The view options: camera, shading, snapping.
 
 All of it gets out of the way:
@@ -149,8 +152,14 @@ duplicate, Delete delete, H hide. Every action can be rebound.
 
 egui with egui_dock for docking and egui-wgpu to draw the viewport on the
 renderer's own device. The theme is a set of tokens applied to egui's style,
-and the designs still being compared are sets of sizes and arrangements
-in `crates/rk-studio/src/design.rs`, chosen with `--design`.
+and a design is a set of sizes and arrangements in
+`crates/rk-studio/src/design.rs`, chosen with `--design`. The default, D,
+combines the three designs compared before it: the filled panel tabs with
+icons and the Details rows of A, the floating blocks of B over the viewport
+(tool strip, mode rail with its palette beside it, view options), the
+Outliner of C with indent guides and visibility at the right edge, and the
+selection bar in the viewport's own header row beside its tab. A, B and C
+stay available for comparison.
 
 ## Order of work
 

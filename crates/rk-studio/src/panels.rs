@@ -6,7 +6,7 @@
 //! Timeline along the bottom. Their content is placeholder until the scene
 //! model exists; the shell is for judging layout and look.
 
-use crate::design::{Overlays, Tabs, Tree};
+use crate::design::{Tabs, Tree};
 use crate::kinds::Kind;
 use crate::properties;
 use crate::state::{has_children, Look, State, SCENE};
@@ -208,10 +208,10 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl Viewer<'_> {
-    /// The free part of the tab row above the viewport, for the design
-    /// that puts the selection bar there.
+    /// The free part of the tab row above the viewport, for the designs
+    /// that put the selection bar there.
     fn viewport_header(&self, ui: &Ui) -> Option<Rect> {
-        if self.k.d.overlays != Overlays::Header {
+        if !self.k.d.overlays.bar_in_header() {
             return None;
         }
         let body = ui.available_rect_before_wrap();

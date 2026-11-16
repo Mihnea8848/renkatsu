@@ -36,7 +36,7 @@ enum Bottom {
 #[command(name = "renkatsu", version, about = "Renkatsu Studio")]
 struct Cli {
     /// The design to show.
-    #[arg(long, value_enum, default_value = "a")]
+    #[arg(long, value_enum, default_value = "d")]
     design: Design,
     /// Picture to show in the viewport until the live viewport exists.
     #[arg(long)]

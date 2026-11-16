@@ -3,7 +3,8 @@
 
 //! The complete designs offered for comparison. They share the theme, the
 //! layout and every feature; a design decides sizes and how the parts are
-//! drawn and arranged. Once one is chosen the others can be removed.
+//! drawn and arranged. D is the chosen mix of the first three, which stay
+//! for comparison until they are removed.
 
 use clap::ValueEnum;
 
@@ -18,6 +19,10 @@ pub enum Design {
     /// Clean viewport: the mode rail is part of the window, the selection
     /// bar lives in the viewport's header row, panel titles are underlined.
     C,
+    /// The three combined: the tabs and Details rows of A, the floating
+    /// blocks of B, the Outliner of C, and the selection bar in the
+    /// viewport's header row.
+    D,
 }
 
 /// How the tabs of docked panels are drawn.
@@ -41,6 +46,16 @@ pub enum Overlays {
     /// The rail at the window's left edge, the selection bar in the
     /// viewport's header row.
     Header,
+    /// Separate blocks floating over the viewport, except the selection
+    /// bar, which lives in the viewport's header row.
+    Blocks,
+}
+
+impl Overlays {
+    /// The selection bar belongs to the viewport's header row.
+    pub fn bar_in_header(self) -> bool {
+        matches!(self, Overlays::Header | Overlays::Blocks)
+    }
 }
 
 /// How the Properties panel lays out its sections and rows.
@@ -89,7 +104,7 @@ pub struct Spec {
 
 impl Design {
     #[cfg(test)]
-    pub const ALL: [Design; 3] = [Design::A, Design::B, Design::C];
+    pub const ALL: [Design; 4] = [Design::A, Design::B, Design::C, Design::D];
 
     pub fn spec(self) -> Spec {
         match self {
@@ -136,6 +151,21 @@ impl Design {
                 tab_icons: false,
                 overlays: Overlays::Header,
                 props: Props::Joined,
+                tree: Tree::Guides,
+            },
+            Design::D => Spec {
+                name: "D, combined",
+                text: 13.0,
+                small: 11.0,
+                row: 24.0,
+                menu_height: 34.0,
+                tab_height: 28.0,
+                status_height: 24.0,
+                separator: 2.0,
+                tabs: Tabs::Filled,
+                tab_icons: true,
+                overlays: Overlays::Blocks,
+                props: Props::Details,
                 tree: Tree::Guides,
             },
         }
