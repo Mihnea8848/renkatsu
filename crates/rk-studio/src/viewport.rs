@@ -404,10 +404,6 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             {
                 st.ask(Command::ImportCard, ui.ctx());
             }
-        } else if *text == "Wear" {
-            egui::Popup::menu(&resp)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| wear_menu(ui, k, st));
         } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(format!("{text} arrives with its feature")).color(k.t.text_dim));
@@ -416,11 +412,12 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 }
 
-/// The Wear menu of a character: what it has on, and in which state.
-fn wear_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+/// The Clothing menu of the selected character: what it has on, and in
+/// which state; a click on a piece cycles it, and the menu stays open.
+fn clothing_menu(ui: &mut Ui, k: &Look, st: &mut State) {
     use crate::scene::Content;
     use rk_chara::clothes_state as cs;
-    widgets::menu_sub(ui, k, icon::T_SHIRT, "Clothing", |ui| {
+    {
         ui.set_min_width(220.0);
         let Some(mut object) = st.doc.selection().cloned() else {
             return;
@@ -482,13 +479,6 @@ fn wear_menu(ui: &mut Ui, k: &Look, st: &mut State) {
         if *clothes != before {
             st.doc.edit(object, false);
         }
-    });
-    ui.separator();
-    for later in ["Outfit", "Accessories"] {
-        ui.add_enabled(false, egui::Button::new(later))
-            .on_disabled_hover_text(format!(
-                "{later} arrives with its feature. The outfit is chosen in Properties."
-            ));
     }
 }
 
@@ -777,7 +767,15 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
                 let on = st.mode_tool[st.mode] == index;
-                if widgets::tool_row(ui, k, row, id, g, name, on).clicked() {
+                let resp = widgets::tool_row(ui, k, row, id, g, name, on);
+                if *name == "Clothing" {
+                    // Opens the clothing of the selected character beside
+                    // the palette, rather than becoming the mode's tool.
+                    egui::Popup::menu(&resp)
+                        .align(egui::RectAlign::RIGHT_START)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| clothing_menu(ui, k, st));
+                } else if resp.clicked() {
                     st.mode_tool[st.mode] = index;
                 }
             }

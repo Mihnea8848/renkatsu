@@ -89,6 +89,7 @@ pub const MODES: [Mode; 6] = [
             (
                 "Wear",
                 &[
+                    (icon::COAT_HANGER, "Clothing"),
                     (icon::T_SHIRT, "Outfit"),
                     (icon::SNEAKER, "Shoes"),
                     (icon::DIAMOND, "Accessories"),
@@ -221,10 +222,9 @@ pub fn actions(kind: Kind) -> &'static [Action] {
             (icon::FLOPPY_DISK, "Save scene", false),
         ],
         Kind::Character => &[
+            // Outfit, clothing and expressions live in the Character
+            // mode's palette; the bar keeps what matters most.
             (icon::IDENTIFICATION_CARD, "Load card", false),
-            (icon::T_SHIRT, "Outfit", true),
-            (icon::COAT_HANGER, "Wear", true),
-            (icon::SMILEY, "Expression", true),
             (icon::PUZZLE_PIECE, "Modules", true),
         ],
         Kind::Outfit => &[
