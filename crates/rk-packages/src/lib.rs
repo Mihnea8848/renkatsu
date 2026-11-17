@@ -36,6 +36,8 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The id of the package with the characters of Starter Content.
 pub const STARTER_CHARACTERS: &str = "starter-characters";
+/// The package that holds CharaStudio's poses and animations.
+pub const STARTER_POSES: &str = "starter-poses";
 
 /// What a long piece of work is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,10 +12,12 @@ use crate::camera::{Focus, Orbit, ViewCamera};
 use crate::mods::Games;
 use crate::project::Project;
 use crate::scene::{Content, ObjectId, Scene, Transform};
-use crate::state::{Log, Physics};
+use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
+use rk_chara::clothes_state::{self as cs, States};
+use rk_chara::motion::{self, Bound, Motion};
 use rk_chara::scene::Trs;
 use rk_chara::Image;
 use rk_render::{bounds, Camera, Environment, Renderer, StudioEffects};
@@ -51,6 +53,63 @@ struct Actor {
     applied: Option<Transform>,
     /// How many outfits the card has.
     outfits: usize,
+    /// The clothes states the character was last brought to.
+    clothes: States,
+    /// The animation of the scene the actor last looked for, by bundle,
+    /// controller and state.
+    pose: Option<[String; 3]>,
+    /// That animation, when it could be read.
+    playing: Option<Playing>,
+    /// Why it could not be read.
+    pose_problem: Option<String>,
+    /// The point of the animation the bones were last posed at.
+    phase: Option<f32>,
+}
+
+/// An animation bound to an actor's bones.
+struct Playing {
+    motion: Motion,
+    bound: Bound,
+}
+
+impl Playing {
+    /// Whether the animation holds one pose: it does not loop and is as
+    /// short as the game's fixed poses.
+    fn is_static(&self) -> bool {
+        !self.motion.loops() && self.motion.duration() <= rk_chara::poses::POSE_SECONDS
+    }
+
+    /// The point of the animation that shows at the scene's time. A static
+    /// pose shows its last frame, which is where the game leaves it.
+    fn phase(&self, pose: &crate::scene::Pose, time: f32) -> f32 {
+        if self.is_static() {
+            return 1.0;
+        }
+        self.motion
+            .phase(self.motion.normalized(pose.start, time, pose.speed), pose.force_loop)
+    }
+}
+
+/// The scene's time for one frame: the transport before and now, the
+/// seconds since the last frame and the seconds played since the stop.
+#[derive(Debug, Clone, Copy)]
+pub struct Clock {
+    pub was: Playback,
+    pub now: Playback,
+    pub dt: f32,
+    pub time: f32,
+}
+
+impl Clock {
+    /// A scene that stands still.
+    pub fn stopped() -> Clock {
+        Clock {
+            was: Playback::Stopped,
+            now: Playback::Stopped,
+            dt: 0.0,
+            time: 0.0,
+        }
+    }
 }
 
 impl Actor {
@@ -88,13 +147,133 @@ impl Actor {
         }
         self.applied = None;
     }
+
+    /// Brings the character in line with its object for one frame: the
+    /// clothes states, the pose or animation, the place, and the physics.
+    /// `game` reads an animation that is not loaded yet. Returns whether
+    /// the character moved as a whole.
+    fn update(
+        &mut self,
+        object: &crate::scene::Object,
+        game: &mut dyn FnMut() -> Result<Motion>,
+        clock: &Clock,
+        log: &mut Log,
+    ) -> bool {
+        let Content::Character {
+            simulate,
+            clothes,
+            pose,
+            ..
+        } = &object.content
+        else {
+            return false;
+        };
+        // What has to be posed again from the start.
+        let mut again = clock.was != Playback::Stopped && clock.now == Playback::Stopped;
+
+        // The states the scene asks for, as far as the outfit has them.
+        let states = cs::fitted(clothes, &self.chara.clothes.worn);
+        if states != self.clothes {
+            self.chara.set_clothes(&states);
+            self.clothes = states;
+            again = true;
+        }
+
+        let key = pose
+            .as_ref()
+            .map(|p| [p.bundle.clone(), p.controller.clone(), p.state.clone()]);
+        if key != self.pose {
+            self.pose = key;
+            self.playing = None;
+            self.pose_problem = None;
+            if let Some(pose) = pose {
+                match game() {
+                    Ok(motion) => {
+                        let bound = motion.bind(&motion::Skeleton::of(&self.chara.scene, self.chara.animator));
+                        self.playing = Some(Playing { motion, bound });
+                    }
+                    Err(e) => {
+                        let why = format!("{e:#}");
+                        log.error(format!(
+                            "{}: the pose {} could not be read: {why}",
+                            object.name, pose.name
+                        ));
+                        self.pose_problem = Some(why);
+                    }
+                }
+            }
+            // Stiletto's flags go by the animation.
+            let named = pose.as_ref().filter(|_| self.playing.is_some());
+            if let Some(heels) = &mut self.chara.heels {
+                heels.animation(named.map(|p| p.controller.as_str()), named.map(|p| p.state.as_str()));
+            }
+            // The bones the last animation wrote go back to where they
+            // were loaded.
+            self.back_to_rest();
+            self.chara.refresh_heels(&states);
+            again = true;
+        }
+
+        let phase = match (&self.playing, pose) {
+            (Some(playing), Some(pose)) => Some(playing.phase(pose, clock.time)),
+            _ => None,
+        };
+        let running = clock.now == Playback::Playing;
+        if running {
+            // A frame as the game runs it: the physics puts its bones
+            // back, the animation writes, the physics simulates.
+            let moved = self.place(&object.transform, true);
+            if *simulate {
+                self.chara.physics.begin_frame(&mut self.chara.scene);
+            }
+            if let (Some(playing), Some(phase)) = (&self.playing, phase) {
+                self.chara.animate(&playing.bound, phase, &states);
+            }
+            if *simulate {
+                self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
+            }
+            self.phase = phase;
+            return moved;
+        }
+        if !again && phase == self.phase {
+            return self.place(&object.transform, false);
+        }
+        // Nothing plays: the character is posed once and holds still.
+        self.back_to_rest();
+        self.place(&object.transform, false);
+        self.chara.refresh_heels(&states);
+        if let (Some(playing), Some(phase)) = (&self.playing, phase) {
+            self.chara.animate(&playing.bound, phase, &states);
+            self.chara.physics.reset(&self.chara.scene);
+            if *simulate {
+                // Hair and skirts settle on the pose, as they settled on
+                // the character when it was built.
+                for _ in 0..rk_chara::physics::SETTLE_FRAMES {
+                    self.chara.physics.begin_frame(&mut self.chara.scene);
+                    self.chara.animate(&playing.bound, phase, &states);
+                    self.chara
+                        .physics
+                        .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
+                }
+            }
+        }
+        self.phase = phase;
+        true
+    }
 }
 
 /// What the Properties panel shows about a built character.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Built {
     pub outfits: usize,
     pub warnings: usize,
+    /// What the worn clothes say about their states.
+    pub worn: cs::Worn,
+    /// The animation the character is in: whether it holds one pose,
+    /// whether it loops and how long one pass is.
+    pub pose: Option<(bool, bool, f32)>,
+    /// Why the character's pose could not be read.
+    pub pose_problem: Option<String>,
 }
 
 pub struct Live {
@@ -169,6 +348,12 @@ impl Live {
         self.actors.iter().find(|a| a.id == id).map(|a| Built {
             outfits: a.outfits,
             warnings: a.chara.warnings.len(),
+            worn: a.chara.clothes.worn.clone(),
+            pose: a
+                .playing
+                .as_ref()
+                .map(|p| (p.is_static(), p.motion.loops(), p.motion.duration())),
+            pose_problem: a.pose_problem.clone(),
         })
     }
 
@@ -180,21 +365,11 @@ impl Live {
             .map(|(.., why)| why.as_str())
     }
 
-    /// Brings the built characters in line with the scene, and moves the
-    /// physics on by `dt` seconds while it plays. `was` is the physics
-    /// state of the frame before. The scene names its cards relative to
-    /// the project, whose mods `games` opens the game with.
-    #[allow(clippy::too_many_arguments)]
-    pub fn follow(
-        &mut self,
-        scene: &Scene,
-        project: &Project,
-        games: &mut Games,
-        was: Physics,
-        physics: Physics,
-        dt: f32,
-        log: &mut Log,
-    ) {
+    /// Brings the built characters in line with the scene, and moves
+    /// their animations and physics on by the clock while the scene plays.
+    /// The scene names its cards relative to the project, whose mods
+    /// `games` opens the game with.
+    pub fn follow(&mut self, scene: &Scene, project: &Project, games: &mut Games, clock: Clock, log: &mut Log) {
         let wanted: Vec<(ObjectId, Recipe)> = scene
             .objects()
             .iter()
@@ -274,19 +449,24 @@ impl Live {
             }
         }
 
-        let stopped = was != Physics::Stopped && physics == Physics::Stopped;
-        let running = physics == Physics::Playing;
+        let mods = project.mods_dir();
         for actor in &mut self.actors {
             let Some(object) = scene.get(actor.id) else { continue };
-            if stopped {
-                actor.back_to_rest();
-            }
-            if actor.place(&object.transform, running) {
+            let parameters = actor.chara.parameters;
+            let mut read = || -> Result<Motion> {
+                let Content::Character { pose: Some(pose), .. } = &object.content else {
+                    anyhow::bail!("the character has no pose");
+                };
+                motion::load(
+                    games.get(&mods)?,
+                    &pose.bundle,
+                    &pose.controller,
+                    &pose.state,
+                    &parameters,
+                )
+            };
+            if actor.update(object, &mut read, &clock, log) {
                 self.cam.follow(actor.subject());
-            }
-            let simulate = matches!(object.content, Content::Character { simulate: true, .. });
-            if running && simulate {
-                actor.chara.physics.step(&mut actor.chara.scene, dt);
             }
         }
     }
@@ -312,6 +492,11 @@ impl Live {
             distance: (home.eye - home.target).length(),
             applied: None,
             outfits: card.coordinates.len(),
+            clothes: [cs::ON; cs::KINDS],
+            pose: None,
+            playing: None,
+            pose_problem: None,
+            phase: None,
         })
     }
 

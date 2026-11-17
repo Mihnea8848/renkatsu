@@ -538,6 +538,89 @@ pub fn warp_shoe(scene: &mut Scene, renderers: &[usize], heel: &Heel, flags: Fla
     }
 }
 
+/// The bones `pose` moves.
+const POSED: [&str; 11] = [
+    "cf_j_waist02",
+    "cf_j_thigh00_L",
+    "cf_j_thigh00_R",
+    "cf_j_leg01_L",
+    "cf_j_leg01_R",
+    "cf_j_leg03_L",
+    "cf_j_leg03_R",
+    "cf_j_foot_L",
+    "cf_j_foot_R",
+    "cf_j_toes_L",
+    "cf_j_toes_R",
+];
+
+/// A built character's heels, kept so that they can be put on again after
+/// an animation wrote the bones (the plugin does so every frame) and taken
+/// off with the shoes.
+#[derive(Debug, Clone)]
+pub struct Heels {
+    heel: Heel,
+    files: Vec<FlagFile>,
+    settings: Settings,
+    /// The object holding `cf_j_root`.
+    holder: usize,
+    /// The bones `pose` moves and the holder, as they were before it.
+    before: Vec<(usize, crate::scene::Trs)>,
+    /// The flags of the animation that plays.
+    flags: Flags,
+}
+
+impl Heels {
+    /// Notes the bones as they are, before `pose` runs for the first time.
+    pub fn new(
+        scene: &Scene,
+        bones: &HashMap<String, usize>,
+        holder: usize,
+        heel: Heel,
+        config: &Config,
+        flags: Flags,
+    ) -> Heels {
+        let nodes = POSED
+            .iter()
+            .filter_map(|name| bones.get(*name).copied())
+            .chain([holder]);
+        Heels {
+            heel,
+            files: config.flag_files.clone(),
+            settings: config.settings,
+            holder,
+            before: nodes.map(|n| (n, scene.nodes[n].local)).collect(),
+            flags,
+        }
+    }
+
+    /// Looks the flags up for an animation: its controller and state. An
+    /// animation whose flags cannot be worked out keeps the heels off.
+    pub fn animation(&mut self, controller: Option<&str>, state: Option<&str>) {
+        self.flags = flags_for(&self.files, controller, state).unwrap_or_default();
+    }
+
+    /// Puts the bones back as they were without heels. An animation that
+    /// plays writes its bones after this.
+    pub fn reset(&self, scene: &mut Scene) {
+        for (node, local) in &self.before {
+            scene.nodes[*node].local = *local;
+        }
+    }
+
+    /// Puts the heels on, on top of what the bones hold now.
+    pub fn apply(&self, scene: &mut Scene, bones: &HashMap<String, usize>) {
+        pose(
+            scene,
+            bones,
+            self.holder,
+            &self.heel,
+            self.flags,
+            &CustomPose::default(),
+            &self.settings,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

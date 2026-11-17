@@ -1774,6 +1774,14 @@ impl Physics {
 
     /// One rendered frame of `dt` seconds.
     pub fn step(&mut self, scene: &mut Scene, dt: f32) {
+        self.begin_frame(scene);
+        self.end_frame(scene, dt);
+    }
+
+    /// The first half of a frame, the components' `Update`: the bones go
+    /// back to where they were loaded. An animation writes its bones
+    /// after this and before `end_frame`, as Unity's Animator does.
+    pub fn begin_frame(&self, scene: &mut Scene) {
         for b in &self.bones {
             match b {
                 Bone::Dynamic(d) if d.running() => d.init_transforms(scene),
@@ -1781,6 +1789,11 @@ impl Physics {
                 _ => {}
             }
         }
+    }
+
+    /// The second half of a frame, the components' `LateUpdate`: the
+    /// simulation moves on by `dt` seconds and poses the bones.
+    pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
         for b in &mut self.bones {
             match b {
                 Bone::Dynamic(d) if d.running() => d.late_update(scene, &self.colliders, dt),

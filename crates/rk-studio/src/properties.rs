@@ -40,6 +40,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let kind = object.kind();
     header(ui, k, st, kind, &object.name);
     let built = st.live.as_ref().and_then(|live| live.built(object.id));
+    let mut save_pose = false;
     let failure = st
         .live
         .as_ref()
@@ -82,6 +83,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 outfit,
                 outdoor_shoes,
                 simulate,
+                clothes,
+                pose,
             } => {
                 if section(ui, k, st, 1, "Character") {
                     row(ui, k, "Card", None, |ui, rect| {
@@ -102,7 +105,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             st.show_content = true;
                         }
                     });
-                    let outfits: Vec<String> = (1..=built.map_or(1, |b| b.outfits.max(1)))
+                    let outfits: Vec<String> = (1..=built.as_ref().map_or(1, |b| b.outfits.max(1)))
                         .map(|n| format!("Outfit {n}"))
                         .collect();
                     let outfits: Vec<&str> = outfits.iter().map(String::as_str).collect();
@@ -124,7 +127,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             let text = format!("Could not be built: {why}");
                             label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
                         });
-                    } else if let Some(count) = built.map(|b| b.warnings).filter(|n| *n > 0) {
+                    } else if let Some(count) = built.as_ref().map(|b| b.warnings).filter(|n| *n > 0) {
                         row(ui, k, "Warnings", None, |ui, rect| {
                             let text = format!("{count}, listed in the Console");
                             label(
@@ -134,6 +137,158 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                 &text,
                                 t.accent,
                             );
+                        });
+                    }
+                    section_end(ui, k);
+                }
+                if section(ui, k, st, 5, "Clothing") {
+                    use rk_chara::clothes_state as cs;
+                    let worn = built.as_ref().map(|b| b.worn.clone());
+                    let waiting = worn.is_none().then_some("The character is not built");
+                    row(ui, k, "All", waiting, |ui, rect| {
+                        let options = [("All on", true), ("All half off", true), ("All off", true)];
+                        let clicked = choices(ui, k, rect, id.with("clothes all"), None, &options);
+                        if let (Some(i), Some(worn)) = (clicked, &worn) {
+                            cs::set_all(clothes, worn, [cs::ON, cs::HALF, cs::OFF][i]);
+                        }
+                    });
+                    // The pair of shoes that is worn stands for both.
+                    let shoes = if *outdoor_shoes {
+                        (cs::SHOES_OUTDOOR, "Outdoor shoes")
+                    } else {
+                        (cs::SHOES_INDOOR, "Indoor shoes")
+                    };
+                    let rows = [
+                        (cs::TOP, "Top"),
+                        (cs::BOTTOM, "Bottom"),
+                        (cs::BRA, "Bra"),
+                        (cs::SHORTS, "Underwear"),
+                        (cs::GLOVES, "Gloves"),
+                        (cs::PANTYHOSE, "Pantyhose"),
+                        (cs::SOCKS, "Socks"),
+                        shoes,
+                    ];
+                    let kinds = worn.as_ref().map(cs::Worn::kinds).unwrap_or_default();
+                    let shown = worn.as_ref().map_or(*clothes, |w| cs::fitted(clothes, w));
+                    for (kind, name) in rows {
+                        let off = waiting.or((!kinds.is_kind(kind)).then_some("Nothing with states is worn here"));
+                        row(ui, k, name, off, |ui, rect| {
+                            let options = [
+                                ("On", kinds.has(kind, cs::ON)),
+                                ("Half", kinds.has(kind, cs::HALF)),
+                                ("Half 2", kinds.has(kind, cs::HALF_2)),
+                                ("Off", kinds.has(kind, cs::OFF)),
+                            ];
+                            let chosen = Some(usize::from(shown[kind]));
+                            let clicked = choices(ui, k, rect, id.with(("clothes", kind)), chosen, &options);
+                            // A state the piece lacks moves on to the next
+                            // one it has, as CharaStudio's buttons do.
+                            if let (Some(state), Some(worn)) = (clicked, &worn) {
+                                *clothes = shown;
+                                cs::set_state(clothes, worn, kind, state as u8, true);
+                            }
+                        });
+                    }
+                    section_end(ui, k);
+                }
+                if section(ui, k, st, 6, "Pose") {
+                    let playing = built.as_ref().and_then(|b| b.pose);
+                    row(ui, k, "Pose", None, |ui, rect| {
+                        let side = rect.height();
+                        let field =
+                            Rect::from_min_max(rect.min, Pos2::new(rect.right() - 2.0 * (side + 4.0), rect.bottom()));
+                        let name = pose.as_ref().map_or("None, as built", |p| p.name.as_str());
+                        widgets::value_box(ui, k, field, name);
+                        if let Some(p) = pose.as_ref() {
+                            ui.interact(field, id.with("pose"), Sense::hover())
+                                .on_hover_text(format!("{} of {} in {}", p.state, p.controller, p.bundle));
+                        }
+                        let button = |n: f32, name: &str, glyph_text: &str, tip: &str| {
+                            let at = Rect::from_min_size(
+                                Pos2::new(field.right() + 4.0 + n * (side + 4.0), rect.top()),
+                                Vec2::splat(side),
+                            );
+                            let resp = ui.interact(at, id.with(name), Sense::click()).on_hover_text(tip);
+                            let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                            ui.painter().rect_filled(at, k.radius(), fill);
+                            glyph(ui.painter(), k, at.center(), glyph_text, 14.0, k.t.text);
+                            resp.clicked()
+                        };
+                        if button(
+                            0.0,
+                            "browse poses",
+                            icon::FOLDER_OPEN,
+                            "Show the poses in the Content panel",
+                        ) {
+                            st.show_content = true;
+                            st.folder = 1;
+                        }
+                        if button(1.0, "clear pose", icon::X, "Take the pose off") {
+                            *pose = None;
+                        }
+                    });
+                    if let Some(why) = built.as_ref().and_then(|b| b.pose_problem.clone()) {
+                        row(ui, k, "Problem", None, |ui, rect| {
+                            ui.interact(rect, id.with("pose problem"), Sense::hover())
+                                .on_hover_text(&why);
+                            let text = format!("Could not be read: {why}");
+                            label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
+                        });
+                    }
+                    if let Some(p) = pose.as_mut() {
+                        let fixed = playing.is_some_and(|(fixed, ..)| fixed);
+                        row(ui, k, "Kind", None, |ui, rect| {
+                            let text = match playing {
+                                None => "Not read".to_owned(),
+                                Some((true, ..)) => "Static: holds one pose".to_owned(),
+                                Some((_, true, seconds)) => format!("Dynamic: loops every {seconds:.1} s"),
+                                Some((_, false, seconds)) => format!("Dynamic: plays {seconds:.1} s once"),
+                            };
+                            label(
+                                &ui.painter().with_clip_rect(rect),
+                                k,
+                                rect.left_center(),
+                                &text,
+                                t.text_dim,
+                            );
+                        });
+                        let still = fixed.then_some("A static pose does not move");
+                        row(ui, k, "Speed", still, |ui, rect| {
+                            widgets::number(
+                                ui,
+                                k,
+                                rect,
+                                id.with("pose speed"),
+                                &mut p.speed,
+                                Marker::None,
+                                true,
+                                FINE,
+                            );
+                            p.speed = p.speed.clamp(0.0, 4.0);
+                        });
+                        row(ui, k, "Start", still, |ui, rect| {
+                            widgets::number(
+                                ui,
+                                k,
+                                rect,
+                                id.with("pose start"),
+                                &mut p.start,
+                                Marker::None,
+                                true,
+                                FINE,
+                            );
+                            p.start = p.start.clamp(0.0, 1.0);
+                        });
+                        let loops = playing.is_some_and(|(_, loops, _)| loops);
+                        let why = still.or(loops.then_some("The animation loops by itself"));
+                        row(ui, k, "At the end", why, |ui, rect| {
+                            widgets::checkbox(ui, k, rect, id.with("pose loop"), &mut p.force_loop, "Start over");
+                        });
+                        row(ui, k, "Project", None, |ui, rect| {
+                            let options = [("Save to the project's poses", true)];
+                            if choices(ui, k, rect, id.with("save pose"), None, &options).is_some() {
+                                save_pose = true;
+                            }
                         });
                     }
                     section_end(ui, k);
@@ -245,6 +400,54 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
     }
+    if save_pose {
+        st.run(crate::state::Command::SavePose);
+    }
+}
+
+/// Buttons side by side in one box, each with whether it is one of the
+/// things on offer (the others are drawn dim but still take a click). The
+/// one at `chosen` is marked. Returns the button clicked.
+fn choices(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    id: Id,
+    chosen: Option<usize>,
+    options: &[(&str, bool)],
+) -> Option<usize> {
+    widgets::boxed(ui.painter(), rect, k.radius(), k.t.input, k.t.border);
+    let w = (rect.width() - 2.0) / options.len() as f32;
+    let mut clicked = None;
+    for (i, (name, offered)) in options.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new((rect.left() + 1.0 + i as f32 * w).round(), rect.top() + 1.0),
+            Vec2::new(w.round(), rect.height() - 2.0),
+        );
+        let resp = ui.interact(cell, id.with(i), Sense::click());
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+        let p = ui.painter();
+        let on = chosen == Some(i);
+        if on {
+            p.rect_filled(cell.shrink(1.0), (k.radius() - 1.0).max(0.0), k.t.control);
+        } else if resp.hovered() && *offered {
+            p.rect_filled(cell.shrink(1.0), (k.radius() - 1.0).max(0.0), k.t.row_hover);
+        }
+        let color = if on {
+            k.t.text_bright
+        } else if !*offered {
+            k.t.border
+        } else if resp.hovered() {
+            k.t.text_bright
+        } else {
+            k.t.text
+        };
+        p.with_clip_rect(cell)
+            .text(cell.center(), Align2::CENTER_CENTER, *name, k.font(), color);
+    }
+    clicked
 }
 
 /// The selected object at the top of the panel, then the property search.
