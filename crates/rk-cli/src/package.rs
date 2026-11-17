@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// The version of the Starter Content packages this build makes.
 const STARTER_VERSION: &str = "1.1.0";
 /// The version of Starter Content: Animations & Poses this build makes.
-const POSES_VERSION: &str = "1.0.0";
+const POSES_VERSION: &str = "1.1.0";
 /// The release the packages are uploaded to, apart from the app's own.
 const RELEASE: &str = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1";
 /// GitHub takes release files under 2 GB; parts stay well below.
