@@ -467,6 +467,19 @@ pub(crate) fn line(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, col
 /// A boxed button; the primary one of a view is filled with the selection
 /// colour. Returns whether it was clicked.
 pub(crate) fn button(ui: &mut Ui, k: &Look, rect: Rect, text: &str, primary: bool, enabled: bool) -> bool {
+    icon_button(ui, k, rect, None, text, primary, enabled)
+}
+
+/// A button as [`button`], with an icon to the left of its text.
+pub(crate) fn icon_button(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    glyph_name: Option<&str>,
+    text: &str,
+    primary: bool,
+    enabled: bool,
+) -> bool {
     let t = &k.t;
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(rect, ui.id().with(("selector button", text)), sense);
@@ -480,7 +493,20 @@ pub(crate) fn button(ui: &mut Ui, k: &Look, rect: Rect, text: &str, primary: boo
     };
     let p = ui.painter();
     p.rect_filled(rect, k.radius(), fill);
-    p.text(rect.center(), Align2::CENTER_CENTER, text, k.font(), color);
+    match glyph_name {
+        None => {
+            p.text(rect.center(), Align2::CENTER_CENTER, text, k.font(), color);
+        }
+        Some(g) => {
+            // The icon and the text together sit in the middle.
+            let galley = p.layout_no_wrap(text.to_owned(), k.font(), color);
+            let (size, gap) = (16.0, 7.0);
+            let left = rect.center().x - (size + gap + galley.size().x) / 2.0;
+            let y = rect.center().y;
+            glyph(p, k, Pos2::new(left + size / 2.0, y), g, size, color);
+            p.galley(Pos2::new(left + size + gap, y - galley.size().y / 2.0), galley, color);
+        }
+    }
     resp.clicked()
 }
 

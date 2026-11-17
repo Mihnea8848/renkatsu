@@ -30,10 +30,7 @@ pub struct DragFile(pub String);
 /// it is empty.
 fn folder_kind(top: &str) -> (Kind, &'static str) {
     match top {
-        project::CHARACTERS => (
-            Kind::Character,
-            "The project has no characters yet. Import a card to add one.",
-        ),
+        project::CHARACTERS => (Kind::Character, "This project has no characters yet"),
         project::ANIMATIONS => (Kind::Animation, "This project has no animations yet"),
         project::POSES => (Kind::Pose, "Poses made by hand arrive with FK and IK posing"),
         "Maps" => (Kind::Map, "Maps arrive with their feature"),
@@ -84,7 +81,7 @@ fn import_items(ui: &mut Ui, k: &Look, top: &str, asks: &mut Asks) {
             ui.separator();
         }
         project::ANIMATIONS => {
-            if widgets::menu_item(ui, k, icon::DOWNLOAD_SIMPLE, "Import from file here", "", true) {
+            if widgets::menu_item(ui, k, icon::FILE, "Import from file here", "", true) {
                 asks.commands.push(Command::ImportAnimationFile);
             }
             if widgets::menu_item(ui, k, icon::PACKAGE, "Import from package here", "", true) {
@@ -403,7 +400,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// The toolbar of the Animations folder.
 fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
-    if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import from file", false, false)
+    if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false)
         .on_hover_text("Pick an animation file or a zipmod and copy animations from it into the project")
         .clicked()
     {
@@ -548,6 +545,37 @@ fn note(ui: &Ui, k: &Look, area: Rect, text: &str) {
     );
 }
 
+/// What an empty folder shows in its middle: what is missing, why
+/// importing helps, and the two ways in, from a file and from a package.
+fn empty_state(ui: &mut Ui, k: &Look, grid: Rect, title: &str, line: &str, ways: [Command; 2], asks: &mut Asks) {
+    let t = &k.t;
+    let c = grid.center();
+    ui.painter().text(
+        c - Vec2::new(0.0, 34.0),
+        Align2::CENTER_CENTER,
+        title,
+        k.bold(k.d.text + 1.0),
+        t.text_bright,
+    );
+    ui.painter().text(
+        c - Vec2::new(0.0, 12.0),
+        Align2::CENTER_CENTER,
+        line,
+        k.font(),
+        t.text_dim,
+    );
+    let size = Vec2::new(176.0, 30.0);
+    let left = Rect::from_min_size(Pos2::new(c.x - size.x - 5.0, c.y + 12.0), size);
+    let right = Rect::from_min_size(Pos2::new(c.x + 5.0, c.y + 12.0), size);
+    let [file, package] = ways;
+    if crate::selector::icon_button(ui, k, left, Some(icon::FILE), "Import from file", false, true) {
+        asks.commands.push(file);
+    }
+    if crate::selector::icon_button(ui, k, right, Some(icon::PACKAGE), "Import from package", true, true) {
+        asks.commands.push(package);
+    }
+}
+
 /// The project's characters in the open folder, as their cards.
 fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &str, asks: &mut Asks) {
     let t = &k.t;
@@ -574,7 +602,16 @@ fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &
             "This folder has no characters. Drag cards onto it in the tree.",
         );
     } else if cards.is_empty() {
-        note(ui, k, grid, empty);
+        empty_state(
+            ui,
+            k,
+            grid,
+            empty,
+            "Imported cards are copied into the project, with the mods they need.",
+            [Command::ImportCard, Command::ImportFromPackage],
+            asks,
+        );
+        return;
     }
     // Cards are portrait pictures, 252 by 352.
     let thumb = Vec2::new((k.d.row * 2.5).round(), (k.d.row * 2.5 * 352.0 / 252.0).round());
@@ -712,36 +749,20 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
         })
         .collect();
     if here.is_empty() {
-        // Nothing here yet: say so in the middle, with the two ways in.
-        let c = grid.center();
         let text = if st.animations.items.is_empty() {
             "This project has no animations yet"
         } else {
             "This folder has no animations yet"
         };
-        ui.painter().text(
-            c - Vec2::new(0.0, 34.0),
-            Align2::CENTER_CENTER,
+        empty_state(
+            ui,
+            k,
+            grid,
             text,
-            k.bold(k.d.text + 1.0),
-            t.text_bright,
-        );
-        ui.painter().text(
-            c - Vec2::new(0.0, 12.0),
-            Align2::CENTER_CENTER,
             "Imported animations are copied into the project, so it plays them anywhere.",
-            k.font(),
-            t.text_dim,
+            [Command::ImportAnimationFile, Command::ImportAnimations],
+            asks,
         );
-        let size = Vec2::new(170.0, 30.0);
-        let left = Rect::from_min_size(Pos2::new(c.x - size.x - 5.0, c.y + 12.0), size);
-        let right = Rect::from_min_size(Pos2::new(c.x + 5.0, c.y + 12.0), size);
-        if crate::selector::button(ui, k, left, "Import from file", false, true) {
-            asks.commands.push(Command::ImportAnimationFile);
-        }
-        if crate::selector::button(ui, k, right, "Import from package", true, true) {
-            asks.commands.push(Command::ImportAnimations);
-        }
         return;
     }
     if shown.is_empty() {

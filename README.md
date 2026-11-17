@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.6, on the
+The latest version is 0.1.7, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -56,6 +56,10 @@ The latest version is 0.1.6, on the
 - 0.1.6 reads the rest of the game's animations, 5728 in all with a Koikatsu
   folder, and names them in English. Starter Content: Poses is now Starter
   Content: Animations & Poses and carries 3860 of them.
+- 0.1.7 keeps who a character is beside how it looks: the card's name,
+  personality, birthday, club, traits and likes, changed per character in the
+  scene without touching the card. The animation list puts the H scenes' nine
+  groups under one row of their own.
 - Next: posing by hand (FK and IK).
 
 ## Renkatsu Studio

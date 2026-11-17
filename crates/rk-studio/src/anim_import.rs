@@ -22,7 +22,7 @@ use crate::state::{Log, Look, Playback, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, label};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use egui_phosphor::regular as icon;
-use rk_chara::animations::{same_name, Library, Source, Timing};
+use rk_chara::animations::{same_name, Branch, Library, Source, Timing};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,6 +41,8 @@ pub struct Entry {
     pub source: Source,
     /// The source's name as it shows.
     pub source_name: String,
+    /// The H scenes list it, rather than CharaStudio's own menu.
+    pub h: bool,
     pub from: From,
     pub timing: Option<Timing>,
     /// Its place in CharaStudio's list, for the ones that come from it.
@@ -54,6 +56,7 @@ impl Entry {
             group: self.group.clone(),
             category: self.category.clone(),
             source: self.source_name.clone(),
+            h: Some(self.h),
             from: self.from.clone(),
         }
     }
@@ -86,13 +89,33 @@ impl Entry {
     }
 }
 
+/// The row the H scenes' groups sit under, so that they are one thing in
+/// the tree instead of nine spread through CharaStudio's own.
+pub const H_GROUPS: &str = "H Animations";
+
 /// What of the list shows: a source, a group and a category, each or all.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Shown {
     /// One source by its name, or every mod at once.
     pub source: Option<SourceChoice>,
-    pub group: Option<String>,
+    /// One group by its name, or every group the H scenes list.
+    pub group: Option<GroupChoice>,
     pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupChoice {
+    One(String),
+    H,
+}
+
+impl GroupChoice {
+    fn takes(&self, entry: &Entry) -> bool {
+        match self {
+            GroupChoice::One(name) => same_name(name, &entry.group),
+            GroupChoice::H => entry.h,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +140,7 @@ impl Shown {
 
     pub fn takes(&self, entry: &Entry) -> bool {
         self.source_takes(entry)
-            && self.group.as_ref().is_none_or(|g| same_name(g, &entry.group))
+            && self.group.as_ref().is_none_or(|g| g.takes(entry))
             && self.category.as_ref().is_none_or(|c| same_name(c, &entry.category))
     }
 }
@@ -226,41 +249,81 @@ pub fn tree(entries: &[Entry], shown: &Shown, unfolded: &HashSet<String>) -> Vec
         key: "all categories".to_owned(),
         caption: false,
     });
-    let branches = rk_chara::animations::tree_of(of_source.iter().map(|e| (e.group.as_str(), e.category.as_str())));
-    for branch in branches {
-        let key = format!("group {}", branch.name.to_lowercase());
+    // CharaStudio's own groups, each a row of the tree; the H scenes'
+    // groups sit together under one row of their own instead, a step
+    // further in, so that the list opens on the studio's own menu.
+    let (h, own): (Vec<&Entry>, Vec<&Entry>) = of_source.iter().copied().partition(|e| e.h);
+    let named = |of: &[&Entry]| {
+        rk_chara::animations::tree_of(
+            of.iter()
+                .map(|e| (e.group.as_str(), e.category.as_str()))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
+    };
+    for branch in named(&own) {
+        rows.extend(group_rows(&branch, 0, &shown.source, unfolded));
+    }
+    if !h.is_empty() {
+        let key = "group h scenes".to_owned();
         let open = unfolded.contains(&key);
         rows.push(Node {
             depth: 0,
-            label: branch.name.clone(),
-            count: branch.count,
+            label: H_GROUPS.to_owned(),
+            count: h.len(),
             shows: Shown {
                 source: shown.source.clone(),
-                group: Some(branch.name.clone()),
+                group: Some(GroupChoice::H),
                 category: None,
             },
             parent: true,
             key,
             caption: false,
         });
-        if !open {
-            continue;
+        if open {
+            for branch in named(&h) {
+                rows.extend(group_rows(&branch, 1, &shown.source, unfolded));
+            }
         }
-        for (category, count) in branch.categories {
-            rows.push(Node {
-                depth: 1,
-                key: format!("category {} {}", branch.name.to_lowercase(), category.to_lowercase()),
-                shows: Shown {
-                    source: shown.source.clone(),
-                    group: Some(branch.name.clone()),
-                    category: Some(category.clone()),
-                },
-                label: category,
-                count,
-                parent: false,
-                caption: false,
-            });
-        }
+    }
+    rows
+}
+
+/// One group's rows: the group itself, and its categories a step
+/// further in while it is unfolded.
+fn group_rows(branch: &Branch, depth: usize, source: &Option<SourceChoice>, unfolded: &HashSet<String>) -> Vec<Node> {
+    let key = format!("group {}", branch.name.to_lowercase());
+    let group = Some(GroupChoice::One(branch.name.clone()));
+    let mut rows = vec![Node {
+        depth,
+        label: branch.name.clone(),
+        count: branch.count,
+        shows: Shown {
+            source: source.clone(),
+            group: group.clone(),
+            category: None,
+        },
+        parent: true,
+        key: key.clone(),
+        caption: false,
+    }];
+    if !unfolded.contains(&key) {
+        return rows;
+    }
+    for (category, count) in &branch.categories {
+        rows.push(Node {
+            depth: depth + 1,
+            key: format!("category {} {}", branch.name.to_lowercase(), category.to_lowercase()),
+            shows: Shown {
+                source: source.clone(),
+                group: group.clone(),
+                category: Some(category.clone()),
+            },
+            label: category.clone(),
+            count: *count,
+            parent: false,
+            caption: false,
+        });
     }
     rows
 }
@@ -302,6 +365,7 @@ pub fn listed(library: &Library, only: Option<&Source>, name_of: &dyn Fn(&Source
             original: e.original.clone(),
             group: library.group_name(e.group),
             category: library.category_label(e.group, e.category),
+            h: e.h,
             source_name: name_of(&e.source),
             source: e.source.clone(),
             from: From::Installed {
@@ -333,6 +397,7 @@ pub fn package_files(dir: &Path, id: &str, name: &str) -> Vec<Entry> {
             original: file.meta.name.clone(),
             group: or(file.group, name),
             category: or(file.category, "Other"),
+            h: file.meta.h,
             source: Source::Package(id.to_owned()),
             source_name: name.to_owned(),
             timing: Some(file.meta.timing()),
@@ -607,6 +672,7 @@ fn preview_content(st: &State) -> Option<Content> {
             simulate: true,
             clothes: *clothes,
             animation: None,
+            profile: None,
         }),
         _ => None,
     };
@@ -1274,6 +1340,15 @@ mod tests {
             },
             timing: Some(Timing { seconds, loops: false }),
             listed: None,
+            h: false,
+        }
+    }
+
+    /// The same, listed by the H scenes' sheets.
+    fn h_entry(name: &str, group: &str, category: &str, seconds: f32) -> Entry {
+        Entry {
+            h: true,
+            ..entry(name, group, category, Source::Game, seconds)
         }
     }
 
@@ -1369,6 +1444,58 @@ mod tests {
         assert_eq!(names(&Shown::default(), 0, "dance"), ["Waltz", "Tango"]);
         assert_eq!(names(&Shown::default(), 0, "tango (listed)"), ["Tango"]);
         assert_eq!(names(&Shown::default(), 2, "stand"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn the_h_scenes_groups_sit_under_one_row() {
+        let mut all = entries();
+        all.push(h_entry("Stand 1", "H foreplay", "Stand", 2.0));
+        all.push(h_entry("Chair 1", "H foreplay", "Chair sit", 2.0));
+        all.push(h_entry("Lying 1", "Female H insertion", "Missionary", 2.0));
+        let mut unfolded = HashSet::new();
+        let rows = tree(&all, &Shown::default(), &unfolded);
+        // CharaStudio's groups stay where they were; the H scenes' three
+        // animations are one row, after them, with nothing of theirs
+        // standing beside the studio's own groups.
+        assert_eq!(
+            &labels(&rows)[4..],
+            [
+                (0, "All categories", 10),
+                (0, "Character", 2),
+                (0, "Studio", 3),
+                (0, "Men", 2),
+                (0, H_GROUPS, 3),
+            ]
+        );
+        // Unfolded it holds its groups, and those their categories.
+        unfolded.insert("group h scenes".to_owned());
+        unfolded.insert("group h foreplay".to_owned());
+        let rows = tree(&all, &Shown::default(), &unfolded);
+        assert_eq!(
+            &labels(&rows)[7..],
+            [
+                (0, "Men", 2),
+                (0, H_GROUPS, 3),
+                (1, "H foreplay", 2),
+                (2, "Stand", 1),
+                (2, "Chair sit", 1),
+                (1, "Female H insertion", 1),
+            ]
+        );
+        let names = |shown: &Shown| -> Vec<&str> {
+            matching(&all, shown, 0, "")
+                .into_iter()
+                .map(|i| all[i].name.as_str())
+                .collect()
+        };
+        let h = rows.iter().find(|n| n.label == H_GROUPS).unwrap();
+        assert_eq!(names(&h.shows), ["Stand 1", "Chair 1", "Lying 1"]);
+        // The row for one of its groups shows that group alone, and the
+        // studio's own Character group keeps its own Stand 1.
+        let foreplay = rows.iter().find(|n| n.label == "H foreplay").unwrap();
+        assert_eq!(names(&foreplay.shows), ["Stand 1", "Chair 1"]);
+        let character = rows.iter().find(|n| n.label == "Character").unwrap();
+        assert_eq!(names(&character.shows), ["Stand 1", "Walk 1"]);
     }
 
     #[test]

@@ -139,6 +139,10 @@ pub enum Content {
         /// call it `pose`.
         #[serde(default, alias = "pose", skip_serializing_if = "Option::is_none")]
         animation: Option<Animation>,
+        /// Who the character is, as changed in this scene; none keeps the
+        /// card's. The card itself is never written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<Box<crate::profile::Profile>>,
     },
     Light {
         /// The light stays at the camera's upper left, as in the game's
@@ -165,6 +169,7 @@ impl Content {
             simulate: true,
             clothes: [0; 9],
             animation: None,
+            profile: None,
         }
     }
 
@@ -1297,6 +1302,29 @@ mod tests {
         assert!(text.contains("card = \"/cards/anna.png\""), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(&back, doc.scene());
+    }
+
+    #[test]
+    fn a_changed_profile_is_saved_with_the_character() {
+        use crate::profile::{self, Profile};
+        let (mut doc, [_, anna, ..]) = cast();
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        let Content::Character { profile: own, .. } = &mut edited.content else {
+            panic!("Anna is a character");
+        };
+        let mut p = Profile {
+            nickname: "Annie".into(),
+            ..Profile::default()
+        };
+        profile::add_custom(&mut p.custom_likes, &profile::LIKES, "Jazz", true);
+        profile::add_custom(&mut p.custom_traits, &profile::TRAITS, "Early riser", false);
+        *own = Some(Box::new(p));
+        assert!(doc.edit(edited.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("nickname = \"Annie\""), "{text}");
+        assert!(text.contains("name = \"Jazz\""), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, edited.content);
     }
 
     #[test]
