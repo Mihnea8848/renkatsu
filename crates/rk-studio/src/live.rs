@@ -508,6 +508,7 @@ impl Live {
                     &animation.bundle,
                     &animation.controller,
                     &animation.state,
+                    animation.over(),
                     &parameters,
                 )
             };

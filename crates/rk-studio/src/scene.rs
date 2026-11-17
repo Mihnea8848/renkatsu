@@ -83,6 +83,12 @@ pub struct Animation {
     pub controller: String,
     #[serde(default)]
     pub state: String,
+    /// The controller whose clips replace the base's, for the H scenes'
+    /// animations, which share one controller for a whole category.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub override_bundle: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub override_controller: String,
     /// How fast it plays; 1 is the animation's own speed.
     #[serde(default = "one")]
     pub speed: f32,
@@ -109,10 +115,17 @@ impl Animation {
             bundle: pose.bundle.clone(),
             controller: pose.controller.clone(),
             state: pose.state.clone(),
+            override_bundle: pose.override_bundle.clone(),
+            override_controller: pose.override_controller.clone(),
             speed: 1.0,
             start: 0.0,
             force_loop: false,
         }
+    }
+
+    /// The controller whose clips replace the base's, when it names one.
+    pub fn over(&self) -> rk_chara::motion::Override<'_> {
+        (!self.override_bundle.is_empty()).then_some((self.override_bundle.as_str(), self.override_controller.as_str()))
     }
 }
 
@@ -138,7 +151,7 @@ pub enum Content {
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
         #[serde(default, alias = "pose", skip_serializing_if = "Option::is_none")]
-        animation: Option<Animation>,
+        animation: Option<Box<Animation>>,
         /// Who the character is, as changed in this scene; none keeps the
         /// card's. The card itself is never written.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1336,6 +1349,8 @@ mod tests {
             bundle: "studio/anime/00.unity3d".into(),
             controller: "tachi".into(),
             state: "f_tachi_00".into(),
+            override_bundle: String::new(),
+            override_controller: String::new(),
             speed: 0.5,
             start: 0.25,
             force_loop: true,
@@ -1350,7 +1365,7 @@ mod tests {
             panic!("Anna is a character");
         };
         *clothes = [1, 0, 0, 2, 3, 0, 0, 3, 3];
-        *worn = Some(pose.clone());
+        *worn = Some(Box::new(pose.clone()));
         assert!(doc.edit(edited.clone(), false));
         let text = toml::to_string(doc.scene()).unwrap();
         assert!(text.contains("clothes = [1, 0, 0, 2, 3, 0, 0, 3, 3]"), "{text}");
@@ -1430,16 +1445,18 @@ speed = 0.5
         let mut edited = doc.scene().get(anna).unwrap().clone();
         if let Content::Character { card, animation, .. } = &mut edited.content {
             *card = PathBuf::from("Characters/anna.png");
-            *animation = Some(Animation {
+            *animation = Some(Box::new(Animation {
                 name: "Sit".into(),
                 file: Some("Animations/Sit.rkanim".into()),
                 bundle: String::new(),
                 controller: String::new(),
                 state: String::new(),
+                override_bundle: String::new(),
+                override_controller: String::new(),
                 speed: 1.0,
                 start: 0.0,
                 force_loop: false,
-            });
+            }));
         }
         doc.edit(edited, false);
         doc.rename(anna, "Anna B");

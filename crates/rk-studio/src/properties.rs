@@ -285,7 +285,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         egui::Popup::menu(&resp).show(|ui| {
                             ui.set_min_width(field.width() - 10.0);
                             if let Some(chosen) = crate::panels::animation_items(ui, k, st, Some(before.id)) {
-                                *animation = chosen;
+                                *animation = chosen.map(Box::new);
                             }
                         });
                         if let Some(a) = animation.as_ref() {

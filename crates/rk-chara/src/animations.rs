@@ -106,6 +106,12 @@ pub struct Entry {
     pub controller: String,
     /// The state of the controller.
     pub state: String,
+    /// A second controller whose clips replace the base controller's by
+    /// name, as the game layers it over them. The H scenes' animations
+    /// share one controller for a whole category and name a different
+    /// one of these each; the rest leave it empty.
+    pub override_bundle: String,
+    pub override_controller: String,
     /// How long it is and whether it loops, once its clips were read.
     pub timing: Option<Timing>,
     /// Who lists it: the game, a package or a mod. A mod may list clips
@@ -139,6 +145,12 @@ impl Entry {
     /// read.
     pub fn is_static(&self) -> Option<bool> {
         self.timing.map(|t| t.is_static())
+    }
+
+    /// The controller whose clips replace the base's, for the animations
+    /// whose list names one.
+    pub fn over(&self) -> crate::motion::Override<'_> {
+        (!self.override_bundle.is_empty()).then_some((self.override_bundle.as_str(), self.override_controller.as_str()))
     }
 }
 
@@ -262,6 +274,16 @@ impl Layout {
             Layout::HScene => 8,
         }
     }
+
+    /// The columns holding the bundle and the file of the controller
+    /// whose clips replace the base's. CharaStudio's own sheets have
+    /// none, so they are pointed at an empty cell.
+    fn over(self) -> (usize, usize) {
+        match self {
+            Layout::Studio => (usize::MAX, usize::MAX),
+            Layout::HScene => (6, 7),
+        }
+    }
 }
 
 impl Library {
@@ -339,6 +361,8 @@ impl Library {
                     bundle: bundle.to_owned(),
                     controller: cell(5).to_owned(),
                     state: cell(layout.state()).to_owned(),
+                    override_bundle: cell(layout.over().0).to_owned(),
+                    override_controller: cell(layout.over().1).to_owned(),
                     timing: None,
                     source: listed.clone(),
                     h: layout == Layout::HScene,
@@ -451,15 +475,22 @@ impl Library {
                 return false;
             }
             let pose = &mut self.entries[self.timed];
-            let timing = crate::motion::load(game, &pose.bundle, &pose.controller, &pose.state, &parameters)
-                .map(|m| Timing {
-                    seconds: m.duration(),
-                    loops: m.loops(),
-                })
-                .unwrap_or(Timing {
-                    seconds: 0.0,
-                    loops: false,
-                });
+            let timing = crate::motion::load(
+                game,
+                &pose.bundle,
+                &pose.controller,
+                &pose.state,
+                pose.over(),
+                &parameters,
+            )
+            .map(|m| Timing {
+                seconds: m.duration(),
+                loops: m.loops(),
+            })
+            .unwrap_or(Timing {
+                seconds: 0.0,
+                loops: false,
+            });
             pose.timing = Some(timing);
             self.timed += 1;
         }
@@ -1040,8 +1071,23 @@ mod tests {
         assert_eq!(pose.controller, "kha_f_base");
         // Column 8, not the second bundle in 6.
         assert_eq!(pose.state, "Idle");
+        // Columns 6 and 7 name the controller whose clips replace the
+        // base's. A whole category of the H scenes shares one base
+        // controller and one state name, so this is the only thing that
+        // tells its animations apart.
+        assert_eq!(pose.override_bundle, "h/anim/female/00_00_00.unity3d");
+        assert_eq!(pose.override_controller, "kha_f_00");
+        assert_eq!(pose.over(), Some(("h/anim/female/00_00_00.unity3d", "kha_f_00")));
         // The groups and categories are the game's own, shared with Studio.
         assert_eq!(library.category_name(1, 100), "H foreplay: Stand");
+    }
+
+    #[test]
+    fn charastudios_own_sheets_name_no_second_controller() {
+        let library = library();
+        let pose = &library.entries[0];
+        assert_eq!(pose.state, "f_aruki_00");
+        assert_eq!(pose.over(), None, "column 6 is the clip, not a bundle");
     }
 
     #[test]
