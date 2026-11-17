@@ -620,6 +620,14 @@ impl Index {
                 trees.push((abdata, files));
             }
         }
+        // A package's zipmods count as the game's own would: Sideloader's
+        // rules choose between them and every other copy of a mod.
+        for package in &sources.packages {
+            let mods = package.join("mods");
+            if mods.is_dir() {
+                zips.extend(scan_extra(&mods));
+            }
+        }
         for dir in &sources.mods {
             zips.extend(scan_extra(dir));
         }

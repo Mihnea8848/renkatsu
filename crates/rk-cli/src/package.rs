@@ -420,13 +420,18 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
 pub fn install(archive: &Path) -> Result<()> {
     let store = Store::user()?;
     let installed = store.install(archive, &Task::new())?;
+    let holds = installed.manifest.holds();
     println!(
-        "installed {} {} in {} ({}: {})",
+        "installed {} {} in {} ({}{})",
         installed.manifest.name,
         installed.manifest.version,
         installed.dir.display(),
         size_text(installed.size()),
-        installed.manifest.holds()
+        if holds.is_empty() {
+            String::new()
+        } else {
+            format!(": {holds}")
+        }
     );
     Ok(())
 }

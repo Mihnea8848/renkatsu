@@ -10,6 +10,7 @@ mod bench;
 mod bundle;
 mod card;
 mod compare;
+mod custom_package;
 mod package;
 mod reference;
 mod render;
@@ -169,6 +170,26 @@ enum PackageCmd {
         #[arg(long)]
         part_size: Option<u64>,
     },
+    /// Start a package of your own: a folder with its package.toml and the
+    /// folders content goes in.
+    New {
+        /// The folder to make; it must be new or empty.
+        dir: PathBuf,
+        /// The package's id: lower case letters, digits and dashes.
+        #[arg(long)]
+        id: String,
+        /// The name people read; the id with spaces when left out.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Build a package folder made with `rk package new` into a .rkpkg.
+    Build {
+        /// The package folder, with its package.toml.
+        dir: PathBuf,
+        /// The folder the .rkpkg is written to.
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+    },
     /// Install a package from its file.
     Install { file: PathBuf },
     /// Download a package Renkatsu knows about and install it.
@@ -226,6 +247,8 @@ fn main() -> Result<()> {
             PackageCmd::StarterCharacters { out, list, part_size } => {
                 package::starter_characters(&out, list, part_size.map(|mb| mb * 1024 * 1024))
             }
+            PackageCmd::New { dir, id, name } => custom_package::new(&dir, &id, name.as_deref()),
+            PackageCmd::Build { dir, out } => custom_package::build(&dir, &out),
             PackageCmd::Install { file } => package::install(&file),
             PackageCmd::Download { id } => package::download(&id),
             PackageCmd::List => package::list(),
