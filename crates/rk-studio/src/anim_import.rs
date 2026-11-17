@@ -780,7 +780,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                     ),
                     (None, None) => (
                         "Nothing with animations is installed",
-                        "Starter Content: Animations brings CharaStudio's, and so does choosing your Koikatsu folder."
+                        "Starter Content: Animations & Poses brings CharaStudio's, and so does choosing your Koikatsu folder."
                             .to_owned(),
                     ),
                 };

@@ -176,11 +176,13 @@ pub fn csv_rows(text: &str) -> Vec<Vec<String>> {
 }
 
 /// Whether a file under `abdata` is one of the Studio list sheets kept:
-/// the lists of animations. The H scenes' lists (`HAnime_`) are not.
+/// the lists of animations, CharaStudio's own (`anime...`) and the H
+/// scenes' (`hanime_...`), which the game reads into the same list.
+/// `handanime_` names the hand shapes, which are not animations.
 fn studio_sheet(inner: &str) -> Option<(String, String)> {
     let rest = inner.strip_prefix("studio/info/")?.strip_suffix(".csv")?;
     let (folder, name) = rest.rsplit_once('/').unwrap_or(("", rest));
-    name.starts_with("anime").then(|| (folder.to_owned(), name.to_owned()))
+    (name.starts_with("anime") || name.starts_with("hanime_")).then(|| (folder.to_owned(), name.to_owned()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1139,9 +1141,14 @@ mod tests {
             studio_sheet("studio/info/animegroup_x.csv"),
             Some((String::new(), "animegroup_x".to_owned()))
         );
-        // Item lists, the H scenes' lists and files elsewhere are not kept.
+        // The H scenes' lists are animations too.
+        assert_eq!(
+            studio_sheet("studio/info/x/hanime_00_01_100.csv"),
+            Some(("x".to_owned(), "hanime_00_01_100".to_owned()))
+        );
+        // Item lists, the hand shapes and files elsewhere are not kept.
         assert_eq!(studio_sheet("studio/info/x/itemlist_00_01.csv"), None);
-        assert_eq!(studio_sheet("studio/info/x/hanime_00_01_100.csv"), None);
+        assert_eq!(studio_sheet("studio/info/x/handanime_00_00.csv"), None);
         assert_eq!(studio_sheet("list/characustom/anime_00.csv"), None);
         assert_eq!(studio_sheet("studio/info/x/anime_00_1_2.unity3d"), None);
     }

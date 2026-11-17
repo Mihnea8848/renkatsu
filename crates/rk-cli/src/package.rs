@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 /// The version of the Starter Content packages this build makes.
 const STARTER_VERSION: &str = "1.1.0";
-/// The version of Starter Content: Poses this build makes.
+/// The version of Starter Content: Animations & Poses this build makes.
 const POSES_VERSION: &str = "1.0.0";
 /// The release the packages are uploaded to, apart from the app's own.
 const RELEASE: &str = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1";
@@ -68,15 +68,6 @@ pub fn official(lists: &[BundleList]) -> BTreeMap<String, String> {
     out
 }
 
-/// Content that never goes into a package, whatever asks for it: the H
-/// scenes, the voices and sounds, and the accessories for the crotch.
-pub fn never(path: &str) -> bool {
-    path.starts_with("h/")
-        || path.starts_with("sound/")
-        || path.starts_with("chara/ao_kokan")
-        || path.starts_with("chara/thumb/ao_kokan")
-}
-
 /// What Starter Content: Characters & Clothing is made of: every part a character
 /// wears or is made of, the lists that name the parts, the shape tables,
 /// and CharaStudio's colour filters (the sheets in `studio/info` and the
@@ -91,11 +82,11 @@ pub fn character_part(path: &str) -> bool {
         || path.starts_with("studio/filter/")
 }
 
-/// What Starter Content: Poses is made of: CharaStudio's animations (the
-/// bundles of `studio/anime`), the sheets in `studio/info` that list them
-/// and the maker's poses. The H scenes' animations live under `h/`, which no package takes;
-/// the sheets that list those for Studio are in the same files as the
-/// others and are never read.
+/// What Starter Content: Animations & Poses is made of: CharaStudio's
+/// animations (the bundles of `studio/anime`), the sheets in `studio/info`
+/// that list them and the maker's poses. The H scenes' animations are
+/// listed in those same sheets but play clips under `h/anim/`, which no
+/// rule here names: the build takes those by what the sheets point at.
 pub fn pose_part(path: &str) -> bool {
     path.starts_with("studio/anime/") || path.starts_with("studio/info/") || path == MAKER_POSES
 }
@@ -113,14 +104,11 @@ pub fn holds_cards(path: &str) -> bool {
         || path.starts_with("action/mobchara/")
 }
 
-/// The bundles chosen for a package, and what was asked for and refused.
+/// The bundles chosen for a package.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     /// Paths under `abdata`, lower case.
     pub take: BTreeSet<String>,
-    /// Bundles a taken bundle needs that never go into a package, with
-    /// the bundle that needs them.
-    pub refused: BTreeSet<(String, String)>,
 }
 
 /// Chooses the official bundles `want` asks for and, through the lists,
@@ -129,17 +117,12 @@ pub fn select(lists: &[BundleList], want: &dyn Fn(&str) -> bool) -> Selection {
     let mut out = Selection::default();
     for list in lists {
         let names: Vec<String> = list.bundles.iter().map(|b| norm(b)).collect();
-        let mut todo: Vec<usize> = (0..names.len())
-            .filter(|&i| want(&names[i]) && !never(&names[i]))
-            .collect();
+        let mut todo: Vec<usize> = (0..names.len()).filter(|&i| want(&names[i])).collect();
         let mut seen: BTreeSet<usize> = todo.iter().copied().collect();
         while let Some(i) = todo.pop() {
             out.take.insert(names[i].clone());
             for &need in list.needs.get(i).into_iter().flatten() {
-                let Some(name) = names.get(need) else { continue };
-                if never(name) {
-                    out.refused.insert((name.clone(), names[i].clone()));
-                } else if seen.insert(need) {
+                if need < names.len() && seen.insert(need) {
                     todo.push(need);
                 }
             }
@@ -328,16 +311,16 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
     )
 }
 
-/// Builds Starter Content: Poses from the configured Koikatsu install into
+/// Builds Starter Content: Animations & Poses from the configured Koikatsu install into
 /// `out`, or only says what it would hold.
 pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
     starter(
         &Starter {
             id: rk_packages::STARTER_POSES,
-            name: "Starter Content: Animations",
+            name: "Starter Content: Animations & Poses",
             version: POSES_VERSION,
-            description: "CharaStudio's poses and animations for standing, sitting, talking, walking, dancing and \
-                          fighting, without the H scenes' animations.",
+            description: "CharaStudio's poses and animations for standing, sitting, talking, walking, dancing \
+                          and fighting, and the H scenes' animations.",
             gives: "Characters are posed and animated without a Koikatsu install.",
             part: "an animation",
             want: pose_part,
@@ -353,7 +336,24 @@ pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Res
 /// The animations CharaStudio's sheets list in the chosen bundles, as the
 /// editor will list them, and how many of the chosen animation bundles no
 /// sheet names.
+/// Every bundle the animations of the chosen `studio/info` sheets play,
+/// whether or not it is chosen yet.
+fn listed_bundles(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    let library = read_sheets(disk, take, &|_| true)?;
+    Ok(library.entries.iter().map(|e| norm(&e.bundle)).collect())
+}
+
+/// The animations the chosen sheets list, counting only those whose
+/// bundle is chosen too, as the editor will read them.
 fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Result<rk_chara::animations::Library> {
+    read_sheets(disk, take, &|bundle| take.contains(&norm(bundle)))
+}
+
+fn read_sheets(
+    disk: &BTreeMap<String, PathBuf>,
+    take: &BTreeSet<String>,
+    installed: &dyn Fn(&str) -> bool,
+) -> Result<rk_chara::animations::Library> {
     let mut library = rk_chara::animations::Library::default();
     for path in take.iter().filter(|p| p.starts_with("studio/info/")) {
         let Some(file) = disk.get(path) else { continue };
@@ -363,15 +363,14 @@ fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Re
             let serialized = SerializedFile::parse(bundle.read_node(node)?)?;
             for object in serialized.objects_of(class::MONO_BEHAVIOUR) {
                 let Some(name) = serialized.name(object) else { continue };
-                if name.to_ascii_lowercase().starts_with("anime") {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with("anime") || lower.starts_with("hanime") {
                     sheets.push((name, rk_chara::animations::sheet_rows(&serialized.read(object)?)));
                 }
             }
         }
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".unity3d");
-        library.add_bundle(Some(stem), &sheets, &rk_chara::animations::Source::Game, &|bundle| {
-            take.contains(&norm(bundle))
-        });
+        library.add_bundle(Some(stem), &sheets, &rk_chara::animations::Source::Game, installed);
     }
     Ok(library)
 }
@@ -397,14 +396,23 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
         println!("left out, in none of the game's lists: {path}");
     }
 
-    let selection = select(&lists, &wanted);
-    for (need, by) in &selection.refused {
-        println!("left out, never packaged: {need} (asked for by {by})");
+    let mut selection = select(&lists, &wanted);
+    // The H scenes' animations are listed in CharaStudio's own sheets, but
+    // their clips live under `h/anim/`, which no rule of `want` names. Read
+    // the sheets the first pass chose and take what they point at, so that
+    // the package holds a bundle for every animation it lists.
+    let mut played: BTreeSet<String> = BTreeSet::new();
+    if spec.poses {
+        let named = listed_bundles(&disk, &selection.take)?;
+        played = named.difference(&selection.take).cloned().collect();
+        if !played.is_empty() {
+            for path in &played {
+                println!("taken because an animation of the list plays it: {path}");
+            }
+            selection = select(&lists, &|p| wanted(p) || played.contains(p));
+        }
     }
-    for path in official.keys().filter(|p| wanted(p) && never(p)) {
-        println!("left out, never packaged: {path}");
-    }
-    for path in selection.take.iter().filter(|p| !wanted(p)) {
+    for path in selection.take.iter().filter(|p| !wanted(p) && !played.contains(*p)) {
         println!("taken because {} needs it: {path}", spec.part);
     }
     let mut manifest = Manifest {
@@ -415,7 +423,7 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
         kind: "starter-content".to_owned(),
         description: spec.description.to_owned(),
         requires_renkatsu: rk_packages::APP_VERSION.to_owned(),
-        source: "Koikatsu by Illusion: the official game data, without mods, voices or H content".to_owned(),
+        source: "Koikatsu by Illusion: the official game data, without mods or voices".to_owned(),
         default_card: None,
         contents: BTreeMap::new(),
     };
@@ -439,7 +447,7 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
 
     // The game's own characters, as the cards they are stored as.
     let mut cards = 0u64;
-    for path in official.keys().filter(|p| spec.cards && holds_cards(p) && !never(p)) {
+    for path in official.keys().filter(|p| spec.cards && holds_cards(p)) {
         let Some(file) = disk.get(path) else { continue };
         for card in cards_in(file).with_context(|| format!("reading {path}"))? {
             let sex = if card.female { "female" } else { "male" };
@@ -475,7 +483,7 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
         // Nothing the editor would list may come from outside the package.
         for pose in &library.entries {
             ensure!(
-                selection.take.contains(&norm(&pose.bundle)) && !never(&norm(&pose.bundle)),
+                selection.take.contains(&norm(&pose.bundle)),
                 "{} is listed from {}, which is not in the package",
                 pose.name,
                 pose.bundle
@@ -695,33 +703,32 @@ mod tests {
     }
 
     #[test]
-    fn characters_take_their_parts_and_what_these_need_and_never_h_or_sound() {
+    fn characters_take_their_parts_and_their_dependencies() {
         let selection = select(&lists(), &character_part);
         let take: Vec<&str> = selection.take.iter().map(String::as_str).collect();
+
         assert_eq!(
             take,
             [
+                "chara/ao_kokan_00.unity3d",
                 "chara/co_top_50.unity3d",
                 "chara/mm_base.unity3d",
                 "chara/oo_base.unity3d",
                 "chara/thumb/co_top_50.unity3d",
+                "h/common/00_00.unity3d",
                 "list/characustom/00.unity3d",
                 // Not a character part itself: the materials need it.
                 "map/shader.unity3d",
             ]
         );
-        assert_eq!(
-            selection.refused,
-            BTreeSet::from([("h/common/00_00.unity3d".to_owned(), "chara/mm_base.unity3d".to_owned())])
-        );
-        assert!(take.iter().all(|p| !never(p)));
+
         // The CharaStudio look's colour filter comes along.
         assert!(character_part("studio/info/00.unity3d") && character_part("studio/filter/00.unity3d"));
         assert!(!character_part("studio/map/00.unity3d"));
     }
 
     #[test]
-    fn poses_take_studios_animations_and_lists_and_never_h_or_sound() {
+    fn poses_take_studios_animations_and_lists_and_their_dependencies() {
         let lists = vec![
             list(
                 "studio00",
@@ -748,50 +755,28 @@ mod tests {
                 &[&[], &[], &[], &[]],
             ),
         ];
+
         let chosen = select(&lists, &pose_part);
         let take: Vec<&str> = chosen.take.iter().map(String::as_str).collect();
+
         assert_eq!(
             take,
             [
                 "custom/custompose.unity3d",
+                "h/anim/female/00_00_00.unity3d",
+                "sound/data/se/studio/00.unity3d",
                 "studio/anime/00.unity3d",
                 "studio/base/00.unity3d",
                 "studio/info/00.unity3d",
             ]
         );
-        let refused: Vec<&str> = chosen.refused.iter().map(|(need, _)| need.as_str()).collect();
-        assert_eq!(
-            refused,
-            ["h/anim/female/00_00_00.unity3d", "sound/data/se/studio/00.unity3d"]
-        );
+
         // A bundle a repack added is in no list, so nothing can choose it.
         assert!(pose_part("studio/anime/99.unity3d"));
         assert!(!official(&lists).contains_key("studio/anime/99.unity3d"));
+
         assert!(!pose_part("h/anim/female/00_00_00.unity3d"));
         assert!(!pose_part("studio/item/00.unity3d"));
-    }
-
-    #[test]
-    fn h_scenes_voices_and_crotch_accessories_are_never_packaged() {
-        for path in [
-            "h/anim/female/00.unity3d",
-            "sound/data/pcm/c00.unity3d",
-            "chara/ao_kokan_00.unity3d",
-            "chara/thumb/ao_kokan_00.unity3d",
-        ] {
-            assert!(never(path), "{path}");
-        }
-        for path in [
-            "chara/ao_head_00.unity3d",
-            "chara/thumb/ao_head_00.unity3d",
-            "map/shader.unity3d",
-        ] {
-            assert!(!never(path), "{path}");
-        }
-        // Whatever asks for everything still gets none of them.
-        let all = select(&lists(), &|_| true);
-        assert!(all.take.iter().all(|p| !never(p)));
-        assert_eq!(all.take.len(), 7);
     }
 
     #[test]

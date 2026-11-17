@@ -244,8 +244,8 @@ enum PackageCmd {
         #[arg(long, default_value = ".")]
         out: PathBuf,
     },
-    /// Build Starter Content: Poses from the Koikatsu install: CharaStudio's
-    /// poses and animations, without mods and without the H scenes'.
+    /// Build Starter Content: Animations & Poses from the Koikatsu install:
+    /// CharaStudio's poses and animations and the H scenes', without mods.
     StarterPoses {
         /// The folder the package file is written to.
         #[arg(long)]

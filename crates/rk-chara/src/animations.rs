@@ -10,12 +10,14 @@
 //! names the groups, `AnimeCategory_<n>_<group>` the categories of a
 //! group, and `Anime_<n>_<group>_<category>` the animations: a number, the
 //! group, the category, the name shown, the bundle, the controller in it
-//! and the state to play. Bundles are read in name order and a later
-//! sheet replaces an earlier one's entry. An animation whose bundle is not
-//! installed is left out, as the game leaves it out.
-//!
-//! The `HAnime_` sheets, which list the H scenes' animations for Studio,
-//! are never read, and an entry that points into `h/` is dropped.
+//! and the state to play. The H scenes' animations are listed in the same
+//! bundles, as `HAnime_<n>_<group>_<category>`, in the same groups and
+//! categories but in a sheet one column wider: a second bundle and file
+//! sit in columns 6 and 7, so the state to play is column 8. The game
+//! reads both into one list, its own sheets first, and so does this.
+//! Bundles are read in name order and a later sheet replaces an earlier
+//! one's entry. An animation whose bundle is not installed is left out,
+//! as the game leaves it out.
 //!
 //! The game's names are Japanese; the names shown here are translations
 //! made for Renkatsu, by the words the names are built from.
@@ -229,10 +231,34 @@ fn sheet_numbers(name: &str, prefix: &str) -> Option<Vec<i32>> {
     name[prefix.len()..].split('_').map(|n| n.parse().ok()).collect()
 }
 
-/// Content that is never listed: the H scenes' animations.
-pub fn never(bundle: &str) -> bool {
-    let bundle = bundle.replace('\\', "/").to_lowercase();
-    bundle.starts_with("h/") || bundle.starts_with("sound/")
+/// The two shapes an animation sheet comes in. Both name the animation
+/// in column 3, its bundle in 4 and its controller in 5, and the game
+/// reads them into one list; they part after that, the H scenes' sheets
+/// carrying a second bundle and file (the override) in 6 and 7 before
+/// the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Layout {
+    /// `Anime_<n>_<group>_<category>`: the clip is column 6.
+    Studio,
+    /// `HAnime_<n>_<group>_<category>`: the clip is column 8.
+    HScene,
+}
+
+impl Layout {
+    fn prefix(self) -> &'static str {
+        match self {
+            Layout::Studio => "Anime_",
+            Layout::HScene => "HAnime_",
+        }
+    }
+
+    /// The column holding the state the controller plays.
+    fn state(self) -> usize {
+        match self {
+            Layout::Studio => 6,
+            Layout::HScene => 8,
+        }
+    }
 }
 
 impl Library {
@@ -277,13 +303,20 @@ impl Library {
                 }
             }
         }
-        // Animation sheets by group, category, then number.
-        let mut ordered: Vec<(Vec<i32>, &Rows)> = sheets
-            .iter()
-            .filter_map(|(n, s)| Some((sheet_numbers(n, "Anime_").filter(|v| v.len() == 3)?, s)))
-            .collect();
-        ordered.sort_by_key(|(n, _)| (n[1], n[2], n[0]));
-        for (_, sheet) in ordered {
+        // Animation sheets by group, category, then number: CharaStudio's
+        // own first, then the H scenes', as the game reads them, so that a
+        // clash of numbers ends the way it does there.
+        let mut ordered: Vec<(Layout, Vec<i32>, &Rows)> = Vec::new();
+        for (name, sheet) in sheets {
+            for layout in [Layout::Studio, Layout::HScene] {
+                if let Some(numbers) = sheet_numbers(name, layout.prefix()).filter(|v| v.len() == 3) {
+                    ordered.push((layout, numbers, sheet));
+                    break;
+                }
+            }
+        }
+        ordered.sort_by_key(|(layout, n, _)| (*layout, n[1], n[2], n[0]));
+        for (layout, _, sheet) in ordered {
             for row in rows(sheet).skip(2) {
                 let cell = |i: usize| row.get(i).copied().unwrap_or_default();
                 let number = |i: usize| cell(i).trim().parse::<i32>().ok();
@@ -291,7 +324,7 @@ impl Library {
                     continue;
                 };
                 let bundle = cell(4);
-                if never(bundle) || !installed(bundle) {
+                if !installed(bundle) {
                     continue;
                 }
                 let pose = Entry {
@@ -302,7 +335,7 @@ impl Library {
                     name: english(cell(3)),
                     bundle: bundle.to_owned(),
                     controller: cell(5).to_owned(),
-                    state: cell(6).to_owned(),
+                    state: cell(layout.state()).to_owned(),
                     timing: None,
                     source: listed.clone(),
                 };
@@ -356,7 +389,8 @@ impl Library {
                 for file in &bundle.files {
                     for info in file.sf.objects_of(class::MONO_BEHAVIOUR) {
                         let Some(name) = file.sf.name(info) else { continue };
-                        if !name.to_ascii_lowercase().starts_with("anime") {
+                        let lower = name.to_ascii_lowercase();
+                        if !lower.starts_with("anime") && !lower.starts_with("hanime") {
                             continue;
                         }
                         if let Ok(sheet) = file.sf.read(info) {
@@ -625,6 +659,8 @@ const WORDS: &[(&str, &str)] = &[
     ("添い寝", "Lie alongside"),
     ("机で寝る", "Sleep at desk"),
     ("椅子で寝る", "Sleep on chair"),
+    ("寝バック", "Lying from behind"),
+    ("寝位", "Lying position"),
     ("寝", "Lie down"),
     ("小太刀二刀", "Two short swords"),
     ("小太刀", "Short sword"),
@@ -687,19 +723,121 @@ const WORDS: &[(&str, &str)] = &[
     ("立ち", "Stand"),
     ("椅子", "Chair"),
     ("待機", "Wait"),
+    // The H scenes' groups.
+    ("ダークネス", "Darkness"),
+    ("複数", "Multiple"),
+    ("愛撫", "Foreplay"),
+    ("特殊", "Special"),
+    ("レズ", "Lesbian"),
+    ("奉仕", "Service"),
+    ("挿入前", "Before insertion"),
+    ("挿入", "Insertion"),
+    // Where they happen.
+    ("本棚", "Bookshelf"),
+    ("ソファ", "Sofa"),
+    ("ベンチ", "Bench"),
+    ("フェンス", "Fence"),
+    ("プール", "Pool"),
+    ("トイレ", "Toilet"),
+    ("シャワー", "Shower"),
+    ("ハードル", "Hurdle"),
+    ("跳び箱", "Vaulting box"),
+    // The positions.
+    ("開脚", "Spread legs"),
+    ("正常位", "Missionary"),
+    ("マングリ", "Piledriver"),
+    ("騎乗位", "Cowgirl"),
+    ("後背位", "Doggy style"),
+    ("側位", "Side position"),
+    ("立位", "Standing position"),
+    ("駅弁", "Standing carry"),
+    ("種付けプレス", "Mating press"),
+    ("四つん這い", "On all fours"),
+    ("仰向け", "On her back"),
+    ("対面", "Facing"),
+    ("背面", "Facing away"),
+    ("バック", "From behind"),
+    ("アナル", "Anal"),
+    ("片足上げ", "One leg up"),
+    ("押さえ", "Held down"),
+    ("押し付け", "Pressed against"),
+    ("腕引っ張り", "Arms pulled"),
+    ("腕はさみ", "Arms squeezed"),
+    ("密着", "Pressed close"),
+    ("またがり", "Straddling"),
+    ("掴まり", "Holding on"),
+    // What is done.
+    ("パイズリ", "Breast job"),
+    ("Wフェラ", "Double blowjob"),
+    ("フェラ", "Blowjob"),
+    ("イラマチオ", "Deep throat"),
+    ("クンニ", "Cunnilingus"),
+    ("手マン", "Fingering"),
+    ("オナニー", "Masturbation"),
+    ("オナホ", "Onahole"),
+    ("両手フェラ", "Two-handed blowjob"),
+    ("片手フェラ", "One-handed blowjob"),
+    ("両手コキ", "Two-handed handjob"),
+    ("片手コキ", "One-handed handjob"),
+    ("手コキ", "Handjob"),
+    ("ノーハンド", "No hands"),
+    ("亀頭", "Glans"),
+    ("咥え", "with mouth"),
+    ("口内", "In mouth"),
+    ("舐め", "Licking"),
+    ("いじり", "Teasing"),
+    ("いたずら", "Mischief"),
+    ("覗き", "Peeping"),
+    ("互い", "Each other"),
+    ("弄り", "Touching"),
+    ("具合わせ", "Rubbing together"),
+    ("揉まれ", "Fondled"),
+    ("触り", "Touched"),
+    ("反応", "Reaction"),
+    ("キス", "Kiss"),
+    ("嫌がり", "Dislikes it"),
+    ("股間", "Crotch"),
+    // How one goes.
+    ("絶頂前", "Before climax"),
+    ("絶頂", "Climax"),
+    ("同時", "Together"),
+    ("外出し", "Outside finish"),
+    ("中出し", "Finish inside"),
+    ("汁垂れ", "Dripping"),
+    ("抜く", "Withdraw"),
+    ("ループ", "Loop"),
+    ("開始", "Start"),
+    ("事後", "After"),
+    ("のむ", "Swallow"),
+    ("はく", "Spit out"),
+    ("弱", "Weak"),
+    ("強", "Strong"),
+    ("両手", "Both hands"),
+    ("片手", "One hand"),
+    ("胸", "Breasts"),
+    ("尻", "Buttocks"),
+    ("玉", "Balls"),
+    ("竿", "Shaft"),
+    ("先", "Tip"),
+    ("机", "Desk"),
+    ("壁", "Wall"),
+    ("角", "Corner"),
+    ("中", "Inside"),
+    ("前", "Front"),
+    ("後", "Rear"),
     ("男", "Male"),
     ("女", "Female"),
 ];
 
 /// A name of the game's lists in English: the words it is built from are
-/// translated and what is left (numbers, letters) is kept, with full
-/// width digits and letters made plain. A name with a word that is not
-/// known stays as the game has it.
+/// translated and what is left (numbers, letters, the `+` and `&` the
+/// names join parts with) is kept, with full width forms made plain. A
+/// name with a word that is not known stays as the game has it.
 pub fn english(name: &str) -> String {
     let plain: String = name
         .chars()
         .map(|c| match c {
-            '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
             '\u{3000}' => ' ',
             c => c,
         })
@@ -727,7 +865,7 @@ pub fn english(name: &str) -> String {
         if !c.is_ascii() {
             return name.to_owned();
         }
-        if c.is_ascii_alphanumeric() && after_word && !out.ends_with(' ') {
+        if (c.is_ascii_alphanumeric() || c == '+' || c == '&') && after_word && !out.ends_with(' ') {
             out.push(' ');
         }
         after_word = false;
@@ -754,6 +892,17 @@ mod tests {
         assert_eq!(english("お茶を飲む待機"), "Drink tea, wait");
         assert_eq!(english("歩く・走る"), "Walk and run");
         assert_eq!(english("ポーズ"), "Pose");
+        // The H scenes' names: their own words, and the `+` and `&` that
+        // join parts, full width or not.
+        assert_eq!(english("H愛撫"), "H foreplay");
+        assert_eq!(english("女H挿入"), "Female H insertion");
+        assert_eq!(english("椅子パイズリ+咥え"), "Chair breast job + with mouth");
+        assert_eq!(english("先舐め＋竿舐め"), "Tip licking + shaft licking");
+        assert_eq!(english("女 バック＆フェラ"), "Female from behind & blowjob");
+        assert_eq!(english("同時絶頂弱ループ"), "Together climax weak loop");
+        assert_eq!(english("挿入前待機"), "Before insertion wait");
+        // A longer word wins: 寝位 is not 寝 and a stray 位.
+        assert_eq!(english("机寝位"), "Desk lying position");
         // A word that is not known leaves the name alone.
         assert_eq!(english("謎の踊り2"), "謎の踊り2");
         assert_eq!(english("Idle"), "Idle");
@@ -800,7 +949,6 @@ mod tests {
                     ],
                     &["x", "0", "3", "broken"],
                     &["2", "0", "3", "歩く2", "studio/anime/77.unity3d", "walk_run", "missing"],
-                    &["3", "0", "3", "歩く3", "h/anim/female/00.unity3d", "walk_run", "never"],
                 ]),
             ),
             (
@@ -811,15 +959,85 @@ mod tests {
                     &["0", "0", "4", "立ち1", "studio/anime/00.unity3d", "tachi", "f_tachi_00"],
                 ]),
             ),
-            // The H scenes' sheets are not read at all.
-            (
-                "HAnime_00_01_100".to_owned(),
-                sheet(&[&[], &[], &["0", "1", "100", "x", "studio/anime/00.unity3d", "h", "h"]]),
-            ),
         ];
         let mut library = Library::default();
         library.add_bundle(Some("00"), &sheets, &Source::Game, &|b| b == "studio/anime/00.unity3d");
         library
+    }
+
+    /// The H scenes' sheets carry a second bundle and file before the
+    /// clip, so the state is column 8, and the game reads them after its
+    /// own sheets: a row of theirs under numbers already taken wins.
+    #[test]
+    fn the_h_scenes_sheets_have_their_own_columns_and_come_last() {
+        let header = &[
+            "no", "group", "category", "name", "bundle", "file", "bundle", "file", "clip",
+        ];
+        let sheets = vec![
+            ("AnimeGroup_00".to_owned(), sheet(&[&["id", "name"], &["1", "H愛撫"]])),
+            (
+                "AnimeCategory_00_01".to_owned(),
+                sheet(&[&["id", "name"], &["100", "立ち"]]),
+            ),
+            // Read first, although its name sorts later.
+            (
+                "Anime_00_01_100".to_owned(),
+                sheet(&[
+                    &[],
+                    &["no", "group", "category", "name", "bundle", "file", "clip"],
+                    &[
+                        "0",
+                        "1",
+                        "100",
+                        "歩く1",
+                        "studio/anime/00.unity3d",
+                        "walk_run",
+                        "f_aruki_00",
+                    ],
+                ]),
+            ),
+            (
+                "HAnime_00_01_100".to_owned(),
+                sheet(&[
+                    &[],
+                    header,
+                    &[
+                        "0",
+                        "1",
+                        "100",
+                        "待機",
+                        "h/anim/female/00_00_00.unity3d",
+                        "kha_f_base",
+                        "h/anim/female/00_00_00.unity3d",
+                        "kha_f_00",
+                        "Idle",
+                    ],
+                    // Its bundle is not installed.
+                    &[
+                        "1",
+                        "1",
+                        "100",
+                        "胸触り",
+                        "h/anim/female/99.unity3d",
+                        "kha_f_base",
+                        "",
+                        "",
+                        "M_Idle",
+                    ],
+                ]),
+            ),
+        ];
+        let mut library = Library::default();
+        library.add_bundle(Some("00"), &sheets, &Source::Game, &|b| b != "h/anim/female/99.unity3d");
+        assert_eq!(library.entries.len(), 1);
+        let pose = &library.entries[0];
+        assert_eq!(pose.original, "待機");
+        assert_eq!(pose.bundle, "h/anim/female/00_00_00.unity3d");
+        assert_eq!(pose.controller, "kha_f_base");
+        // Column 8, not the second bundle in 6.
+        assert_eq!(pose.state, "Idle");
+        // The groups and categories are the game's own, shared with Studio.
+        assert_eq!(library.category_name(1, 100), "H foreplay: Stand");
     }
 
     #[test]
@@ -973,12 +1191,5 @@ mod tests {
             }]
         );
         assert_eq!(library.find(900, 1, 0).unwrap().source.label(), "dance-pack");
-    }
-
-    #[test]
-    fn h_content_is_never_listed() {
-        assert!(never("h/anim/female/02_00_00.unity3d"));
-        assert!(never("H\\anim\\male\\01.unity3d"));
-        assert!(!never("studio/anime/00.unity3d"));
     }
 }

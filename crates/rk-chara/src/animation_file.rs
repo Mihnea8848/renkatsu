@@ -119,9 +119,6 @@ impl Stored {
     /// installed, with the clips it plays. The meta names where it was
     /// found; the caller adds what the list said of it.
     pub fn extract(game: &Game, bundle: &str, controller: &str, state: &str) -> Result<Stored> {
-        if crate::animations::never(bundle) {
-            bail!("{bundle} is not content Renkatsu reads");
-        }
         let object = game
             .assets
             .find(bundle, controller, Some(class::ANIMATOR_CONTROLLER), None)
@@ -300,8 +297,7 @@ pub struct Filed {
 /// holds them, in path order. The folders around a file name its group
 /// (the first) and its category (the last); a file at the top keeps the
 /// group and category written in it, and one folder deep the folder is
-/// the group. Files that cannot be read, and anything that is not
-/// content Renkatsu reads, are left out.
+/// the group. Files that cannot be read are left out.
 pub fn filed(root: &Path) -> Vec<Filed> {
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -320,9 +316,6 @@ pub fn filed(root: &Path) -> Vec<Filed> {
         .into_iter()
         .filter_map(|path| {
             let meta = read_meta(&path).ok()?;
-            if crate::animations::never(&meta.bundle) {
-                return None;
-            }
             let folders: Vec<String> = path
                 .strip_prefix(root)
                 .ok()?
@@ -449,10 +442,5 @@ mod tests {
         let bytes = first.to_bytes();
         assert!(Stored::from_bytes(&bytes[..bytes.len() - 9]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn h_content_is_never_taken_out() {
-        assert!(crate::animations::never("h/anim/female/02_00_00.unity3d"));
     }
 }

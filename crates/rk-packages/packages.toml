@@ -20,9 +20,9 @@ sha256 = "1a71c5f81929a696bcbc9cbe2446221ae95bd17ba9c89595235b5f7ac4abf438"
 # `rk package starter-poses --out DIR` builds this one.
 [[package]]
 id = "starter-poses"
-name = "Starter Content: Animations"
+name = "Starter Content: Animations & Poses"
 version = "1.0.0"
-description = "CharaStudio's animations, static and moving, for standing, sitting, talking, walking, dancing and fighting, without the H scenes' animations. Characters are animated without a Koikatsu install."
+description = "CharaStudio's animations, static and moving, for standing, sitting, talking, walking, dancing and fighting, and the H scenes' animations. Characters are animated without a Koikatsu install."
 installed_size = 178129456
 
 [[package.part]]

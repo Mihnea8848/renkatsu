@@ -227,9 +227,6 @@ fn stored(game: Option<&rk_vfs::Game>, pick: &Pick) -> Result<Stored> {
     fill(&mut stored.meta.group, &pick.group);
     fill(&mut stored.meta.category, &pick.category);
     fill(&mut stored.meta.source, &pick.source);
-    if rk_chara::animations::never(&stored.meta.bundle) {
-        anyhow::bail!("it is not content Renkatsu reads");
-    }
     Ok(stored)
 }
 
