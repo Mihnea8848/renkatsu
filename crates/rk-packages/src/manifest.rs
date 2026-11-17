@@ -31,8 +31,13 @@ pub mod folder {
     pub const POSES: &str = "poses";
     pub const ITEMS: &str = "items";
     pub const SCENES: &str = "scenes";
+    /// Zipmods, read with Sideloader's rules as the game's own are.
+    /// Packages with mods need Renkatsu [`MODS_SINCE`] or newer.
+    pub const MODS: &str = "mods";
     /// Every folder a package may have at its root.
-    pub const ALL: [&str; 7] = [ABDATA, CARDS, MAPS, ANIMATIONS, POSES, ITEMS, SCENES];
+    pub const ALL: [&str; 8] = [ABDATA, CARDS, MAPS, ANIMATIONS, POSES, ITEMS, SCENES, MODS];
+    /// The first Renkatsu that reads a package's `mods` folder.
+    pub const MODS_SINCE: &str = "0.1.4";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

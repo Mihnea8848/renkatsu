@@ -168,6 +168,9 @@ A `renkatsu.toml` in the folder you run the tools from, or the
 Start Renkatsu Studio from the Start menu or application menu, or run
 `renkatsu`. `renkatsu --project path/to/project` opens a project directly.
 
+Packages bring content to every project; [docs/packages.md](docs/packages.md)
+explains how to make your own.
+
 ### Command line tools
 
 The `rk` command works on cards and the game folder without a window.
