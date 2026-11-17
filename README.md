@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.4, on the
+The latest version is 0.1.5, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -51,6 +51,8 @@ The latest version is 0.1.4, on the
 - 0.1.4 toggles clothing as CharaStudio does and poses characters with the
   game's 716 animations, also from Starter Content: Animations, and lets anyone
   make packages.
+- 0.1.5 keeps animations in the project with an importer that previews
+  them, and adds context menus in Content and the Outliner.
 - Next: posing by hand (FK and IK).
 
 ## Renkatsu Studio
