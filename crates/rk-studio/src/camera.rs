@@ -13,6 +13,8 @@ use rk_render::Camera;
 const ORBIT_RATE: f32 = 0.008;
 /// Radians turned per point of drag while looking around in place.
 const LOOK_RATE: f32 = 0.004;
+/// Distances to the target flown per second at the usual fly speed.
+const FLY_RATE: f32 = 0.5;
 /// The range of the fly speed, as a multiple of the usual speed.
 pub const SPEED_RANGE: (f32, f32) = (0.1, 10.0);
 
@@ -98,11 +100,12 @@ impl Orbit {
     }
 
     /// Flies the camera and its target together. `along` is right, up and
-    /// forward, each -1 to 1; `speed` is in distances to the target per
-    /// second, so it suits a close-up and a whole room alike.
+    /// forward, each -1 to 1; `speed` is a multiple of [`FLY_RATE`]
+    /// distances to the target per second, so it suits a close-up and a
+    /// whole room alike.
     pub fn fly(&mut self, along: Vec3, dt: f32, speed: f32) {
         let (right, _, forward) = self.basis();
-        let step = self.distance.max(0.5) * speed * dt;
+        let step = self.distance.max(0.5) * FLY_RATE * speed * dt;
         self.target += (right * along.x + Vec3::Y * along.y + forward * along.z) * step;
     }
 
