@@ -200,14 +200,45 @@ pub enum Marker {
 }
 
 /// A number that is changed by dragging it sideways, by `speed` for each
-/// point of the drag.
+/// point of the drag, or typed after a click, as in Unity and Unreal:
+/// Enter or a click elsewhere takes the typed value, Escape keeps the old.
 #[allow(clippy::too_many_arguments)]
 pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker: Marker, framed: bool, speed: f32) {
+    let typing = id.with("typing");
+    if let Some(mut text) = ui.data(|d| d.get_temp::<String>(typing)) {
+        let edit = ui.put(
+            rect,
+            egui::TextEdit::singleline(&mut text)
+                .id(typing.with("edit"))
+                .font(k.font())
+                .margin(egui::Margin::symmetric(6, 2))
+                .horizontal_align(egui::Align::LEFT),
+        );
+        if !edit.has_focus() && !edit.lost_focus() {
+            edit.request_focus();
+        }
+        let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if edit.lost_focus() || cancel {
+            if !cancel {
+                if let Some(typed) = parse_number(&text) {
+                    *value = typed;
+                }
+            }
+            ui.data_mut(|d| d.remove::<String>(typing));
+        } else {
+            ui.data_mut(|d| d.insert_temp(typing, text));
+        }
+        return;
+    }
     let resp = ui
         .interact(rect, id, Sense::click_and_drag())
         .on_hover_cursor(CursorIcon::ResizeHorizontal);
     if resp.dragged() {
         *value += resp.drag_delta().x * speed;
+    }
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(typing, format!("{value:.2}")));
+        ui.ctx().request_repaint();
     }
     let p = ui.painter();
     if framed {
@@ -255,6 +286,12 @@ pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker
         k.font(),
         color,
     );
+}
+
+/// A typed number: a decimal point or comma, a sign, spaces around it.
+pub fn parse_number(text: &str) -> Option<f32> {
+    let n: f32 = text.trim().replace(',', ".").parse().ok()?;
+    n.is_finite().then_some(n)
 }
 
 /// A read-only text value in a field's box.
@@ -403,4 +440,19 @@ pub fn check_item(ui: &mut Ui, k: &Look, on: bool, text: &str, keys: &str) -> Re
         button = button.shortcut_text(keys);
     }
     ui.add(button)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_number;
+
+    #[test]
+    fn typed_numbers_take_a_point_or_a_comma_and_refuse_the_rest() {
+        assert_eq!(parse_number(" 1.5 "), Some(1.5));
+        assert_eq!(parse_number("-0,25"), Some(-0.25));
+        assert_eq!(parse_number("3"), Some(3.0));
+        assert_eq!(parse_number("abc"), None);
+        assert_eq!(parse_number("inf"), None);
+        assert_eq!(parse_number(""), None);
+    }
 }

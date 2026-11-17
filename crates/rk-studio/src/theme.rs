@@ -114,7 +114,9 @@ impl Theme {
             color: Color32::from_black_alpha(120),
         };
         v.selection.bg_fill = self.select;
-        v.selection.stroke = Stroke::new(1.0, self.select);
+        // egui draws selected text in the stroke's colour, over the fill:
+        // it must stand out from the blue, not match it.
+        v.selection.stroke = Stroke::new(1.0, self.text_bright);
         v.hyperlink_color = self.select;
         v.text_cursor.stroke = Stroke::new(1.0, self.text_bright);
         for (w, fill, text) in [
