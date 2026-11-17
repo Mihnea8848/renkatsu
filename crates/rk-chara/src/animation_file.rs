@@ -120,9 +120,17 @@ pub struct Stored {
 
 impl Stored {
     /// Takes one state of a controller out of the content that is
-    /// installed, with the clips it plays. The meta names where it was
-    /// found; the caller adds what the list said of it.
-    pub fn extract(game: &Game, bundle: &str, controller: &str, state: &str) -> Result<Stored> {
+    /// installed, with the clips it plays. With `over`, the clips of
+    /// that controller replace the base's by name first, as the game
+    /// layers them for the H scenes' animations. The meta names where it
+    /// was found; the caller adds what the list said of it.
+    pub fn extract(
+        game: &Game,
+        bundle: &str,
+        controller: &str,
+        state: &str,
+        over: crate::motion::Override,
+    ) -> Result<Stored> {
         let object = game
             .assets
             .find(bundle, controller, Some(class::ANIMATOR_CONTROLLER), None)
@@ -133,6 +141,7 @@ impl Stored {
             .with_context(|| format!("controller {controller} has no state {state}"))?
             .clone();
         let indices = found.clip_indices();
+        let instead = crate::motion::replacements(game, over)?;
         let mut clips = Vec::with_capacity(indices.len());
         for &index in &indices {
             let pointer = *read
@@ -143,6 +152,7 @@ impl Stored {
                 .assets
                 .deref(&object.file, pointer)
                 .with_context(|| format!("a clip of {controller} is missing from {bundle}"))?;
+            let clip = instead.get(&clip.name()).unwrap_or(&clip);
             clips.push(Arc::new(AnimationClip::read(&clip.read()?)?));
         }
         let state_stored = found.with_clips(&|old| indices.iter().position(|i| *i == old).unwrap_or(0));

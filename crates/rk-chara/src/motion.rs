@@ -22,8 +22,9 @@ use anyhow::{Context, Result};
 use glam::{Quat, Vec3};
 use rk_unityfs::animation::{crc32, AnimationClip, AnimatorController, Target};
 use rk_unityfs::class;
+use rk_vfs::assets::ObjRef;
 use rk_vfs::Game;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// The bones below an Animator's object, by the hash of their path.
@@ -342,15 +343,55 @@ pub fn resolve(
     })
 }
 
-/// Loads a state of a controller from the game's files, as
-/// `ChaControl.LoadAnimation` and `Animator.Play` find it: the controller
-/// asset `controller` of `bundle`, and its state `state`.
-pub fn load(game: &Game, bundle: &str, controller: &str, state: &str, parameters: &Parameters) -> Result<Motion> {
+/// Where a second controller's clips are, for an animation whose list
+/// names one: the bundle and the controller asset in it. The H scenes'
+/// animations share one base controller for a whole category and differ
+/// only by this, so an animation that names one and plays without it
+/// plays its neighbour's motion.
+pub type Override<'a> = Option<(&'a str, &'a str)>;
+
+/// The clips of `over` by their name, which replace the base
+/// controller's clips of the same name. This is what the game's
+/// `Illusion.Utils.Animator.SetupAnimatorOverrideController` does: it
+/// builds an override controller over the base and assigns every clip of
+/// the second controller by name.
+pub(crate) fn replacements(game: &Game, over: Override) -> Result<BTreeMap<String, ObjRef>> {
+    let mut out = BTreeMap::new();
+    let Some((bundle, controller)) = over.filter(|(b, c)| !b.is_empty() && !c.is_empty()) else {
+        return Ok(out);
+    };
     let object = game
         .assets
         .find(bundle, controller, Some(class::ANIMATOR_CONTROLLER), None)
         .with_context(|| format!("no animator controller {controller} in {bundle}"))?;
     let read = AnimatorController::read(&object.read()?)?;
+    for pointer in &read.clips {
+        if let Some(clip) = game.assets.deref(&object.file, *pointer) {
+            out.insert(clip.name(), clip);
+        }
+    }
+    Ok(out)
+}
+
+/// Loads a state of a controller from the game's files, as
+/// `ChaControl.LoadAnimation` and `Animator.Play` find it: the controller
+/// asset `controller` of `bundle`, and its state `state`. With `over`,
+/// the clips of that controller replace the base's by name first, as
+/// `Studio.OCIChar.LoadAnime` does for the H scenes' animations.
+pub fn load(
+    game: &Game,
+    bundle: &str,
+    controller: &str,
+    state: &str,
+    over: Override,
+    parameters: &Parameters,
+) -> Result<Motion> {
+    let object = game
+        .assets
+        .find(bundle, controller, Some(class::ANIMATOR_CONTROLLER), None)
+        .with_context(|| format!("no animator controller {controller} in {bundle}"))?;
+    let read = AnimatorController::read(&object.read()?)?;
+    let instead = replacements(game, over)?;
     resolve(&read, state, parameters, &mut |index| {
         let pointer = *read
             .clips
@@ -360,6 +401,7 @@ pub fn load(game: &Game, bundle: &str, controller: &str, state: &str, parameters
             .assets
             .deref(&object.file, pointer)
             .with_context(|| format!("a clip of {controller} is missing from {bundle}"))?;
+        let clip = instead.get(&clip.name()).unwrap_or(&clip);
         Ok(Arc::new(AnimationClip::read(&clip.read()?)?))
     })
 }

@@ -48,7 +48,14 @@ pub fn list(details: bool) -> Result<()> {
                 ),
                 None => "not read".to_owned(),
             };
-            let kind = match motion::load(&game, &pose.bundle, &pose.controller, &pose.state, &parameters) {
+            let kind = match motion::load(
+                &game,
+                &pose.bundle,
+                &pose.controller,
+                &pose.state,
+                pose.over(),
+                &parameters,
+            ) {
                 Ok(m) => format!("{listed}, moves {:.4}", m.movement()),
                 Err(e) => format!("unreadable: {e:#}"),
             };
@@ -94,8 +101,13 @@ pub fn export(group: i32, category: i32, number: Option<i32>, out: &Path) -> Res
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut total = 0;
     for entry in wanted {
-        let mut stored =
-            rk_chara::animation_file::Stored::extract(&game, &entry.bundle, &entry.controller, &entry.state)?;
+        let mut stored = rk_chara::animation_file::Stored::extract(
+            &game,
+            &entry.bundle,
+            &entry.controller,
+            &entry.state,
+            entry.over(),
+        )?;
         stored.meta.name = entry.name.clone();
         stored.meta.group = group_name.clone();
         stored.meta.category = category_name.clone();
@@ -142,7 +154,14 @@ pub fn check(card: &Path) -> Result<()> {
     let mut written: BTreeSet<usize> = BTreeSet::new();
     let mut unbound_in: BTreeMap<String, usize> = BTreeMap::new();
     for pose in &library.entries {
-        let motion = match motion::load(&game, &pose.bundle, &pose.controller, &pose.state, &chara.parameters) {
+        let motion = match motion::load(
+            &game,
+            &pose.bundle,
+            &pose.controller,
+            &pose.state,
+            pose.over(),
+            &chara.parameters,
+        ) {
             Ok(m) => m,
             Err(e) => {
                 failed += 1;

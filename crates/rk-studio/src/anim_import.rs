@@ -63,25 +63,30 @@ impl Entry {
 
     /// The animation as a scene names it while it is not in the project.
     fn reference(&self) -> scene::Animation {
-        let (file, bundle, controller, state) = match &self.from {
+        let (file, bundle, controller, state, over) = match &self.from {
             From::Installed {
                 bundle,
                 controller,
                 state,
-            } => (None, bundle.clone(), controller.clone(), state.clone()),
+                over,
+            } => (None, bundle.clone(), controller.clone(), state.clone(), over.clone()),
             From::File(path) => (
                 Some(path.to_string_lossy().into_owned()),
                 String::new(),
                 String::new(),
                 String::new(),
+                Default::default(),
             ),
         };
+        let [override_bundle, override_controller] = over;
         scene::Animation {
             name: self.name.clone(),
             file,
             bundle,
             controller,
             state,
+            override_bundle,
+            override_controller,
             speed: 1.0,
             start: 0.0,
             force_loop: false,
@@ -372,6 +377,7 @@ pub fn listed(library: &Library, only: Option<&Source>, name_of: &dyn Fn(&Source
                 bundle: e.bundle.clone(),
                 controller: e.controller.clone(),
                 state: e.state.clone(),
+                over: [e.override_bundle.clone(), e.override_controller.clone()],
             },
             timing: e.timing,
             listed: Some(i),
@@ -735,7 +741,7 @@ impl Importer {
             if let Some(Content::Character { animation: worn, .. }) =
                 preview.scene.get_mut(preview.character).map(|o| &mut o.content)
             {
-                *worn = animation;
+                *worn = animation.map(Box::new);
             }
         } else {
             preview.seconds += dt;
@@ -1337,6 +1343,7 @@ mod tests {
                 bundle: "b".into(),
                 controller: "c".into(),
                 state: name.to_lowercase(),
+                over: Default::default(),
             },
             timing: Some(Timing { seconds, loops: false }),
             listed: None,

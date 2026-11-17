@@ -62,7 +62,14 @@ pub fn render(a: Args) -> Result<()> {
         let pose = library
             .find(group, category, number)
             .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
-        let motion = rk_chara::motion::load(&game, &pose.bundle, &pose.controller, &pose.state, &chara.parameters)?;
+        let motion = rk_chara::motion::load(
+            &game,
+            &pose.bundle,
+            &pose.controller,
+            &pose.state,
+            pose.over(),
+            &chara.parameters,
+        )?;
         let bound = motion.bind(&rk_chara::motion::Skeleton::of(&chara.scene, chara.animator));
         if let Some(heels) = &mut chara.heels {
             heels.animation(Some(&pose.controller), Some(&pose.state));

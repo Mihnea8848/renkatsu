@@ -63,6 +63,16 @@ impl Item {
             bundle: origin(|m| &m.bundle, |l| &l.bundle),
             controller: origin(|m| &m.controller, |l| &l.controller),
             state: origin(|m| &m.state, |l| &l.state),
+            override_bundle: self
+                .link
+                .as_ref()
+                .map(|l| l.override_bundle.clone())
+                .unwrap_or_default(),
+            override_controller: self
+                .link
+                .as_ref()
+                .map(|l| l.override_controller.clone())
+                .unwrap_or_default(),
             speed: self.link.as_ref().map_or(1.0, |l| l.speed),
             start: self.link.as_ref().map_or(0.0, |l| l.start),
             force_loop: self.link.as_ref().is_some_and(|l| l.force_loop),
@@ -177,6 +187,9 @@ pub enum From {
         bundle: String,
         controller: String,
         state: String,
+        /// The bundle and the controller whose clips replace the base's,
+        /// for the H scenes' animations; empty for the rest.
+        over: [String; 2],
     },
     /// An animation file, of a package or picked by the user.
     File(PathBuf),
@@ -214,9 +227,11 @@ fn stored(game: Option<&rk_vfs::Game>, pick: &Pick) -> Result<Stored> {
             bundle,
             controller,
             state,
+            over,
         } => {
             let game = game.context("the content it is installed in could not be opened")?;
-            Stored::extract(game, bundle, controller, state)?
+            let over = (!over[0].is_empty()).then_some((over[0].as_str(), over[1].as_str()));
+            Stored::extract(game, bundle, controller, state, over)?
         }
         From::File(path) => Stored::read(path)?,
     };
@@ -317,6 +332,7 @@ pub fn copy_in(project: &mut Project, game: &rk_vfs::Game, item: &Item) -> Resul
             bundle: link.bundle.clone(),
             controller: link.controller.clone(),
             state: link.state.clone(),
+            over: [link.override_bundle.clone(), link.override_controller.clone()],
         },
     };
     let (rel, _) = write_in(project, item.folder(), &stored(Some(game), &pick)?)?;
@@ -427,6 +443,7 @@ mod tests {
                 bundle: "studio/anime/00.unity3d".into(),
                 controller: "tachi".into(),
                 state: "f_tachi_00".into(),
+                over: Default::default(),
             },
             ..file(&home, "Stand", 1.0, false)
         };
@@ -482,7 +499,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut content = Content::character(PathBuf::from("Characters/anna.png"));
         if let Content::Character { animation, .. } = &mut content {
-            *animation = Some(item.reference());
+            *animation = Some(Box::new(item.reference()));
         }
         scene.add("Anna", content, None);
         project.save_scene(&scene).unwrap();

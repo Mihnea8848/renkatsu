@@ -539,7 +539,7 @@ impl State {
             Command::Animate(animation) => {
                 if let Some(mut object) = self.doc.selection().cloned() {
                     if let Content::Character { animation: worn, .. } = &mut object.content {
-                        *worn = animation;
+                        *worn = animation.map(Box::new);
                         self.doc.edit(object, false);
                     }
                 }
