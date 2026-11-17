@@ -176,7 +176,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Viewport => viewport::show(ui, k, st, header),
             Panel::Outliner => outliner(ui, k, st),
             Panel::Properties => properties::show(ui, k, st),
-            Panel::Content => content(ui, k, st),
+            Panel::Content => crate::content_panel::show(ui, k, st),
             Panel::Console => console(ui, k, st),
             Panel::Timeline => timeline(ui, k),
         }
@@ -233,7 +233,7 @@ impl Viewer<'_> {
 }
 
 /// A row of controls across the top of a panel. Returns its rectangle.
-fn toolbar(ui: &mut Ui, k: &Look, add: impl FnOnce(&mut Ui)) -> Rect {
+pub fn toolbar(ui: &mut Ui, k: &Look, add: impl FnOnce(&mut Ui)) -> Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 10.0), Sense::hover());
     let mut row = ui.new_child(
         UiBuilder::new()
@@ -291,6 +291,11 @@ struct Row {
 /// What a frame of the Outliner asks for, carried out once it is drawn.
 enum Act {
     Select(Option<ObjectId>),
+    /// Add an object to the selection, or take it out.
+    Toggle(ObjectId),
+    /// Select an object unless it is one of several selected, before a
+    /// command that acts on the selection.
+    Keep(ObjectId),
     Fold(Option<ObjectId>),
     Eye(ObjectId),
     Rename(ObjectId),
@@ -397,10 +402,13 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
             for row in &rows {
                 let (rect, resp) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click_and_drag());
-                if resp.clicked() || resp.drag_started() {
-                    acts.push(Act::Select(row.id));
+                let adding = ui.input(|i| i.modifiers.command);
+                match row.id {
+                    Some(id) if resp.clicked() && adding => acts.push(Act::Toggle(id)),
+                    _ if resp.clicked() || resp.drag_started() => acts.push(Act::Select(row.id)),
+                    _ => {}
                 }
-                let selected = row.id.is_some() && st.doc.selected == row.id;
+                let selected = row.id.is_some_and(|id| st.doc.is_selected(id));
                 let hovered = ui.rect_contains_pointer(rect);
                 let p = ui.painter().clone();
                 if selected {
@@ -418,38 +426,34 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                 };
                 let faint = if selected { on_selection(t.select) } else { t.text_dim };
 
+                if row.id.is_none() {
+                    resp.context_menu(|ui| {
+                        if let Some(command) = scene_menu(ui, k, st) {
+                            acts.push(Act::Select(None));
+                            acts.push(Act::Run(command));
+                        }
+                    });
+                }
                 if let Some(id) = row.id {
                     resp.dnd_set_drag_payload(DragObject(id));
                     if resp.double_clicked() {
                         acts.push(Act::Rename(id));
                     }
                     resp.context_menu(|ui| {
-                        let item = |ui: &mut Ui, text: &str, keys: &str| {
-                            let clicked = ui.add(egui::Button::new(text).shortcut_text(keys)).clicked();
-                            if clicked {
-                                ui.close();
-                            }
-                            clicked
-                        };
-                        let mut command = None;
-                        if item(ui, "Rename", "F2") {
-                            command = Some(Command::Rename);
-                        }
-                        if item(ui, "Duplicate", "Ctrl+D") {
-                            command = Some(Command::Duplicate);
-                        }
-                        if item(ui, if row.visible { "Hide" } else { "Show" }, "H") {
-                            command = Some(Command::ToggleHidden);
-                        }
-                        ui.separator();
-                        if item(ui, "Delete", "Del") {
-                            command = Some(Command::Delete);
-                        }
-                        if let Some(command) = command {
-                            acts.push(Act::Select(Some(id)));
+                        if let Some(command) = object_menu(ui, k, st, row) {
+                            acts.push(Act::Keep(id));
                             acts.push(Act::Run(command));
                         }
                     });
+                    // An animation of the project dropped on a character.
+                    if row.kind == Kind::Character {
+                        if let Some(file) = resp.dnd_release_payload::<crate::content_panel::DragFile>() {
+                            if let Some(item) = st.animations.find(&file.0) {
+                                acts.push(Act::Select(Some(id)));
+                                acts.push(Act::Run(Command::Animate(Some(item.reference()))));
+                            }
+                        }
+                    }
 
                     // Visibility: a column, or a button at the right edge.
                     let eye = match k.d.tree {
@@ -591,6 +595,15 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
     for act in acts {
         match act {
             Act::Select(id) => st.doc.selected = id,
+            Act::Toggle(id) => st.doc.toggle_selected(id),
+            Act::Keep(id) => {
+                // The object that was clicked leads what is selected.
+                let mut all = vec![id];
+                if st.doc.is_selected(id) {
+                    all.extend(st.doc.selected_all().into_iter().filter(|other| *other != id));
+                }
+                st.doc.select_many(&all);
+            }
             Act::Fold(None) => st.scene_folded = !st.scene_folded,
             Act::Fold(Some(id)) => {
                 if !st.folded.remove(&id) {
@@ -610,7 +623,13 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                 st.renaming = None;
             }
             Act::Move(id, place) => {
-                if st.doc.place(id, place) {
+                // What is dragged takes the rest of the selection along.
+                let all = if st.doc.is_selected(id) {
+                    st.doc.selected_all()
+                } else {
+                    vec![id]
+                };
+                if st.doc.place_many(&all, place) > 0 {
                     if let Place::Into(Some(folder)) = place {
                         st.folded.remove(&folder);
                     }
@@ -624,7 +643,10 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), footer), Sense::hover());
         let p = ui.painter();
         hair_h(p, rect.left(), rect.right(), rect.top(), t.line);
-        let chosen = if st.doc.selected.is_some() { ", 1 selected" } else { "" };
+        let chosen = match st.doc.selected_all().len() {
+            0 => String::new(),
+            n => format!(", {n} selected"),
+        };
         p.text(
             Pos2::new(rect.left() + 10.0, rect.center().y),
             Align2::LEFT_CENTER,
@@ -633,6 +655,153 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
             t.text_dim,
         );
     }
+}
+
+/// The context menu of an object in the Outliner. Returns what was chosen.
+fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> {
+    use widgets::menu_item;
+    let mut command = None;
+    let scene = st.doc.scene();
+    let folder = row.kind == Kind::Folder;
+    let character = row.kind == Kind::Character;
+    let inside = row.id.and_then(|id| scene.get(id)).is_some_and(|o| o.parent.is_some());
+    if menu_item(ui, k, icon::CROSSHAIR, "Focus", "F", !folder) {
+        command = Some(Command::Focus);
+    }
+    if character {
+        widgets::menu_sub(ui, k, Kind::Animation.glyph(), "Apply animation", |ui| {
+            if let Some(chosen) = animation_items(ui, k, st, row.id) {
+                command = Some(Command::Animate(chosen));
+            }
+        });
+    }
+    ui.separator();
+    if menu_item(ui, k, icon::PENCIL_SIMPLE, "Rename", "F2", true) {
+        command = Some(Command::Rename);
+    }
+    if menu_item(ui, k, icon::COPY, "Duplicate", "Ctrl+D", true) {
+        command = Some(Command::Duplicate);
+    }
+    if menu_item(ui, k, icon::COPY, "Copy", "Ctrl+C", true) {
+        command = Some(Command::Copy);
+    }
+    if menu_item(ui, k, icon::SCISSORS, "Cut", "Ctrl+X", true) {
+        command = Some(Command::Cut);
+    }
+    if menu_item(
+        ui,
+        k,
+        icon::CLIPBOARD,
+        "Paste",
+        "Ctrl+V",
+        !st.scene_clipboard.is_empty(),
+    ) {
+        command = Some(Command::Paste);
+    }
+    ui.separator();
+    let eye = if row.visible { icon::EYE_SLASH } else { icon::EYE };
+    if menu_item(ui, k, eye, if row.visible { "Hide" } else { "Show" }, "H", true) {
+        command = Some(Command::ToggleHidden);
+    }
+    if menu_item(ui, k, icon::SELECTION_ALL, "Select children", "", folder && row.parent) {
+        command = Some(Command::SelectChildren);
+    }
+    if menu_item(ui, k, icon::FOLDER_SIMPLE_PLUS, "Add child folder", "", folder) {
+        command = Some(Command::AddChildFolder);
+    }
+    if menu_item(ui, k, icon::ARROW_BEND_LEFT_UP, "Unparent", "", inside) {
+        command = Some(Command::Unparent);
+    }
+    ui.separator();
+    if menu_item(ui, k, icon::TRASH, "Delete", "Del", true) {
+        command = Some(Command::Delete);
+    }
+    command
+}
+
+/// The context menu of the scene's own row.
+fn scene_menu(ui: &mut Ui, k: &Look, st: &State) -> Option<Command> {
+    use widgets::menu_item;
+    let mut command = None;
+    if menu_item(ui, k, icon::FOLDER_SIMPLE_PLUS, "Add folder", "", true) {
+        command = Some(Command::AddChildFolder);
+    }
+    for (kind, text) in [(Kind::Light, "Add light"), (Kind::Camera, "Add camera")] {
+        if menu_item(ui, k, kind.glyph(), text, "", true) {
+            command = Some(Command::Add(kind));
+        }
+    }
+    if menu_item(ui, k, Kind::Character.glyph(), "Add character from a card", "", true) {
+        command = Some(Command::Add(Kind::Character));
+    }
+    ui.separator();
+    if menu_item(
+        ui,
+        k,
+        icon::CLIPBOARD,
+        "Paste",
+        "Ctrl+V",
+        !st.scene_clipboard.is_empty(),
+    ) {
+        command = Some(Command::Paste);
+    }
+    command
+}
+
+/// The project's animations as menu items, by the folders the user keeps
+/// them in, with none first. Returns what was chosen: an animation, or
+/// `Some(None)` for none. `of` is the character whose animation is marked.
+pub fn animation_items(
+    ui: &mut Ui,
+    k: &Look,
+    st: &State,
+    of: Option<ObjectId>,
+) -> Option<Option<crate::scene::Animation>> {
+    let worn = of.and_then(|id| st.doc.scene().get(id)).and_then(|o| match &o.content {
+        crate::scene::Content::Character { animation, .. } => animation.as_ref(),
+        _ => None,
+    });
+    let worn_rel = worn.and_then(|a| st.animations.of(a)).map(|i| i.rel.as_str());
+    let mut chosen = None;
+    if widgets::check_item(ui, k, worn.is_none(), "None, as built", "").clicked() {
+        chosen = Some(None);
+        ui.close();
+    }
+    // An animation the scene has that the project does not own.
+    if let (Some(worn), None) = (worn, worn_rel) {
+        let text = format!("{} (not in the project)", worn.name);
+        let _ = widgets::check_item(ui, k, true, &text, "");
+    }
+    if st.animations.items.is_empty() {
+        ui.separator();
+        ui.label(egui::RichText::new("This project has no animations yet").color(k.t.text_dim));
+        ui.label(egui::RichText::new("Import some in Content, Animations").color(k.t.text_dim));
+        return chosen;
+    }
+    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        let mut folder: Option<&str> = None;
+        for item in &st.animations.items {
+            if folder != Some(item.folder()) {
+                folder = Some(item.folder());
+                ui.separator();
+                let name = match item.folder().strip_prefix(crate::project::ANIMATIONS) {
+                    Some("") | None => crate::project::ANIMATIONS.to_owned(),
+                    Some(rest) => rest.trim_start_matches('/').replace('/', " / "),
+                };
+                ui.label(egui::RichText::new(name).font(k.small()).color(k.t.text_dim));
+            }
+            let kind = match item.is_static() {
+                Some(true) => "Static",
+                Some(false) => "Moving",
+                None => "Linked",
+            };
+            if widgets::check_item(ui, k, worn_rel == Some(item.rel.as_str()), &item.name, kind).clicked() {
+                chosen = Some(Some(item.reference()));
+                ui.close();
+            }
+        }
+    });
+    chosen
 }
 
 /// The kinds the Add menu offers, as menu items with the kind's icon.
@@ -663,347 +832,6 @@ pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
             st.run(Command::Add(kind));
             ui.close();
         }
-    }
-}
-
-/// The project's folders besides Characters, as they are on disk: each
-/// with its kind, what its import button says (none when the folder fills
-/// another way) and what the folder shows until its feature arrives.
-const LATER: [(&str, Kind, Option<&str>, &str); 6] = [
-    ("Poses", Kind::Pose, Some("Import pose"), "Poses arrive with posing"),
-    ("Maps", Kind::Map, Some("Import map"), "Maps arrive with their feature"),
-    (
-        "Items",
-        Kind::Item,
-        Some("Import item"),
-        "Items arrive with their feature",
-    ),
-    (
-        "Scenes",
-        Kind::Scene,
-        Some("Import scene"),
-        "A project holds one scene for now",
-    ),
-    ("Renders", Kind::Camera, None, "Renders arrive with baking"),
-    (
-        "Mods",
-        Kind::Folder,
-        None,
-        "Imported cards copy the mods they need here",
-    ),
-];
-
-fn content(ui: &mut Ui, k: &Look, st: &mut State) {
-    let t = &k.t;
-    st.library.begin_frame();
-    st.folder = st.folder.min(LATER.len());
-    // The characters come first, then the folders kept for later.
-    // The folder this frame draws; a click in the tree below changes
-    // `st.folder` for the next frame.
-    let folder = st.folder;
-    let characters = folder == 0;
-    let poses = folder == 1;
-    let trail = [
-        st.project.file.name.clone(),
-        if characters {
-            "Characters".to_owned()
-        } else {
-            LATER[folder - 1].0.to_owned()
-        },
-    ];
-
-    let mut add: Option<PathBuf> = None;
-    let bar = toolbar(ui, k, |ui| {
-        // Each folder imports its own kind of file.
-        if characters {
-            if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import card", false, false)
-                .on_hover_text("Pick a card and copy it into the project, with the mods it needs")
-                .clicked()
-            {
-                st.ask(Command::ImportCard, ui.ctx());
-            }
-            if flat_button(ui, k, Some(icon::PACKAGE), "From a package", false, false)
-                .on_hover_text("Choose characters of the installed packages and copy their cards into the project")
-                .clicked()
-            {
-                st.ask(Command::ImportFromPackage, ui.ctx());
-            }
-            let resp = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false).on_hover_text(
-                if st.asset.is_some() {
-                    "Add the selected character to the scene"
-                } else {
-                    "Select a character first, or double click one"
-                },
-            );
-            if resp.clicked() {
-                add = st.asset.clone();
-            }
-        } else if poses {
-            crate::poses::toolbar(ui, k, st);
-        } else if let (Some(import), why) = (LATER[folder - 1].2, LATER[folder - 1].3) {
-            ui.add_enabled_ui(false, |ui| {
-                flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), import, false, false).on_disabled_hover_text(why);
-            });
-        }
-        if icon_button(ui, k, icon::ARROWS_CLOCKWISE, false)
-            .on_hover_text("Read the project's folders again")
-            .clicked()
-        {
-            st.library.refresh(&st.project);
-            st.poses.refresh(&st.project);
-        }
-        bar_divider(ui, k);
-        ui.add_space(2.0);
-        for (i, part) in trail.iter().enumerate() {
-            let last = i + 1 == trail.len();
-            let w = widgets::text_width(ui, part, k.font()).ceil();
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
-            let color = if last { t.text_bright } else { t.text_dim };
-            label(ui.painter(), k, rect.left_center(), part, color);
-            if !last {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, k.field()), Sense::hover());
-                glyph(ui.painter(), k, rect.center(), icon::CARET_RIGHT, 10.0, t.text_dim);
-            }
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::search(ui, k, &mut st.content_search, "Search this folder", 240.0);
-        });
-    });
-    hair_h(ui.painter(), bar.left(), bar.right(), bar.bottom() - 1.0, t.line);
-
-    let body = ui.available_rect_before_wrap();
-    let tree_w = 188.0;
-    let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + tree_w, body.bottom()));
-    hair_v(ui.painter(), tree.right(), tree.top(), tree.bottom(), t.line);
-    let mut side = ui.new_child(UiBuilder::new().max_rect(tree));
-    side.set_clip_rect(tree.intersect(ui.clip_rect()));
-    egui::ScrollArea::vertical()
-        .id_salt("folders")
-        .auto_shrink(false)
-        .show(&mut side, |ui| {
-            ui.add_space(4.0);
-            // The project folder holds the others, as on disk.
-            let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::hover());
-            let p = ui.painter();
-            let x = row.left() + 10.0;
-            glyph(p, k, Pos2::new(x, row.center().y), icon::CARET_DOWN, 10.0, t.text_dim);
-            glyph(
-                p,
-                k,
-                Pos2::new(x + 14.0, row.center().y),
-                icon::FOLDER_OPEN,
-                15.0,
-                t.text_dim,
-            );
-            let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
-            label(
-                &clip,
-                k,
-                Pos2::new(x + 28.0, row.center().y),
-                &st.project.file.name,
-                t.text_bright,
-            );
-            let folders = std::iter::once(("Characters", Kind::Character))
-                .chain(LATER.iter().map(|(name, kind, _, _)| (*name, *kind)));
-            let mut chosen = None;
-            for (i, (name, kind)) in folders.enumerate() {
-                let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-                if resp.clicked() {
-                    chosen = Some(i);
-                }
-                let p = ui.painter();
-                let on = st.folder == i;
-                if on {
-                    p.rect_filled(row, 0.0, t.control);
-                } else if resp.hovered() {
-                    p.rect_filled(row, 0.0, t.row_hover);
-                }
-                let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
-                let x = row.left() + 34.0;
-                glyph(p, k, Pos2::new(x, row.center().y), g, 15.0, kind.color());
-                let color = if on { t.text_bright } else { t.text };
-                let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
-                label(&clip, k, Pos2::new(x + 14.0, row.center().y), name, color);
-                if !(on && name == "Poses") {
-                    continue;
-                }
-                // The open Poses folder shows its groups: the project's
-                // own poses, then CharaStudio's and the ones mods add.
-                for (group, name) in crate::poses::groups(st) {
-                    let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-                    if resp.clicked() {
-                        st.poses.group = group;
-                    }
-                    let p = ui.painter();
-                    let on = st.poses.group == group;
-                    if on || resp.hovered() {
-                        p.rect_filled(row, 0.0, t.row_hover);
-                    }
-                    let color = if on { t.text_bright } else { t.text_dim };
-                    let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
-                    if on {
-                        p.rect_filled(
-                            Rect::from_min_size(row.left_top(), Vec2::new(2.0, row.height())),
-                            0.0,
-                            kind.color(),
-                        );
-                    }
-                    label(&clip, k, Pos2::new(row.left() + 62.0, row.center().y), &name, color);
-                }
-            }
-            if let Some(i) = chosen {
-                st.folder = i;
-                st.asset = None;
-            }
-        });
-
-    let grid = Rect::from_min_max(Pos2::new(tree.right() + 1.0, body.top()), body.max);
-    let mut area = ui.new_child(UiBuilder::new().max_rect(grid));
-    area.set_clip_rect(grid.intersect(ui.clip_rect()));
-    let note = |area: &Ui, text: &str| {
-        area.painter().text(
-            grid.min + Vec2::new(14.0, 20.0),
-            Align2::LEFT_CENTER,
-            text,
-            k.font(),
-            t.text_dim,
-        );
-    };
-    let search = st.content_search.trim().to_lowercase();
-    let cards: Vec<crate::library::Entry> = if characters {
-        st.library
-            .characters
-            .iter()
-            .filter(|c| {
-                search.is_empty()
-                    || c.name.to_lowercase().contains(&search)
-                    || c.file.to_string_lossy().to_lowercase().contains(&search)
-            })
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if poses {
-        crate::poses::list(&mut area, k, st, grid);
-        ui.allocate_rect(body, Sense::hover());
-        return;
-    }
-    if !characters {
-        let (name, _, _, why) = LATER[folder - 1];
-        if name == "Mods" {
-            let count = std::fs::read_dir(st.project.folder(name))
-                .map(|d| {
-                    d.flatten()
-                        .filter(|e| e.path().extension().is_some_and(|x| x == "zipmod"))
-                        .count()
-                })
-                .unwrap_or(0);
-            note(&area, &format!("{count} mods. {why}"));
-        } else {
-            note(&area, why);
-        }
-    } else if cards.is_empty() && !search.is_empty() {
-        note(&area, "No character matches the search");
-    } else if cards.is_empty() {
-        note(&area, "The project has no characters yet. Import a card to add one.");
-    }
-
-    // Cards are portrait pictures, 252 by 352.
-    let thumb = Vec2::new((k.d.row * 2.5).round(), (k.d.row * 2.5 * 352.0 / 252.0).round());
-    let caption = k.d.tree != Tree::Plain;
-    let tile = Vec2::new(thumb.x + 12.0, thumb.y + if caption { 40.0 } else { 26.0 });
-    let kind = Kind::Character;
-    egui::ScrollArea::vertical()
-        .id_salt("cards")
-        .auto_shrink(false)
-        .show(&mut area, |ui| {
-            let columns = ((ui.available_width() - 12.0) / tile.x).floor().max(1.0) as usize;
-            let rows = cards.len().div_ceil(columns);
-            let (space, _) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), rows as f32 * tile.y + 12.0),
-                Sense::hover(),
-            );
-            for (i, card) in cards.iter().enumerate() {
-                let cell = Rect::from_min_size(
-                    space.min
-                        + Vec2::new(
-                            12.0 + (i % columns) as f32 * tile.x,
-                            10.0 + (i / columns) as f32 * tile.y,
-                        ),
-                    tile - Vec2::new(12.0, 0.0),
-                );
-                if !ui.is_rect_visible(cell) {
-                    continue;
-                }
-                let name = card.name.as_str();
-                let resp = ui
-                    .interact(cell, ui.id().with(("card", i)), Sense::click_and_drag())
-                    .on_hover_text(format!(
-                        "{name}\n{}\nDouble click or drag into the scene to add",
-                        card.file.display()
-                    ));
-                resp.dnd_set_drag_payload(DragCard(card.file.clone()));
-                if resp.clicked() || resp.drag_started() {
-                    st.asset = Some(card.file.clone());
-                }
-                if resp.double_clicked() {
-                    add = Some(card.file.clone());
-                }
-                let on = st.asset.as_ref() == Some(&card.file);
-                let picture = Rect::from_min_size(cell.min, thumb);
-                let texture = st.library.thumb(ui.ctx(), &card.path).map(|tex| tex.id());
-                let p = ui.painter();
-                p.rect_filled(picture, 0.0, t.input);
-                match texture {
-                    Some(id) => {
-                        p.image(
-                            id,
-                            picture,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
-                    None => glyph(p, k, picture.center(), kind.glyph(), thumb.x * 0.42, t.hover),
-                }
-                // The type colour along the picture's foot, as Unreal's tiles.
-                p.rect_filled(
-                    Rect::from_min_max(Pos2::new(picture.left(), picture.bottom() - 2.0), picture.max),
-                    0.0,
-                    kind.color(),
-                );
-                if on {
-                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Outside);
-                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.select), StrokeKind::Inside);
-                } else if resp.hovered() {
-                    p.rect_stroke(picture, 0.0, Stroke::new(1.0, t.hover), StrokeKind::Inside);
-                }
-                let clip = p.with_clip_rect(Rect::from_min_max(
-                    Pos2::new(cell.left(), picture.bottom()),
-                    Pos2::new(cell.right(), cell.bottom()),
-                ));
-                let color = if on { t.text_bright } else { t.text };
-                label(
-                    &clip,
-                    k,
-                    Pos2::new(cell.left() + 1.0, picture.bottom() + 12.0),
-                    name,
-                    color,
-                );
-                if caption {
-                    clip.text(
-                        Pos2::new(cell.left() + 1.0, picture.bottom() + 27.0),
-                        Align2::LEFT_CENTER,
-                        kind.label(),
-                        k.small(),
-                        t.text_dim,
-                    );
-                }
-            }
-        });
-    ui.allocate_rect(body, Sense::hover());
-    if let Some(card) = add {
-        st.run(Command::AddCard(card));
     }
 }
 
@@ -1133,7 +961,7 @@ fn timeline(ui: &mut Ui, k: &Look) {
     }
     let tracks: [(usize, Kind, &str, &[f32]); 4] = [
         (0, Kind::Character, "Simple", &[]),
-        (1, Kind::Pose, "Pose", &[0.0, 24.0, 60.0]),
+        (1, Kind::Animation, "Animation", &[0.0, 24.0, 60.0]),
         (1, Kind::Character, "Expression", &[12.0, 48.0]),
         (0, Kind::Camera, "Camera 1", &[0.0, 90.0]),
     ];

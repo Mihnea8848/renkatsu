@@ -404,11 +404,102 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             {
                 st.ask(Command::ImportCard, ui.ctx());
             }
+        } else if *text == "Wear" {
+            egui::Popup::menu(&resp)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| wear_menu(ui, k, st));
         } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new(format!("{text} arrives with its feature")).color(k.t.text_dim));
             });
         }
+    }
+}
+
+/// The Wear menu of a character: what it has on, and in which state.
+fn wear_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    use rk_chara::clothes_state as cs;
+    widgets::menu_sub(ui, k, icon::T_SHIRT, "Clothing", |ui| {
+        ui.set_min_width(220.0);
+        let Some(mut object) = st.doc.selection().cloned() else {
+            return;
+        };
+        let worn = st
+            .live
+            .as_ref()
+            .and_then(|live| live.built(object.id))
+            .map(|built| built.worn);
+        let Content::Character {
+            clothes, outdoor_shoes, ..
+        } = &mut object.content
+        else {
+            return;
+        };
+        let Some(worn) = worn else {
+            ui.label(egui::RichText::new("The character is not built").color(k.t.text_dim));
+            return;
+        };
+        let before = *clothes;
+        for (text, state) in [("All on", cs::ON), ("All half off", cs::HALF), ("All off", cs::OFF)] {
+            if widgets::menu_step(ui, k, "", text, "", true) {
+                cs::set_all(clothes, &worn, state);
+            }
+        }
+        ui.separator();
+        // The pair of shoes that is worn stands for both.
+        let shoes = if *outdoor_shoes {
+            (cs::SHOES_OUTDOOR, "Outdoor shoes")
+        } else {
+            (cs::SHOES_INDOOR, "Indoor shoes")
+        };
+        let rows = [
+            (cs::TOP, "Top"),
+            (cs::BOTTOM, "Bottom"),
+            (cs::BRA, "Bra"),
+            (cs::SHORTS, "Underwear"),
+            (cs::GLOVES, "Gloves"),
+            (cs::PANTYHOSE, "Pantyhose"),
+            (cs::SOCKS, "Socks"),
+            shoes,
+        ];
+        let kinds = worn.kinds();
+        let shown = cs::fitted(clothes, &worn);
+        for (kind, name) in rows {
+            let has = kinds.is_kind(kind);
+            let state = if has {
+                clothes_state_name(shown[kind])
+            } else {
+                "None worn"
+            };
+            // A click moves on to the next state the piece has, as
+            // CharaStudio's button does; the menu stays open.
+            if widgets::menu_step(ui, k, "", name, state, has) {
+                *clothes = shown;
+                cs::next_state(clothes, &worn, kind);
+            }
+        }
+        if *clothes != before {
+            st.doc.edit(object, false);
+        }
+    });
+    ui.separator();
+    for later in ["Outfit", "Accessories"] {
+        ui.add_enabled(false, egui::Button::new(later))
+            .on_disabled_hover_text(format!(
+                "{later} arrives with its feature. The outfit is chosen in Properties."
+            ));
+    }
+}
+
+/// What a state of a piece of clothing is called.
+fn clothes_state_name(state: u8) -> &'static str {
+    use rk_chara::clothes_state as cs;
+    match state {
+        cs::ON => "On",
+        cs::HALF => "Half off",
+        cs::HALF_2 => "Half off 2",
+        _ => "Off",
     }
 }
 

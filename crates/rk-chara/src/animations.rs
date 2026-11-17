@@ -1,7 +1,10 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! CharaStudio's list of animations, read as `Studio.Info` reads it.
+//! CharaStudio's list of animations (its Anime menu), read as
+//! `Studio.Info` reads it. Some of them hold one pose and some move; a
+//! pose in CharaStudio's own sense, a file of FK and IK rotations, is
+//! something else and not read here.
 //!
 //! Every bundle under `studio/info/` may hold sheets: `AnimeGroup_<file>`
 //! names the groups, `AnimeCategory_<n>_<group>` the categories of a
@@ -29,11 +32,65 @@ pub const STILL: f32 = 1e-4;
 /// a pose. The game stores its fixed poses as clips of six frames at
 /// thirty a second, a sixth of a second, which play once and hold their
 /// last frame; everything else in its list lasts 0.7 seconds or more.
-pub const POSE_SECONDS: f32 = 0.2;
+pub const STATIC_SECONDS: f32 = 0.2;
+
+/// Where an animation comes from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Source {
+    /// The user's Koikatsu install.
+    #[default]
+    Game,
+    /// An installed package, by the name of its folder, which is its id.
+    Package(String),
+    /// A zipmod, by its name.
+    Mod(String),
+}
+
+impl Source {
+    /// The name the source shows under.
+    pub fn label(&self) -> &str {
+        match self {
+            Source::Game => "Koikatsu",
+            Source::Package(id) => id,
+            Source::Mod(name) => name,
+        }
+    }
+}
+
+/// A zipmod of the index as a source.
+pub fn mod_source(index: &rk_vfs::index::Index, mod_idx: u32) -> Source {
+    let info = index.mods.get(mod_idx as usize);
+    let name = info.map(|m| {
+        if m.name.trim().is_empty() {
+            m.guid.clone()
+        } else {
+            m.name.clone()
+        }
+    });
+    Source::Mod(name.unwrap_or_else(|| "Mod".to_owned()))
+}
+
+/// Where the first copy of a bundle lies: in a zipmod, in a package or in
+/// the game. `None` when no source has it.
+pub fn source_of(index: &rk_vfs::index::Index, bundle: &str) -> Option<Source> {
+    let loc = index.bundles.get(&rk_vfs::index::norm(bundle))?.first()?;
+    Some(match loc.mod_idx {
+        Some(i) => mod_source(index, i),
+        None => {
+            let root = index.roots.get(loc.root as usize);
+            let in_game =
+                !index.game_dir.as_os_str().is_empty() && root.is_some_and(|r| r.starts_with(&index.game_dir));
+            match root.and_then(|r| r.parent()).and_then(|p| p.file_name()) {
+                Some(package) if !in_game => Source::Package(package.to_string_lossy().into_owned()),
+                _ => Source::Game,
+            }
+        }
+    })
+}
 
 /// One animation of the list.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Pose {
+pub struct Entry {
     /// Where CharaStudio has it: group, category and number.
     pub group: i32,
     pub category: i32,
@@ -49,6 +106,10 @@ pub struct Pose {
     pub state: String,
     /// How long it is and whether it loops, once its clips were read.
     pub timing: Option<Timing>,
+    /// Who lists it: the game, a package or a mod. A mod may list clips
+    /// of the game's own bundles under new names, and it is still the
+    /// mod's animation.
+    pub source: Source,
 }
 
 /// What an animation's clips say about its time.
@@ -64,11 +125,11 @@ impl Timing {
     /// Whether the animation holds one pose: it plays for a moment and
     /// stays on its last frame. The others move for as long as they play.
     pub fn is_static(&self) -> bool {
-        !self.loops && self.seconds <= POSE_SECONDS
+        !self.loops && self.seconds <= STATIC_SECONDS
     }
 }
 
-impl Pose {
+impl Entry {
     /// Whether the animation holds one pose; `None` until its clips were
     /// read.
     pub fn is_static(&self) -> Option<bool> {
@@ -80,7 +141,7 @@ impl Pose {
 /// categories.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Library {
-    pub poses: Vec<Pose>,
+    pub entries: Vec<Entry>,
     /// How many of the animations, from the first, have their timing.
     timed: usize,
     groups: BTreeMap<i32, String>,
@@ -95,6 +156,50 @@ pub struct Category {
     /// `Group: Category` in English.
     pub name: String,
     pub count: usize,
+}
+
+/// A group of the browsing tree with its categories and how many
+/// animations each holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Branch {
+    pub name: String,
+    pub count: usize,
+    pub categories: Vec<(String, usize)>,
+}
+
+fn lowered(s: &str) -> impl Iterator<Item = char> + '_ {
+    s.trim().chars().flat_map(char::to_lowercase)
+}
+
+/// The same name, whatever its capitals and the spaces around it.
+pub fn same_name(a: &str, b: &str) -> bool {
+    lowered(a).eq(lowered(b))
+}
+
+/// Builds the browsing tree from the group and category names of some
+/// animations, in the order they first appear.
+pub fn tree_of<'a>(named: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Branch> {
+    let mut out: Vec<Branch> = Vec::new();
+    for (group, category) in named {
+        let at = match out.iter().position(|b| same_name(&b.name, group)) {
+            Some(at) => at,
+            None => {
+                out.push(Branch {
+                    name: group.trim().to_owned(),
+                    count: 0,
+                    categories: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        let branch = &mut out[at];
+        branch.count += 1;
+        match branch.categories.iter_mut().find(|(name, _)| same_name(name, category)) {
+            Some((_, count)) => *count += 1,
+            None => branch.categories.push((category.trim().to_owned(), 1)),
+        }
+    }
+    out
 }
 
 /// The rows of a sheet, each a row of cells.
@@ -125,19 +230,25 @@ fn sheet_numbers(name: &str, prefix: &str) -> Option<Vec<i32>> {
 }
 
 /// Content that is never listed: the H scenes' animations.
-fn never(bundle: &str) -> bool {
+pub fn never(bundle: &str) -> bool {
     let bundle = bundle.replace('\\', "/").to_lowercase();
     bundle.starts_with("h/") || bundle.starts_with("sound/")
 }
 
 impl Library {
     /// Adds the sheets of one `studio/info` bundle, or of one folder of
-    /// list files of a mod. `sheets` are the sheets by name and
-    /// `installed` says whether a bundle exists. A bundle's sheet of
+    /// list files of a mod. `sheets` are the sheets by name, `listed` is
+    /// who brings them and `installed` says whether a bundle exists. A bundle's sheet of
     /// groups is the one named after the bundle, `AnimeGroup_<stem>`; a
     /// mod's folder has no such name to go by (`stem` is `None`) and every
     /// `AnimeGroup_` sheet in it counts, as for Sideloader.
-    pub fn add_bundle(&mut self, stem: Option<&str>, sheets: &[(String, Rows)], installed: &dyn Fn(&str) -> bool) {
+    pub fn add_bundle(
+        &mut self,
+        stem: Option<&str>,
+        sheets: &[(String, Rows)],
+        listed: &Source,
+        installed: &dyn Fn(&str) -> bool,
+    ) {
         let is_groups = |name: &str| match stem {
             Some(stem) => name.eq_ignore_ascii_case(&format!("AnimeGroup_{stem}")),
             None => name.get(..11).is_some_and(|p| p.eq_ignore_ascii_case("AnimeGroup_")),
@@ -183,7 +294,7 @@ impl Library {
                 if never(bundle) || !installed(bundle) {
                     continue;
                 }
-                let pose = Pose {
+                let pose = Entry {
                     group,
                     category,
                     number: no,
@@ -193,14 +304,15 @@ impl Library {
                     controller: cell(5).to_owned(),
                     state: cell(6).to_owned(),
                     timing: None,
+                    source: listed.clone(),
                 };
                 match self
-                    .poses
+                    .entries
                     .iter_mut()
                     .find(|p| (p.group, p.category, p.number) == (group, category, no))
                 {
                     Some(old) => *old = pose,
-                    None => self.poses.push(pose),
+                    None => self.entries.push(pose),
                 }
             }
         }
@@ -213,6 +325,14 @@ impl Library {
     /// puts animations into the ones that exist, by the numbers its sheets
     /// give.
     pub fn read(game: &Game) -> Library {
+        Library::read_with(game, false)
+    }
+
+    /// As [`Library::read`]; with `missing`, animations whose bundle is
+    /// not among the content are listed too, for looking at what a
+    /// package lists by itself, without the game it adds to.
+    pub fn read_with(game: &Game, missing: bool) -> Library {
+        let installed = |bundle: &str| missing || game.assets.index.bundles.contains_key(&rk_vfs::index::norm(bundle));
         let mut paths: Vec<&String> = game
             .assets
             .index
@@ -245,9 +365,8 @@ impl Library {
                     }
                 }
             }
-            library.add_bundle(Some(&stem), &sheets, &|bundle| {
-                game.assets.index.bundles.contains_key(&rk_vfs::index::norm(bundle))
-            });
+            let listed = source_of(&game.assets.index, path).unwrap_or_default();
+            library.add_bundle(Some(&stem), &sheets, &listed, &installed);
         }
         // The list files of mods, a folder of a mod at a time.
         let mut folders: Vec<(Option<u32>, &str)> = Vec::new();
@@ -265,11 +384,10 @@ impl Library {
                 .filter(|s| (s.mod_idx, s.folder.as_str()) == (mod_idx, folder))
                 .map(|s| (s.name.clone(), s.rows.clone()))
                 .collect();
-            library.add_bundle(None, &sheets, &|bundle| {
-                game.assets.index.bundles.contains_key(&rk_vfs::index::norm(bundle))
-            });
+            let listed = mod_idx.map_or(Source::Game, |i| mod_source(&game.assets.index, i));
+            library.add_bundle(None, &sheets, &listed, &installed);
         }
-        library.poses.sort_by_key(|p| (p.group, p.category, p.number));
+        library.entries.sort_by_key(|p| (p.group, p.category, p.number));
         library
     }
 
@@ -290,11 +408,11 @@ impl Library {
             height: 0.5,
             breast: 0.5,
         };
-        while self.timed < self.poses.len() {
+        while self.timed < self.entries.len() {
             if enough() {
                 return false;
             }
-            let pose = &mut self.poses[self.timed];
+            let pose = &mut self.entries[self.timed];
             let timing = crate::motion::load(game, &pose.bundle, &pose.controller, &pose.state, &parameters)
                 .map(|m| Timing {
                     seconds: m.duration(),
@@ -313,7 +431,7 @@ impl Library {
     /// The categories that have animations, in the game's order.
     pub fn categories(&self) -> Vec<Category> {
         let mut out: Vec<Category> = Vec::new();
-        for pose in &self.poses {
+        for pose in &self.entries {
             match out.last_mut() {
                 Some(last) if (last.group, last.category) == (pose.group, pose.category) => last.count += 1,
                 _ => out.push(Category {
@@ -341,9 +459,37 @@ impl Library {
         }
     }
 
+    /// The name of a group in English, or `Group <n>` for one no sheet
+    /// names.
+    pub fn group_name(&self, group: i32) -> String {
+        self.groups
+            .get(&group)
+            .map_or_else(|| format!("Group {group}"), |g| english(g))
+    }
+
+    /// The name of a category in English, without its group.
+    pub fn category_label(&self, group: i32, category: i32) -> String {
+        self.categories
+            .get(&(group, category))
+            .map_or_else(|| format!("Category {category}"), |c| english(c))
+    }
+
+    /// The groups and their categories for browsing, in the list's order.
+    /// They are told apart by name, not by number: categories of the same
+    /// name in groups of the same name are one, whichever source brought
+    /// them and whatever numbers it used.
+    pub fn tree(&self) -> Vec<Branch> {
+        let named: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .map(|e| (self.group_name(e.group), self.category_label(e.group, e.category)))
+            .collect();
+        tree_of(named.iter().map(|(g, c)| (g.as_str(), c.as_str())))
+    }
+
     /// The animation CharaStudio has under these numbers.
-    pub fn find(&self, group: i32, category: i32, number: i32) -> Option<&Pose> {
-        self.poses
+    pub fn find(&self, group: i32, category: i32, number: i32) -> Option<&Entry> {
+        self.entries
             .iter()
             .find(|p| (p.group, p.category, p.number) == (group, category, number))
     }
@@ -354,7 +500,7 @@ impl Library {
     /// number, its name in English and how many animations it has.
     pub fn groups(&self) -> Vec<(i32, String, usize)> {
         let mut out: Vec<(i32, String, usize)> = Vec::new();
-        for pose in &self.poses {
+        for pose in &self.entries {
             match out.iter_mut().find(|g| g.0 == pose.group) {
                 Some(group) => group.2 += 1,
                 None => {
@@ -672,7 +818,7 @@ mod tests {
             ),
         ];
         let mut library = Library::default();
-        library.add_bundle(Some("00"), &sheets, &|b| b == "studio/anime/00.unity3d");
+        library.add_bundle(Some("00"), &sheets, &Source::Game, &|b| b == "studio/anime/00.unity3d");
         library
     }
 
@@ -705,27 +851,47 @@ mod tests {
                 ]),
             ),
         ];
-        library.add_bundle(None, &sheets, &|_| true);
+        library.add_bundle(None, &sheets, &Source::Mod("Masculine".into()), &|_| true);
         let own = library.find(6549, 65490, 0).unwrap();
         assert_eq!((own.name.as_str(), own.state.as_str()), ("Masculine 01", "Mstand_00"));
         assert_eq!(library.category_name(6549, 65490), "MASCULINE: Masculine");
         // An entry with the numbers of one of the game's categories joins it.
         assert_eq!(library.find(0, 4, 1).unwrap().name, "Stand 9");
-        library.poses.sort_by_key(|p| (p.group, p.category, p.number));
+        library.entries.sort_by_key(|p| (p.group, p.category, p.number));
         assert_eq!(
             library.groups(),
             [(0, "Character".to_owned(), 4), (6549, "MASCULINE".to_owned(), 1)]
         );
+        assert_eq!(
+            library.find(6549, 65490, 0).unwrap().source,
+            Source::Mod("Masculine".into())
+        );
+        // The tree for browsing goes by names.
+        assert_eq!(
+            library.tree(),
+            [
+                Branch {
+                    name: "Character".into(),
+                    count: 4,
+                    categories: vec![("Walk and run".into(), 2), ("Stand".into(), 2)],
+                },
+                Branch {
+                    name: "MASCULINE".into(),
+                    count: 1,
+                    categories: vec![("Masculine".into(), 1)],
+                },
+            ]
+        );
         // A bundle's own sheet of groups must carry the bundle's name.
         let mut strict = Library::default();
-        strict.add_bundle(Some("00"), &sheets, &|_| true);
+        strict.add_bundle(Some("00"), &sheets, &Source::Game, &|_| true);
         assert!(strict.groups.is_empty());
     }
 
     #[test]
     fn the_list_is_read_from_the_sheets() {
         let library = library();
-        let names: Vec<&str> = library.poses.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> = library.entries.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["Walk 1", "Run 1", "Stand 1"]);
         let walk = library.find(0, 3, 0).unwrap();
         assert_eq!(
@@ -772,9 +938,41 @@ mod tests {
                 ],
             ]),
         )];
-        library.add_bundle(Some("01"), &sheets, &|_| true);
-        assert_eq!(library.poses.len(), 3);
+        library.add_bundle(Some("01"), &sheets, &Source::Game, &|_| true);
+        assert_eq!(library.entries.len(), 3);
         assert_eq!(library.find(0, 3, 1).unwrap().state, "f_hasiru_new");
+    }
+
+    #[test]
+    fn categories_of_the_same_name_are_one_whatever_their_numbers() {
+        // Two packs: one adds to the game's group 0 under a new category
+        // number but an existing name, the other brings a group of its own.
+        let mut library = library();
+        let sheets = vec![
+            ("AnimeGroup_x".to_owned(), sheet(&[&[], &["900", "character"]])),
+            (
+                "AnimeCategory_00_900".to_owned(),
+                sheet(&[&[], &["1", " STAND "], &["2", "Dance"]]),
+            ),
+            (
+                "Anime_00_900_1".to_owned(),
+                sheet(&[&[], &[], &["0", "900", "1", "Lean", "pack/a.unity3d", "c", "lean"]]),
+            ),
+            (
+                "Anime_00_900_2".to_owned(),
+                sheet(&[&[], &[], &["0", "900", "2", "Spin", "pack/a.unity3d", "c", "spin"]]),
+            ),
+        ];
+        library.add_bundle(None, &sheets, &Source::Package("dance-pack".into()), &|_| true);
+        assert_eq!(
+            library.tree(),
+            [Branch {
+                name: "Character".into(),
+                count: 5,
+                categories: vec![("Walk and run".into(), 2), ("Stand".into(), 2), ("Dance".into(), 1)],
+            }]
+        );
+        assert_eq!(library.find(900, 1, 0).unwrap().source.label(), "dance-pack");
     }
 
     #[test]

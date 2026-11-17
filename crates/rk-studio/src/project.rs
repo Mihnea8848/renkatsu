@@ -10,8 +10,17 @@
 //!   Characters/*.png   the cards the project owns, copied in on import
 //!   Scenes/*.toml      scenes, as the scene model writes itself
 //!   Mods/*.zipmod      the zipmods those cards need, copied from the game
+//!   Animations/        the animations the project owns, copied in on
+//!                      import as Renkatsu animation files (`.rkanim`),
+//!                      in folders the user makes
 //!   Poses/ Maps/ Items/ Renders/   kept for the features that fill them
 //! ```
+//!
+//! `Animations` holds what CharaStudio calls anime: clips that play on a
+//! character, some of which hold one pose. `Poses` is kept for poses made
+//! by hand with FK and IK. Renkatsu 0.1.4 kept links to animations in
+//! `Poses` as `.rkpose` files; a project that still has them gets them
+//! moved to `Animations` when it is opened.
 //!
 //! The project file is TOML named after the project, made safe for the
 //! file system, and the folders are the ones the Content browser shows.
@@ -30,12 +39,18 @@ pub const FORMAT: u32 = 1;
 
 /// The extension of the project file.
 pub const EXTENSION: &str = "rkproj";
-const CHARACTERS: &str = "Characters";
-const SCENES: &str = "Scenes";
+pub const CHARACTERS: &str = "Characters";
+pub const ANIMATIONS: &str = "Animations";
+/// Where Renkatsu 0.1.4 kept its links to animations, and where poses
+/// made by hand will go.
+pub const POSES: &str = "Poses";
+pub const SCENES: &str = "Scenes";
 const MODS: &str = "Mods";
+/// The extension of a link to an animation as Renkatsu 0.1.4 saved it.
+pub const OLD_LINK: &str = "rkpose";
 /// Folders every project has, as the Content browser shows them: the ones
 /// in use and the ones kept for later.
-pub const FOLDERS: [&str; 7] = [CHARACTERS, "Poses", "Maps", "Items", SCENES, "Renders", MODS];
+pub const FOLDERS: [&str; 8] = [CHARACTERS, ANIMATIONS, POSES, "Maps", "Items", SCENES, "Renders", MODS];
 
 fn is_project_file(path: &Path) -> bool {
     path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
@@ -258,14 +273,33 @@ pub fn set_icon_in(root: &Path, source: Option<&Path>) -> Result<()> {
     project.set_icon(source)
 }
 
-/// The cards in a project folder's characters folder, by file name.
+/// The cards in a project folder's characters folder and the folders the
+/// user made in it, by file name.
 pub fn cards_in(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(root.join(CHARACTERS)) else {
-        return Vec::new();
-    };
-    let mut cards: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| is_card(p)).collect();
+    let mut cards = Vec::new();
+    files_below(&root.join(CHARACTERS), &mut cards);
+    cards.retain(|p| is_card(p));
     cards.sort_by(|a, b| by_name(a, b));
     cards
+}
+
+/// Every file below a folder, at any depth.
+pub fn files_below(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_below(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// A path as scenes and the project file write it: relative to the
+/// project folder, with forward slashes. `None` for a path outside it.
+pub fn relative_to(root: &Path, path: &Path) -> Option<String> {
+    let rest = path.strip_prefix(root).ok()?;
+    Some(rest.to_string_lossy().replace('\\', "/"))
 }
 
 /// Where new projects go unless the user says otherwise: `Renkatsu` in the
@@ -391,6 +425,7 @@ impl Project {
             root: root.to_owned(),
             file,
         };
+        project.adopt_old_links();
         let (scene, note) = match project.load_scene() {
             Ok(scene) => (scene, None),
             Err(e) => (Scene::new(), Some(format!("The project opens with a new scene: {e:#}"))),
@@ -398,11 +433,106 @@ impl Project {
         Ok((project, scene, note))
     }
 
+    /// Moves the links to animations that Renkatsu 0.1.4 kept in `Poses`
+    /// to `Animations`, where they are listed now. A link whose name is
+    /// taken there stays where it is.
+    fn adopt_old_links(&self) {
+        let from = self.root.join(POSES);
+        let links: Vec<PathBuf> = std::fs::read_dir(&from)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case(OLD_LINK)))
+            .collect();
+        if links.is_empty() {
+            return;
+        }
+        let to = self.root.join(ANIMATIONS);
+        if std::fs::create_dir_all(&to).is_err() {
+            return;
+        }
+        for link in links {
+            let target = to.join(link.file_name().unwrap_or_default());
+            if !target.exists() {
+                let _ = std::fs::rename(&link, &target);
+            }
+        }
+    }
+
+    /// Follows files of the project that moved: `to` gives the new path
+    /// of a file, relative to the project, or `None` for one that stays.
+    /// The project file and every scene on disk are brought in line, and
+    /// written when they changed.
+    pub fn retarget(&mut self, to: &dyn Fn(&str) -> Option<String>) -> Result<()> {
+        let mut changed = false;
+        for character in &mut self.file.characters {
+            if let Some(new) = to(&character.file) {
+                character.file = new;
+                changed = true;
+            }
+        }
+        if let Some(new) = to(&self.file.scene) {
+            self.file.scene = new;
+            changed = true;
+        }
+        if let Some(new) = self.file.icon.as_deref().and_then(to) {
+            self.file.icon = Some(new);
+            changed = true;
+        }
+        let mut scenes = Vec::new();
+        files_below(&self.root.join(SCENES), &mut scenes);
+        for path in scenes {
+            if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(mut file) = toml::from_str::<SceneFile>(&text) else {
+                continue;
+            };
+            if file.scene.retarget(to) {
+                std::fs::write(&path, toml::to_string(&file)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Forgets the names of cards that are gone from the project.
+    pub fn forget_missing_cards(&mut self) -> bool {
+        let before = self.file.characters.len();
+        let root = self.root.clone();
+        self.file.characters.retain(|c| root.join(&c.file).is_file());
+        self.file.characters.len() != before
+    }
+
+    /// Lists a card of the project under a name, or changes the name it
+    /// is listed under.
+    pub fn name_card(&mut self, file: &str, name: &str) {
+        match self.file.characters.iter_mut().find(|c| c.file == file) {
+            Some(character) => character.name = name.to_owned(),
+            None => self.file.characters.push(Character {
+                file: file.to_owned(),
+                name: name.to_owned(),
+            }),
+        }
+    }
+
     fn load_scene(&self) -> Result<Scene> {
         if self.file.scene.is_empty() {
             bail!("the project names no scene");
         }
-        let path = self.root.join(&self.file.scene);
+        self.read_scene_at(&self.file.scene)
+    }
+
+    /// Reads one of the project's scene files, named relative to it.
+    pub fn read_scene_at(&self, relative: &str) -> Result<Scene> {
+        let path = self.root.join(relative);
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let file: SceneFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
         Ok(file.scene)
@@ -580,8 +710,8 @@ impl Project {
         }
         cards_in(&self.root)
             .iter()
-            .map(|card| {
-                let file = relative(CHARACTERS, &card.file_name().unwrap_or_default().to_string_lossy());
+            .filter_map(|card| Some((card, relative_to(&self.root, card)?)))
+            .map(|(card, file)| {
                 let name = self.character_name(&file).map(str::to_owned);
                 let stem = card.file_stem().unwrap_or_default().to_string_lossy().into_owned();
                 Character {
@@ -710,6 +840,85 @@ mod tests {
                 ("Characters/by hand.png".to_owned(), "by hand".to_owned()),
             ]
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn links_in_the_old_poses_folder_move_to_animations_when_the_project_opens() {
+        let home = scratch("old-poses");
+        let root = home.join("Old");
+        // A project as Renkatsu 0.1.4 left it: no Animations folder, a
+        // link in Poses, and a scene that calls the animation a pose.
+        let project = Project::create(&root, "Old").unwrap();
+        std::fs::remove_dir_all(root.join(ANIMATIONS)).unwrap();
+        let link = "name = \"Stand 1\"\nbundle = \"studio/anime/00.unity3d\"\ncontroller = \"tachi\"\nstate = \"f_tachi_00\"\n";
+        std::fs::write(root.join("Poses/Stand 1.rkpose"), link).unwrap();
+        std::fs::write(root.join("Poses/by hand.dat"), b"a pose made by hand").unwrap();
+        let scene =
+            "format = 1\nname = \"Main\"\nnext_id = 2\n\n[[objects]]\nid = 1\nname = \"Anna\"\nkind = \"character\"\n\
+                     card = \"Characters/anna.png\"\noutfit = 0\noutdoor_shoes = false\nsimulate = true\n\n\
+                     [objects.pose]\nname = \"Stand 1\"\nbundle = \"studio/anime/00.unity3d\"\n\
+                     controller = \"tachi\"\nstate = \"f_tachi_00\"\n";
+        std::fs::write(root.join("Scenes/Main.toml"), scene).unwrap();
+        let text = std::fs::read_to_string(project.path()).unwrap();
+        std::fs::write(
+            project.path(),
+            text.replace("scene = \"\"", "scene = \"Scenes/Main.toml\""),
+        )
+        .unwrap();
+
+        let (opened, scene, note) = Project::open(&root).unwrap();
+        assert_eq!(note, None);
+        assert!(root.join("Animations/Stand 1.rkpose").is_file());
+        assert!(!root.join("Poses/Stand 1.rkpose").exists());
+        assert!(root.join("Poses/by hand.dat").is_file(), "only the links move");
+        let Content::Character { animation, .. } = &scene.objects()[0].content else {
+            panic!("Anna is a character");
+        };
+        assert_eq!(animation.as_ref().unwrap().state, "f_tachi_00");
+        // Opening again changes nothing, and a save brings the folders back.
+        Project::open(&root).unwrap();
+        opened.save().unwrap();
+        assert!(root.join(ANIMATIONS).is_dir() && root.join(POSES).is_dir());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn files_that_move_are_followed_in_the_project_file_and_in_scenes_on_disk() {
+        let home = scratch("retarget");
+        let root = home.join("P");
+        let mut project = Project::create(&root, "P").unwrap();
+        std::fs::write(home.join("Anna.png"), b"card").unwrap();
+        let card = project.import_card(&home.join("Anna.png"), "Anna").unwrap();
+        let mut scene = Scene::new();
+        scene.add("Anna", Content::character(PathBuf::from(&card)), None);
+        project.save_scene(&scene).unwrap();
+        std::fs::copy(root.join("Scenes/Untitled scene.toml"), root.join("Scenes/Other.toml")).unwrap();
+
+        // The card goes into a folder of the user's and the scene is renamed.
+        std::fs::create_dir_all(root.join("Characters/Cast")).unwrap();
+        std::fs::rename(root.join(&card), root.join("Characters/Cast/Anna B.png")).unwrap();
+        std::fs::rename(root.join("Scenes/Untitled scene.toml"), root.join("Scenes/Main.toml")).unwrap();
+        project
+            .retarget(&|old| match old {
+                "Characters/Anna.png" => Some("Characters/Cast/Anna B.png".to_owned()),
+                "Scenes/Untitled scene.toml" => Some("Scenes/Main.toml".to_owned()),
+                _ => None,
+            })
+            .unwrap();
+        let (opened, opened_scene, note) = Project::open(&root).unwrap();
+        assert_eq!(note, None);
+        assert_eq!(opened.file.scene, "Scenes/Main.toml");
+        assert_eq!(opened.character_name("Characters/Cast/Anna B.png"), Some("Anna"));
+        for scene in [opened_scene, opened.read_scene_at("Scenes/Other.toml").unwrap()] {
+            let Content::Character { card, .. } = &scene.objects().last().unwrap().content else {
+                panic!("no character");
+            };
+            assert_eq!(card, Path::new("Characters/Cast/Anna B.png"));
+        }
+        // Cards in folders of the user's are the project's characters too.
+        let listed: Vec<String> = opened.characters().into_iter().map(|c| c.file).collect();
+        assert_eq!(listed, ["Characters/Cast/Anna B.png"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 

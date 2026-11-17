@@ -223,6 +223,7 @@ pub fn actions(kind: Kind) -> &'static [Action] {
         Kind::Character => &[
             (icon::IDENTIFICATION_CARD, "Load card", false),
             (icon::T_SHIRT, "Outfit", true),
+            (icon::COAT_HANGER, "Wear", true),
             (icon::SMILEY, "Expression", true),
             (icon::PUZZLE_PIECE, "Modules", true),
         ],
@@ -256,6 +257,7 @@ pub fn actions(kind: Kind) -> &'static [Action] {
             (icon::SUN_HORIZON, "Time of day", true),
         ],
         Kind::Folder => &[(icon::PLUS, "Add", true), (icon::EYE_SLASH, "Hide all", false)],
+        Kind::Animation => &[(icon::PLAY, "Apply", false)],
         Kind::Pose => &[
             (icon::BOOKMARKS_SIMPLE, "Load pose", false),
             (icon::BOOKMARK_SIMPLE, "Save pose", false),

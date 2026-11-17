@@ -23,6 +23,10 @@ pub enum Kind {
     Camera,
     Map,
     Folder,
+    /// An animation, as CharaStudio's Anime menu has them: a clip that
+    /// plays on a character, which may hold one pose.
+    Animation,
+    /// A pose made by hand with FK and IK.
     Pose,
     #[allow(dead_code)]
     Script,
@@ -41,7 +45,8 @@ impl Kind {
             Kind::Camera => [0x6a, 0x9c, 0xc0],
             Kind::Map => [0x78, 0xa8, 0x6c],
             Kind::Folder => [0xa8, 0x96, 0x74],
-            Kind::Pose => [0x5c, 0xa8, 0x98],
+            Kind::Animation => [0x5c, 0xa8, 0x98],
+            Kind::Pose => [0x6c, 0xa0, 0xb4],
             Kind::Script => [0x84, 0x84, 0xc0],
         };
         Color32::from_rgb(r, g, b)
@@ -58,6 +63,7 @@ impl Kind {
             Kind::Camera => icon::VIDEO_CAMERA,
             Kind::Map => icon::MAP_TRIFOLD,
             Kind::Folder => icon::FOLDER_SIMPLE,
+            Kind::Animation => icon::PERSON_SIMPLE_RUN,
             Kind::Pose => icon::PERSON_ARMS_SPREAD,
             Kind::Script => icon::CODE,
         }
@@ -74,6 +80,7 @@ impl Kind {
             Kind::Camera => "Camera",
             Kind::Map => "Map",
             Kind::Folder => "Folder",
+            Kind::Animation => "Animation",
             Kind::Pose => "Pose",
             Kind::Script => "Script",
         }

@@ -7,6 +7,8 @@
 pub mod abmx;
 pub mod accessory_clothes;
 pub mod accessory_states;
+pub mod animation_file;
+pub mod animations;
 pub mod build;
 pub mod clothes_state;
 pub mod clothing_blend_shape;
@@ -30,7 +32,6 @@ pub mod more_accessories;
 pub mod motion;
 pub mod overlays;
 pub mod physics;
-pub mod poses;
 pub mod pregnancy;
 pub mod pushup;
 pub mod scene;

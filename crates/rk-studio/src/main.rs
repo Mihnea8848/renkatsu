@@ -9,8 +9,12 @@
 // A window program on Windows: no console opens beside it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod anim_import;
+mod animations;
 mod camera;
 mod chrome;
+mod content;
+mod content_panel;
 mod design;
 mod dialogs;
 mod kinds;
@@ -20,7 +24,6 @@ mod modes;
 mod mods;
 mod packages;
 mod panels;
-mod poses;
 mod preferences;
 mod project;
 mod properties;
@@ -116,9 +119,11 @@ struct Cli {
     #[arg(long, value_enum, default_value = "content")]
     bottom: Bottom,
     /// Click at X,Y before the screenshot, to picture menus and states.
-    /// May be given several times; the clicks happen in order.
-    #[arg(long, value_parser = parse_point)]
-    click: Vec<egui::Pos2>,
+    /// May be given several times; the clicks happen in order. A point
+    /// that starts with `r`, as in `r120,48`, is clicked with the right
+    /// button, and one that starts with `d` is double clicked.
+    #[arg(long, value_parser = parse_click)]
+    click: Vec<Click>,
     /// Leave the pointer at X,Y for the screenshot, to picture hover.
     #[arg(long, value_parser = parse_point)]
     hover: Option<egui::Pos2>,
@@ -137,16 +142,52 @@ struct Cli {
     fly_speed: Option<f32>,
     /// Start with the selected character in this animation of
     /// CharaStudio's list, as GROUP/CATEGORY/NUMBER, to picture it.
+    #[arg(long, hide = true, alias = "pose")]
+    animation: Option<String>,
+    /// Import these animations of CharaStudio's list into the project at
+    /// the start, each as GROUP/CATEGORY/NUMBER or GROUP/CATEGORY for a
+    /// whole category, to picture a project that has animations.
     #[arg(long, hide = true)]
-    pose: Option<String>,
+    import_animation: Vec<String>,
+    /// Start with the window that imports animations open, to picture it.
+    #[arg(long, hide = true)]
+    animation_importer: bool,
+    /// Type this text before the screenshot, into whatever has the
+    /// keyboard after the clicks, or after the first `--type-after` of
+    /// them.
+    #[arg(long, hide = true)]
+    type_text: Option<String>,
+    #[arg(long, hide = true)]
+    type_after: Option<usize>,
     /// Start with the scene paused after this many seconds of play, to
     /// picture a frame of an animation.
     #[arg(long, hide = true)]
     scene_time: Option<f32>,
     /// Start with the Content panel on this folder, by its place in the
-    /// list (1 is Poses).
+    /// list (1 is Animations).
     #[arg(long, hide = true)]
     folder: Option<usize>,
+}
+
+/// A scripted click: where, with which button, and whether twice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Click {
+    at: egui::Pos2,
+    right: bool,
+    double: bool,
+}
+
+fn parse_click(text: &str) -> Result<Click, String> {
+    let (right, double, point) = match text.as_bytes().first() {
+        Some(b'r') => (true, false, &text[1..]),
+        Some(b'd') => (false, true, &text[1..]),
+        _ => (false, false, text),
+    };
+    Ok(Click {
+        at: parse_point(point)?,
+        right,
+        double,
+    })
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -164,7 +205,10 @@ struct Studio {
     dock: DockState<Panel>,
     bottom: Panel,
     screenshot: Option<PathBuf>,
-    clicks: Vec<egui::Pos2>,
+    clicks: Vec<Click>,
+    /// Text typed once the clicks are done, or once this many are.
+    type_text: Option<String>,
+    type_after: Option<usize>,
     hover: Option<egui::Pos2>,
     frames: u32,
     /// The window title as last given to the desktop.
@@ -374,25 +418,62 @@ impl Studio {
             }
         };
         // What the command line put in the scene is where the history starts.
-        if let Some(spec) = &cli.pose {
+        if !cli.import_animation.is_empty() {
+            let game = state.games.get(&state.project.mods_dir())?;
+            let library = rk_chara::animations::Library::read(game);
+            let mut picks = Vec::new();
+            for spec in &cli.import_animation {
+                let numbers: Vec<i32> = spec.split('/').filter_map(|n| n.parse().ok()).collect();
+                let (group, category, number) = match numbers[..] {
+                    [group, category] => (group, category, None),
+                    [group, category, number] => (group, category, Some(number)),
+                    _ => anyhow::bail!("{spec}: an animation is named as GROUP/CATEGORY/NUMBER"),
+                };
+                let entries = anim_import::listed(&library, None, &|s| s.label().to_owned());
+                picks.extend(
+                    library
+                        .entries
+                        .iter()
+                        .zip(&entries)
+                        .filter(|(e, _)| {
+                            (e.group, e.category) == (group, category) && number.is_none_or(|n| n == e.number)
+                        })
+                        .map(|(_, entry)| animations::Pick {
+                            name: entry.name.clone(),
+                            group: entry.group.clone(),
+                            category: entry.category.clone(),
+                            source: entry.source_name.clone(),
+                            from: entry.from.clone(),
+                        }),
+                );
+            }
+            state.import_animations(&picks, false);
+            state.show_content = false;
+        }
+        if let Some(spec) = &cli.animation {
             let numbers: Vec<i32> = spec.split('/').filter_map(|n| n.parse().ok()).collect();
             let [group, category, number] = numbers[..] else {
-                anyhow::bail!("{spec}: a pose is named as GROUP/CATEGORY/NUMBER");
+                anyhow::bail!("{spec}: an animation is named as GROUP/CATEGORY/NUMBER");
             };
             let game = state.games.get(&state.project.mods_dir())?;
-            let library = rk_chara::poses::Library::read(game);
-            let pose = library
+            let library = rk_chara::animations::Library::read(game);
+            let entry = library
                 .find(group, category, number)
                 .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
-            state.run(Command::Pose(Some(scene::Pose::of(pose))));
+            let named = scene::Animation::of(entry);
+            // The project's own copy when it has one.
+            let own = state.animations.of(&named).map(|i| i.reference());
+            state.run(Command::Animate(Some(own.unwrap_or(named))));
         }
         if let Some(seconds) = cli.scene_time {
             state.playback = Playback::Paused;
             state.clock = seconds;
         }
-        state.poses.eager = cli.screenshot.is_some();
-        state.poses.refresh(&state.project);
-        state.folder = cli.folder.unwrap_or(0);
+        state.animations.refresh(&state.project);
+        state.open_folder(project::FOLDERS[cli.folder.unwrap_or(0).min(project::FOLDERS.len() - 1)]);
+        if cli.animation_importer {
+            state.importer = Some(anim_import::Importer::new(None));
+        }
         state.doc.clear_history();
         if !cli.card.is_empty() {
             let live = state
@@ -448,6 +529,8 @@ impl Studio {
             bottom,
             screenshot: cli.screenshot.clone(),
             clicks: cli.click.clone(),
+            type_text: cli.type_text.clone(),
+            type_after: cli.type_after,
             hover: cli.hover,
             frames: 0,
             title: String::new(),
@@ -577,6 +660,7 @@ impl eframe::App for Studio {
         preferences::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
         packages::browser(ctx, &k, &mut self.state);
+        anim_import::show(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);
         self.window(ctx);
@@ -584,7 +668,6 @@ impl eframe::App for Studio {
         // Something asked for the cards: bring the Content panel forward.
         if std::mem::take(&mut self.state.show_content) {
             self.state.maximised = false;
-            self.state.folder = 0;
             self.bottom = Panel::Content;
             panels::open(&mut self.dock, Panel::Content);
             if let Some(tab) = self.dock.find_tab(&Panel::Content) {
@@ -773,6 +856,34 @@ impl Studio {
             (Modifiers::NONE, Key::H, Command::ToggleHidden),
             (Modifiers::NONE, Key::F2, Command::Rename),
         ];
+        // Copy, cut and paste reach the window as events of their own on
+        // some systems and as keys on others; either does it once.
+        let clipboard = [
+            (Key::C, Command::Copy),
+            (Key::X, Command::Cut),
+            (Key::V, Command::Paste),
+        ];
+        for (key, command) in clipboard {
+            let event = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        (e, key),
+                        (egui::Event::Copy, Key::C) | (egui::Event::Cut, Key::X) | (egui::Event::Paste(_), Key::V)
+                    )
+                })
+            });
+            let pressed = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key));
+            if event || pressed {
+                if command != Command::Paste {
+                    // The system's clipboard gets the name, so that a paste
+                    // has something to bring back.
+                    if let Some(object) = self.state.doc.selection() {
+                        ctx.copy_text(object.name.clone());
+                    }
+                }
+                self.state.run(command);
+            }
+        }
         for (modifiers, key, command) in keys {
             // Plain letters must not fire while Ctrl or Alt is held.
             let plain = modifiers != Modifiers::NONE || ctx.input(|i| i.modifiers.is_none());
@@ -799,20 +910,48 @@ impl Studio {
         let step = self.frames.saturating_sub(2);
         let (index, phase) = ((step / CLICK_FRAMES) as usize, step % CLICK_FRAMES);
         if self.frames >= 2 {
-            if let Some(pos) = self.clicks.get(index).copied() {
+            let type_at = self.type_after.unwrap_or(self.clicks.len());
+            if index == type_at && phase == 0 {
+                if let Some(text) = &self.type_text {
+                    // Over what the field holds, as typing over a selection.
+                    input.events.push(egui::Event::Key {
+                        key: egui::Key::A,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    });
+                    input.events.push(egui::Event::Text(text.clone()));
+                }
+            }
+            if let Some(click) = self.clicks.get(index).copied() {
+                let pos = click.at;
                 input.events.push(egui::Event::PointerMoved(pos));
-                if phase == 1 || phase == 2 {
+                let button = if click.right {
+                    egui::PointerButton::Secondary
+                } else {
+                    egui::PointerButton::Primary
+                };
+                let mut press = |pressed: bool| {
                     input.events.push(egui::Event::PointerButton {
                         pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: phase == 1,
+                        button,
+                        pressed,
                         modifiers: egui::Modifiers::NONE,
                     });
+                };
+                if phase == 1 || phase == 2 {
+                    press(phase == 1);
+                    // The second click of a double click, in the same frames.
+                    if click.double && phase == 2 {
+                        press(true);
+                        press(false);
+                    }
                 }
                 return;
             }
         }
-        if let Some(pos) = self.hover.or(self.clicks.last().copied()) {
+        if let Some(pos) = self.hover.or(self.clicks.last().map(|c| c.at)) {
             input.events.push(egui::Event::PointerMoved(pos));
         }
     }

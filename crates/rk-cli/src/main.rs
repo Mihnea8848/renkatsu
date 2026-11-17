@@ -88,10 +88,12 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         time: f32,
     },
-    /// CharaStudio's animations: list them, or check them on a character.
-    Pose {
+    /// CharaStudio's animations: list them, check them on a character, or
+    /// write one as a Renkatsu animation file.
+    #[command(alias = "pose")]
+    Animation {
         #[command(subcommand)]
-        cmd: PoseCmd,
+        cmd: AnimationCmd,
     },
     /// Print which states a card's clothes have, and what a row of state
     /// changes such as `top=1 bottom=3 all=0` shows.
@@ -180,7 +182,7 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum PoseCmd {
+enum AnimationCmd {
     /// List the categories, or with `--all` every animation with whether
     /// it holds one pose or moves.
     List {
@@ -191,6 +193,20 @@ enum PoseCmd {
     Check { card: PathBuf },
     /// List the installed mods that bring animation lists, with their size.
     Mods,
+    /// Write animations of the list as Renkatsu animation files
+    /// (`.rkanim`), the files a project and a package's `animations`
+    /// folder hold. Without `--number`, the whole category.
+    Export {
+        /// The group's number, as `rk animation list` prints it.
+        group: i32,
+        /// The category's number.
+        category: i32,
+        #[arg(long)]
+        number: Option<i32>,
+        /// The folder the files go into, under `<Group>/<Category>/`.
+        #[arg(short, long, default_value = ".")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,13 +392,24 @@ fn main() -> Result<()> {
             pose: pose.as_deref(),
             time,
         }),
-        Cmd::Pose {
-            cmd: PoseCmd::List { all },
+        Cmd::Animation {
+            cmd: AnimationCmd::List { all },
         } => pose::list(all),
-        Cmd::Pose {
-            cmd: PoseCmd::Check { card },
+        Cmd::Animation {
+            cmd: AnimationCmd::Check { card },
         } => pose::check(&card),
-        Cmd::Pose { cmd: PoseCmd::Mods } => pose::mods(),
+        Cmd::Animation {
+            cmd: AnimationCmd::Mods,
+        } => pose::mods(),
+        Cmd::Animation {
+            cmd:
+                AnimationCmd::Export {
+                    group,
+                    category,
+                    number,
+                    out,
+                },
+        } => pose::export(group, category, number, &out),
         Cmd::Clothes { card, outfit, steps } => pose::clothes(&card, outfit, &steps),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),
         Cmd::Bundle {

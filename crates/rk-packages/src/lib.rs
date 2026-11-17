@@ -7,8 +7,10 @@
 //! A package is a zip archive (`.rkpkg`) with `package.toml`, which says
 //! what it is, `checksums.txt`, with the SHA-256 of every file, and its
 //! content in folders by kind: `abdata` for game data laid over the
-//! game's own, `cards` for character cards, and `maps`, `animations`,
-//! `poses`, `items` and `scenes` for what comes later.
+//! game's own, `cards` for character cards, `animations` for Renkatsu
+//! animation files in folders by group and category, and `maps`, `poses`
+//! (poses made by hand with FK and IK), `items` and `scenes` for what
+//! comes later.
 //!
 //! Installed, a package is that archive unpacked into a folder of the
 //! user's data folder named after its id. This crate reads and writes
@@ -36,7 +38,9 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The id of the package with the characters of Starter Content.
 pub const STARTER_CHARACTERS: &str = "starter-characters";
-/// The package that holds CharaStudio's poses and animations.
+/// The package that holds CharaStudio's animations, static and moving.
+/// Its id dates from when Renkatsu called them poses and stays, since an
+/// id names the package on disk for every version of it.
 pub const STARTER_POSES: &str = "starter-poses";
 
 /// What a long piece of work is doing.

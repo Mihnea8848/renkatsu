@@ -5,6 +5,7 @@
 //! the state of the viewport's overlays, the project that is open, its
 //! scene being edited and the commands that change them.
 
+use crate::content;
 use crate::design::{Spec, TitleBar};
 use crate::dialogs::{After, Import, Modal, PendingImport, Pick, Picker, ProjectForm};
 use crate::kinds::Kind;
@@ -130,10 +131,31 @@ pub enum Command {
     /// Add the character of one of the project's cards, named by its path
     /// relative to the project.
     AddCard(PathBuf),
-    /// Put the selected character in a pose, or take its pose off.
-    Pose(Option<crate::scene::Pose>),
-    /// Save the selected character's pose in the project.
-    SavePose,
+    /// Give the selected character an animation, or take its animation
+    /// off.
+    Animate(Option<crate::scene::Animation>),
+    /// Choose animations of the installed packages, of Koikatsu and of
+    /// mods, and copy them into the project.
+    ImportAnimations,
+    /// Pick an animation file or a zipmod and copy animations from it
+    /// into the project.
+    ImportAnimationFile,
+    /// Something done to a file or a folder of the project.
+    File(FileOp),
+    /// Copy the selection with everything below it, to paste.
+    Copy,
+    /// Copy the selection, then delete it.
+    Cut,
+    /// Paste what was copied beside the selection.
+    Paste,
+    /// Take the selection out of its folder, to the top of the scene.
+    Unparent,
+    /// Add a folder inside the selected folder.
+    AddChildFolder,
+    /// Select everything directly inside the selected folder.
+    SelectChildren,
+    /// Turn the camera to the selection.
+    Focus,
     /// Save the scene and the project.
     Save,
     /// Save a copy of the project under another name and work on that.
@@ -153,6 +175,31 @@ pub enum Command {
     /// Pick a picture as the project's icon.
     SetIcon,
     Quit,
+}
+
+/// What the Content panel does to a file or a folder of the project. Paths
+/// are relative to the project, with forward slashes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileOp {
+    /// Give it another name.
+    Rename(String, String),
+    /// Move it into a folder.
+    Move(String, String),
+    Duplicate(String),
+    /// Move it to the project's trash.
+    Delete(String),
+    /// Make a folder inside this one, and start naming it.
+    NewFolder(String),
+    Copy(String),
+    Cut(String),
+    /// Paste what was copied or cut into this folder.
+    Paste(String),
+    /// Show it in the system's file manager.
+    Reveal(String),
+    /// Make a picture the project's icon.
+    SetIcon(String),
+    /// Copy a linked animation into the project for good.
+    CopyIn(String),
 }
 
 /// The card a new project starts with, as Blender starts with a cube, and
@@ -213,6 +260,19 @@ pub struct State {
     pub renaming: Option<(ObjectId, String)>,
     /// The Content panel was asked for and should come to the front.
     pub show_content: bool,
+    /// The folder open in the Content panel, relative to the project: one
+    /// of the project's folders or a folder the user made below one.
+    pub subfolder: String,
+    /// The file or folder being renamed in the Content panel, with the
+    /// text so far.
+    pub content_renaming: Option<(String, String)>,
+    /// The file or folder that was copied or cut in the Content panel,
+    /// and whether it was cut.
+    pub clipboard: Option<(String, bool)>,
+    /// The objects that were copied in the Outliner.
+    pub scene_clipboard: Vec<crate::scene::Object>,
+    /// The window that imports animations, while it shows.
+    pub importer: Option<crate::anim_import::Importer>,
     /// The project's characters, for the Content panel.
     pub library: Library,
     pub log: Log,
@@ -241,18 +301,18 @@ pub struct State {
 
     /// Properties sections that are open.
     pub sections: [bool; 7],
-    /// The poses of the Content panel.
-    pub poses: crate::poses::Shelf,
+    /// The project's animations, for the Content panel and Properties.
+    pub animations: crate::animations::Shelf,
 
     pub scene_search: String,
     pub property_search: String,
     pub content_search: String,
     pub console_search: String,
     pub command_search: String,
-    /// The folder open in the Content panel: the characters, then the
-    /// other kinds of asset.
+    /// The project folder open in the Content panel, as an index into
+    /// `project::FOLDERS`.
     pub folder: usize,
-    /// The card selected in the Content panel, relative to the project.
+    /// The file selected in the Content panel, relative to the project.
     pub asset: Option<PathBuf>,
     /// Console levels shown: information, warnings, errors.
     pub levels: [bool; 3],
@@ -328,6 +388,11 @@ impl State {
             scene_folded: false,
             renaming: None,
             show_content: false,
+            subfolder: project::FOLDERS[0].to_owned(),
+            content_renaming: None,
+            clipboard: None,
+            scene_clipboard: Vec::new(),
+            importer: None,
             log: Log::new(),
             mode: 0,
             mode_tool: [0, 0, 1, 0, 0, 0],
@@ -341,7 +406,7 @@ impl State {
             playback: Playback::Stopped,
             clock: 0.0,
             sections: [true, true, true, false, true, true, true],
-            poses: Default::default(),
+            animations: Default::default(),
             scene_search: String::new(),
             property_search: String::new(),
             content_search: String::new(),
@@ -377,9 +442,8 @@ impl State {
                 self.doc.redo();
             }
             Command::Delete => {
-                if let Some(id) = selected {
-                    self.doc.delete(id);
-                }
+                let all = self.doc.selected_all();
+                self.doc.delete_many(&all);
             }
             Command::Duplicate => {
                 if let Some(id) = selected {
@@ -387,14 +451,54 @@ impl State {
                 }
             }
             Command::ToggleHidden => {
-                if let Some((id, visible)) = self.doc.selection().map(|o| (o.id, o.visible)) {
-                    self.doc.set_visible(id, !visible);
+                if let Some(visible) = self.doc.selection().map(|o| o.visible) {
+                    let all = self.doc.selected_all();
+                    self.doc.set_visible_many(&all, !visible);
                 }
             }
+            Command::Copy => {
+                if let Some(id) = selected {
+                    self.scene_clipboard = self.doc.copy(id);
+                }
+            }
+            Command::Cut => {
+                if let Some(id) = selected {
+                    self.scene_clipboard = self.doc.copy(id);
+                    self.doc.delete(id);
+                }
+            }
+            Command::Paste => {
+                let copied = self.scene_clipboard.clone();
+                if let Some(id) = self.doc.paste(&copied) {
+                    self.unfold_to(id);
+                    self.focus_pending = Some(id);
+                }
+            }
+            Command::Unparent => {
+                let all = self.doc.selected_all();
+                self.doc.place_many(&all, crate::scene::Place::Into(None));
+            }
+            Command::AddChildFolder => {
+                let inside = self.doc.selection().filter(|o| o.kind() == Kind::Folder).map(|o| o.id);
+                let id = self.doc.add_in("Folder", Content::Folder, inside);
+                self.unfold_to(id);
+                self.renaming = self.doc.scene().get(id).map(|o| (id, o.name.clone()));
+            }
+            Command::SelectChildren => {
+                if let Some(id) = selected {
+                    let children = self.doc.scene().children(Some(id));
+                    if !children.is_empty() {
+                        self.folded.remove(&id);
+                        self.doc.select_many(&children);
+                    }
+                }
+            }
+            Command::Focus => self.focus_pending = selected,
+            Command::File(op) => self.file_op(op),
             Command::Rename => {
                 self.renaming = self.doc.selection().map(|o| (o.id, o.name.clone()));
             }
-            Command::Add(Kind::Character) => self.show_content = true,
+            Command::Add(Kind::Character) => self.show_folder(0),
             Command::Add(kind) => {
                 if let Some(content) = Content::of_kind(kind) {
                     let name = match kind {
@@ -410,28 +514,11 @@ impl State {
                 }
             }
             Command::AddCard(card) => self.add_card(card),
-            Command::Pose(pose) => {
+            Command::Animate(animation) => {
                 if let Some(mut object) = self.doc.selection().cloned() {
-                    if let Content::Character { pose: worn, .. } = &mut object.content {
-                        *worn = pose;
+                    if let Content::Character { animation: worn, .. } = &mut object.content {
+                        *worn = animation;
                         self.doc.edit(object, false);
-                    }
-                }
-            }
-            Command::SavePose => {
-                let worn = self.doc.selection().and_then(|o| match &o.content {
-                    Content::Character { pose, .. } => pose.clone(),
-                    _ => None,
-                });
-                if let Some(pose) = worn {
-                    match crate::poses::save_in(&self.project.folder("Poses"), &pose) {
-                        Ok(file) => {
-                            let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                            self.log
-                                .info(format!("Saved the pose as {name} in the project's Poses"));
-                            self.poses.saved = crate::poses::saved_in(&self.project.folder("Poses"));
-                        }
-                        Err(e) => self.log.error(format!("The pose could not be saved: {e:#}")),
                     }
                 }
             }
@@ -444,6 +531,8 @@ impl State {
             | Command::OpenProject(_)
             | Command::ImportCard
             | Command::ImportFromPackage
+            | Command::ImportAnimations
+            | Command::ImportAnimationFile
             | Command::Packages
             | Command::ProjectSelector
             | Command::SetIcon
@@ -487,6 +576,8 @@ impl State {
                 self.pick(Pick::Card, cards, ctx);
             }
             Command::ImportFromPackage => self.packages.browse(),
+            Command::ImportAnimations => self.importer = Some(crate::anim_import::Importer::new(None)),
+            Command::ImportAnimationFile => self.pick(Pick::Animation, None, ctx),
             Command::Packages => self.packages.open = true,
             other => self.run(other),
         }
@@ -593,6 +684,7 @@ impl State {
                 name: None,
             }),
             Pick::Project => self.open_or_tell(&path),
+            Pick::Animation => self.import_animation_file(&path),
             Pick::Package => self.packages.picked = Some(path),
             Pick::Icon => {
                 let set = match self.selector.as_mut().and_then(|s| s.icon_for.take()) {
@@ -646,9 +738,12 @@ impl State {
         let eager = self.library.eager;
         self.library = Library::new(&self.project);
         self.library.eager = eager;
-        self.poses.refresh(&self.project);
-        self.poses.selected = None;
-        self.poses.group = None;
+        self.animations.refresh(&self.project);
+        self.subfolder = project::FOLDERS[0].to_owned();
+        self.content_renaming = None;
+        self.clipboard = None;
+        self.scene_clipboard.clear();
+        self.importer = None;
         self.playback = Playback::Stopped;
         self.clock = 0.0;
         self.folded.clear();
@@ -756,7 +851,10 @@ impl State {
     /// built get another try.
     pub fn content_changed(&mut self) {
         self.games.reset();
-        self.poses.refresh(&self.project);
+        self.animations.refresh(&self.project);
+        if let Some(importer) = &mut self.importer {
+            importer.reset();
+        }
         if let Some(live) = self.live.as_mut() {
             live.retry();
         }
@@ -903,7 +1001,220 @@ impl State {
         if import.place {
             self.add_card(file);
         } else {
-            self.show_content = true;
+            self.show_folder(0);
+        }
+    }
+
+    /// Brings the Content panel to the front on one of the project's
+    /// folders, by its place in `project::FOLDERS`.
+    pub fn show_folder(&mut self, folder: usize) {
+        self.show_content = true;
+        if self.folder != folder || content::top(&self.subfolder) != project::FOLDERS[folder] {
+            self.open_folder(project::FOLDERS[folder]);
+        }
+    }
+
+    /// Opens a folder of the project in the Content panel.
+    pub fn open_folder(&mut self, rel: &str) {
+        let top = content::top(rel);
+        if let Some(at) = project::FOLDERS.iter().position(|f| *f == top) {
+            self.folder = at;
+            self.subfolder = rel.to_owned();
+            self.content_renaming = None;
+        }
+    }
+
+    /// The folder imported animations go into: the open one when it is
+    /// among the animations, else the project's Animations folder.
+    pub fn animation_folder(&self) -> String {
+        if content::top(&self.subfolder) == project::ANIMATIONS && self.project.root.join(&self.subfolder).is_dir() {
+            self.subfolder.clone()
+        } else {
+            project::ANIMATIONS.to_owned()
+        }
+    }
+
+    /// Lists the project's files again, after they changed on disk.
+    pub fn refresh_content(&mut self) {
+        self.library.refresh(&self.project);
+        self.animations.refresh(&self.project);
+        if !self.project.is_none() && !self.project.root.join(&self.subfolder).is_dir() {
+            self.subfolder = project::FOLDERS[self.folder.min(project::FOLDERS.len() - 1)].to_owned();
+        }
+    }
+
+    /// Copies animations into the project, as the import window asked.
+    pub fn import_animations(&mut self, picks: &[crate::animations::Pick], by_category: bool) {
+        if self.project.is_none() || picks.is_empty() {
+            return;
+        }
+        let folder = self.animation_folder();
+        let mods = self.project.mods_dir();
+        let needs_game = picks
+            .iter()
+            .any(|p| matches!(p.from, crate::animations::From::Installed { .. }));
+        let game = if needs_game { self.games.get(&mods).ok() } else { None };
+        let done = crate::animations::import(&self.project, game, picks, &folder, by_category);
+        self.imported_animations(done, &folder);
+    }
+
+    /// Says what an import of animations did and shows the folder they
+    /// went into.
+    pub fn imported_animations(&mut self, done: crate::animations::Imported, folder: &str) {
+        for problem in &done.problems {
+            self.log.error(format!("Not imported: {problem}"));
+        }
+        if !done.files.is_empty() {
+            let what = match done.files.len() {
+                1 => format!("Imported {}", content::leaf(&done.files[0])),
+                n => format!("Imported {n} animations"),
+            };
+            let size = if done.bytes == 0 {
+                "already there".to_owned()
+            } else {
+                mods::size_text(done.bytes)
+            };
+            self.log.info(format!("{what} into {folder}: {size}"));
+            self.asset = done.files.last().map(PathBuf::from);
+        }
+        self.refresh_content();
+        self.open_folder(folder);
+        self.show_content = true;
+    }
+
+    /// Imports from a file the user picked: an animation file is copied
+    /// in, a zipmod opens the import window on the animations it lists.
+    pub fn import_animation_file(&mut self, path: &Path) {
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if extension == rk_chara::animation_file::EXTENSION {
+            let pick = crate::animations::Pick {
+                name: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                group: String::new(),
+                category: String::new(),
+                source: String::new(),
+                from: crate::animations::From::File(path.to_owned()),
+            };
+            self.import_animations(&[pick], false);
+        } else if extension == "zipmod" || extension == "zip" {
+            self.importer = Some(crate::anim_import::Importer::new(Some(path.to_owned())));
+        } else {
+            self.log.error(format!(
+                "{} is neither an animation file (.rkanim) nor a zipmod. A package (.rkpkg) is installed under \
+                 Window, Packages first; its animations then show under Import from package.",
+                path.display()
+            ));
+        }
+    }
+
+    /// Carries out something the Content panel asked of a file or a
+    /// folder, and keeps the scene and the panels on what moved.
+    pub fn file_op(&mut self, op: FileOp) {
+        if self.project.is_none() {
+            return;
+        }
+        let done: Result<Option<content::Moved>> = match op {
+            FileOp::Rename(rel, name) => content::rename(&mut self.project, &rel, &name).map(Some),
+            FileOp::Move(rel, folder) => content::move_into(&mut self.project, &rel, &folder).map(Some),
+            FileOp::Duplicate(rel) => content::duplicate(&mut self.project, &rel).map(|copy| {
+                self.asset = Some(PathBuf::from(copy));
+                None
+            }),
+            FileOp::Delete(rel) => {
+                let used = self.doc.scene().uses(&rel);
+                content::trash(&mut self.project, &rel).map(|()| {
+                    let name = content::leaf(&rel);
+                    self.log
+                        .info(format!("Moved {name} to the project's trash ({})", content::TRASH));
+                    if used > 0 {
+                        self.log.warn(format!("{used} objects of the scene still name {name}"));
+                    }
+                    if self.clipboard.as_ref().is_some_and(|(c, _)| *c == rel) {
+                        self.clipboard = None;
+                    }
+                    if self.asset.as_deref() == Some(Path::new(&rel)) {
+                        self.asset = None;
+                    }
+                    None
+                })
+            }
+            FileOp::NewFolder(inside) => content::new_folder(&self.project, &inside, "New folder").map(|folder| {
+                self.content_renaming = Some((folder.clone(), content::leaf(&folder).to_owned()));
+                None
+            }),
+            FileOp::Copy(rel) => {
+                self.clipboard = Some((rel, false));
+                Ok(None)
+            }
+            FileOp::Cut(rel) => {
+                self.clipboard = Some((rel, true));
+                Ok(None)
+            }
+            FileOp::Paste(folder) => match self.clipboard.clone() {
+                Some((rel, true)) => {
+                    self.clipboard = None;
+                    content::move_into(&mut self.project, &rel, &folder).map(Some)
+                }
+                Some((rel, false)) => content::copy_into(&mut self.project, &rel, &folder).map(|copy| {
+                    self.asset = Some(PathBuf::from(copy));
+                    None
+                }),
+                None => Ok(None),
+            },
+            FileOp::Reveal(rel) => content::reveal(&self.project.root.join(rel)).map(|()| None),
+            FileOp::SetIcon(rel) => self.project.set_icon(Some(&self.project.root.join(&rel))).map(|()| {
+                self.log
+                    .info(format!("{} is the project's icon now", content::leaf(&rel)));
+                None
+            }),
+            FileOp::CopyIn(rel) => self.copy_in(&rel).map(Some),
+        };
+        match done {
+            Ok(Some(moved)) => self.follow(&moved),
+            Ok(None) => {}
+            Err(e) => self.log.error(format!("{e:#}")),
+        }
+        self.refresh_content();
+    }
+
+    /// Copies a linked animation into the project for good.
+    fn copy_in(&mut self, rel: &str) -> Result<content::Moved> {
+        use anyhow::Context;
+        let item = self.animations.find(rel).cloned().context("no such animation")?;
+        let mods = self.project.mods_dir();
+        let game = self.games.get(&mods)?;
+        let (old, new) = crate::animations::copy_in(&mut self.project, game, &item)?;
+        let moved = content::Moved(vec![(old, new)]);
+        self.project.retarget(&|old| moved.target(old))?;
+        Ok(moved)
+    }
+
+    /// Files of the project moved: the scene being edited, its history,
+    /// the scene as saved and what the Content panel has open follow.
+    fn follow(&mut self, moved: &content::Moved) {
+        if moved.0.is_empty() {
+            return;
+        }
+        let to = |old: &str| moved.target(old);
+        self.doc.retarget(&to);
+        self.saved.retarget(&to);
+        let slashes = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        if let Some(new) = self.asset.as_deref().and_then(|a| to(&slashes(a))) {
+            self.asset = Some(PathBuf::from(new));
+        }
+        if let Some(new) = to(&self.subfolder) {
+            self.subfolder = new;
+        }
+        if let Some((rel, _)) = &mut self.clipboard {
+            if let Some(new) = to(rel) {
+                *rel = new;
+            }
+        }
+        // Built characters are known by their card's path.
+        if let Some(live) = self.live.as_mut() {
+            live.retry();
         }
     }
 
@@ -943,5 +1254,215 @@ impl State {
             self.mode = mode;
             self.palette_open = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::Place;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("renkatsu-state-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An editor on a new, empty project.
+    fn editor(home: &Path) -> State {
+        let mut st = State::new(Project::none(), Scene::new());
+        st.scripted = true;
+        st.new_project(&home.join("P"), "P", Start::Empty).unwrap();
+        st
+    }
+
+    /// The card and the animation file the scene's only character names.
+    fn named(st: &State) -> (String, Option<String>) {
+        let character = st.doc.scene().objects().iter().find_map(|o| match &o.content {
+            Content::Character { card, animation, .. } => Some((
+                card.to_string_lossy().into_owned(),
+                animation.as_ref().and_then(|a| a.file.clone()),
+            )),
+            _ => None,
+        });
+        character.expect("the scene has a character")
+    }
+
+    #[test]
+    fn what_content_does_to_files_keeps_the_scene_on_them() {
+        let home = scratch("files");
+        let mut st = editor(&home);
+        std::fs::write(home.join("anna.png"), b"card").unwrap();
+        let card = st.project.import_card(&home.join("anna.png"), "Anna").unwrap();
+        st.project.save().unwrap();
+        st.refresh_content();
+        rk_chara::animation_file::sample("Spin", 3.0, true)
+            .write(&home.join("Spin.rkanim"))
+            .unwrap();
+        // An animation file is copied into the project and shown there.
+        st.import_animation_file(&home.join("Spin.rkanim"));
+        std::fs::remove_file(home.join("Spin.rkanim")).unwrap();
+        assert_eq!(st.asset, Some(PathBuf::from("Animations/Spin.rkanim")));
+        assert_eq!((st.folder, st.subfolder.as_str()), (1, "Animations"));
+        assert!(std::mem::take(&mut st.show_content));
+        // Anything else is refused with a word about what to do.
+        st.import_animation_file(&home.join("pack.rkpkg"));
+        assert!(st.log.lines.last().unwrap().2.contains("Window, Packages"));
+
+        st.run(Command::AddCard(PathBuf::from(&card)));
+        let spin = st.animations.items[0].reference();
+        st.run(Command::Animate(Some(spin)));
+        assert!(st.save());
+        assert_eq!(
+            named(&st),
+            ("Characters/anna.png".into(), Some("Animations/Spin.rkanim".into()))
+        );
+
+        // Rename the card; make a folder, name it and move the animation in.
+        st.run(Command::File(FileOp::Rename(card, "Anna Kato".into())));
+        st.run(Command::File(FileOp::NewFolder("Animations".into())));
+        let (folder, text) = st.content_renaming.clone().expect("the new folder is being named");
+        assert_eq!(
+            (folder.as_str(), text.as_str()),
+            ("Animations/New folder", "New folder")
+        );
+        st.run(Command::File(FileOp::Rename(folder, "Dances".into())));
+        st.asset = Some(PathBuf::from("Animations/Spin.rkanim"));
+        st.run(Command::File(FileOp::Move(
+            "Animations/Spin.rkanim".into(),
+            "Animations/Dances".into(),
+        )));
+        let moved = (
+            "Characters/Anna Kato.png".to_owned(),
+            Some("Animations/Dances/Spin.rkanim".to_owned()),
+        );
+        assert_eq!(named(&st), moved);
+        assert_eq!(st.asset, Some(PathBuf::from("Animations/Dances/Spin.rkanim")));
+        assert_eq!(st.library.characters[0].name, "Anna Kato");
+        assert_eq!(st.animations.items[0].rel, "Animations/Dances/Spin.rkanim");
+        // The scene on disk followed, so nothing is unsaved, and the
+        // project opens with the files where they are.
+        assert!(!st.dirty());
+        let (_, on_disk, _) = Project::open(&st.project.root).unwrap();
+        assert_eq!(&on_disk, st.doc.scene());
+        // Undoing the animation and doing it again keeps the new path.
+        st.run(Command::Undo);
+        assert_eq!(named(&st), (moved.0.clone(), None));
+        st.run(Command::Redo);
+        assert_eq!(named(&st), moved);
+
+        // Cut and paste moves it back; copy and paste makes a copy.
+        st.run(Command::File(FileOp::Cut("Animations/Dances/Spin.rkanim".into())));
+        st.run(Command::File(FileOp::Paste("Animations".into())));
+        assert_eq!(named(&st).1.as_deref(), Some("Animations/Spin.rkanim"));
+        assert_eq!(st.clipboard, None);
+        st.run(Command::File(FileOp::Copy("Animations/Spin.rkanim".into())));
+        st.run(Command::File(FileOp::Paste("Animations/Dances".into())));
+        st.run(Command::File(FileOp::Duplicate("Animations/Spin.rkanim".into())));
+        let files: Vec<&str> = st.animations.items.iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(
+            files,
+            [
+                "Animations/Spin.rkanim",
+                "Animations/Spin 2.rkanim",
+                "Animations/Dances/Spin.rkanim"
+            ]
+        );
+        assert_eq!(named(&st).1.as_deref(), Some("Animations/Spin.rkanim"));
+
+        // Deleting what the scene uses says so, and the file can be found.
+        st.run(Command::File(FileOp::Delete("Animations/Spin.rkanim".into())));
+        assert!(st.project.root.join(".renkatsu/trash/1/Spin.rkanim").is_file());
+        assert!(st.log.lines.last().unwrap().2.contains("1 objects of the scene"));
+        assert_eq!(st.animations.items.len(), 2);
+        // What cannot be done is said in the console and changes nothing.
+        st.run(Command::File(FileOp::Rename("Animations".into(), "Clips".into())));
+        assert_eq!(st.log.lines.last().unwrap().0, 2);
+        assert!(st.project.root.join("Animations").is_dir());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_outliners_commands_act_on_the_scene() {
+        let home = scratch("scene");
+        let mut st = editor(&home);
+        let names = |st: &State| -> Vec<(usize, String)> {
+            let scene = st.doc.scene();
+            scene
+                .rows()
+                .into_iter()
+                .map(|(depth, id)| (depth, scene.get(id).unwrap().name.clone()))
+                .collect()
+        };
+        let row = |depth: usize, name: &str| (depth, name.to_owned());
+        st.run(Command::Add(Kind::Folder));
+        let folder = st.doc.selected.unwrap();
+        st.run(Command::Add(Kind::Camera));
+        let camera = st.doc.selected.unwrap();
+        // A folder inside the selected folder, which is then being named.
+        st.doc.selected = Some(folder);
+        st.run(Command::AddChildFolder);
+        let child = st.doc.selected.unwrap();
+        assert_eq!(st.renaming.as_ref().map(|r| r.0), Some(child));
+        assert_eq!(
+            names(&st),
+            [
+                row(0, "Key light"),
+                row(0, "Folder"),
+                row(1, "Camera"),
+                row(1, "Folder 2")
+            ]
+        );
+        // Its children are selected together, hidden together and taken
+        // out of it together.
+        st.doc.selected = Some(folder);
+        st.run(Command::SelectChildren);
+        assert_eq!(st.doc.selected_all(), [camera, child]);
+        st.run(Command::ToggleHidden);
+        assert!(!st.doc.scene().get(camera).unwrap().visible && !st.doc.scene().get(child).unwrap().visible);
+        st.run(Command::Undo);
+        st.doc.select_many(&[camera, child]);
+        st.run(Command::Unparent);
+        assert_eq!(
+            names(&st),
+            [
+                row(0, "Key light"),
+                row(0, "Folder"),
+                row(0, "Camera"),
+                row(0, "Folder 2")
+            ]
+        );
+        st.run(Command::Undo);
+        assert_eq!(st.doc.scene().get(camera).unwrap().parent, Some(folder));
+
+        // Copy the folder, paste it at the top; cut the copy again.
+        st.doc.selected = Some(folder);
+        st.run(Command::Copy);
+        st.doc.selected = None;
+        st.run(Command::Paste);
+        let pasted = st.doc.selected.unwrap();
+        assert_eq!(st.focus_pending, Some(pasted));
+        assert_eq!(
+            names(&st)[4..],
+            [row(0, "Folder 3"), row(1, "Camera 2"), row(1, "Folder 4")]
+        );
+        st.run(Command::Cut);
+        assert_eq!(names(&st).len(), 4);
+        assert_eq!(st.scene_clipboard.len(), 3);
+        // Focus asks the viewport for the selection.
+        st.doc.selected = Some(camera);
+        st.focus_pending = None;
+        st.run(Command::Focus);
+        assert_eq!(st.focus_pending, Some(camera));
+        // Several selected objects go with one Delete, and come back with
+        // one undo.
+        st.doc.select_many(&[camera, child]);
+        st.run(Command::Delete);
+        assert_eq!(names(&st), [row(0, "Key light"), row(0, "Folder")]);
+        st.run(Command::Undo);
+        assert_eq!(names(&st).len(), 4);
+        assert!(st.doc.scene().can_place(camera, Place::Into(None)));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

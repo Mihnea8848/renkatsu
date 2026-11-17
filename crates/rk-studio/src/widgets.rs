@@ -442,6 +442,80 @@ pub fn check_item(ui: &mut Ui, k: &Look, on: bool, text: &str, keys: &str) -> Re
     ui.add(button)
 }
 
+/// The text of a menu item: an icon, a name and, to the right, the keys
+/// that do the same or the state the item is in.
+fn menu_job(k: &Look, icon_glyph: &str, text: &str) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let format = |font, color| egui::TextFormat {
+        font_id: font,
+        color,
+        valign: egui::Align::Center,
+        ..Default::default()
+    };
+    let icon_text = if icon_glyph.is_empty() { icon::CHECK } else { icon_glyph };
+    let tint = if icon_glyph.is_empty() {
+        Color32::TRANSPARENT
+    } else {
+        k.t.text_dim
+    };
+    job.append(icon_text, 0.0, format(k.icons(14.0), tint));
+    job.append(text, 8.0, format(k.font(), Color32::PLACEHOLDER));
+    job
+}
+
+/// An item of a context menu. Returns whether it was chosen, and closes
+/// the menu when it was.
+pub fn menu_item(ui: &mut Ui, k: &Look, icon_glyph: &str, text: &str, keys: &str, enabled: bool) -> bool {
+    let mut button = egui::Button::new(menu_job(k, icon_glyph, text));
+    if !keys.is_empty() {
+        button = button.shortcut_text(keys);
+    }
+    let clicked = ui.add_enabled(enabled, button).clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
+/// An item of a menu that stays open when it is chosen, with what it is
+/// set to at its right: for values stepped through by clicking.
+pub fn menu_step(ui: &mut Ui, k: &Look, icon_glyph: &str, text: &str, value: &str, enabled: bool) -> bool {
+    let button = egui::Button::new(menu_job(k, icon_glyph, text)).shortcut_text(value);
+    ui.add_enabled(enabled, button).clicked()
+}
+
+/// A menu inside a menu, drawn like `menu_item`.
+pub fn menu_sub(ui: &mut Ui, k: &Look, icon_glyph: &str, text: &str, add: impl FnOnce(&mut Ui)) {
+    ui.menu_button(menu_job(k, icon_glyph, text), add);
+}
+
+/// A text field over `rect` for renaming something in a list. Returns
+/// the name when Enter or a click elsewhere took it, an empty name when
+/// Escape gave it up, and `None` while the user types.
+pub fn rename_field(ui: &mut Ui, k: &Look, rect: Rect, text: &mut String) -> Option<String> {
+    let p = ui.painter();
+    p.rect_filled(rect, k.radius(), k.t.input);
+    p.rect_stroke(rect, k.radius(), Stroke::new(1.0, k.t.select), StrokeKind::Inside);
+    let edit = ui.put(
+        rect.shrink2(Vec2::new(4.0, 0.0)),
+        egui::TextEdit::singleline(text)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .font(k.font())
+            .text_color(k.t.text_bright),
+    );
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        Some(String::new())
+    } else if edit.lost_focus() {
+        Some(text.clone())
+    } else {
+        if !edit.has_focus() {
+            edit.request_focus();
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_number;

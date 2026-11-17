@@ -111,6 +111,8 @@ pub enum Pick {
     GameFolder,
     /// A package file to install.
     Package,
+    /// An animation file or a zipmod to import animations from.
+    Animation,
 }
 
 /// A system file dialog that is open. It runs on a thread of its own, so
@@ -133,6 +135,7 @@ impl Picker {
                 Pick::Icon => "Project icon",
                 Pick::GameFolder => "Koikatsu folder",
                 Pick::Package => "Install package",
+                Pick::Animation => "Import animations",
             });
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
@@ -144,6 +147,12 @@ impl Picker {
                     .pick_file(),
                 Pick::Folder | Pick::GameFolder => dialog.pick_folder(),
                 Pick::Icon => dialog.add_filter("PNG pictures", &["png"]).pick_file(),
+                Pick::Animation => dialog
+                    .add_filter(
+                        "Animations and zipmods",
+                        &[rk_chara::animation_file::EXTENSION, "zipmod"],
+                    )
+                    .pick_file(),
                 // A package, or the first part of one that was cut into parts.
                 Pick::Package => dialog
                     .add_filter("Renkatsu packages", &[rk_packages::EXTENSION, "001"])

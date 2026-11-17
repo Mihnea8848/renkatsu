@@ -334,7 +334,7 @@ enum Ask {
 
 /// The editor dims behind a window drawn like the project selector, and
 /// takes no clicks. Returns whether the dimmed part was clicked.
-fn veil(ctx: &egui::Context, id: &str) -> bool {
+pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new((id, "veil")))
         .order(egui::Order::Foreground)
@@ -348,10 +348,10 @@ fn veil(ctx: &egui::Context, id: &str) -> bool {
 }
 
 /// The parts of such a window: its header, body and foot.
-struct Frame {
-    head: Rect,
-    body: Rect,
-    foot: Rect,
+pub(crate) struct Frame {
+    pub head: Rect,
+    pub body: Rect,
+    pub foot: Rect,
 }
 
 const HEAD: f32 = 52.0;
@@ -359,7 +359,7 @@ const FOOT: f32 = 56.0;
 
 /// Paints the window's panels and its header, and says whether its close
 /// cell was clicked.
-fn frame(ui: &mut Ui, k: &Look, window: Rect, title: &str, under: &str) -> (Frame, bool) {
+pub(crate) fn frame(ui: &mut Ui, k: &Look, window: Rect, title: &str, under: &str) -> (Frame, bool) {
     let t = &k.t;
     let head = Rect::from_min_size(window.min, Vec2::new(window.width(), HEAD));
     let foot = Rect::from_min_max(Pos2::new(window.left(), window.bottom() - FOOT), window.max);
@@ -401,7 +401,7 @@ fn frame(ui: &mut Ui, k: &Look, window: Rect, title: &str, under: &str) -> (Fram
 }
 
 /// The window's place: centred, as large as `want` where the screen allows.
-fn placed(ctx: &egui::Context, want: Vec2, least: Vec2) -> Rect {
+pub(crate) fn placed(ctx: &egui::Context, want: Vec2, least: Vec2) -> Rect {
     let screen = ctx.content_rect();
     let size = Vec2::new(
         (screen.width() - 80.0).clamp(least.x, want.x),

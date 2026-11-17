@@ -49,7 +49,7 @@ The latest version is 0.1.4, on the
   character content, so Renkatsu works without a Koikatsu install.
 - 0.1.3 checks for new versions and keeps the editor's grey backdrop.
 - 0.1.4 toggles clothing as CharaStudio does and poses characters with the
-  game's 716 animations, also from Starter Content: Poses, and lets anyone
+  game's 716 animations, also from Starter Content: Animations, and lets anyone
   make packages.
 - Next: posing by hand (FK and IK).
 
@@ -58,8 +58,8 @@ The latest version is 0.1.4, on the
 - A project selector at start, with recent projects as tiles or a list, each
   with its icon or a picture of its last scene
 - Projects are plain folders: a readable `.rkproj` file with Characters,
-  Poses, Maps, Items, Scenes, Renders and Mods folders, so a project can be
-  moved, copied or backed up as it is
+  Animations, Poses, Maps, Items, Scenes, Renders and Mods folders, so a
+  project can be moved, copied or backed up as it is
 - Importing a card copies it into the project with every mod it needs, after
   showing how many and how large they are. A project uses its own mods when
   it opens
@@ -71,12 +71,16 @@ The latest version is 0.1.4, on the
   navigation and eased focus, and characters skinned on the GPU
 - Clothing toggles per category as in CharaStudio: on, half off and off,
   with the game's own rules for which pieces pull others along
-- Poses and animations by CharaStudio's groups and categories, static or
-  dynamic, with speed and start; play, pause and stop drive animations and
-  physics together. Animation lists from mods and packages add their own
-  groups
+- Animations, static or moving, with speed and start; play, pause and stop
+  drive animations and physics together. A project owns its animations:
+  they are imported from Koikatsu, packages and mods through a window with
+  sources, groups and categories, a search and a live preview, and copied
+  into the project so it plays them anywhere
+- Context menus in Content and the Outliner: rename, duplicate, copy, cut,
+  paste, delete, folders, and drag and drop; scenes follow files that are
+  renamed or moved
 - Packages: Starter Content brings Koikatsu's vanilla characters, clothing
-  and poses without the game, and `rk package new` and `rk package build`
+  and animations without the game, and `rk package new` and `rk package build`
   make your own ([docs/packages.md](docs/packages.md))
 - Unreal Engine 5's dark look, with the window's own title bar and border
 - Renkatsu runs without Koikatsu. The Koikatsu folder, chosen in the project
@@ -117,8 +121,8 @@ The latest version is 0.1.4, on the
 
 ## Known problems
 
-- Characters take poses and animations, but cannot be posed by hand yet (FK
-  and IK come next), and community pose files cannot be imported yet
+- Characters take animations, static and moving, but cannot be posed by hand
+  yet (FK and IK come next), and community pose files cannot be imported yet
 - Without a Koikatsu install, characters come from Starter Content only.
   Cards that use mods need the mods, which come with a Koikatsu install
 - CharaStudio's depth of field, fog and sun shafts (off by default) are not

@@ -58,7 +58,7 @@ pub fn render(a: Args) -> Result<()> {
         let [group, category, number] = numbers[..] else {
             anyhow::bail!("{spec}: expected group/category/number");
         };
-        let library = rk_chara::poses::Library::read(&game);
+        let library = rk_chara::animations::Library::read(&game);
         let pose = library
             .find(group, category, number)
             .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
