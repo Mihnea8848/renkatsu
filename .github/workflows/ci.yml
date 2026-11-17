@@ -56,6 +56,9 @@ jobs:
   # Slow, but on pull requests too, so that a Windows break is caught
   # before it reaches main.
   windows:
+    # Its own name, apart from the release workflow's Windows build: the
+    # main branch's rules require it by this name.
+    name: test-windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
