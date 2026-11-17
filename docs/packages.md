@@ -147,9 +147,6 @@ check them before you share the package:
       Leaning (4)
 ```
 
-Renkatsu never reads the lists of the game's H scenes (`HAnime_*`) or
-anything under `h/`, from any package.
-
 ## Install it
 
 In Renkatsu Studio, open Window, Packages and choose Install from a file.

@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.5, on the
+The latest version is 0.1.6, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -53,6 +53,9 @@ The latest version is 0.1.5, on the
   make packages.
 - 0.1.5 keeps animations in the project with an importer that previews
   them, and adds context menus in Content and the Outliner.
+- 0.1.6 reads the rest of the game's animations, 5728 in all with a Koikatsu
+  folder, and names them in English. Starter Content: Poses is now Starter
+  Content: Animations & Poses and carries 3860 of them.
 - Next: posing by hand (FK and IK).
 
 ## Renkatsu Studio
@@ -319,5 +322,5 @@ The interface font, Open Sans, is under the SIL Open Font License 1.1, in
 [LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).
 
 The Renkatsu repository holds no game files. Starter Content, a separate
-download, carries Koikatsu's own vanilla character content and default
-characters, without mods, community cards, voices or H content.
+download, carries Koikatsu's own vanilla character content, animations and
+default characters, without mods, community cards or voices.

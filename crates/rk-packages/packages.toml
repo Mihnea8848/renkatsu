@@ -20,12 +20,12 @@ sha256 = "1a71c5f81929a696bcbc9cbe2446221ae95bd17ba9c89595235b5f7ac4abf438"
 # `rk package starter-poses --out DIR` builds this one.
 [[package]]
 id = "starter-poses"
-name = "Starter Content: Animations"
-version = "1.0.0"
-description = "CharaStudio's animations, static and moving, for standing, sitting, talking, walking, dancing and fighting, without the H scenes' animations. Characters are animated without a Koikatsu install."
-installed_size = 178129456
+name = "Starter Content: Animations & Poses"
+version = "1.1.0"
+description = "CharaStudio's animations, static and moving, for standing, sitting, talking, walking, dancing and fighting, and the H scenes' animations. Characters are animated without a Koikatsu install."
+installed_size = 898152965
 
 [[package.part]]
-url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-poses-1.0.0.rkpkg"
-size = 164017183
-sha256 = "b0b53b3d7d98a1fd4269c6dccad446d6abe603b2a34e9407c54bf9f312daaf8c"
+url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-poses-1.1.0.rkpkg"
+size = 648192573
+sha256 = "1b6b522069cba3bb8913d45e586e3603c85ebb3f7b28e39f0636a3c3458fc61e"
