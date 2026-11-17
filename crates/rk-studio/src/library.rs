@@ -60,7 +60,7 @@ impl Library {
                 name: c.name,
             })
             .collect();
-        self.characters.sort_by_key(|c| c.name.to_lowercase());
+        self.characters.sort_by_key(|c| crate::content::natural(&c.name));
         let characters = &self.characters;
         self.thumbs.retain(|path, _| characters.iter().any(|c| c.path == *path));
     }

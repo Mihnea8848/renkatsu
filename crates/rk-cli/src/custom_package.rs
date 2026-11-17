@@ -149,6 +149,59 @@ pub fn sort_files(all: Vec<(String, PathBuf)>) -> (Vec<(String, PathBuf)>, Vec<S
     (take, refused)
 }
 
+/// The groups and categories a package folder puts animations into, by
+/// name: from the lists of its zipmods and `abdata`, whose numbers name
+/// groups and categories as in CharaStudio, and from the animation files
+/// in `animations`, whose folders do.
+pub fn categories(dir: &Path) -> Result<Vec<rk_chara::animations::Branch>> {
+    let mut named: Vec<(String, String)> = Vec::new();
+    let lists = [folder::ABDATA, folder::MODS].iter().any(|f| dir.join(f).is_dir());
+    if lists {
+        let game = rk_vfs::Game::open_sources(&rk_vfs::index::Sources {
+            game: None,
+            packages: vec![dir.to_owned()],
+            mods: Vec::new(),
+        })?;
+        // The package alone: what it lists counts, also where the clips
+        // are the game's own.
+        let library = rk_chara::animations::Library::read_with(&game, true);
+        named.extend(
+            library
+                .entries
+                .iter()
+                .map(|e| (library.group_name(e.group), library.category_label(e.group, e.category))),
+        );
+    }
+    for file in rk_chara::animation_file::filed(&dir.join(folder::ANIMATIONS)) {
+        let or = |value: String, fallback: &str| {
+            if value.trim().is_empty() {
+                fallback.to_owned()
+            } else {
+                value
+            }
+        };
+        named.push((or(file.group, "No group"), or(file.category, "Other")));
+    }
+    Ok(rk_chara::animations::tree_of(
+        named.iter().map(|(g, c)| (g.as_str(), c.as_str())),
+    ))
+}
+
+/// What `rk package build` says about a package's animation categories.
+pub fn categories_text(found: &[rk_chara::animations::Branch]) -> String {
+    let total: usize = found.iter().map(|b| b.count).sum();
+    let mut text = format!("  {total} animations in these groups and categories:\n");
+    for branch in found {
+        text += &format!("    {} ({})\n", branch.name, branch.count);
+        for (category, count) in &branch.categories {
+            text += &format!("      {category} ({count})\n");
+        }
+    }
+    text += "  a category whose name another package or Koikatsu already has is joined with it;\n";
+    text += "  one with a new name shows as a new category\n";
+    text
+}
+
 /// Checks a package folder and writes `<id>-<version>.rkpkg` into `out`.
 pub fn build(dir: &Path, out: &Path) -> Result<()> {
     let mut manifest = Manifest::read(&dir.join(rk_core::PACKAGE_FILE)).with_context(|| {
@@ -206,6 +259,11 @@ pub fn build(dir: &Path, out: &Path) -> Result<()> {
         size_text(built.installed_size)
     );
     println!("  sha256 {}", built.sha256);
+    match categories(dir) {
+        Ok(found) if !found.is_empty() => print!("{}", categories_text(&found)),
+        Ok(_) => {}
+        Err(e) => println!("  its animation lists could not be read: {e:#}"),
+    }
     println!("install it in Renkatsu Studio with Window, Packages, Install from a file,");
     println!("or with: rk package install {}", built.file.display());
     Ok(())

@@ -60,15 +60,28 @@ impl Transform {
     }
 }
 
-/// A pose or an animation on a character: a state of an animator
-/// controller in one of the game's bundles, as CharaStudio's list names
-/// it, and how it is played.
+/// An animation on a character and how it is played. Some animations
+/// hold one pose and some move; both are animations here, as in
+/// CharaStudio's Anime menu.
+///
+/// The animation is one of the project's own files when `file` names
+/// one. `bundle`, `controller` and `state` say where it came from, a state
+/// of an animator controller in a bundle as CharaStudio's list names it,
+/// and are what plays when the project has no file for it: scenes saved
+/// before projects kept their own animations have only these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Pose {
+pub struct Animation {
     /// The name shown.
     pub name: String,
+    /// The animation file, relative to the project folder, with forward
+    /// slashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default)]
     pub bundle: String,
+    #[serde(default)]
     pub controller: String,
+    #[serde(default)]
     pub state: String,
     /// How fast it plays; 1 is the animation's own speed.
     #[serde(default = "one")]
@@ -86,11 +99,13 @@ fn one() -> f32 {
     1.0
 }
 
-impl Pose {
-    /// An entry of the game's list, played as it is.
-    pub fn of(pose: &rk_chara::poses::Pose) -> Pose {
-        Pose {
+impl Animation {
+    /// An entry of the game's list, played as it is from where it is
+    /// installed.
+    pub fn of(pose: &rk_chara::animations::Entry) -> Animation {
+        Animation {
             name: pose.name.clone(),
+            file: None,
             bundle: pose.bundle.clone(),
             controller: pose.controller.clone(),
             state: pose.state.clone(),
@@ -119,10 +134,11 @@ pub enum Content {
         /// outdoor shoes): 0 on, 1 and 2 half off, 3 off.
         #[serde(default)]
         clothes: [u8; 9],
-        /// The pose the character holds or the animation it plays; none
-        /// leaves it as it was built.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pose: Option<Pose>,
+        /// The animation the character plays or the pose it holds; none
+        /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
+        /// call it `pose`.
+        #[serde(default, alias = "pose", skip_serializing_if = "Option::is_none")]
+        animation: Option<Animation>,
     },
     Light {
         /// The light stays at the camera's upper left, as in the game's
@@ -148,7 +164,7 @@ impl Content {
             outdoor_shoes: false,
             simulate: true,
             clothes: [0; 9],
-            pose: None,
+            animation: None,
         }
     }
 
@@ -434,6 +450,69 @@ impl Scene {
         Some(new)
     }
 
+    /// Adds copies of objects that were copied out of a scene: the first
+    /// is the head and goes last into `parent`, the rest sit below it as
+    /// they did. Returns the head's new id.
+    pub fn insert_copies(&mut self, objects: &[Object], parent: Option<ObjectId>) -> Option<ObjectId> {
+        let head = objects.first()?.id;
+        let parent = parent.filter(|p| self.get(*p).is_some_and(|o| o.kind() == Kind::Folder));
+        let mut renamed: Vec<(ObjectId, ObjectId)> = Vec::with_capacity(objects.len());
+        for object in objects {
+            let mut copy = object.clone();
+            copy.id = self.fresh_id();
+            copy.parent = if object.id == head {
+                parent
+            } else {
+                // An object whose folder was not copied with it joins the head.
+                let found = object.parent.and_then(|p| renamed.iter().find(|(from, _)| *from == p));
+                Some(found.map_or(renamed[0].1, |(_, to)| *to))
+            };
+            renamed.push((object.id, copy.id));
+            copy.name = self.free_name(&copy.name);
+            self.objects.push(copy);
+        }
+        Some(renamed[0].1)
+    }
+
+    /// Renames the project files the scene names: `to` gives the new path
+    /// of a file that moved, relative to the project, or `None` for one
+    /// that stays. Returns whether anything changed.
+    pub fn retarget(&mut self, to: &dyn Fn(&str) -> Option<String>) -> bool {
+        let mut changed = false;
+        for object in &mut self.objects {
+            if let Content::Character { card, animation, .. } = &mut object.content {
+                let old = card.to_string_lossy().replace('\\', "/");
+                if let Some(new) = to(&old) {
+                    *card = PathBuf::from(new);
+                    changed = true;
+                }
+                if let Some(file) = animation.as_mut().and_then(|a| a.file.as_mut()) {
+                    if let Some(new) = to(file) {
+                        *file = new;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// How many objects name a project file, or a file below a folder.
+    pub fn uses(&self, path: &str) -> usize {
+        let below = format!("{path}/");
+        let hit = |file: &str| file == path || file.starts_with(&below);
+        self.objects
+            .iter()
+            .filter(|o| match &o.content {
+                Content::Character { card, animation, .. } => {
+                    hit(&card.to_string_lossy().replace('\\', "/"))
+                        || animation.as_ref().and_then(|a| a.file.as_deref()).is_some_and(hit)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
     /// Whether an object may be moved to a place: the target must exist,
     /// only folders hold objects, and a folder cannot go inside itself.
     pub fn can_place(&self, id: ObjectId, place: Place) -> bool {
@@ -504,6 +583,10 @@ const HISTORY: usize = 200;
 pub struct Document {
     scene: Scene,
     pub selected: Option<ObjectId>,
+    /// More objects selected along with `selected`, and the selection they
+    /// were added to: they count only while that is still the selection.
+    others: Vec<ObjectId>,
+    others_of: Option<ObjectId>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// A value is being dragged: its further changes belong to the step
@@ -516,6 +599,8 @@ impl Document {
         Document {
             scene,
             selected: None,
+            others: Vec::new(),
+            others_of: None,
             undo: Vec::new(),
             redo: Vec::new(),
             gesture: false,
@@ -524,6 +609,154 @@ impl Document {
 
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    /// Everything selected: the selection first, then what was added to
+    /// it, without what is gone and without objects inside a folder that
+    /// is selected too.
+    pub fn selected_all(&self) -> Vec<ObjectId> {
+        let Some(first) = self.selected.filter(|id| self.scene.get(*id).is_some()) else {
+            return Vec::new();
+        };
+        let mut all = vec![first];
+        if self.others_of == Some(first) {
+            for id in &self.others {
+                if self.scene.get(*id).is_some() && !all.contains(id) {
+                    all.push(*id);
+                }
+            }
+        }
+        let inside = |id: ObjectId| all.iter().any(|other| *other != id && self.scene.contains(*other, id));
+        all.iter().copied().filter(|id| !inside(*id)).collect()
+    }
+
+    /// Whether an object is selected, alone or with others.
+    pub fn is_selected(&self, id: ObjectId) -> bool {
+        self.selected == Some(id) || (self.others_of == self.selected && self.others.contains(&id))
+    }
+
+    /// Selects several objects: the first is the selection the panels
+    /// show, the rest go along with it.
+    pub fn select_many(&mut self, ids: &[ObjectId]) {
+        self.selected = ids.first().copied();
+        self.others = ids.iter().skip(1).copied().collect();
+        self.others_of = self.selected;
+    }
+
+    /// Adds an object to the selection, or takes it out again.
+    pub fn toggle_selected(&mut self, id: ObjectId) {
+        let mut all: Vec<ObjectId> = match self.selected {
+            Some(first) if self.others_of == Some(first) => {
+                std::iter::once(first).chain(self.others.iter().copied()).collect()
+            }
+            Some(first) => vec![first],
+            None => Vec::new(),
+        };
+        match all.iter().position(|other| *other == id) {
+            Some(at) => {
+                all.remove(at);
+            }
+            None => all.push(id),
+        }
+        self.select_many(&all);
+    }
+
+    /// Renames the project files the scene names, now and at every step
+    /// of the history, so that undoing never brings back a path that is
+    /// gone. It is no step of the history itself.
+    pub fn retarget(&mut self, to: &dyn Fn(&str) -> Option<String>) -> bool {
+        let mut changed = self.scene.retarget(to);
+        for snapshot in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            changed |= snapshot.scene.retarget(to);
+        }
+        changed
+    }
+
+    /// An object with everything below it, as copies to paste.
+    pub fn copy(&self, id: ObjectId) -> Vec<Object> {
+        let ids = if self.scene.get(id).is_some() {
+            self.scene.subtree(id)
+        } else {
+            Vec::new()
+        };
+        ids.into_iter().filter_map(|id| self.scene.get(id).cloned()).collect()
+    }
+
+    /// Pastes copied objects beside the selection and selects the copy.
+    pub fn paste(&mut self, objects: &[Object]) -> Option<ObjectId> {
+        if objects.is_empty() {
+            return None;
+        }
+        self.checkpoint();
+        let id = self.scene.insert_copies(objects, self.target_folder())?;
+        self.selected = Some(id);
+        if self.scene.get(id).is_some_and(|o| o.kind() == Kind::Character) {
+            let position = self.free_spot();
+            if let Some(object) = self.scene.get_mut(id) {
+                object.transform.position = position;
+            }
+        }
+        Some(id)
+    }
+
+    /// Adds an object last inside a folder, or at the top of the scene,
+    /// and selects it.
+    pub fn add_in(&mut self, name: &str, content: Content, parent: Option<ObjectId>) -> ObjectId {
+        self.checkpoint();
+        let id = self.scene.add(name, content, parent);
+        self.selected = Some(id);
+        id
+    }
+
+    /// Deletes several objects as one step of the history.
+    pub fn delete_many(&mut self, ids: &[ObjectId]) -> bool {
+        let ids: Vec<ObjectId> = ids.iter().copied().filter(|id| self.scene.get(*id).is_some()).collect();
+        match ids[..] {
+            [] => false,
+            [one] => self.delete(one),
+            _ => {
+                self.checkpoint();
+                for id in ids {
+                    self.scene.delete(id);
+                }
+                self.selected = None;
+                true
+            }
+        }
+    }
+
+    /// Shows or hides several objects as one step of the history.
+    pub fn set_visible_many(&mut self, ids: &[ObjectId], visible: bool) -> bool {
+        let change: Vec<ObjectId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.scene.get(*id).is_some_and(|o| o.visible != visible))
+            .collect();
+        if change.is_empty() {
+            return false;
+        }
+        self.checkpoint();
+        for id in change {
+            if let Some(object) = self.scene.get_mut(id) {
+                object.visible = visible;
+            }
+        }
+        true
+    }
+
+    /// Moves several objects to a place in the tree as one step of the
+    /// history, in the order given. Returns how many moved.
+    pub fn place_many(&mut self, ids: &[ObjectId], place: Place) -> usize {
+        let movable: Vec<ObjectId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.scene.can_place(*id, place))
+            .collect();
+        if movable.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        movable.iter().filter(|id| self.scene.place(**id, place)).count()
     }
 
     pub fn selection(&self) -> Option<&Object> {
@@ -671,6 +904,7 @@ impl Document {
     }
 
     /// Moves an object in the tree.
+    #[cfg(test)]
     pub fn place(&mut self, id: ObjectId, place: Place) -> bool {
         if !self.scene.can_place(id, place) {
             return false;
@@ -1068,8 +1302,9 @@ mod tests {
     #[test]
     fn clothes_states_and_the_pose_are_saved_and_undone() {
         let (mut doc, [_, anna, ..]) = cast();
-        let pose = Pose {
+        let pose = Animation {
             name: "Stand 1".into(),
+            file: Some("Animations/Stand 1.rkanim".into()),
             bundle: "studio/anime/00.unity3d".into(),
             controller: "tachi".into(),
             state: "f_tachi_00".into(),
@@ -1079,7 +1314,9 @@ mod tests {
         };
         let mut edited = doc.scene().get(anna).unwrap().clone();
         let Content::Character {
-            clothes, pose: worn, ..
+            clothes,
+            animation: worn,
+            ..
         } = &mut edited.content
         else {
             panic!("Anna is a character");
@@ -1096,10 +1333,10 @@ mod tests {
 
         // One step back: dressed and as built again.
         assert!(doc.undo());
-        let Content::Character { clothes, pose, .. } = &doc.scene().get(anna).unwrap().content else {
+        let Content::Character { clothes, animation, .. } = &doc.scene().get(anna).unwrap().content else {
             panic!("Anna is a character");
         };
-        assert_eq!((*clothes, pose), ([0; 9], &None));
+        assert_eq!((*clothes, animation), ([0; 9], &None));
         assert!(doc.redo());
         assert_eq!(doc.scene().get(anna).unwrap().content, edited.content);
 
@@ -1113,11 +1350,152 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let read: Scene = toml::from_str(&old).unwrap();
-        let Content::Character { clothes, pose, .. } = &read.get(anna).unwrap().content else {
+        let Content::Character { clothes, animation, .. } = &read.get(anna).unwrap().content else {
             panic!("Anna is a character");
         };
         assert_eq!(*clothes, [0; 9]);
-        let pose = pose.as_ref().unwrap();
+        let pose = animation.as_ref().unwrap();
         assert_eq!((pose.speed, pose.start, pose.force_loop), (1.0, 0.0, false));
+    }
+
+    #[test]
+    fn a_scene_that_says_pose_still_loads_its_animation() {
+        // As Renkatsu 0.1.4 wrote a posed character: the table is called
+        // pose and names no file of the project.
+        let old = r#"
+name = "Old"
+next_id = 2
+
+[[objects]]
+id = 1
+name = "Anna"
+kind = "character"
+card = "Characters/anna.png"
+outfit = 0
+outdoor_shoes = false
+simulate = true
+
+[objects.pose]
+name = "Stand 1"
+bundle = "studio/anime/00.unity3d"
+controller = "tachi"
+state = "f_tachi_00"
+speed = 0.5
+"#;
+        let scene: Scene = toml::from_str(old).unwrap();
+        let Content::Character { animation, .. } = &scene.objects()[0].content else {
+            panic!("Anna is a character");
+        };
+        let animation = animation.as_ref().unwrap();
+        assert_eq!((animation.name.as_str(), animation.speed), ("Stand 1", 0.5));
+        assert_eq!(animation.file, None);
+        assert_eq!(animation.state, "f_tachi_00");
+        // It is written back under the new name.
+        let text = toml::to_string(&scene).unwrap();
+        assert!(text.contains("[objects.animation]"), "{text}");
+        assert!(!text.contains("pose"), "{text}");
+    }
+
+    #[test]
+    fn files_that_move_are_followed_through_the_scene_and_its_history() {
+        let (mut doc, [_, anna, ..]) = cast();
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        if let Content::Character { card, animation, .. } = &mut edited.content {
+            *card = PathBuf::from("Characters/anna.png");
+            *animation = Some(Animation {
+                name: "Sit".into(),
+                file: Some("Animations/Sit.rkanim".into()),
+                bundle: String::new(),
+                controller: String::new(),
+                state: String::new(),
+                speed: 1.0,
+                start: 0.0,
+                force_loop: false,
+            });
+        }
+        doc.edit(edited, false);
+        doc.rename(anna, "Anna B");
+        assert_eq!(doc.scene().uses("Characters/anna.png"), 1);
+        assert_eq!(doc.scene().uses("Animations"), 1);
+        assert_eq!(doc.scene().uses("Animations/Si"), 0);
+        let moved = |old: &str| match old {
+            "Characters/anna.png" => Some("Characters/Cast/Anna.png".to_owned()),
+            "Animations/Sit.rkanim" => Some("Animations/Sitting/Sit.rkanim".to_owned()),
+            _ => None,
+        };
+        assert!(doc.retarget(&moved));
+        assert!(!doc.retarget(&moved), "nothing names the old paths any more");
+        let paths = |doc: &Document| match &doc.scene().get(anna).unwrap().content {
+            Content::Character { card, animation, .. } => (
+                card.to_string_lossy().into_owned(),
+                animation.as_ref().and_then(|a| a.file.clone()),
+            ),
+            _ => panic!("Anna is a character"),
+        };
+        let new = (
+            "Characters/Cast/Anna.png".to_owned(),
+            Some("Animations/Sitting/Sit.rkanim".to_owned()),
+        );
+        assert_eq!(paths(&doc), new);
+        // The step before the rename names the files where they are now.
+        assert!(doc.undo());
+        assert_eq!(paths(&doc), new);
+        assert!(doc.redo());
+        assert_eq!(paths(&doc), new);
+    }
+
+    #[test]
+    fn several_objects_are_selected_deleted_and_pasted_together() {
+        let (mut doc, [folder, anna, bea, light, camera]) = cast();
+        doc.select_many(&[light, camera]);
+        assert!(doc.is_selected(light) && doc.is_selected(camera) && !doc.is_selected(anna));
+        doc.toggle_selected(anna);
+        doc.toggle_selected(camera);
+        assert_eq!(doc.selected_all(), [light, anna]);
+        // Selecting something else the plain way drops the rest.
+        doc.selected = Some(bea);
+        assert_eq!(doc.selected_all(), [bea]);
+        assert!(!doc.is_selected(anna));
+        // A folder and something inside it count as the folder.
+        doc.select_many(&[anna, folder, light]);
+        assert_eq!(doc.selected_all(), [folder, light]);
+        let all = doc.selected_all();
+        assert!(doc.delete_many(&all));
+        assert_eq!(names(doc.scene()), [(0, "Camera")]);
+        assert!(doc.undo());
+        assert_eq!(doc.scene().objects().len(), 5);
+
+        // Copy the folder with its characters and paste it at the top.
+        let copied = doc.copy(folder);
+        assert_eq!(copied.len(), 3);
+        doc.selected = None;
+        let pasted = doc.paste(&copied).unwrap();
+        assert_eq!(doc.selected, Some(pasted));
+        assert_eq!(
+            names(doc.scene()),
+            [
+                (0, "Cast"),
+                (1, "Anna"),
+                (1, "Bea"),
+                (0, "Key light"),
+                (0, "Camera"),
+                (0, "Cast 2"),
+                (1, "Anna 2"),
+                (1, "Bea 2"),
+            ]
+        );
+        assert!(doc.undo());
+        assert_eq!(doc.scene().objects().len(), 5);
+
+        // Hide two at once, take both out of the folder at once.
+        assert!(doc.set_visible_many(&[anna, bea], false));
+        assert!(!doc.scene().get(anna).unwrap().visible && !doc.scene().get(bea).unwrap().visible);
+        assert!(doc.undo());
+        assert_eq!(doc.place_many(&[anna, bea], Place::Into(None)), 2);
+        assert_eq!(names(doc.scene())[3..], [(0, "Anna"), (0, "Bea")]);
+        assert!(doc.undo());
+        assert_eq!(doc.scene().get(anna).unwrap().parent, Some(folder));
+        let child = doc.add_in("Props", Content::Folder, Some(folder));
+        assert_eq!(doc.scene().get(child).unwrap().parent, Some(folder));
     }
 }

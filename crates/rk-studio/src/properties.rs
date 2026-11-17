@@ -40,7 +40,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let kind = object.kind();
     header(ui, k, st, kind, &object.name);
     let built = st.live.as_ref().and_then(|live| live.built(object.id));
-    let mut save_pose = false;
+    let mut show_animations = false;
+    let mut show_cards = false;
     let failure = st
         .live
         .as_ref()
@@ -84,7 +85,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 outdoor_shoes,
                 simulate,
                 clothes,
-                pose,
+                animation,
             } => {
                 if section(ui, k, st, 1, "Character") {
                     row(ui, k, "Card", None, |ui, rect| {
@@ -102,7 +103,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         ui.painter().rect_filled(button, k.radius(), fill);
                         glyph(ui.painter(), k, button.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
                         if resp.clicked() {
-                            st.show_content = true;
+                            show_cards = true;
                         }
                     });
                     let outfits: Vec<String> = (1..=built.as_ref().map_or(1, |b| b.outfits.max(1)))
@@ -191,58 +192,77 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                     section_end(ui, k);
                 }
-                if section(ui, k, st, 6, "Pose") {
-                    let playing = built.as_ref().and_then(|b| b.pose);
-                    row(ui, k, "Pose", None, |ui, rect| {
+                if section(ui, k, st, 6, "Animation") {
+                    let playing = built.as_ref().and_then(|b| b.animation);
+                    row(ui, k, "Animation", None, |ui, rect| {
                         let side = rect.height();
-                        let field =
-                            Rect::from_min_max(rect.min, Pos2::new(rect.right() - 2.0 * (side + 4.0), rect.bottom()));
-                        let name = pose.as_ref().map_or("None, as built", |p| p.name.as_str());
-                        widgets::value_box(ui, k, field, name);
-                        if let Some(p) = pose.as_ref() {
-                            ui.interact(field, id.with("pose"), Sense::hover())
-                                .on_hover_text(format!("{} of {} in {}", p.state, p.controller, p.bundle));
+                        let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+                        // A dropdown of the project's animations, by the
+                        // folders the user keeps them in, and none.
+                        let resp = ui.interact(field, id.with("animation"), Sense::click());
+                        let p = ui.painter();
+                        let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                        p.rect_filled(field, k.radius(), fill);
+                        let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+                        let name = animation.as_ref().map_or("None, as built", |a| a.name.as_str());
+                        p.with_clip_rect(field.with_max_x(field.right() - 22.0)).text(
+                            Pos2::new(field.left() + 8.0, field.center().y),
+                            Align2::LEFT_CENTER,
+                            name,
+                            k.font(),
+                            color,
+                        );
+                        glyph(
+                            p,
+                            k,
+                            Pos2::new(field.right() - 12.0, field.center().y + 1.0),
+                            icon::CARET_DOWN,
+                            10.0,
+                            color,
+                        );
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.set_min_width(field.width() - 10.0);
+                            if let Some(chosen) = crate::panels::animation_items(ui, k, st, Some(before.id)) {
+                                *animation = chosen;
+                            }
+                        });
+                        if let Some(a) = animation.as_ref() {
+                            let from = match &a.file {
+                                Some(file) => file.clone(),
+                                None => format!(
+                                    "{} of {} in {}, played from what is installed",
+                                    a.state, a.controller, a.bundle
+                                ),
+                            };
+                            resp.on_hover_text(from);
                         }
-                        let button = |n: f32, name: &str, glyph_text: &str, tip: &str| {
-                            let at = Rect::from_min_size(
-                                Pos2::new(field.right() + 4.0 + n * (side + 4.0), rect.top()),
-                                Vec2::splat(side),
-                            );
-                            let resp = ui.interact(at, id.with(name), Sense::click()).on_hover_text(tip);
-                            let fill = if resp.hovered() { k.t.hover } else { k.t.control };
-                            ui.painter().rect_filled(at, k.radius(), fill);
-                            glyph(ui.painter(), k, at.center(), glyph_text, 14.0, k.t.text);
-                            resp.clicked()
-                        };
-                        if button(
-                            0.0,
-                            "browse poses",
-                            icon::FOLDER_OPEN,
-                            "Show the poses in the Content panel",
-                        ) {
-                            st.show_content = true;
-                            st.folder = 1;
-                        }
-                        if button(1.0, "clear pose", icon::X, "Take the pose off") {
-                            *pose = None;
+                        let at = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
+                        let browse = ui
+                            .interact(at, id.with("browse animations"), Sense::click())
+                            .on_hover_text("Show the project's animations in the Content panel");
+                        let fill = if browse.hovered() { k.t.hover } else { k.t.control };
+                        ui.painter().rect_filled(at, k.radius(), fill);
+                        glyph(ui.painter(), k, at.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
+                        if browse.clicked() {
+                            show_animations = true;
                         }
                     });
-                    if let Some(why) = built.as_ref().and_then(|b| b.pose_problem.clone()) {
+                    if let Some(why) = built.as_ref().and_then(|b| b.animation_problem.clone()) {
                         row(ui, k, "Problem", None, |ui, rect| {
-                            ui.interact(rect, id.with("pose problem"), Sense::hover())
+                            ui.interact(rect, id.with("animation problem"), Sense::hover())
                                 .on_hover_text(&why);
                             let text = format!("Could not be read: {why}");
                             label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
                         });
                     }
-                    if let Some(p) = pose.as_mut() {
+                    if let Some(p) = animation.as_mut() {
                         let fixed = playing.is_some_and(|(fixed, ..)| fixed);
                         row(ui, k, "Kind", None, |ui, rect| {
                             let text = match playing {
                                 None => "Not read".to_owned(),
                                 Some((true, ..)) => "Static: holds one pose".to_owned(),
-                                Some((_, true, seconds)) => format!("Dynamic: loops every {seconds:.1} s"),
-                                Some((_, false, seconds)) => format!("Dynamic: plays {seconds:.1} s once"),
+                                Some((_, true, seconds)) => format!("Moving: loops every {seconds:.1} s"),
+                                Some((_, false, seconds)) => format!("Moving: plays {seconds:.1} s once"),
                             };
                             label(
                                 &ui.painter().with_clip_rect(rect),
@@ -252,13 +272,13 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                 t.text_dim,
                             );
                         });
-                        let still = fixed.then_some("A static pose does not move");
+                        let still = fixed.then_some("A static animation does not move");
                         row(ui, k, "Speed", still, |ui, rect| {
                             widgets::number(
                                 ui,
                                 k,
                                 rect,
-                                id.with("pose speed"),
+                                id.with("animation speed"),
                                 &mut p.speed,
                                 Marker::None,
                                 true,
@@ -271,7 +291,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                 ui,
                                 k,
                                 rect,
-                                id.with("pose start"),
+                                id.with("animation start"),
                                 &mut p.start,
                                 Marker::None,
                                 true,
@@ -282,13 +302,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         let loops = playing.is_some_and(|(_, loops, _)| loops);
                         let why = still.or(loops.then_some("The animation loops by itself"));
                         row(ui, k, "At the end", why, |ui, rect| {
-                            widgets::checkbox(ui, k, rect, id.with("pose loop"), &mut p.force_loop, "Start over");
-                        });
-                        row(ui, k, "Project", None, |ui, rect| {
-                            let options = [("Save to the project's poses", true)];
-                            if choices(ui, k, rect, id.with("save pose"), None, &options).is_some() {
-                                save_pose = true;
-                            }
+                            widgets::checkbox(ui, k, rect, id.with("animation loop"), &mut p.force_loop, "Start over");
                         });
                     }
                     section_end(ui, k);
@@ -400,8 +414,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
     }
-    if save_pose {
-        st.run(crate::state::Command::SavePose);
+    if show_cards {
+        st.show_folder(0);
+    }
+    if show_animations {
+        st.show_folder(1);
     }
 }
 

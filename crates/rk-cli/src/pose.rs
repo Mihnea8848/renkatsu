@@ -1,15 +1,15 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! `rk pose` and `rk clothes`: what CharaStudio's animation list holds and
+//! `rk animation` and `rk clothes`: what CharaStudio's animation list holds and
 //! how it lands on a character's bones, and what the states of a card's
 //! clothes show, as text to check against the game's code.
 
 use anyhow::{Context, Result};
 use rk_card::Card;
+use rk_chara::animations::Library;
 use rk_chara::clothes_state::{self as cs, States, KINDS};
 use rk_chara::motion::{self, Parameters, Skeleton};
-use rk_chara::poses::Library;
 use rk_chara::BuildOptions;
 use rk_vfs::Game;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +35,7 @@ pub fn list(details: bool) -> Result<()> {
             continue;
         }
         for pose in library
-            .poses
+            .entries
             .iter()
             .filter(|p| (p.group, p.category) == (category.group, category.category))
         {
@@ -58,7 +58,59 @@ pub fn list(details: bool) -> Result<()> {
             );
         }
     }
-    println!("{} animations", library.poses.len());
+    println!("{} animations", library.entries.len());
+    Ok(())
+}
+
+/// Writes the animations of a category, or one of them, as Renkatsu
+/// animation files under `<out>/<Group>/<Category>/`, the layout of a
+/// package's `animations` folder.
+pub fn export(group: i32, category: i32, number: Option<i32>, out: &Path) -> Result<()> {
+    let game = Game::open_user(&[])?;
+    let library = Library::read(&game);
+    let wanted: Vec<_> = library
+        .entries
+        .iter()
+        .filter(|e| (e.group, e.category) == (group, category) && number.is_none_or(|n| n == e.number))
+        .collect();
+    if wanted.is_empty() {
+        anyhow::bail!("the list has no animation with these numbers; `rk animation list` prints them");
+    }
+    let (group_name, category_name) = (library.group_name(group), library.category_label(group, category));
+    let clean = |name: &str| -> String {
+        let s: String = name
+            .chars()
+            .map(|c| {
+                if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        s.trim().trim_end_matches('.').to_owned()
+    };
+    let dir = out.join(clean(&group_name)).join(clean(&category_name));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut total = 0;
+    for entry in wanted {
+        let mut stored =
+            rk_chara::animation_file::Stored::extract(&game, &entry.bundle, &entry.controller, &entry.state)?;
+        stored.meta.name = entry.name.clone();
+        stored.meta.group = group_name.clone();
+        stored.meta.category = category_name.clone();
+        stored.meta.source = entry.source.label().to_owned();
+        let file = dir.join(format!(
+            "{}.{}",
+            clean(&entry.name),
+            rk_chara::animation_file::EXTENSION
+        ));
+        let bytes = stored.to_bytes();
+        total += bytes.len();
+        std::fs::write(&file, &bytes).with_context(|| format!("writing {}", file.display()))?;
+        println!("{}  {} bytes", file.display(), bytes.len());
+    }
+    println!("{total} bytes in all");
     Ok(())
 }
 
@@ -78,7 +130,7 @@ pub fn check(card: &Path) -> Result<()> {
     let library = Library::read(&game);
     println!(
         "{} animations; the Animator of {} has {} transforms below it; height {:.3}, bust {:.3}",
-        library.poses.len(),
+        library.entries.len(),
         card.full_name(),
         skeleton.len(),
         chara.parameters.height,
@@ -88,7 +140,7 @@ pub fn check(card: &Path) -> Result<()> {
     let (mut tracks, mut unbound, mut other) = (0usize, 0usize, 0usize);
     let mut written: BTreeSet<usize> = BTreeSet::new();
     let mut unbound_in: BTreeMap<String, usize> = BTreeMap::new();
-    for pose in &library.poses {
+    for pose in &library.entries {
         let motion = match motion::load(&game, &pose.bundle, &pose.controller, &pose.state, &chara.parameters) {
             Ok(m) => m,
             Err(e) => {
@@ -105,7 +157,7 @@ pub fn check(card: &Path) -> Result<()> {
             println!("  no clip: {} ({}/{})", pose.name, pose.controller, pose.state);
             continue;
         }
-        if motion.movement() <= rk_chara::poses::STILL {
+        if motion.movement() <= rk_chara::animations::STILL {
             still += 1;
         } else {
             moving += 1;

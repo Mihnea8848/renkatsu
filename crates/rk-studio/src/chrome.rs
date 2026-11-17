@@ -359,6 +359,8 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             ("Save as", "Ctrl+Shift+S", Command::SaveAs),
             ("Import card", "Ctrl+I", Command::ImportCard),
             ("Import from a package", "", Command::ImportFromPackage),
+            ("Import animations from a file", "", Command::ImportAnimationFile),
+            ("Import animations from a package", "", Command::ImportAnimations),
             ("Set project icon", "", Command::SetIcon),
             ("Project selector", "", Command::ProjectSelector),
             ("Quit", "Ctrl+Q", Command::Quit),

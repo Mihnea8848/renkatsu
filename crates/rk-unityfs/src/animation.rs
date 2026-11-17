@@ -555,6 +555,274 @@ impl State {
     }
 }
 
+/// Writes numbers and text in a fixed byte order, for clips and states
+/// kept outside a Unity bundle.
+#[derive(Debug, Default)]
+pub struct Writer(pub Vec<u8>);
+
+impl Writer {
+    pub fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn f32(&mut self, v: f32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn text(&mut self, v: &str) {
+        self.u32(v.len() as u32);
+        self.0.extend_from_slice(v.as_bytes());
+    }
+
+    fn floats(&mut self, v: &[f32]) {
+        self.u32(v.len() as u32);
+        for f in v {
+            self.f32(*f);
+        }
+    }
+}
+
+/// Reads what [`Writer`] wrote. Every read fails at the end of the bytes
+/// instead of going past it.
+#[derive(Debug)]
+pub struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Reader { bytes, at: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self.at.checked_add(n).filter(|e| *e <= self.bytes.len());
+        let end = end.ok_or_else(|| Error::Format("stored animation ends early".into()))?;
+        let out = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(out)
+    }
+
+    pub fn u32(&mut self) -> Result<u32> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_bits(self.u32()?))
+    }
+
+    /// A count of things that each take at least `each` bytes: one that
+    /// the bytes left cannot hold is refused before anything is reserved.
+    pub fn count(&mut self, each: usize) -> Result<usize> {
+        let n = self.u32()? as usize;
+        if n.saturating_mul(each.max(1)) > self.bytes.len() - self.at {
+            return Err(Error::Format("stored animation names more than it holds".into()));
+        }
+        Ok(n)
+    }
+
+    pub fn text(&mut self) -> Result<String> {
+        let n = self.count(1)?;
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| Error::Format("stored animation has broken text".into()))
+    }
+
+    fn floats(&mut self) -> Result<Vec<f32>> {
+        let n = self.count(4)?;
+        (0..n).map(|_| self.f32()).collect()
+    }
+}
+
+impl AnimationClip {
+    /// Writes the clip as it plays: its times, bindings and curves.
+    pub fn write(&self, w: &mut Writer) {
+        w.text(&self.name);
+        w.f32(self.sample_rate);
+        w.f32(self.start);
+        w.f32(self.stop);
+        w.u32(u32::from(self.loops));
+        w.u32(self.bindings.len() as u32);
+        for b in &self.bindings {
+            w.u32(b.path);
+            w.u32(match b.target {
+                Target::Position => 1,
+                Target::Rotation => 2,
+                Target::Scale => 3,
+                Target::Euler => 4,
+                Target::Other => 0,
+            });
+        }
+        w.u32(self.streamed.len() as u32);
+        for curve in &self.streamed {
+            w.u32(curve.len() as u32);
+            for piece in curve {
+                w.f32(piece.time);
+                for c in piece.coeff {
+                    w.f32(c);
+                }
+            }
+        }
+        w.u32(self.dense.frames as u32);
+        w.u32(self.dense.curves as u32);
+        w.f32(self.dense.rate);
+        w.f32(self.dense.begin);
+        w.floats(&self.dense.samples);
+        w.floats(&self.constant);
+    }
+
+    /// Reads a clip that [`AnimationClip::write`] wrote.
+    pub fn read_stored(r: &mut Reader) -> Result<Self> {
+        let name = r.text()?;
+        let (sample_rate, start, stop) = (r.f32()?, r.f32()?, r.f32()?);
+        let loops = r.u32()? != 0;
+        let bindings = (0..r.count(8)?)
+            .map(|_| {
+                Ok(Binding {
+                    path: r.u32()?,
+                    target: match r.u32()? {
+                        1 => Target::Position,
+                        2 => Target::Rotation,
+                        3 => Target::Scale,
+                        4 => Target::Euler,
+                        _ => Target::Other,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut streamed = Vec::new();
+        for _ in 0..r.count(4)? {
+            let pieces = (0..r.count(20)?)
+                .map(|_| {
+                    Ok(Piece {
+                        time: r.f32()?,
+                        coeff: [r.f32()?, r.f32()?, r.f32()?, r.f32()?],
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            streamed.push(pieces);
+        }
+        let (frames, curves) = (r.u32()? as usize, r.u32()? as usize);
+        let (rate, begin) = (r.f32()?, r.f32()?);
+        let samples = r.floats()?;
+        if samples.len() < frames.saturating_mul(curves) {
+            return Err(Error::Format("dense clip is shorter than its frame count".into()));
+        }
+        Ok(Self {
+            name,
+            sample_rate,
+            start,
+            stop,
+            loops,
+            bindings,
+            streamed,
+            dense: Dense {
+                frames,
+                curves,
+                rate,
+                begin,
+                samples,
+            },
+            constant: r.floats()?,
+        })
+    }
+}
+
+impl State {
+    /// Writes the state with its blend tree. The clips it names are
+    /// indices the caller gives meaning to.
+    pub fn write(&self, w: &mut Writer) {
+        w.text(&self.name);
+        w.f32(self.speed);
+        w.u32(self.transitions as u32);
+        w.u32(u32::from(self.loops));
+        w.u32(self.nodes.len() as u32);
+        for node in &self.nodes {
+            match &node.blend {
+                Blend::Clip(clip) => {
+                    w.u32(0);
+                    w.u32(*clip as u32);
+                }
+                Blend::Simple1D { parameter, children } => {
+                    w.u32(1);
+                    w.u32(*parameter);
+                    w.u32(children.len() as u32);
+                    for (child, at) in children {
+                        w.u32(*child as u32);
+                        w.f32(*at);
+                    }
+                }
+                Blend::Unknown { children } => {
+                    w.u32(2);
+                    w.u32(children.len() as u32);
+                    for child in children {
+                        w.u32(*child as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads a state that [`State::write`] wrote.
+    pub fn read_stored(r: &mut Reader) -> Result<Self> {
+        let name = r.text()?;
+        let speed = r.f32()?;
+        let transitions = r.u32()? as usize;
+        let loops = r.u32()? != 0;
+        let mut nodes = Vec::new();
+        for _ in 0..r.count(8)? {
+            let blend = match r.u32()? {
+                0 => Blend::Clip(r.u32()? as usize),
+                1 => {
+                    let parameter = r.u32()?;
+                    let children = (0..r.count(8)?)
+                        .map(|_| Ok((r.u32()? as usize, r.f32()?)))
+                        .collect::<Result<Vec<_>>>()?;
+                    Blend::Simple1D { parameter, children }
+                }
+                2 => Blend::Unknown {
+                    children: (0..r.count(4)?)
+                        .map(|_| Ok(r.u32()? as usize))
+                        .collect::<Result<Vec<_>>>()?,
+                },
+                other => return Err(Error::Format(format!("stored animation has a blend of kind {other}"))),
+            };
+            nodes.push(BlendNode { blend });
+        }
+        Ok(State {
+            name,
+            speed,
+            nodes,
+            transitions,
+            loops,
+        })
+    }
+
+    /// The clips the state's blend tree names, each once, in rising order.
+    pub fn clip_indices(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n.blend {
+                Blend::Clip(clip) => Some(clip),
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The state with its clips renumbered by `to`.
+    pub fn with_clips(mut self, to: &dyn Fn(usize) -> usize) -> State {
+        for node in &mut self.nodes {
+            if let Blend::Clip(clip) = &mut node.blend {
+                *clip = to(*clip);
+            }
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +960,54 @@ mod tests {
         };
         assert_eq!(single.weights(&|_| 0.3), [(4, 1.0)]);
         assert!(single.loops && !s.loops);
+    }
+
+    #[test]
+    fn a_clip_and_a_state_come_back_from_their_stored_bytes() {
+        let clip = AnimationClip::from_parts(
+            vec![
+                Binding {
+                    path: 7,
+                    target: Target::Rotation,
+                },
+                Binding {
+                    path: 9,
+                    target: Target::Position,
+                },
+            ],
+            vec![vec![(0.0, [0.0, 0.0, 1.0, 2.0]), (0.5, [0.0, 0.0, 0.0, 2.5])]],
+            (30.0, vec![vec![1.0, 2.0, 3.0], vec![2.0, 3.0, 4.0]]),
+            vec![0.5, 0.25, 0.125],
+            1.0,
+            true,
+        );
+        let state = State {
+            name: "walk".into(),
+            speed: 1.5,
+            nodes: vec![
+                BlendNode {
+                    blend: Blend::Simple1D {
+                        parameter: 11,
+                        children: vec![(1, 0.0), (2, 1.0)],
+                    },
+                },
+                BlendNode { blend: Blend::Clip(4) },
+                BlendNode { blend: Blend::Clip(9) },
+            ],
+            transitions: 2,
+            loops: true,
+        };
+        let mut w = Writer::default();
+        clip.write(&mut w);
+        state.write(&mut w);
+        let mut r = Reader::new(&w.0);
+        assert_eq!(AnimationClip::read_stored(&mut r).unwrap(), clip);
+        assert_eq!(State::read_stored(&mut r).unwrap(), state);
+        assert_eq!(state.clip_indices(), [4, 9]);
+        let renumbered = state.with_clips(&|c| if c == 4 { 0 } else { 1 });
+        assert_eq!(renumbered.clip_indices(), [0, 1]);
+        // Cut short, or with a count no file could hold, it is refused.
+        assert!(AnimationClip::read_stored(&mut Reader::new(&w.0[..w.0.len() / 3])).is_err());
+        assert!(AnimationClip::read_stored(&mut Reader::new(&[255, 255, 255, 255, 1])).is_err());
     }
 }

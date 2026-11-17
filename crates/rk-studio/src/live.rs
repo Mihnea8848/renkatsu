@@ -55,13 +55,13 @@ struct Actor {
     outfits: usize,
     /// The clothes states the character was last brought to.
     clothes: States,
-    /// The animation of the scene the actor last looked for, by bundle,
-    /// controller and state.
-    pose: Option<[String; 3]>,
+    /// The animation of the scene the actor last looked for, by its file
+    /// in the project, bundle, controller and state.
+    pose: Option<[String; 4]>,
     /// That animation, when it could be read.
     playing: Option<Playing>,
     /// Why it could not be read.
-    pose_problem: Option<String>,
+    animation_problem: Option<String>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
 }
@@ -76,12 +76,12 @@ impl Playing {
     /// Whether the animation holds one pose: it does not loop and is as
     /// short as the game's fixed poses.
     fn is_static(&self) -> bool {
-        !self.motion.loops() && self.motion.duration() <= rk_chara::poses::POSE_SECONDS
+        !self.motion.loops() && self.motion.duration() <= rk_chara::animations::STATIC_SECONDS
     }
 
     /// The point of the animation that shows at the scene's time. A static
     /// pose shows its last frame, which is where the game leaves it.
-    fn phase(&self, pose: &crate::scene::Pose, time: f32) -> f32 {
+    fn phase(&self, pose: &crate::scene::Animation, time: f32) -> f32 {
         if self.is_static() {
             return 1.0;
         }
@@ -162,7 +162,7 @@ impl Actor {
         let Content::Character {
             simulate,
             clothes,
-            pose,
+            animation: pose,
             ..
         } = &object.content
         else {
@@ -179,13 +179,18 @@ impl Actor {
             again = true;
         }
 
-        let key = pose
-            .as_ref()
-            .map(|p| [p.bundle.clone(), p.controller.clone(), p.state.clone()]);
+        let key = pose.as_ref().map(|p| {
+            [
+                p.file.clone().unwrap_or_default(),
+                p.bundle.clone(),
+                p.controller.clone(),
+                p.state.clone(),
+            ]
+        });
         if key != self.pose {
             self.pose = key;
             self.playing = None;
-            self.pose_problem = None;
+            self.animation_problem = None;
             if let Some(pose) = pose {
                 match game() {
                     Ok(motion) => {
@@ -195,10 +200,10 @@ impl Actor {
                     Err(e) => {
                         let why = format!("{e:#}");
                         log.error(format!(
-                            "{}: the pose {} could not be read: {why}",
+                            "{}: the animation {} could not be read: {why}",
                             object.name, pose.name
                         ));
-                        self.pose_problem = Some(why);
+                        self.animation_problem = Some(why);
                     }
                 }
             }
@@ -262,6 +267,18 @@ impl Actor {
     }
 }
 
+/// The animation file of the project that a scene's animation names,
+/// when it names one that is there. A link of Renkatsu 0.1.4 is no such
+/// file: it plays from what is installed.
+pub fn own_file(project: &Project, animation: &crate::scene::Animation) -> Option<PathBuf> {
+    let file = animation.file.as_deref()?;
+    let path = project.resolve(Path::new(file));
+    let ours = path
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case(rk_chara::animation_file::EXTENSION));
+    (ours && path.is_file()).then_some(path)
+}
+
 /// What the Properties panel shows about a built character.
 #[derive(Debug, Clone)]
 pub struct Built {
@@ -271,9 +288,9 @@ pub struct Built {
     pub worn: cs::Worn,
     /// The animation the character is in: whether it holds one pose,
     /// whether it loops and how long one pass is.
-    pub pose: Option<(bool, bool, f32)>,
-    /// Why the character's pose could not be read.
-    pub pose_problem: Option<String>,
+    pub animation: Option<(bool, bool, f32)>,
+    /// Why the character's animation could not be read.
+    pub animation_problem: Option<String>,
 }
 
 pub struct Live {
@@ -297,6 +314,20 @@ const DEFAULT_COLOR_FILTER: i32 = 0;
 
 impl Live {
     /// A renderer on the window's device, with nothing to draw yet.
+    /// Gives back the picture egui was shown, when this renderer goes
+    /// away before the window does.
+    pub fn release(&mut self) {
+        if let Some(target) = self.target.take() {
+            self.render_state.renderer.write().free_texture(&target.id);
+        }
+    }
+
+    /// Another renderer on the same device with a scene of its own, for a
+    /// preview beside the viewport.
+    pub fn sibling(&self) -> Result<Live> {
+        Live::new(&self.render_state)
+    }
+
     pub fn new(render_state: &egui_wgpu::RenderState) -> Result<Live> {
         let renderer = Renderer::with_device(render_state.device.clone(), render_state.queue.clone())?;
         // Until a character arrives, the view of a standing person.
@@ -349,11 +380,11 @@ impl Live {
             outfits: a.outfits,
             warnings: a.chara.warnings.len(),
             worn: a.chara.clothes.worn.clone(),
-            pose: a
+            animation: a
                 .playing
                 .as_ref()
                 .map(|p| (p.is_static(), p.motion.loops(), p.motion.duration())),
-            pose_problem: a.pose_problem.clone(),
+            animation_problem: a.animation_problem.clone(),
         })
     }
 
@@ -454,14 +485,29 @@ impl Live {
             let Some(object) = scene.get(actor.id) else { continue };
             let parameters = actor.chara.parameters;
             let mut read = || -> Result<Motion> {
-                let Content::Character { pose: Some(pose), .. } = &object.content else {
-                    anyhow::bail!("the character has no pose");
+                let Content::Character {
+                    animation: Some(animation),
+                    ..
+                } = &object.content
+                else {
+                    anyhow::bail!("the character has no animation");
                 };
+                // The project's own file first; what is installed plays
+                // an animation the project never copied.
+                if let Some(file) = own_file(project, animation) {
+                    return rk_chara::animation_file::Stored::read(&file)?.motion(&parameters);
+                }
+                if animation.state.is_empty() {
+                    anyhow::bail!(
+                        "{} is gone from the project",
+                        animation.file.as_deref().unwrap_or("its file")
+                    );
+                }
                 motion::load(
                     games.get(&mods)?,
-                    &pose.bundle,
-                    &pose.controller,
-                    &pose.state,
+                    &animation.bundle,
+                    &animation.controller,
+                    &animation.state,
                     &parameters,
                 )
             };
@@ -495,7 +541,7 @@ impl Live {
             clothes: [cs::ON; cs::KINDS],
             pose: None,
             playing: None,
-            pose_problem: None,
+            animation_problem: None,
             phase: None,
         })
     }

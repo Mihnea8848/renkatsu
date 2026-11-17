@@ -412,6 +412,87 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 }
 
+/// The Clothing menu of the selected character: what it has on, and in
+/// which state; a click on a piece cycles it, and the menu stays open.
+fn clothing_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    use rk_chara::clothes_state as cs;
+    {
+        ui.set_min_width(220.0);
+        let Some(mut object) = st.doc.selection().cloned() else {
+            return;
+        };
+        let worn = st
+            .live
+            .as_ref()
+            .and_then(|live| live.built(object.id))
+            .map(|built| built.worn);
+        let Content::Character {
+            clothes, outdoor_shoes, ..
+        } = &mut object.content
+        else {
+            return;
+        };
+        let Some(worn) = worn else {
+            ui.label(egui::RichText::new("The character is not built").color(k.t.text_dim));
+            return;
+        };
+        let before = *clothes;
+        for (text, state) in [("All on", cs::ON), ("All half off", cs::HALF), ("All off", cs::OFF)] {
+            if widgets::menu_step(ui, k, "", text, "", true) {
+                cs::set_all(clothes, &worn, state);
+            }
+        }
+        ui.separator();
+        // The pair of shoes that is worn stands for both.
+        let shoes = if *outdoor_shoes {
+            (cs::SHOES_OUTDOOR, "Outdoor shoes")
+        } else {
+            (cs::SHOES_INDOOR, "Indoor shoes")
+        };
+        let rows = [
+            (cs::TOP, "Top"),
+            (cs::BOTTOM, "Bottom"),
+            (cs::BRA, "Bra"),
+            (cs::SHORTS, "Underwear"),
+            (cs::GLOVES, "Gloves"),
+            (cs::PANTYHOSE, "Pantyhose"),
+            (cs::SOCKS, "Socks"),
+            shoes,
+        ];
+        let kinds = worn.kinds();
+        let shown = cs::fitted(clothes, &worn);
+        for (kind, name) in rows {
+            let has = kinds.is_kind(kind);
+            let state = if has {
+                clothes_state_name(shown[kind])
+            } else {
+                "None worn"
+            };
+            // A click moves on to the next state the piece has, as
+            // CharaStudio's button does; the menu stays open.
+            if widgets::menu_step(ui, k, "", name, state, has) {
+                *clothes = shown;
+                cs::next_state(clothes, &worn, kind);
+            }
+        }
+        if *clothes != before {
+            st.doc.edit(object, false);
+        }
+    }
+}
+
+/// What a state of a piece of clothing is called.
+fn clothes_state_name(state: u8) -> &'static str {
+    use rk_chara::clothes_state as cs;
+    match state {
+        cs::ON => "On",
+        cs::HALF => "Half off",
+        cs::HALF_2 => "Half off 2",
+        _ => "Off",
+    }
+}
+
 /// Camera, shading and snapping, then the two buttons that clear the view.
 /// Laid out from the right.
 fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
@@ -686,7 +767,15 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
                 let on = st.mode_tool[st.mode] == index;
-                if widgets::tool_row(ui, k, row, id, g, name, on).clicked() {
+                let resp = widgets::tool_row(ui, k, row, id, g, name, on);
+                if *name == "Clothing" {
+                    // Opens the clothing of the selected character beside
+                    // the palette, rather than becoming the mode's tool.
+                    egui::Popup::menu(&resp)
+                        .align(egui::RectAlign::RIGHT_START)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| clothing_menu(ui, k, st));
+                } else if resp.clicked() {
                     st.mode_tool[st.mode] = index;
                 }
             }

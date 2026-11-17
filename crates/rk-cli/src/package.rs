@@ -334,7 +334,7 @@ pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Res
     starter(
         &Starter {
             id: rk_packages::STARTER_POSES,
-            name: "Starter Content: Poses",
+            name: "Starter Content: Animations",
             version: POSES_VERSION,
             description: "CharaStudio's poses and animations for standing, sitting, talking, walking, dancing and \
                           fighting, without the H scenes' animations.",
@@ -353,8 +353,8 @@ pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Res
 /// The animations CharaStudio's sheets list in the chosen bundles, as the
 /// editor will list them, and how many of the chosen animation bundles no
 /// sheet names.
-fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Result<rk_chara::poses::Library> {
-    let mut library = rk_chara::poses::Library::default();
+fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Result<rk_chara::animations::Library> {
+    let mut library = rk_chara::animations::Library::default();
     for path in take.iter().filter(|p| p.starts_with("studio/info/")) {
         let Some(file) = disk.get(path) else { continue };
         let bundle = Bundle::open(file)?;
@@ -364,12 +364,14 @@ fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Re
             for object in serialized.objects_of(class::MONO_BEHAVIOUR) {
                 let Some(name) = serialized.name(object) else { continue };
                 if name.to_ascii_lowercase().starts_with("anime") {
-                    sheets.push((name, rk_chara::poses::sheet_rows(&serialized.read(object)?)));
+                    sheets.push((name, rk_chara::animations::sheet_rows(&serialized.read(object)?)));
                 }
             }
         }
         let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".unity3d");
-        library.add_bundle(Some(stem), &sheets, &|bundle| take.contains(&norm(bundle)));
+        library.add_bundle(Some(stem), &sheets, &rk_chara::animations::Source::Game, &|bundle| {
+            take.contains(&norm(bundle))
+        });
     }
     Ok(library)
 }
@@ -471,7 +473,7 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
             }
         }
         // Nothing the editor would list may come from outside the package.
-        for pose in &library.poses {
+        for pose in &library.entries {
             ensure!(
                 selection.take.contains(&norm(&pose.bundle)) && !never(&norm(&pose.bundle)),
                 "{} is listed from {}, which is not in the package",
@@ -479,8 +481,10 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
                 pose.bundle
             );
         }
-        manifest.contents.insert("poses".to_owned(), library.poses.len() as u64);
-        holds += &format!(" with {} poses and animations", library.poses.len());
+        manifest
+            .contents
+            .insert("poses".to_owned(), library.entries.len() as u64);
+        holds += &format!(" with {} poses and animations", library.entries.len());
     }
     *pack.manifest_mut() = manifest.clone();
     println!("{}: {holds}, {} before compression", manifest.name, size_text(bytes));
