@@ -24,6 +24,12 @@ pub struct Args<'a> {
     pub list: bool,
     /// Draw the light's real-time shadows.
     pub shadows: bool,
+    /// The states of the clothes, as `rk clothes` reads them.
+    pub clothes: Option<&'a str>,
+    /// An animation as `group/category/number`.
+    pub pose: Option<&'a str>,
+    /// Where in the animation, in passes.
+    pub time: f32,
 }
 
 pub fn render(a: Args) -> Result<()> {
@@ -38,8 +44,51 @@ pub fn render(a: Args) -> Result<()> {
         physics: !a.no_physics,
         ..Default::default()
     };
-    let chara = rk_chara::build(&game, &card, &opts)?;
+    let mut chara = rk_chara::build(&game, &card, &opts)?;
     let t_build = t.elapsed();
+    let mut states = [rk_chara::clothes_state::ON; rk_chara::clothes_state::KINDS];
+    if let Some(spec) = a.clothes {
+        states = crate::pose::parse_states(spec, &chara.clothes.worn)?;
+        chara.set_clothes(&states);
+        println!("clothes states {states:?}");
+    }
+    if let Some(spec) = a.pose {
+        use anyhow::Context;
+        let numbers: Vec<i32> = spec.split('/').filter_map(|n| n.parse().ok()).collect();
+        let [group, category, number] = numbers[..] else {
+            anyhow::bail!("{spec}: expected group/category/number");
+        };
+        let library = rk_chara::poses::Library::read(&game);
+        let pose = library
+            .find(group, category, number)
+            .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
+        let motion = rk_chara::motion::load(&game, &pose.bundle, &pose.controller, &pose.state, &chara.parameters)?;
+        let bound = motion.bind(&rk_chara::motion::Skeleton::of(&chara.scene, chara.animator));
+        if let Some(heels) = &mut chara.heels {
+            heels.animation(Some(&pose.controller), Some(&pose.state));
+        }
+        let phase = motion.phase(a.time, false);
+        // The frame as the game shows it: the animation, then the physics.
+        if !a.no_physics {
+            for _ in 0..opts.settle_frames {
+                chara.physics.begin_frame(&mut chara.scene);
+                chara.animate(&bound, phase, &states);
+                chara.physics.end_frame(&mut chara.scene, opts.frame_time);
+            }
+        } else {
+            chara.animate(&bound, phase, &states);
+        }
+        println!(
+            "{} ({}/{}): {} clips, {:.2} s, {} bone properties, {} curves without a bone",
+            pose.name,
+            pose.controller,
+            pose.state,
+            motion.clips.len(),
+            motion.duration(),
+            bound.tracks(),
+            bound.unbound
+        );
+    }
     let draws = chara.scene.pose();
     if a.list {
         for d in &draws {

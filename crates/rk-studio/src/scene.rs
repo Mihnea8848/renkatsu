@@ -60,6 +60,47 @@ impl Transform {
     }
 }
 
+/// A pose or an animation on a character: a state of an animator
+/// controller in one of the game's bundles, as CharaStudio's list names
+/// it, and how it is played.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pose {
+    /// The name shown.
+    pub name: String,
+    pub bundle: String,
+    pub controller: String,
+    pub state: String,
+    /// How fast it plays; 1 is the animation's own speed.
+    #[serde(default = "one")]
+    pub speed: f32,
+    /// Where it starts, in passes: 0 the first frame, 0.5 half way.
+    #[serde(default)]
+    pub start: f32,
+    /// An animation that does not loop starts over at its end instead of
+    /// holding its last frame (CharaStudio's option of that name).
+    #[serde(default)]
+    pub force_loop: bool,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Pose {
+    /// An entry of the game's list, played as it is.
+    pub fn of(pose: &rk_chara::poses::Pose) -> Pose {
+        Pose {
+            name: pose.name.clone(),
+            bundle: pose.bundle.clone(),
+            controller: pose.controller.clone(),
+            state: pose.state.clone(),
+            speed: 1.0,
+            start: 0.0,
+            force_loop: false,
+        }
+    }
+}
+
 /// What an object is, with the values only that kind has.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -71,8 +112,17 @@ pub enum Content {
         /// Which of the card's outfits is worn.
         outfit: usize,
         outdoor_shoes: bool,
-        /// Whether hair, skirts and the like move while the physics plays.
+        /// Whether hair, skirts and the like move while the scene plays.
         simulate: bool,
+        /// The state of each piece of clothing in the game's order (top,
+        /// bottom, bra, underwear, gloves, pantyhose, socks, indoor shoes,
+        /// outdoor shoes): 0 on, 1 and 2 half off, 3 off.
+        #[serde(default)]
+        clothes: [u8; 9],
+        /// The pose the character holds or the animation it plays; none
+        /// leaves it as it was built.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose: Option<Pose>,
     },
     Light {
         /// The light stays at the camera's upper left, as in the game's
@@ -97,6 +147,8 @@ impl Content {
             outfit: 0,
             outdoor_shoes: false,
             simulate: true,
+            clothes: [0; 9],
+            pose: None,
         }
     }
 
@@ -1011,5 +1063,61 @@ mod tests {
         assert!(text.contains("card = \"/cards/anna.png\""), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(&back, doc.scene());
+    }
+
+    #[test]
+    fn clothes_states_and_the_pose_are_saved_and_undone() {
+        let (mut doc, [_, anna, ..]) = cast();
+        let pose = Pose {
+            name: "Stand 1".into(),
+            bundle: "studio/anime/00.unity3d".into(),
+            controller: "tachi".into(),
+            state: "f_tachi_00".into(),
+            speed: 0.5,
+            start: 0.25,
+            force_loop: true,
+        };
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        let Content::Character {
+            clothes, pose: worn, ..
+        } = &mut edited.content
+        else {
+            panic!("Anna is a character");
+        };
+        *clothes = [1, 0, 0, 2, 3, 0, 0, 3, 3];
+        *worn = Some(pose.clone());
+        assert!(doc.edit(edited.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("clothes = [1, 0, 0, 2, 3, 0, 0, 3, 3]"), "{text}");
+        assert!(text.contains("state = \"f_tachi_00\""), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(&back, doc.scene());
+        assert_eq!(back.get(anna).unwrap().content, edited.content);
+
+        // One step back: dressed and as built again.
+        assert!(doc.undo());
+        let Content::Character { clothes, pose, .. } = &doc.scene().get(anna).unwrap().content else {
+            panic!("Anna is a character");
+        };
+        assert_eq!((*clothes, pose), ([0; 9], &None));
+        assert!(doc.redo());
+        assert_eq!(doc.scene().get(anna).unwrap().content, edited.content);
+
+        // A scene saved before clothes states and poses existed reads as
+        // fully dressed and unposed, and a pose with only its animation
+        // named plays at its own speed from its start.
+        let old = text
+            .lines()
+            .filter(|l| !l.starts_with("clothes") && !l.starts_with("speed") && !l.starts_with("start"))
+            .filter(|l| !l.starts_with("force_loop"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let read: Scene = toml::from_str(&old).unwrap();
+        let Content::Character { clothes, pose, .. } = &read.get(anna).unwrap().content else {
+            panic!("Anna is a character");
+        };
+        assert_eq!(*clothes, [0; 9]);
+        let pose = pose.as_ref().unwrap();
+        assert_eq!((pose.speed, pose.start, pose.force_loop), (1.0, 0.0, false));
     }
 }

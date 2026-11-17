@@ -702,6 +702,7 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
     // `st.folder` for the next frame.
     let folder = st.folder;
     let characters = folder == 0;
+    let poses = folder == 1;
     let trail = [
         st.project.file.name.clone(),
         if characters {
@@ -737,6 +738,8 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
             if resp.clicked() {
                 add = st.asset.clone();
             }
+        } else if poses {
+            crate::poses::toolbar(ui, k, st);
         } else if let (Some(import), why) = (LATER[folder - 1].2, LATER[folder - 1].3) {
             ui.add_enabled_ui(false, |ui| {
                 flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), import, false, false).on_disabled_hover_text(why);
@@ -747,6 +750,7 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
             .clicked()
         {
             st.library.refresh(&st.project);
+            st.poses.refresh(&st.project);
         }
         bar_divider(ui, k);
         ui.add_space(2.0);
@@ -820,6 +824,32 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
                 let color = if on { t.text_bright } else { t.text };
                 let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
                 label(&clip, k, Pos2::new(x + 14.0, row.center().y), name, color);
+                if !(on && name == "Poses") {
+                    continue;
+                }
+                // The open Poses folder shows its groups: the project's
+                // own poses, then CharaStudio's and the ones mods add.
+                for (group, name) in crate::poses::groups(st) {
+                    let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
+                    if resp.clicked() {
+                        st.poses.group = group;
+                    }
+                    let p = ui.painter();
+                    let on = st.poses.group == group;
+                    if on || resp.hovered() {
+                        p.rect_filled(row, 0.0, t.row_hover);
+                    }
+                    let color = if on { t.text_bright } else { t.text_dim };
+                    let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
+                    if on {
+                        p.rect_filled(
+                            Rect::from_min_size(row.left_top(), Vec2::new(2.0, row.height())),
+                            0.0,
+                            kind.color(),
+                        );
+                    }
+                    label(&clip, k, Pos2::new(row.left() + 62.0, row.center().y), &name, color);
+                }
             }
             if let Some(i) = chosen {
                 st.folder = i;
@@ -854,6 +884,11 @@ fn content(ui: &mut Ui, k: &Look, st: &mut State) {
     } else {
         Vec::new()
     };
+    if poses {
+        crate::poses::list(&mut area, k, st, grid);
+        ui.allocate_rect(body, Sense::hover());
+        return;
+    }
     if !characters {
         let (name, _, _, why) = LATER[folder - 1];
         if name == "Mods" {

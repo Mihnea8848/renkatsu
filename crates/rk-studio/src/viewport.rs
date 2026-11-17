@@ -964,16 +964,25 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     let Some(live) = st.live.as_mut() else { return };
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
+    // The scene's time runs while it plays and starts over on a stop.
+    match st.playback {
+        crate::state::Playback::Playing => st.clock += dt,
+        crate::state::Playback::Paused => {}
+        crate::state::Playback::Stopped => st.clock = 0.0,
+    }
     live.follow(
         st.doc.scene(),
         &st.project,
         &mut st.games,
-        st.last_physics,
-        st.physics,
-        dt,
+        crate::live::Clock {
+            was: st.last_playback,
+            now: st.playback,
+            dt,
+            time: st.clock,
+        },
         &mut st.log,
     );
-    if st.physics == crate::state::Physics::Playing {
+    if st.playback == crate::state::Playback::Playing {
         ui.ctx().request_repaint();
     }
     // What was just added gets the camera, once there is something of it
@@ -1000,7 +1009,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     if live.cam.advance(dt) {
         ui.ctx().request_repaint();
     }
-    st.last_physics = st.physics;
+    st.last_playback = st.playback;
     let ppp = ui.ctx().pixels_per_point();
     let size = [
         (full.width() * ppp).round() as u32,

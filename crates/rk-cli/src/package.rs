@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 
 /// The version of the Starter Content packages this build makes.
 const STARTER_VERSION: &str = "1.1.0";
+/// The version of Starter Content: Poses this build makes.
+const POSES_VERSION: &str = "1.0.0";
 /// The release the packages are uploaded to, apart from the app's own.
 const RELEASE: &str = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1";
 /// GitHub takes release files under 2 GB; parts stay well below.
@@ -88,6 +90,20 @@ pub fn character_part(path: &str) -> bool {
         || path.starts_with("studio/info/")
         || path.starts_with("studio/filter/")
 }
+
+/// What Starter Content: Poses is made of: CharaStudio's animations (the
+/// bundles of `studio/anime`), the sheets in `studio/info` that list them
+/// and the maker's poses. The H scenes' animations live under `h/`, which no package takes;
+/// the sheets that list those for Studio are in the same files as the
+/// others and are never read.
+pub fn pose_part(path: &str) -> bool {
+    path.starts_with("studio/anime/") || path.starts_with("studio/info/") || path == MAKER_POSES
+}
+
+/// The poses of the character maker. CharaStudio's own lists do not name
+/// them, but lists that mods and packages bring play them under names of
+/// their own.
+const MAKER_POSES: &str = "custom/custompose.unity3d";
 
 /// The bundles that hold the game's own characters as cards.
 pub fn holds_cards(path: &str) -> bool {
@@ -270,9 +286,96 @@ fn on_disk(abdata: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+/// One of the Starter Content packages: what it is called and which of
+/// the game's bundles it asks for.
+struct Starter {
+    id: &'static str,
+    name: &'static str,
+    version: &'static str,
+    /// What the package holds, for its own manifest.
+    description: &'static str,
+    /// What having it installed does, added to the description in the
+    /// list of packages to download.
+    gives: &'static str,
+    /// What the bundles are, in the lines printed while choosing them.
+    part: &'static str,
+    want: fn(&str) -> bool,
+    /// The game's own characters come along as cards.
+    cards: bool,
+    /// The animations of CharaStudio's list are counted.
+    poses: bool,
+}
+
 /// Builds Starter Content: Characters & Clothing from the configured Koikatsu
 /// install into `out`, or only says what it would hold.
 pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
+    starter(
+        &Starter {
+            id: rk_packages::STARTER_CHARACTERS,
+            name: "Starter Content: Characters & Clothing",
+            version: STARTER_VERSION,
+            description: "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, \
+                          and its default characters.",
+            gives: "Characters made of these are built without a Koikatsu install.",
+            part: "a character part",
+            want: character_part,
+            cards: true,
+            poses: false,
+        },
+        out,
+        list_only,
+        part_size,
+    )
+}
+
+/// Builds Starter Content: Poses from the configured Koikatsu install into
+/// `out`, or only says what it would hold.
+pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
+    starter(
+        &Starter {
+            id: rk_packages::STARTER_POSES,
+            name: "Starter Content: Poses",
+            version: POSES_VERSION,
+            description: "CharaStudio's poses and animations for standing, sitting, talking, walking, dancing and \
+                          fighting, without the H scenes' animations.",
+            gives: "Characters are posed and animated without a Koikatsu install.",
+            part: "an animation",
+            want: pose_part,
+            cards: false,
+            poses: true,
+        },
+        out,
+        list_only,
+        part_size,
+    )
+}
+
+/// The animations CharaStudio's sheets list in the chosen bundles, as the
+/// editor will list them, and how many of the chosen animation bundles no
+/// sheet names.
+fn listed_poses(disk: &BTreeMap<String, PathBuf>, take: &BTreeSet<String>) -> Result<rk_chara::poses::Library> {
+    let mut library = rk_chara::poses::Library::default();
+    for path in take.iter().filter(|p| p.starts_with("studio/info/")) {
+        let Some(file) = disk.get(path) else { continue };
+        let bundle = Bundle::open(file)?;
+        let mut sheets = Vec::new();
+        for node in bundle.nodes.iter().filter(|n| n.is_serialized()) {
+            let serialized = SerializedFile::parse(bundle.read_node(node)?)?;
+            for object in serialized.objects_of(class::MONO_BEHAVIOUR) {
+                let Some(name) = serialized.name(object) else { continue };
+                if name.to_ascii_lowercase().starts_with("anime") {
+                    sheets.push((name, rk_chara::poses::sheet_rows(&serialized.read(object)?)));
+                }
+            }
+        }
+        let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".unity3d");
+        library.add_bundle(Some(stem), &sheets, &|bundle| take.contains(&norm(bundle)));
+    }
+    Ok(library)
+}
+
+fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
+    let wanted = spec.want;
     let cfg = rk_core::Config::load()?;
     let abdata = cfg.abdata();
     let lists = read_lists(&abdata)?;
@@ -286,31 +389,29 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
     );
     let added: Vec<&String> = disk
         .keys()
-        .filter(|p| character_part(p) && !official.contains_key(*p))
+        .filter(|p| wanted(p) && !official.contains_key(*p))
         .collect();
     for path in &added {
         println!("left out, in none of the game's lists: {path}");
     }
 
-    let selection = select(&lists, &character_part);
+    let selection = select(&lists, &wanted);
     for (need, by) in &selection.refused {
         println!("left out, never packaged: {need} (asked for by {by})");
     }
-    for path in official.keys().filter(|p| character_part(p) && never(p)) {
+    for path in official.keys().filter(|p| wanted(p) && never(p)) {
         println!("left out, never packaged: {path}");
     }
-    for path in selection.take.iter().filter(|p| !character_part(p)) {
-        println!("taken because a character part needs it: {path}");
+    for path in selection.take.iter().filter(|p| !wanted(p)) {
+        println!("taken because {} needs it: {path}", spec.part);
     }
     let mut manifest = Manifest {
         format: FORMAT,
-        id: rk_packages::STARTER_CHARACTERS.to_owned(),
-        name: "Starter Content: Characters & Clothing".to_owned(),
-        version: STARTER_VERSION.to_owned(),
+        id: spec.id.to_owned(),
+        name: spec.name.to_owned(),
+        version: spec.version.to_owned(),
         kind: "starter-content".to_owned(),
-        description: "Koikatsu's own bodies, faces, hair, clothes and accessories, with its updates and add-ons, \
-                      and its default characters."
-            .to_owned(),
+        description: spec.description.to_owned(),
         requires_renkatsu: rk_packages::APP_VERSION.to_owned(),
         source: "Koikatsu by Illusion: the official game data, without mods, voices or H content".to_owned(),
         default_card: None,
@@ -336,7 +437,7 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
 
     // The game's own characters, as the cards they are stored as.
     let mut cards = 0u64;
-    for path in official.keys().filter(|p| holds_cards(p) && !never(p)) {
+    for path in official.keys().filter(|p| spec.cards && holds_cards(p) && !never(p)) {
         let Some(file) = disk.get(path) else { continue };
         for card in cards_in(file).with_context(|| format!("reading {path}"))? {
             let sex = if card.female { "female" } else { "male" };
@@ -357,14 +458,32 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
     manifest
         .contents
         .insert("bundles".to_owned(), selection.take.len() as u64);
-    manifest.contents.insert("cards".to_owned(), cards);
+    let mut holds = format!("{} bundles", selection.take.len());
+    if spec.cards {
+        manifest.contents.insert("cards".to_owned(), cards);
+        holds += &format!(" and {cards} cards");
+    }
+    if spec.poses {
+        let library = listed_poses(&disk, &selection.take)?;
+        for category in library.categories() {
+            if list_only {
+                println!("  {:>3} {}", category.count, category.name);
+            }
+        }
+        // Nothing the editor would list may come from outside the package.
+        for pose in &library.poses {
+            ensure!(
+                selection.take.contains(&norm(&pose.bundle)) && !never(&norm(&pose.bundle)),
+                "{} is listed from {}, which is not in the package",
+                pose.name,
+                pose.bundle
+            );
+        }
+        manifest.contents.insert("poses".to_owned(), library.poses.len() as u64);
+        holds += &format!(" with {} poses and animations", library.poses.len());
+    }
     *pack.manifest_mut() = manifest.clone();
-    println!(
-        "{}: {} bundles and {cards} cards, {} before compression",
-        manifest.name,
-        selection.take.len(),
-        size_text(bytes)
-    );
+    println!("{}: {holds}, {} before compression", manifest.name, size_text(bytes));
     if list_only {
         return Ok(());
     }
@@ -391,10 +510,7 @@ pub fn starter_characters(out: &Path, list_only: bool, part_size: Option<u64>) -
         id: manifest.id.clone(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
-        description: format!(
-            "{} Characters made of these are built without a Koikatsu install.",
-            manifest.description
-        ),
+        description: format!("{} {}", manifest.description, spec.gives),
         installed_size: built.installed_size,
         parts: Vec::new(),
     };
@@ -598,6 +714,57 @@ mod tests {
         // The CharaStudio look's colour filter comes along.
         assert!(character_part("studio/info/00.unity3d") && character_part("studio/filter/00.unity3d"));
         assert!(!character_part("studio/map/00.unity3d"));
+    }
+
+    #[test]
+    fn poses_take_studios_animations_and_lists_and_never_h_or_sound() {
+        let lists = vec![
+            list(
+                "studio00",
+                &[
+                    "studio/anime/00.unity3d",
+                    "studio/info/00.unity3d",
+                    "studio/base/00.unity3d",
+                    "h/anim/female/00_00_00.unity3d",
+                    "sound/data/se/studio/00.unity3d",
+                    "studio/item/00.unity3d",
+                ],
+                // The animations need a base bundle and, if a list said so,
+                // something of the H scenes and a sound.
+                &[&[2, 3, 4], &[], &[], &[], &[], &[]],
+            ),
+            list(
+                "abdata",
+                &[
+                    "custom/custompose.unity3d",
+                    "custom/presets_f_00.unity3d",
+                    "h/anim/male/01_00_00.unity3d",
+                    "chara/oo_base.unity3d",
+                ],
+                &[&[], &[], &[], &[]],
+            ),
+        ];
+        let chosen = select(&lists, &pose_part);
+        let take: Vec<&str> = chosen.take.iter().map(String::as_str).collect();
+        assert_eq!(
+            take,
+            [
+                "custom/custompose.unity3d",
+                "studio/anime/00.unity3d",
+                "studio/base/00.unity3d",
+                "studio/info/00.unity3d",
+            ]
+        );
+        let refused: Vec<&str> = chosen.refused.iter().map(|(need, _)| need.as_str()).collect();
+        assert_eq!(
+            refused,
+            ["h/anim/female/00_00_00.unity3d", "sound/data/se/studio/00.unity3d"]
+        );
+        // A bundle a repack added is in no list, so nothing can choose it.
+        assert!(pose_part("studio/anime/99.unity3d"));
+        assert!(!official(&lists).contains_key("studio/anime/99.unity3d"));
+        assert!(!pose_part("h/anim/female/00_00_00.unity3d"));
+        assert!(!pose_part("studio/item/00.unity3d"));
     }
 
     #[test]

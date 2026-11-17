@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.2, on the
+The latest version is 0.1.4, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -47,7 +47,11 @@ The latest version is 0.1.2, on the
   99.0% body and 99.4% face against captures with the effects on. It adds
   packages, and Starter Content: Characters & Clothing, Koikatsu's own vanilla
   character content, so Renkatsu works without a Koikatsu install.
-- Next: posing.
+- 0.1.3 checks for new versions and keeps the editor's grey backdrop.
+- 0.1.4 toggles clothing as CharaStudio does and poses characters with the
+  game's 716 animations, also from Starter Content: Poses, and lets anyone
+  make packages.
+- Next: posing by hand (FK and IK).
 
 ## Renkatsu Studio
 
@@ -65,6 +69,15 @@ The latest version is 0.1.2, on the
   and delete
 - A live viewport at the display's refresh rate, with physics, Unity style
   navigation and eased focus, and characters skinned on the GPU
+- Clothing toggles per category as in CharaStudio: on, half off and off,
+  with the game's own rules for which pieces pull others along
+- Poses and animations by CharaStudio's groups and categories, static or
+  dynamic, with speed and start; play, pause and stop drive animations and
+  physics together. Animation lists from mods and packages add their own
+  groups
+- Packages: Starter Content brings Koikatsu's vanilla characters, clothing
+  and poses without the game, and `rk package new` and `rk package build`
+  make your own ([docs/packages.md](docs/packages.md))
 - Unreal Engine 5's dark look, with the window's own title bar and border
 - Renkatsu runs without Koikatsu. The Koikatsu folder, chosen in the project
   selector or in Preferences, is only needed for Koikatsu characters
@@ -104,7 +117,8 @@ The latest version is 0.1.2, on the
 
 ## Known problems
 
-- Characters stand in a T-pose. Posing comes next
+- Characters take poses and animations, but cannot be posed by hand yet (FK
+  and IK come next), and community pose files cannot be imported yet
 - Without a Koikatsu install, characters come from Starter Content only.
   Cards that use mods need the mods, which come with a Koikatsu install
 - CharaStudio's depth of field, fog and sun shafts (off by default) are not

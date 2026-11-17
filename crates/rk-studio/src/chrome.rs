@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The parts of the window around the docked panels: the title bar; the
-//! menu row with the physics play controls and the command search; the status
+//! menu row with the scene's play controls and the command search; the status
 //! bar; and, in the design that keeps the viewport clean, the mode rail at
 //! the window's left edge.
 
@@ -10,7 +10,7 @@ use crate::design::{Overlays, TitleBar};
 use crate::kinds::Kind;
 use crate::modes::{tool_hint, MODES, PIPELINES, TOOLS};
 use crate::panels::{self, Panel};
-use crate::state::{Command, Look, Physics, Rail, State};
+use crate::state::{Command, Look, Playback, Rail, State};
 use crate::viewport::{self, RailShape};
 use crate::widgets::{self, flat_button, glyph, hair_h, hair_v, label};
 use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
@@ -483,7 +483,7 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     let gap = 2.0;
     let size = Vec2::new(cell.x * 3.0 + gap * 3.0 + dots_w, cell.y);
     let group = Rect::from_min_size((center - size / 2.0).round(), size);
-    let running = st.physics != Physics::Stopped;
+    let running = st.playback != Playback::Stopped;
     {
         let p = ui.painter();
         for x in [group.left() - 8.0, group.right() + 8.0] {
@@ -491,9 +491,9 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
         }
     }
     let tips = [
-        "Play the physics",
-        "Pause the physics",
-        "Stop and reset the physics",
+        "Play the scene: animations and physics",
+        "Pause the scene",
+        "Stop, and put animations and physics back to their start",
         "Simulation options",
     ];
     let mut x = group.left();
@@ -505,16 +505,16 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
             .interact(rect, ui.id().with(("play", i)), Sense::click())
             .on_hover_text(tip);
         if resp.clicked() {
-            st.physics = match (i, st.physics) {
-                (0, _) => Physics::Playing,
-                (1, Physics::Playing) => Physics::Paused,
-                (1, Physics::Paused) => Physics::Playing,
-                (2, _) => Physics::Stopped,
+            st.playback = match (i, st.playback) {
+                (0, _) => Playback::Playing,
+                (1, Playback::Playing) => Playback::Paused,
+                (1, Playback::Paused) => Playback::Playing,
+                (2, _) => Playback::Stopped,
                 (_, now) => now,
             };
         }
         let p = ui.painter();
-        let held = matches!((i, st.physics), (0, Physics::Playing) | (1, Physics::Paused));
+        let held = matches!((i, st.playback), (0, Playback::Playing) | (1, Playback::Paused));
         if held {
             p.rect_filled(rect, k.radius(), t.control);
         } else if resp.hovered() {
@@ -576,11 +576,11 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     glyph(p, k, Pos2::new(rect.left() + 17.0, y), tool_glyph, 13.0, t.text);
     let x = small(rect.left() + 29.0, Align2::LEFT_CENTER, tool, t.text).right();
     let x = small(x + 10.0, Align2::LEFT_CENTER, tool_hint(st.tool), t.text_dim).right();
-    if st.physics != Physics::Stopped {
-        let text = if st.physics == Physics::Playing {
-            "Physics running"
+    if st.playback != Playback::Stopped {
+        let text = if st.playback == Playback::Playing {
+            "Scene playing"
         } else {
-            "Physics paused"
+            "Scene paused"
         };
         p.circle_filled(Pos2::new(x + 22.0, y), 3.0, t.accent);
         small(x + 31.0, Align2::LEFT_CENTER, text, t.text);

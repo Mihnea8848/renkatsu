@@ -113,6 +113,15 @@ pub struct Character {
     pub scene: Scene,
     /// Root node everything hangs from.
     pub top: usize,
+    /// The object of the body's Animator, which animations name bones
+    /// from (`ChaControl.animBody`).
+    pub animator: usize,
+    /// What animations are told about the body.
+    pub parameters: crate::motion::Parameters,
+    /// The pieces of clothing and what their states switch.
+    pub clothes: crate::clothes_state::Rig,
+    /// The heels Stiletto put on, when the worn shoes have some.
+    pub heels: Option<crate::stiletto::Heels>,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -333,19 +342,6 @@ pub fn head_variant(bundle: &str, texture: &str, head_id: i32) -> Option<(String
     let stem = bundle.replace(".unity3d", "");
     let cut = stem.char_indices().rev().nth(1).map(|(i, _)| i).unwrap_or(0);
     Some((format!("{}50.unity3d", &stem[..cut]), format!("{texture}_{head_id}")))
-}
-
-/// Clothing prefabs hold a fully worn variant and half-off variants; only
-/// the worn one is shown.
-fn hide_undressed_states(scene: &mut Scene, inst: &Instance) {
-    for &n in &inst.nodes {
-        if matches!(
-            scene.nodes[n].name.as_str(),
-            "n_top_b" | "n_bot_b" | "n_bot_c" | "n_panst_b"
-        ) {
-            scene.nodes[n].active = false;
-        }
-    }
 }
 
 const MATERIALS: &str = "chara/mm_base.unity3d";
@@ -2166,6 +2162,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut accessory_nodes: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     // The worn shoe's list entry and renderers, for Stiletto.
     let mut shoe: Option<(&Item, Vec<usize>)> = None;
+    // What the clothes states switch.
+    let mut rig = crate::clothes_state::Rig::new(opts.outdoor_shoes);
+    rig.add_body(&b.scene, &body);
     let hair_settings = crate::hair_accessories::for_outfit(&card.ext, outfit);
     // Bust size, softness and weight in effect; Pushup may replace them.
     let mut bust = crate::pushup::BodyData::from_body(
@@ -2186,6 +2185,15 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             for (i, cp) in co.clothes.parts.iter().enumerate().take(9) {
                 // Only one of indoor (7) and outdoor (8) shoes is worn.
                 if (i == 7 && opts.outdoor_shoes) || (i == 8 && !opts.outdoor_shoes) {
+                    // The game loads both pairs and shows one, so the pair
+                    // that is not built still has its states.
+                    let prop = format!("outfit{outfit}.ChaFileClothes.{}", cat::CLOTHES_PROPS[i]);
+                    if let Lookup::Found(item) = b.game.items.lookup(&b.infos, &prop, cat::CLOTHES[i], cp.id) {
+                        let loads = |key: &str| item.get(key).is_some_and(|v| v != "0" && v != "p_dummy");
+                        if loads("MainAB") && loads("MainData") {
+                            rig.worn.state_type[i] = item.int("StateType");
+                        }
+                    }
                     continue;
                 }
                 // One-piece tops replace the bottom, one-piece bras the shorts.
@@ -2211,7 +2219,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     // skeleton for tops and bottoms only.
                     b.physics_source(inst, true, i < 2, true);
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
-                    hide_undressed_states(&mut b.scene, inst);
+                    rig.add_piece(&b.scene, i, inst);
                     let sources = compose::color_sources(None);
                     b.dress(
                         inst,
@@ -2229,6 +2237,22 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     .as_ref()
                     .is_some_and(|inst| inst.nodes.iter().any(|&n| b.scene.nodes[n].name == "n_top_a"));
                 let state = item.int("StateType");
+                // `infoClothes` is set once the piece's object is loaded; a
+                // sailor or jacket top loads an empty object.
+                let kind = item.int("Kind").unwrap_or(0);
+                if inst.is_some() || (i == 0 && (kind == 1 || kind == 2)) {
+                    rig.worn.state_type[i] = state;
+                }
+                if i == 1 && inst.is_some() {
+                    // `ChangeClothesBotAsync`: the list says whether the
+                    // bottom hides the shorts; lists from before that
+                    // column go by the item's number.
+                    const HIDE_SHORTS: [i32; 13] = [2, 3, 9, 16, 22, 25, 28, 29, 30, 32, 34, 35, 45];
+                    rig.worn.hide_shorts_bot = match b.list_int(item, "HideShorts") {
+                        Some(hide) => hide == 1,
+                        None => item.mod_idx.is_none() && HIDE_SHORTS.contains(&cp.id),
+                    };
+                }
                 match i {
                     0 => {
                         kinds.top = state;
@@ -2261,7 +2285,6 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     _ => {}
                 }
                 // Sailor and jacket tops are assembled from three sub-parts.
-                let kind = item.int("Kind").unwrap_or(0);
                 if i == 0 && (kind == 1 || kind == 2) {
                     let (cats, names) = if kind == 1 {
                         (
@@ -2299,7 +2322,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             }
                             b.physics_source(&inst, true, true, true);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
-                            hide_undressed_states(&mut b.scene, &inst);
+                            rig.add_part(&b.scene, k, &inst);
                             // Sub-parts share the top's colours.
                             let sources = compose::color_sources(Some(k));
                             b.dress(&inst, sub, &cp.color_info, sources, &pattern_prop, overlays::SUB_IDS[k]);
@@ -2312,6 +2335,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     }
                 }
             }
+            // Every piece starts fully on, as a character added in Studio.
+            rig.worn.not_bot = no_bottom;
+            rig.worn.not_bra = kinds.not_bra;
+            rig.worn.not_shorts = no_shorts;
+            rig.apply_visibility(&mut b.scene, &[crate::clothes_state::ON; crate::clothes_state::KINDS]);
             b.hide_under_top(&body, &top_items, &top_insts, bra.as_ref());
 
             // Pushup: the bust of a worn top or bra replaces the card's.
@@ -2438,6 +2466,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         crate::hand_size::studio_copy(&mut b.scene, &bones, &mods);
     }
     // Stiletto turns the bones after the animation, each frame.
+    let mut heels = None;
     if let Some((item, renderers)) = shoe.filter(|_| opts.stiletto) {
         use crate::stiletto as st;
         let config = st::Config::load(&game.assets.index.game_dir);
@@ -2446,10 +2475,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         match st::flags_for(&config.flag_files, None, None) {
             Ok(flags) => {
                 st::warp_shoe(&mut b.scene, &renderers, &heel, flags);
-                let pose = st::CustomPose::default();
                 // `objBodyBone.transform.parent`: what holds `cf_j_root`.
                 let holder = b.scene.nodes[body_root].parent.unwrap_or(anim.root);
-                st::pose(&mut b.scene, &bones, holder, &heel, flags, &pose, &config.settings);
+                let worn = st::Heels::new(&b.scene, &bones, holder, heel, &config, flags);
+                worn.apply(&mut b.scene, &bones);
+                heels = Some(worn);
             }
             Err(pattern) => b.loader.warn(format!(
                 "Stiletto: flags pattern `{pattern}` is not supported, heels are not applied"
@@ -2558,12 +2588,71 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     Ok(Character {
         scene: b.scene,
         top,
+        animator: anim.root,
+        parameters: crate::motion::Parameters::of(&card.body.shape_value_body),
+        clothes: rig,
+        heels,
         bones,
         ramp,
         material_edits,
         physics,
         warnings: b.loader.warnings,
     })
+}
+
+impl Character {
+    /// Brings the clothes to the given states without building again: the
+    /// objects each state shows, the masks under the top, and the heels,
+    /// which come off with the shoes. Bones the heels moved are put back
+    /// as they were first, so an animation is to be applied again after.
+    pub fn set_clothes(&mut self, states: &crate::clothes_state::States) {
+        self.clothes.apply(&mut self.scene, states);
+        if let Some(heels) = &self.heels {
+            heels.reset(&mut self.scene);
+        }
+        self.wear_heels(states);
+    }
+
+    /// Takes the heels off and, when the shoes are on, puts them on again
+    /// on top of the bones as they are now.
+    pub fn refresh_heels(&mut self, states: &crate::clothes_state::States) {
+        if let Some(heels) = &self.heels {
+            heels.reset(&mut self.scene);
+        }
+        self.wear_heels(states);
+    }
+
+    /// Whether the worn shoes are fully on, which is when Stiletto acts.
+    fn shoes_on(&self, states: &crate::clothes_state::States) -> bool {
+        use crate::clothes_state::{ON, SHOES_INDOOR, SHOES_OUTDOOR};
+        let kind = if self.clothes.outdoor_shoes {
+            SHOES_OUTDOOR
+        } else {
+            SHOES_INDOOR
+        };
+        states[kind] == ON
+    }
+
+    /// Puts the heels on top of the bones as they are now, when the shoes
+    /// are on. Call after an animation wrote the bones.
+    pub fn wear_heels(&mut self, states: &crate::clothes_state::States) {
+        if !self.shoes_on(states) {
+            return;
+        }
+        if let Some(heels) = &self.heels {
+            heels.apply(&mut self.scene, &self.bones);
+        }
+    }
+
+    /// Writes one frame of a motion to the bones: the heels come off, the
+    /// motion writes the bones it names, and the heels go on again.
+    pub fn animate(&mut self, motion: &crate::motion::Bound, phase: f32, states: &crate::clothes_state::States) {
+        if let Some(heels) = &self.heels {
+            heels.reset(&mut self.scene);
+        }
+        motion.apply(&mut self.scene, phase);
+        self.wear_heels(states);
+    }
 }
 
 #[cfg(test)]

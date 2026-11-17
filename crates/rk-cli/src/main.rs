@@ -12,6 +12,7 @@ mod card;
 mod compare;
 mod custom_package;
 mod package;
+mod pose;
 mod reference;
 mod render;
 mod state;
@@ -76,6 +77,29 @@ enum Cmd {
         /// Leave out the light's real-time shadows.
         #[arg(long)]
         no_shadows: bool,
+        /// The states of the clothes: nine digits in the game's order, or
+        /// changes such as `top=1,bottom=3` or `all=3` made in turn.
+        #[arg(long)]
+        clothes: Option<String>,
+        /// An animation of CharaStudio's list as `group/category/number`.
+        #[arg(long)]
+        pose: Option<String>,
+        /// Where in the animation, in passes: 0 the start, 0.5 half way.
+        #[arg(long, default_value_t = 0.0)]
+        time: f32,
+    },
+    /// CharaStudio's animations: list them, or check them on a character.
+    Pose {
+        #[command(subcommand)]
+        cmd: PoseCmd,
+    },
+    /// Print which states a card's clothes have, and what a row of state
+    /// changes such as `top=1 bottom=3 all=0` shows.
+    Clothes {
+        card: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        outfit: usize,
+        steps: Vec<String>,
     },
     /// Write a contact sheet: each card's own image beside our render.
     Compare {
@@ -156,6 +180,20 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum PoseCmd {
+    /// List the categories, or with `--all` every animation with whether
+    /// it holds one pose or moves.
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Read every animation and bind it to a card's skeleton.
+    Check { card: PathBuf },
+    /// List the installed mods that bring animation lists, with their size.
+    Mods,
+}
+
+#[derive(Subcommand)]
 enum PackageCmd {
     /// Build Starter Content: Characters & Clothing from the Koikatsu install: the
     /// game's own character parts and default characters, without mods.
@@ -189,6 +227,19 @@ enum PackageCmd {
         /// The folder the .rkpkg is written to.
         #[arg(long, default_value = ".")]
         out: PathBuf,
+    },
+    /// Build Starter Content: Poses from the Koikatsu install: CharaStudio's
+    /// poses and animations, without mods and without the H scenes'.
+    StarterPoses {
+        /// The folder the package file is written to.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only say what the package would hold.
+        #[arg(long)]
+        list: bool,
+        /// Cut the package into parts of at most this many megabytes.
+        #[arg(long)]
+        part_size: Option<u64>,
     },
     /// Install a package from its file.
     Install { file: PathBuf },
@@ -249,6 +300,9 @@ fn main() -> Result<()> {
             }
             PackageCmd::New { dir, id, name } => custom_package::new(&dir, &id, name.as_deref()),
             PackageCmd::Build { dir, out } => custom_package::build(&dir, &out),
+            PackageCmd::StarterPoses { out, list, part_size } => {
+                package::starter_poses(&out, list, part_size.map(|mb| mb * 1024 * 1024))
+            }
             PackageCmd::Install { file } => package::install(&file),
             PackageCmd::Download { id } => package::download(&id),
             PackageCmd::List => package::list(),
@@ -302,6 +356,9 @@ fn main() -> Result<()> {
             no_physics,
             list,
             no_shadows,
+            clothes,
+            pose,
+            time,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -315,7 +372,18 @@ fn main() -> Result<()> {
             no_physics,
             list,
             shadows: !no_shadows,
+            clothes: clothes.as_deref(),
+            pose: pose.as_deref(),
+            time,
         }),
+        Cmd::Pose {
+            cmd: PoseCmd::List { all },
+        } => pose::list(all),
+        Cmd::Pose {
+            cmd: PoseCmd::Check { card },
+        } => pose::check(&card),
+        Cmd::Pose { cmd: PoseCmd::Mods } => pose::mods(),
+        Cmd::Clothes { card, outfit, steps } => pose::clothes(&card, outfit, &steps),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },

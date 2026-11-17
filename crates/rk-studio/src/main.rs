@@ -20,6 +20,7 @@ mod modes;
 mod mods;
 mod packages;
 mod panels;
+mod poses;
 mod preferences;
 mod project;
 mod properties;
@@ -38,7 +39,7 @@ use eframe::egui_wgpu::wgpu;
 use egui_dock::{DockArea, DockState};
 use panels::Panel;
 use project::Project;
-use state::{Command, Look, Physics, Rail, State};
+use state::{Command, Look, Playback, Rail, State};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -134,6 +135,18 @@ struct Cli {
     /// Start with this fly speed and its meter showing.
     #[arg(long)]
     fly_speed: Option<f32>,
+    /// Start with the selected character in this animation of
+    /// CharaStudio's list, as GROUP/CATEGORY/NUMBER, to picture it.
+    #[arg(long, hide = true)]
+    pose: Option<String>,
+    /// Start with the scene paused after this many seconds of play, to
+    /// picture a frame of an animation.
+    #[arg(long, hide = true)]
+    scene_time: Option<f32>,
+    /// Start with the Content panel on this folder, by its place in the
+    /// list (1 is Poses).
+    #[arg(long, hide = true)]
+    folder: Option<usize>,
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -361,6 +374,25 @@ impl Studio {
             }
         };
         // What the command line put in the scene is where the history starts.
+        if let Some(spec) = &cli.pose {
+            let numbers: Vec<i32> = spec.split('/').filter_map(|n| n.parse().ok()).collect();
+            let [group, category, number] = numbers[..] else {
+                anyhow::bail!("{spec}: a pose is named as GROUP/CATEGORY/NUMBER");
+            };
+            let game = state.games.get(&state.project.mods_dir())?;
+            let library = rk_chara::poses::Library::read(game);
+            let pose = library
+                .find(group, category, number)
+                .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
+            state.run(Command::Pose(Some(scene::Pose::of(pose))));
+        }
+        if let Some(seconds) = cli.scene_time {
+            state.playback = Playback::Paused;
+            state.clock = seconds;
+        }
+        state.poses.eager = cli.screenshot.is_some();
+        state.poses.refresh(&state.project);
+        state.folder = cli.folder.unwrap_or(0);
         state.doc.clear_history();
         if !cli.card.is_empty() {
             let live = state
@@ -373,9 +405,10 @@ impl Studio {
                 state.doc.scene(),
                 &state.project,
                 &mut state.games,
-                Physics::Stopped,
-                Physics::Stopped,
-                0.0,
+                live::Clock {
+                    time: state.clock,
+                    ..live::Clock::stopped()
+                },
                 &mut state.log,
             );
             for object in state.doc.scene().objects() {

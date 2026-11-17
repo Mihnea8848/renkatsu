@@ -68,8 +68,10 @@ pub enum Rail {
     Icons,
 }
 
+/// Whether the scene's time runs: the one transport for everything in a
+/// scene that takes time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Physics {
+pub enum Playback {
     Stopped,
     Playing,
     Paused,
@@ -128,6 +130,10 @@ pub enum Command {
     /// Add the character of one of the project's cards, named by its path
     /// relative to the project.
     AddCard(PathBuf),
+    /// Put the selected character in a pose, or take its pose off.
+    Pose(Option<crate::scene::Pose>),
+    /// Save the selected character's pose in the project.
+    SavePose,
     /// Save the scene and the project.
     Save,
     /// Save a copy of the project under another name and work on that.
@@ -227,10 +233,16 @@ pub struct State {
     /// Index into `modes::TOOLS`.
     pub tool: usize,
     pub snap: bool,
-    pub physics: Physics,
+    /// What the play, pause and stop buttons set: whether the scene's
+    /// time runs. Animations and physics both go by it.
+    pub playback: Playback,
+    /// Seconds the scene has played since it was last stopped.
+    pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 5],
+    pub sections: [bool; 7],
+    /// The poses of the Content panel.
+    pub poses: crate::poses::Shelf,
 
     pub scene_search: String,
     pub property_search: String,
@@ -249,8 +261,8 @@ pub struct State {
     /// The scene as the viewport draws it, when the window has a GPU
     /// device to draw with.
     pub live: Option<crate::live::Live>,
-    /// The physics state the last frame saw, to reset on a stop.
-    pub last_physics: Physics,
+    /// The transport as the last frame saw it, to reset on a stop.
+    pub last_playback: Playback,
     /// What surrounds the still picture, taken from its corner so that it
     /// reads as a viewport filled edge to edge.
     pub backdrop: Color32,
@@ -326,8 +338,10 @@ impl State {
             maximised: false,
             tool: 0,
             snap: true,
-            physics: Physics::Stopped,
-            sections: [true, true, true, false, true],
+            playback: Playback::Stopped,
+            clock: 0.0,
+            sections: [true, true, true, false, true, true, true],
+            poses: Default::default(),
             scene_search: String::new(),
             property_search: String::new(),
             content_search: String::new(),
@@ -338,7 +352,7 @@ impl State {
             levels: [true; 3],
             viewport_image: None,
             live: None,
-            last_physics: Physics::Stopped,
+            last_playback: Playback::Stopped,
             backdrop: Color32::from_rgb(0x0f, 0x0f, 0x0f),
             settings: Default::default(),
             vsync_at_start: true,
@@ -396,6 +410,31 @@ impl State {
                 }
             }
             Command::AddCard(card) => self.add_card(card),
+            Command::Pose(pose) => {
+                if let Some(mut object) = self.doc.selection().cloned() {
+                    if let Content::Character { pose: worn, .. } = &mut object.content {
+                        *worn = pose;
+                        self.doc.edit(object, false);
+                    }
+                }
+            }
+            Command::SavePose => {
+                let worn = self.doc.selection().and_then(|o| match &o.content {
+                    Content::Character { pose, .. } => pose.clone(),
+                    _ => None,
+                });
+                if let Some(pose) = worn {
+                    match crate::poses::save_in(&self.project.folder("Poses"), &pose) {
+                        Ok(file) => {
+                            let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                            self.log
+                                .info(format!("Saved the pose as {name} in the project's Poses"));
+                            self.poses.saved = crate::poses::saved_in(&self.project.folder("Poses"));
+                        }
+                        Err(e) => self.log.error(format!("The pose could not be saved: {e:#}")),
+                    }
+                }
+            }
             Command::Save => {
                 self.save();
             }
@@ -607,6 +646,11 @@ impl State {
         let eager = self.library.eager;
         self.library = Library::new(&self.project);
         self.library.eager = eager;
+        self.poses.refresh(&self.project);
+        self.poses.selected = None;
+        self.poses.group = None;
+        self.playback = Playback::Stopped;
+        self.clock = 0.0;
         self.folded.clear();
         self.scene_folded = false;
         self.renaming = None;
@@ -712,6 +756,7 @@ impl State {
     /// built get another try.
     pub fn content_changed(&mut self) {
         self.games.reset();
+        self.poses.refresh(&self.project);
         if let Some(live) = self.live.as_mut() {
             live.retry();
         }

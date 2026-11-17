@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 9;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,6 +112,77 @@ pub struct ListData {
     pub rows: Vec<Vec<String>>,
 }
 
+/// One of CharaStudio's list sheets that a zipmod brings as a CSV file
+/// under `abdata/studio/info/`, the way Sideloader takes them: the file is
+/// named as the game names the sheet in its own bundles
+/// (`AnimeGroup_...`, `AnimeCategory_<n>_<group>`,
+/// `Anime_<n>_<group>_<category>`) and holds the same rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StudioSheet {
+    /// Index into [`Index::mods`].
+    pub mod_idx: Option<u32>,
+    /// The folder under `studio/info` the file is in.
+    pub folder: String,
+    /// The file's name without its extension.
+    pub name: String,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// The text of a list file: UTF-16 with a byte order mark, as spreadsheet
+/// programs save it, or UTF-8.
+pub fn decode_text(bytes: &[u8]) -> String {
+    let wide = |big: bool| {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| {
+                if big {
+                    u16::from_be_bytes([c[0], c[1]])
+                } else {
+                    u16::from_le_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes {
+        [0xff, 0xfe, ..] => wide(false),
+        [0xfe, 0xff, ..] => wide(true),
+        _ => String::from_utf8_lossy(bytes).trim_start_matches('\u{feff}').to_owned(),
+    }
+}
+
+/// The rows of a CSV text: cells apart by commas, a cell in double quotes
+/// may hold commas, and two double quotes inside one stand for one.
+pub fn csv_rows(text: &str) -> Vec<Vec<String>> {
+    text.lines()
+        .map(|line| {
+            let mut cells = vec![String::new()];
+            let mut quoted = false;
+            let mut chars = line.trim_end_matches('\r').chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' if quoted && chars.peek() == Some(&'"') => {
+                        chars.next();
+                        cells.last_mut().expect("never empty").push('"');
+                    }
+                    '"' => quoted = !quoted,
+                    ',' if !quoted => cells.push(String::new()),
+                    c => cells.last_mut().expect("never empty").push(c),
+                }
+            }
+            cells
+        })
+        .collect()
+}
+
+/// Whether a file under `abdata` is one of the Studio list sheets kept:
+/// the lists of animations. The H scenes' lists (`HAnime_`) are not.
+fn studio_sheet(inner: &str) -> Option<(String, String)> {
+    let rest = inner.strip_prefix("studio/info/")?.strip_suffix(".csv")?;
+    let (folder, name) = rest.rsplit_once('/').unwrap_or(("", rest));
+    name.starts_with("anime").then(|| (folder.to_owned(), name.to_owned()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleLoc {
     /// `None`: `path` is relative to `abdata`. `Some`: entry name inside that zipmod.
@@ -169,6 +240,9 @@ struct ZipScan {
     shaders: Vec<MeShader>,
     lists: Vec<ListData>,
     migrations: Vec<Migration>,
+    /// Studio's animation lists.
+    #[serde(default)]
+    studio: Vec<StudioSheet>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -206,6 +280,9 @@ pub struct Index {
     /// Lowercase CAB name to the game bundle's virtual path.
     pub cabs: HashMap<String, String>,
     pub lists: Vec<ListData>,
+    /// Studio's animation lists that zipmods bring as CSV files, in the
+    /// order of the mods.
+    pub studio_sheets: Vec<StudioSheet>,
     pub migrations: Vec<Migration>,
     pub skipped: Vec<(String, String)>,
 }
@@ -419,6 +496,18 @@ fn scan_zipmod(path: &Path) -> ZipScan {
                     if let Some(l) = parse_csv_list(&text) {
                         scan.lists.push(l);
                     }
+                }
+            } else if let Some((folder, _)) = studio_sheet(inner) {
+                let mut bytes = Vec::new();
+                if zip.by_name(&name)?.read_to_end(&mut bytes).is_ok() {
+                    // The name keeps the case the file has.
+                    let file = name.rsplit('/').next().unwrap_or(&name);
+                    scan.studio.push(StudioSheet {
+                        mod_idx: None,
+                        folder,
+                        name: file[..file.len() - ".csv".len()].to_owned(),
+                        rows: csv_rows(&decode_text(&bytes)),
+                    });
                 }
             }
         }
@@ -780,6 +869,10 @@ impl Index {
                 l.mod_idx = Some(mod_idx);
                 idx.lists.push(l);
             }
+            for mut sheet in scan.studio {
+                sheet.mod_idx = Some(mod_idx);
+                idx.studio_sheets.push(sheet);
+            }
         }
         // Sideloader searches the zipmods that share a bundle path in the
         // order of their GUIDs and takes the first one holding the asset;
@@ -1034,6 +1127,37 @@ mod tests {
         assert_eq!(l.keys, ["ID", "Kind", "Name", "MainAB"]);
         assert_eq!(l.rows.len(), 2);
         assert_eq!(l.rows[1][2], "Hair B");
+    }
+
+    #[test]
+    fn studio_sheets_are_csv_files_under_studio_info() {
+        assert_eq!(
+            studio_sheet("studio/info/masculine/anime_00_6549_65490.csv"),
+            Some(("masculine".to_owned(), "anime_00_6549_65490".to_owned()))
+        );
+        assert_eq!(
+            studio_sheet("studio/info/animegroup_x.csv"),
+            Some((String::new(), "animegroup_x".to_owned()))
+        );
+        // Item lists, the H scenes' lists and files elsewhere are not kept.
+        assert_eq!(studio_sheet("studio/info/x/itemlist_00_01.csv"), None);
+        assert_eq!(studio_sheet("studio/info/x/hanime_00_01_100.csv"), None);
+        assert_eq!(studio_sheet("list/characustom/anime_00.csv"), None);
+        assert_eq!(studio_sheet("studio/info/x/anime_00_1_2.unity3d"), None);
+    }
+
+    #[test]
+    fn list_text_is_read_in_either_encoding() {
+        let wide: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain("1,名前\r\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(decode_text(&wide), "1,名前\r\n");
+        assert_eq!(decode_text("\u{feff}2,b".as_bytes()), "2,b");
+        assert_eq!(
+            csv_rows("0,6549,\"Stand, left\",\"say \"\"hi\"\"\"\r\n,,\n"),
+            [vec!["0", "6549", "Stand, left", "say \"hi\""], vec!["", "", ""]]
+        );
     }
 
     #[test]

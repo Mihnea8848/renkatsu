@@ -5,6 +5,7 @@
 //! Koikatsu assets and mods are stored in. This is a file-format decoder
 //! only; no Unity code or runtime is involved.
 
+pub mod animation;
 mod bundle;
 mod common_strings;
 mod io;
