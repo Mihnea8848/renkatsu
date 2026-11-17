@@ -410,9 +410,11 @@ mod tests {
         );
         // A file that is no animation, a folder outside the animations and
         // an installed animation without the content it is in are refused.
-        std::fs::write(home.join("broken.rkanim"), b"not an animation").unwrap();
+        // Its own name: on Windows, broken.rkanim and the Broken.rkanim
+        // that `file` writes are the same file.
+        std::fs::write(home.join("not an animation.rkanim"), b"not an animation").unwrap();
         let broken = Pick {
-            from: From::File(home.join("broken.rkanim")),
+            from: From::File(home.join("not an animation.rkanim")),
             ..file(&home, "Broken", 1.0, false)
         };
         let installed = Pick {
