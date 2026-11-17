@@ -8,6 +8,7 @@
 
 use crate::design::Props;
 use crate::kinds::Kind;
+use crate::profile::{self, Profile};
 use crate::scene::Content;
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
@@ -39,6 +40,33 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut object = before.clone();
     let kind = object.kind();
     header(ui, k, st, kind, &object.name);
+    // Who a character is: the card's profile, or the one the character
+    // has in this scene. Its pages sit beside the scene's settings.
+    let card_profile = match &object.content {
+        Content::Character { card, .. } => st.profile(card),
+        _ => None,
+    };
+    let mut shown = card_profile.as_ref().map(|card| {
+        let mut p = match &object.content {
+            Content::Character { profile: Some(own), .. } => (**own).clone(),
+            _ => card.clone(),
+        };
+        p.male = card.male;
+        p
+    });
+    let shown_before = shown.clone();
+    let pages: &[&str] = match &shown {
+        Some(p) if p.male => &["Scene", "Profile"],
+        Some(_) => &["Scene", "Profile", "Likes", "H Traits"],
+        None => &[],
+    };
+    if pages.is_empty() {
+        st.property_tab = 0;
+    } else {
+        st.property_tab = st.property_tab.min(pages.len() - 1);
+        page_tabs(ui, k, &mut st.property_tab, pages);
+    }
+    let page = st.property_tab;
     let built = st.live.as_ref().and_then(|live| live.built(object.id));
     let mut show_animations = false;
     let mut show_cards = false;
@@ -51,6 +79,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let holds = st.doc.scene().subtree(object.id).len() - 1;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        if let (Some(p), 1..) = (shown.as_mut(), page) {
+            if let Some(card) = &card_profile {
+                profile_page(ui, k, st, p, card, page);
+            }
+            return;
+        }
         let id = ui.id();
         if kind != Kind::Folder && section(ui, k, st, 0, "Transform") {
             // What each of position, rotation and scale waits for, when it
@@ -86,6 +120,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 simulate,
                 clothes,
                 animation,
+                ..
             } => {
                 if section(ui, k, st, 1, "Character") {
                     row(ui, k, "Card", None, |ui, rect| {
@@ -171,23 +206,50 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     ];
                     let kinds = worn.as_ref().map(cs::Worn::kinds).unwrap_or_default();
                     let shown = worn.as_ref().map_or(*clothes, |w| cs::fitted(clothes, w));
+                    // Only what is worn gets a row; the rest is named on
+                    // one line at the end.
+                    let mut missing = Vec::new();
+                    let half_2 = rows.iter().any(|&(kind, _)| kinds.has(kind, cs::HALF_2));
                     for (kind, name) in rows {
-                        let off = waiting.or((!kinds.is_kind(kind)).then_some("Nothing with states is worn here"));
-                        row(ui, k, name, off, |ui, rect| {
-                            let options = [
-                                ("On", kinds.has(kind, cs::ON)),
-                                ("Half", kinds.has(kind, cs::HALF)),
-                                ("Half 2", kinds.has(kind, cs::HALF_2)),
-                                ("Off", kinds.has(kind, cs::OFF)),
-                            ];
-                            let chosen = Some(usize::from(shown[kind]));
+                        if worn.is_some() && !kinds.is_kind(kind) {
+                            missing.push(name);
+                            continue;
+                        }
+                        row(ui, k, name, waiting, |ui, rect| {
+                            // Half 2 gets a place only when something worn
+                            // has it.
+                            let states: &[(u8, &str)] = if half_2 {
+                                &[
+                                    (cs::ON, "On"),
+                                    (cs::HALF, "Half"),
+                                    (cs::HALF_2, "Half 2"),
+                                    (cs::OFF, "Off"),
+                                ]
+                            } else {
+                                &[(cs::ON, "On"), (cs::HALF, "Half"), (cs::OFF, "Off")]
+                            };
+                            let options: Vec<(&str, bool)> =
+                                states.iter().map(|&(s, name)| (name, kinds.has(kind, s))).collect();
+                            let chosen = states.iter().position(|&(s, _)| s == shown[kind]);
                             let clicked = choices(ui, k, rect, id.with(("clothes", kind)), chosen, &options);
                             // A state the piece lacks moves on to the next
                             // one it has, as CharaStudio's buttons do.
-                            if let (Some(state), Some(worn)) = (clicked, &worn) {
+                            if let (Some(i), Some(worn)) = (clicked, &worn) {
                                 *clothes = shown;
-                                cs::set_state(clothes, worn, kind, state as u8, true);
+                                cs::set_state(clothes, worn, kind, states[i].0, true);
                             }
+                        });
+                    }
+                    if !missing.is_empty() {
+                        row(ui, k, "Not worn", None, |ui, rect| {
+                            let text = missing.join(", ");
+                            label(
+                                &ui.painter().with_clip_rect(rect),
+                                k,
+                                rect.left_center(),
+                                &text,
+                                t.text_dim,
+                            );
                         });
                     }
                     section_end(ui, k);
@@ -410,6 +472,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         }
     });
+    if let Content::Character { profile, .. } = &mut object.content {
+        // Values that are all the card's again are the card's.
+        if shown != shown_before {
+            *profile = shown.filter(|p| Some(p) != card_profile.as_ref()).map(Box::new);
+        }
+    }
     if object != before {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
@@ -419,6 +487,314 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     if show_animations {
         st.show_folder(1);
+    }
+}
+
+/// The row of pages under a character's header, each a word with a line
+/// under the open one.
+fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
+    let t = &k.t;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 4.0), Sense::hover());
+    hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
+    let mut x = rect.left() + 8.0;
+    for (i, name) in pages.iter().enumerate() {
+        let w = widgets::text_width(ui, name, k.font()).ceil() + 18.0;
+        let tab = Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x + w, rect.bottom()));
+        let resp = ui.interact(tab, ui.id().with(("property page", i)), Sense::click());
+        if resp.clicked() {
+            *chosen = i;
+        }
+        let on = *chosen == i;
+        let color = match (on, resp.hovered()) {
+            (true, _) => t.text_bright,
+            (false, true) => t.text,
+            (false, false) => t.text_dim,
+        };
+        let p = ui.painter();
+        p.text(
+            tab.center() - Vec2::new(0.0, 1.0),
+            Align2::CENTER_CENTER,
+            name,
+            k.font(),
+            color,
+        );
+        if on {
+            let line = Rect::from_min_max(
+                Pos2::new(tab.left() + 4.0, tab.bottom() - 2.0),
+                Pos2::new(tab.right() - 4.0, tab.bottom()),
+            );
+            p.rect_filled(line, 0.0, t.select);
+        }
+        x += w;
+    }
+}
+
+/// Who the character is (page 1), what it likes (page 2) or what it is
+/// like in bed (page 3). The values
+/// start as the card's; changing one keeps the change in the scene, for
+/// this character only. Each page ends with the way back to the card's
+/// values for what it shows.
+fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &Profile, page: usize) {
+    let id = ui.id().with("profile");
+    if page == 1 {
+        if section(ui, k, st, 7, "Name") {
+            let names = [
+                ("Last name", &mut p.last_name),
+                ("First name", &mut p.first_name),
+                ("Nickname", &mut p.nickname),
+            ];
+            for (name, value) in names {
+                row(ui, k, name, None, |ui, rect| {
+                    if let Some(typed) = widgets::text_field(ui, k, rect, id.with(name), value, "") {
+                        *value = typed.trim().to_owned();
+                    }
+                });
+            }
+            section_end(ui, k);
+        }
+        if section(ui, k, st, 8, "About") {
+            if !p.male {
+                dropdown(ui, k, id, "Personality", &profile::PERSONALITIES, &mut p.personality);
+                row(ui, k, "Voice pitch", None, |ui, rect| {
+                    // Dragged in fractions, kept whole.
+                    let pitch_id = id.with("pitch");
+                    let mut exact = ui.data(|d| d.get_temp::<f32>(pitch_id)).unwrap_or(p.pitch);
+                    if exact.round() != p.pitch {
+                        exact = p.pitch;
+                    }
+                    widgets::number_to(ui, k, rect, pitch_id, &mut exact, Marker::None, true, 0.25, 0);
+                    exact = exact.clamp(0.0, 100.0);
+                    ui.data_mut(|d| d.insert_temp(pitch_id, exact));
+                    p.pitch = exact.round();
+                });
+            }
+            row(ui, k, "Birthday", None, |ui, rect| birthday(ui, k, rect, id, p));
+            dropdown(ui, k, id, "Blood type", &profile::BLOOD_TYPES, &mut p.blood_type);
+            if p.male {
+                row(
+                    ui,
+                    k,
+                    "Club",
+                    Some("Male characters are always in the Koikatsu club"),
+                    |ui, rect| {
+                        widgets::value_box(ui, k, rect, "Koikatsu club");
+                    },
+                );
+                const STEPS: [&str; 11] = ["-5", "-4", "-3", "-2", "-1", "0", "+1", "+2", "+3", "+4", "+5"];
+                let stats = ["Aggressiveness", "Diligence", "Kindness"];
+                for (name, n) in stats.into_iter().zip(p.stats.iter_mut()) {
+                    row(ui, k, name, None, |ui, rect| {
+                        let mut at = (*n + 5).clamp(0, 10) as usize;
+                        widgets::combo(ui, k, rect, id.with(name), &mut at, &STEPS);
+                        if at as i64 - 5 != (*n).clamp(-5, 5) {
+                            *n = at as i64 - 5;
+                        }
+                    });
+                }
+            } else {
+                dropdown(ui, k, id, "Club", &profile::CLUBS, &mut p.club);
+            }
+            section_end(ui, k);
+        }
+        if !p.male && section(ui, k, st, 9, "Traits") {
+            let grid = Grid {
+                items: &profile::TRAITS,
+                hint: Some("Add custom field"),
+            };
+            check_grid(ui, k, id.with("traits"), grid, &mut p.traits, &mut p.custom_traits);
+            section_end(ui, k);
+        }
+    } else if page == 2 {
+        if section(ui, k, st, 10, "Likes") {
+            let grid = Grid {
+                items: &profile::LIKES,
+                hint: Some("Add custom field"),
+            };
+            check_grid(ui, k, id.with("likes"), grid, &mut p.likes, &mut p.custom_likes);
+            section_end(ui, k);
+        }
+    } else {
+        if section(ui, k, st, 12, "Traits") {
+            let grid = Grid {
+                items: &profile::H_TRAITS,
+                hint: Some("Add custom field"),
+            };
+            check_grid(
+                ui,
+                k,
+                id.with("h traits"),
+                grid,
+                &mut p.h_traits,
+                &mut p.custom_h_traits,
+            );
+            section_end(ui, k);
+        }
+        if section(ui, k, st, 13, "Refuses") {
+            let grid = Grid {
+                items: &profile::DENIAL,
+                hint: None,
+            };
+            check_grid(ui, k, id.with("denial"), grid, &mut p.denial, &mut Vec::new());
+            section_end(ui, k);
+        }
+        if section(ui, k, st, 14, "Weak point") {
+            row(ui, k, "Weakest at", None, |ui, rect| {
+                let names: Vec<&str> = std::iter::once("Not set").chain(profile::WEAK_POINTS).collect();
+                let mut at = usize::try_from(p.weak_point + 1).unwrap_or(0).min(names.len() - 1);
+                widgets::combo(ui, k, rect, id.with("weak point"), &mut at, &names);
+                p.weak_point = at as i64 - 1;
+            });
+            section_end(ui, k);
+        }
+    }
+    // The page's values as the card has them, with the other pages' left
+    // as they are now.
+    let mut from_card = p.clone();
+    match page {
+        2 => {
+            from_card.likes = card.likes.clone();
+            from_card.custom_likes = card.custom_likes.clone();
+        }
+        3 => {
+            from_card.h_traits = card.h_traits.clone();
+            from_card.custom_h_traits = card.custom_h_traits.clone();
+            from_card.denial = card.denial.clone();
+            from_card.weak_point = card.weak_point;
+        }
+        _ => {
+            from_card = Profile {
+                likes: p.likes.clone(),
+                custom_likes: p.custom_likes.clone(),
+                h_traits: p.h_traits.clone(),
+                custom_h_traits: p.custom_h_traits.clone(),
+                denial: p.denial.clone(),
+                weak_point: p.weak_point,
+                ..card.clone()
+            };
+        }
+    }
+    if section(ui, k, st, 11, "Card data") {
+        let changed = from_card != *p;
+        let why = (!changed).then_some("Everything here is as the card has it");
+        row(ui, k, "Values", why, |ui, rect| {
+            if crate::selector::button(ui, k, rect, "Reset to card values", false, changed) {
+                *p = from_card.clone();
+            }
+        });
+        section_end(ui, k);
+    }
+}
+
+/// A property chosen from one of the game's lists, kept as its number.
+fn dropdown(ui: &mut Ui, k: &Look, id: Id, name: &str, list: &[&str], n: &mut i64) {
+    row(ui, k, name, None, |ui, rect| {
+        let (names, mut at) = profile::options(list, *n);
+        let before = at;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        widgets::combo(ui, k, rect, id.with(name), &mut at, &names);
+        if at != before && at < list.len() {
+            *n = at as i64;
+        }
+    });
+}
+
+/// The month and the day of a birthday, side by side.
+fn birthday(ui: &mut Ui, k: &Look, rect: Rect, id: Id, p: &mut Profile) {
+    let split = (rect.left() + rect.width() * 0.6).round();
+    let month_box = rect.with_max_x(split - 2.0);
+    let day_box = rect.with_min_x(split + 2.0);
+    let months: Vec<&str> = std::iter::once("Not set").chain(profile::MONTHS).collect();
+    let mut month = usize::try_from(p.birth_month).ok().filter(|&m| m <= 12).unwrap_or(0);
+    widgets::combo(ui, k, month_box, id.with("month"), &mut month, &months);
+    if month as i64 != p.birth_month {
+        p.birth_month = month as i64;
+    }
+    if p.birth_month == 0 {
+        p.birth_day = 0;
+        widgets::value_box(ui, k, day_box, "");
+        return;
+    }
+    p.birth_day = p.birth_day.clamp(1, p.days());
+    let days: Vec<String> = (1..=p.days()).map(|d| d.to_string()).collect();
+    let days: Vec<&str> = days.iter().map(String::as_str).collect();
+    let mut day = (p.birth_day - 1) as usize;
+    widgets::combo(ui, k, day_box, id.with("day"), &mut day, &days);
+    p.birth_day = day as i64 + 1;
+}
+
+/// A list of check boxes: the game's, by key and name, and what the field
+/// at its end says while empty.
+struct Grid<'a> {
+    items: &'a [(&'a str, &'a str)],
+    /// What the field that adds one says while empty, or `None` for a
+    /// list that takes no additions.
+    hint: Option<&'a str>,
+}
+
+/// Check boxes in two columns: the game's items, ticked for the keys in
+/// `keys`, then the ones added for this character, marked with a star and
+/// with a button that takes them away, then a field that adds another.
+fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>, custom: &mut Vec<profile::Custom>) {
+    let t = &k.t;
+    let (pad, h) = (14.0, k.d.row + 4.0);
+    let width = ui.available_width();
+    let cells = grid.items.len() + custom.len() + usize::from(grid.hint.is_some());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, cells.div_ceil(2) as f32 * h + 16.0), Sense::hover());
+    let column = ((width - 2.0 * pad) / 2.0).floor();
+    let cell = |i: usize| {
+        let top = rect.top() + 4.0 + (i / 2) as f32 * h + (h - k.field()) / 2.0;
+        let left = rect.left() + pad + (i % 2) as f32 * column;
+        Rect::from_min_size(Pos2::new(left, top), Vec2::new(column - 8.0, k.field()))
+    };
+    for (i, (key, name)) in grid.items.iter().enumerate() {
+        let mut on = keys.iter().any(|k| k == key);
+        let was = on;
+        widgets::checkbox(ui, k, cell(i), id.with(key), &mut on, name);
+        if on != was {
+            Profile::set(keys, key, on);
+        }
+    }
+    // A check box's mark and the gap before its name.
+    let mark = 14.0 + 7.0;
+    let mut gone = None;
+    for (n, item) in custom.iter_mut().enumerate() {
+        let place = cell(grid.items.len() + n);
+        let text = format!("{} *", item.name);
+        let room = place.width() - mark - 24.0;
+        let text_w = widgets::text_width(ui, &text, k.font()).ceil().min(room);
+        let boxed = place.with_max_x(place.left() + mark + text_w);
+        let clip = ui.painter().clip_rect();
+        ui.set_clip_rect(boxed.intersect(clip));
+        widgets::checkbox(ui, k, boxed, id.with(("custom", n)), &mut item.on, &text);
+        ui.set_clip_rect(clip);
+        let x = Rect::from_center_size(Pos2::new(boxed.right() + 12.0, place.center().y), Vec2::splat(18.0));
+        let resp = ui
+            .interact(x, id.with(("remove", n)), Sense::click())
+            .on_hover_text("Remove it");
+        let color = if resp.hovered() {
+            ui.painter().rect_filled(x, k.radius(), t.hover);
+            t.text_bright
+        } else {
+            t.text_dim
+        };
+        widgets::glyph(ui.painter(), k, x.center(), icon::X, 11.0, color);
+        if resp.clicked() {
+            gone = Some(n);
+        }
+    }
+    if let Some(n) = gone {
+        custom.remove(n);
+    }
+    // The field that adds one; what it adds starts ticked.
+    let Some(hint) = grid.hint else { return };
+    let field = cell(grid.items.len() + custom.len());
+    let field_id = id.with("new");
+    if let Some(name) = widgets::text_field(ui, k, field, field_id, "", hint) {
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if profile::add_custom(custom, grid.items, &name, true) && enter {
+            // The field moves on to the next place, ready for another.
+            ui.memory_mut(|m| m.request_focus(field_id));
+        }
     }
 }
 

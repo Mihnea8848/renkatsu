@@ -112,6 +112,9 @@ pub struct Entry {
     /// of the game's own bundles under new names, and it is still the
     /// mod's animation.
     pub source: Source,
+    /// The H scenes list it, in an `HAnime_` sheet, rather than
+    /// CharaStudio's own `Anime_` sheets.
+    pub h: bool,
 }
 
 /// What an animation's clips say about its time.
@@ -338,6 +341,7 @@ impl Library {
                     state: cell(layout.state()).to_owned(),
                     timing: None,
                     source: listed.clone(),
+                    h: layout == Layout::HScene,
                 };
                 match self
                     .entries

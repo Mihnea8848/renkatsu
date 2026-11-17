@@ -204,6 +204,23 @@ pub enum Marker {
 /// Enter or a click elsewhere takes the typed value, Escape keeps the old.
 #[allow(clippy::too_many_arguments)]
 pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker: Marker, framed: bool, speed: f32) {
+    number_to(ui, k, rect, id, value, marker, framed, speed, 2);
+}
+
+/// A number as [`number`], shown with `decimals` places; with none, what is
+/// dragged or typed is rounded to whole numbers.
+#[allow(clippy::too_many_arguments)]
+pub fn number_to(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    id: Id,
+    value: &mut f32,
+    marker: Marker,
+    framed: bool,
+    speed: f32,
+    decimals: usize,
+) {
     let typing = id.with("typing");
     if let Some(mut text) = ui.data(|d| d.get_temp::<String>(typing)) {
         let edit = ui.put(
@@ -237,7 +254,7 @@ pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker
         *value += resp.drag_delta().x * speed;
     }
     if resp.clicked() {
-        ui.data_mut(|d| d.insert_temp(typing, format!("{value:.2}")));
+        ui.data_mut(|d| d.insert_temp(typing, format!("{value:.decimals$}")));
         ui.ctx().request_repaint();
     }
     let p = ui.painter();
@@ -282,10 +299,45 @@ pub fn number(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &mut f32, marker
     p.with_clip_rect(rect.shrink(1.0)).text(
         Pos2::new(x, rect.center().y),
         Align2::LEFT_CENTER,
-        format!("{value:.2}"),
+        format!("{value:.decimals$}"),
         k.font(),
         color,
     );
+}
+
+/// A text field in a property's box. What is typed is kept aside while
+/// the field has the keyboard and returned once, when Enter or a click
+/// elsewhere ends the typing; Escape gives it up.
+pub fn text_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, value: &str, hint: &str) -> Option<String> {
+    let typing = id.with("typing");
+    let mut text = ui
+        .data(|d| d.get_temp::<String>(typing))
+        .unwrap_or_else(|| value.to_owned());
+    let focused = ui.memory(|m| m.has_focus(id));
+    field_box(ui.painter(), k, rect, ui.rect_contains_pointer(rect), focused);
+    // One line of text, in the middle of the box.
+    let line = ui.painter().layout_no_wrap("Ag".into(), k.font(), k.t.text).size().y;
+    let inner = Rect::from_center_size(rect.center(), Vec2::new(rect.width() - 14.0, line));
+    // In a child, so the field does not move where the panel lays out
+    // what comes next.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+    let edit = child.add_sized(
+        inner.size(),
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .font(k.font())
+            .hint_text(egui::RichText::new(hint).color(k.t.text_dim))
+            .text_color(if focused { k.t.text_bright } else { k.t.text }),
+    );
+    if edit.has_focus() {
+        ui.data_mut(|d| d.insert_temp(typing, text));
+        return None;
+    }
+    ui.data_mut(|d| d.remove::<String>(typing));
+    let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    (edit.lost_focus() && !cancel && text != value).then_some(text)
 }
 
 /// A typed number: a decimal point or comma, a sign, spaces around it.
@@ -331,12 +383,15 @@ pub fn combo(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: &mut usize, opti
     );
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(rect.width() - 10.0);
-        for (i, option) in options.iter().enumerate() {
-            if check_item(ui, k, i == *chosen, option, "").clicked() {
-                *chosen = i;
-                ui.close();
+        // A long list, as of personalities, scrolls.
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (i, option) in options.iter().enumerate() {
+                if check_item(ui, k, i == *chosen, option, "").clicked() {
+                    *chosen = i;
+                    ui.close();
+                }
             }
-        }
+        });
     });
 }
 

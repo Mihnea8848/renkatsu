@@ -100,6 +100,7 @@ pub fn export(group: i32, category: i32, number: Option<i32>, out: &Path) -> Res
         stored.meta.group = group_name.clone();
         stored.meta.category = category_name.clone();
         stored.meta.source = entry.source.label().to_owned();
+        stored.meta.h = entry.h;
         let file = dir.join(format!(
             "{}.{}",
             clean(&entry.name),

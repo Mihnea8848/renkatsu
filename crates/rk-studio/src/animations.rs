@@ -190,6 +190,9 @@ pub struct Pick {
     pub category: String,
     /// The name of the game, package or mod that lists it.
     pub source: String,
+    /// The H scenes list it, rather than CharaStudio's own menu;
+    /// `None` keeps what the animation file says itself.
+    pub h: Option<bool>,
     pub from: From,
 }
 
@@ -227,6 +230,9 @@ fn stored(game: Option<&rk_vfs::Game>, pick: &Pick) -> Result<Stored> {
     fill(&mut stored.meta.group, &pick.group);
     fill(&mut stored.meta.category, &pick.category);
     fill(&mut stored.meta.source, &pick.source);
+    if let Some(h) = pick.h {
+        stored.meta.h = h;
+    }
     Ok(stored)
 }
 
@@ -306,6 +312,7 @@ pub fn copy_in(project: &mut Project, game: &rk_vfs::Game, item: &Item) -> Resul
         group: String::new(),
         category: String::new(),
         source: String::new(),
+        h: None,
         from: From::Installed {
             bundle: link.bundle.clone(),
             controller: link.controller.clone(),
@@ -337,6 +344,7 @@ mod tests {
             group: "Studio".into(),
             category: "Dance".into(),
             source: "Dance pack".into(),
+            h: None,
             from: From::File(path),
         }
     }

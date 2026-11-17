@@ -25,6 +25,7 @@ mod mods;
 mod packages;
 mod panels;
 mod preferences;
+mod profile;
 mod project;
 mod properties;
 mod scene;
@@ -443,6 +444,7 @@ impl Studio {
                             group: entry.group.clone(),
                             category: entry.category.clone(),
                             source: entry.source_name.clone(),
+                            h: Some(entry.h),
                             from: entry.from.clone(),
                         }),
                 );

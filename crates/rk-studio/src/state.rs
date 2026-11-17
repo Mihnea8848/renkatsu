@@ -300,7 +300,12 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 7],
+    pub sections: [bool; 15],
+    /// The page of a character's Properties: the scene's settings, the
+    /// card's profile or its likes.
+    pub property_tab: usize,
+    /// What each card says about its character, by the card on disk.
+    profiles: std::collections::HashMap<PathBuf, Option<crate::profile::Profile>>,
     /// The project's animations, for the Content panel and Properties.
     pub animations: crate::animations::Shelf,
 
@@ -336,6 +341,19 @@ pub struct State {
 }
 
 impl State {
+    /// What a project's card says about its character, read once.
+    pub fn profile(&mut self, card: &Path) -> Option<crate::profile::Profile> {
+        let path = self.project.resolve(card);
+        self.profiles
+            .entry(path)
+            .or_insert_with_key(|path| {
+                rk_card::Card::load(path)
+                    .ok()
+                    .map(|c| crate::profile::Profile::read(&c.parameter))
+            })
+            .clone()
+    }
+
     /// Asks GitHub, on a thread of its own, whether a newer Renkatsu is
     /// out. Nothing waits for the answer.
     pub fn check_for_update(&mut self, ctx: &egui::Context) {
@@ -405,7 +423,11 @@ impl State {
             snap: true,
             playback: Playback::Stopped,
             clock: 0.0,
-            sections: [true, true, true, false, true, true, true],
+            sections: [
+                true, true, true, false, true, true, true, true, true, true, true, true, true, true, true,
+            ],
+            property_tab: 0,
+            profiles: Default::default(),
             animations: Default::default(),
             scene_search: String::new(),
             property_search: String::new(),
@@ -1095,6 +1117,7 @@ impl State {
                 group: String::new(),
                 category: String::new(),
                 source: String::new(),
+                h: None,
                 from: crate::animations::From::File(path.to_owned()),
             };
             self.import_animations(&[pick], false);

@@ -59,6 +59,8 @@ pub struct Meta {
     /// The length of one pass for a middling body, in seconds.
     pub seconds: f32,
     pub loops: bool,
+    /// The H scenes list it, rather than CharaStudio's own menu.
+    pub h: bool,
 }
 
 impl Meta {
@@ -85,6 +87,7 @@ impl Meta {
             ("state", self.state.clone()),
             ("seconds", self.seconds.to_string()),
             ("loops", self.loops.to_string()),
+            ("h", self.h.to_string()),
         ]
     }
 
@@ -99,6 +102,7 @@ impl Meta {
             "state" => self.state = value,
             "seconds" => self.seconds = value.parse().unwrap_or(0.0),
             "loops" => self.loops = value == "true",
+            "h" => self.h = value == "true",
             // A key of a later version.
             _ => {}
         }
