@@ -14,7 +14,8 @@
 
 use crate::camera::RightDrag;
 use crate::design::Overlays;
-use crate::modes::{actions, pipeline_missing, Pipeline, MODES, PIPELINES, TOOLS};
+use crate::keymap::Action;
+use crate::modes::{actions, pipeline_missing, Pipeline, LATER, MODES, PIPELINES, TOOLS};
 use crate::panels::{dragged_over, dropped, DragCard};
 use crate::state::{Command, Look, Rail, State};
 use crate::theme::Theme;
@@ -37,8 +38,13 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     ui.painter().rect_filled(full, 0.0, st.backdrop);
     // A still picture stands in only until the scene has a character.
     let still = st.viewport_image.is_some() && !st.live.as_ref().is_some_and(|live| live.has_characters());
+    let scene = ui.interact(full, ui.id().with("scene"), Sense::click_and_drag());
+    // The pointer's work on the scene comes before the picture, so that
+    // the picture shows where this frame's drag put things.
+    let busy = crate::gizmo::interact(ui, st, &scene, full);
     if st.live.is_some() && !still {
         live_picture(ui, st, full);
+        crate::gizmo::draw(ui, k, st, full);
     } else if let Some(tex) = &st.viewport_image {
         let size = tex.size_vec2();
         let scale = (full.width() / size.x).min(full.height() / size.y);
@@ -50,8 +56,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
             Color32::WHITE,
         );
     }
-    let scene = ui.interact(full, ui.id().with("scene"), Sense::click_and_drag());
-    navigate(ui, st, &scene, full);
+    if !busy {
+        navigate(ui, st, &scene, full);
+    }
     // A card dragged from the Content panel and let go here joins the scene.
     if dragged_over::<DragCard>(ui, full) {
         ui.painter().rect_stroke(
@@ -67,7 +74,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     if (scene.clicked() || scene.drag_started()) && !st.palette_pinned {
         st.palette_open = false;
     }
-    keys(ui, st);
 
     if st.overlays_hidden {
         match header {
@@ -88,7 +94,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
                 );
                 let resp = ui
                     .interact(handle, ui.id().with("show-tools"), Sense::click())
-                    .on_hover_text("Show the viewport tools (`)");
+                    .on_hover_text(st.keys.tip("Show the viewport tools", Action::ViewportTools));
                 block(ui, k, handle.expand(2.0));
                 icon_cell(ui, k, handle, &resp, icon::EYE, false);
                 if resp.clicked() {
@@ -111,47 +117,19 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
         }
         camera_corner(ui, k, st, corner);
     }
+    // The shown inputs stack above the camera's corner.
+    let lift = if st.overlays_hidden || st.live.is_none() {
+        8.0
+    } else {
+        8.0 + k.d.row + 6.0 + 6.0
+    };
+    let mut at = full.left_bottom() + Vec2::new(8.0, -lift);
+    if k.d.overlays == Overlays::Docked && !st.overlays_hidden {
+        at.x += rail_width(k, st, RailShape::Stacked);
+    }
+    crate::keymap::inputs(ui, k, st, at);
     speed_meter(ui, k, st, full);
     ui.allocate_rect(full, Sense::hover());
-}
-
-/// The keys of the viewport: the backtick hides the overlays, the number
-/// keys pick a mode, and Unity's letters pick a transform tool.
-fn keys(ui: &Ui, st: &mut State) {
-    if ui.ctx().egui_wants_keyboard_input() {
-        return;
-    }
-    let pressed = |key: Key| ui.input(|i| i.key_pressed(key) && i.modifiers.is_none());
-    if pressed(Key::Backtick) {
-        st.overlays_hidden = !st.overlays_hidden;
-    }
-    for (i, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6]
-        .into_iter()
-        .enumerate()
-    {
-        if pressed(key) {
-            st.pick_mode(i);
-        }
-    }
-    // F focuses the camera on the selection and frames it; Home goes back
-    // to the starting view.
-    if pressed(Key::F) {
-        focus_selection(st);
-    }
-    if pressed(Key::Home) {
-        if let Some(live) = st.live.as_mut() {
-            live.cam.reset();
-        }
-    }
-    // While the right button is held these keys fly the camera instead.
-    if ui.input(|i| i.pointer.secondary_down()) {
-        return;
-    }
-    for (i, key) in [Key::Q, Key::W, Key::E, Key::R, Key::T].into_iter().enumerate() {
-        if pressed(key) {
-            st.tool = i + 1;
-        }
-    }
 }
 
 /// The dark see-through surface of bars lying on the picture.
@@ -258,6 +236,28 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     );
     set_block(ui, k, slot, view);
 
+    // The transform options, in a block beside the strip while a
+    // transform tool is the active one.
+    if crate::gizmo::has_options(st) {
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let area = Rect::from_min_max(
+            Pos2::new(strip.right() + m + 4.0, top),
+            Pos2::new(view.left() - m, top + h),
+        );
+        let mut row = ui.new_child(
+            UiBuilder::new()
+                .max_rect(area)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        row.spacing_mut().item_spacing.x = 2.0;
+        crate::gizmo::options(&mut row, k, st);
+        let options = Rect::from_min_max(
+            Pos2::new(strip.right() + m, top),
+            Pos2::new(row.min_rect().right() + 4.0, top + h),
+        );
+        set_block(ui, k, slot, options);
+    }
+
     // The selection bar, centred when there is room for it.
     if selection && st.selection().is_some() {
         let id = ui.id().with("context-width");
@@ -284,7 +284,7 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
         Pos2::new(full.left() + m, strip.bottom() + m),
         Vec2::new(
             rail_width(k, st, shape),
-            MODES.len() as f32 * rail_cell(k, st, shape) + 22.0,
+            (MODES.len() + LATER.len()) as f32 * rail_cell(k, st, shape) + LATER_GAP + 22.0,
         ),
     );
     block(ui, k, rail_rect);
@@ -493,7 +493,7 @@ fn clothes_state_name(state: u8) -> &'static str {
     }
 }
 
-/// Camera, shading and snapping, then the two buttons that clear the view.
+/// Camera, shading and the grid, then the two buttons that clear the view.
 /// Laid out from the right.
 fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     let glyph = if st.maximised {
@@ -502,24 +502,25 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
         icon::CORNERS_OUT
     };
     if icon_button(ui, k, glyph, st.maximised)
-        .on_hover_text("Give the viewport the whole window (Shift+Space)")
+        .on_hover_text(st.keys.tip("Give the viewport the whole window", Action::Maximise))
         .clicked()
     {
         st.maximised = !st.maximised;
     }
     if icon_button(ui, k, icon::EYE_SLASH, st.overlays_hidden)
-        .on_hover_text("Hide or show the viewport tools (`)")
+        .on_hover_text(st.keys.tip("Hide or show the viewport tools", Action::ViewportTools))
         .clicked()
     {
         st.overlays_hidden = !st.overlays_hidden;
     }
-    bar_divider(ui, k);
-    if flat_button(ui, k, Some(icon::MAGNET), "Snap", false, st.snap)
-        .on_hover_text("Snap while moving, rotating and scaling")
+    if icon_button(ui, k, icon::KEYBOARD, st.settings.show_inputs)
+        .on_hover_text(st.keys.tip("Show inputs", Action::ShowInputs))
         .clicked()
     {
-        st.snap = !st.snap;
+        st.act(Action::ShowInputs, ui.ctx());
     }
+    bar_divider(ui, k);
+    crate::gizmo::grid_button(ui, k, st);
     for (g, text, options) in [
         (icon::SUN, "Lit", ["Lit", "Unlit", "Wireframe"]),
         (icon::CUBE_FOCUS, "Perspective", ["Perspective", "Front", "Side"]),
@@ -571,6 +572,9 @@ fn rail_cell(k: &Look, st: &State, shape: RailShape) -> f32 {
     }
 }
 
+/// The room between the modes and the ones to come.
+const LATER_GAP: f32 = 5.0;
+
 /// The named modes in `rect`, with the chevron that shrinks the rail to
 /// icons at its bottom. The caller paints what lies behind.
 pub fn rail(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect, shape: RailShape) {
@@ -583,7 +587,8 @@ pub fn rail(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect, shape: RailShape)
         );
         let mut resp = ui.interact(cell, ui.id().with(("mode", i)), Sense::click());
         if !named {
-            resp = resp.on_hover_text(format!("{} mode ({})", mode.name, i + 1));
+            let tip = format!("{} mode", mode.name);
+            resp = resp.on_hover_text(st.keys.tip(&tip, Action::Mode(i as u8)));
         }
         if resp.clicked() {
             st.pick_mode(i);
@@ -657,6 +662,49 @@ pub fn rail(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect, shape: RailShape)
                 widgets::label(p, k, Pos2::new(cell.left() + 30.0, cell.center().y), mode.name, color);
             }
             (RailShape::Rows, false) => glyph(p, k, cell.center(), mode.glyph, 16.0, tint),
+        }
+    }
+
+    // The modes to come, greyed, below a hairline.
+    let top = rect.top() + MODES.len() as f32 * cell_h;
+    hair_h(
+        ui.painter(),
+        rect.left() + 6.0,
+        rect.right() - 6.0,
+        top + (LATER_GAP / 2.0).floor(),
+        Theme::glass(k.t.hover, 90),
+    );
+    for (i, (g, name)) in LATER.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(rect.left(), top + LATER_GAP + i as f32 * cell_h),
+            Vec2::new(rect.width(), cell_h),
+        );
+        let tip = if named {
+            "Not available yet".to_owned()
+        } else {
+            format!("{name} mode, not available yet")
+        };
+        ui.interact(cell, ui.id().with(("later", i)), Sense::hover())
+            .on_hover_text(tip);
+        let faint = Theme::glass(k.t.text_dim, 130);
+        let p = ui.painter();
+        match (shape, named) {
+            (RailShape::Stacked, true) => {
+                glyph(p, k, Pos2::new(cell.center().x, cell.top() + 20.0), g, 20.0, faint);
+                p.text(
+                    Pos2::new(cell.center().x, cell.top() + 39.0),
+                    Align2::CENTER_CENTER,
+                    *name,
+                    k.small(),
+                    faint,
+                );
+            }
+            (RailShape::Stacked, false) => glyph(p, k, cell.center(), g, 20.0, faint),
+            (RailShape::Rows, true) => {
+                glyph(p, k, Pos2::new(cell.left() + 15.0, cell.center().y), g, 16.0, faint);
+                widgets::label(p, k, Pos2::new(cell.left() + 30.0, cell.center().y), name, faint);
+            }
+            (RailShape::Rows, false) => glyph(p, k, cell.center(), g, 16.0, faint),
         }
     }
 
@@ -804,7 +852,7 @@ fn pipeline_row(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, pipelin
 
 /// Focuses the camera on the selected object and frames it, when the
 /// object is something the viewport draws.
-fn focus_selection(st: &mut State) {
+pub fn focus_selection(st: &mut State) {
     let Some(live) = st.live.as_mut() else { return };
     if let Some(focus) = st.doc.selected.and_then(|id| live.subject(id)) {
         live.cam.focus_on(focus);
@@ -843,8 +891,14 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
             "The camera is focused on the {} {name}: it orbits around it. Click to let go",
             kind.label().to_lowercase()
         ),
-        (None, Some(_)) => "The camera is free. Click or press F to focus on the selection".to_owned(),
-        (None, None) => "The camera is free. Select a character and press F to focus on it".to_owned(),
+        (None, Some(_)) => format!(
+            "The camera is free. Click or press {} to focus on the selection",
+            st.keys.text(Action::Focus)
+        ),
+        (None, None) => format!(
+            "The camera is free. Select a character and press {} to focus on it",
+            st.keys.text(Action::Focus)
+        ),
     };
     let resp = ui
         .interact(cell, ui.id().with("camera-focus"), Sense::click())
@@ -885,7 +939,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     if moved {
         let resp = ui
             .interact(reset, ui.id().with("camera-reset"), Sense::click())
-            .on_hover_text("Reset the view to the starting framing (Home)");
+            .on_hover_text(st.keys.tip("Reset the view to the starting framing", Action::ResetView));
         let p = ui.painter();
         hair_v(
             p,
@@ -1019,9 +1073,15 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
     block(ui, k, rect);
     for (i, (g, name, key)) in TOOLS.iter().enumerate() {
         let r = Rect::from_min_size(origin + step * i as f32, Vec2::splat(cell));
+        // The tool's key; the View tool is also held with Alt.
+        let tip = match st.keys.text(Action::Tool(i as u8)) {
+            keys if keys.is_empty() && key.is_empty() => (*name).to_owned(),
+            keys if keys.is_empty() => format!("{name} ({key})"),
+            keys => format!("{name} ({keys})"),
+        };
         let resp = ui
             .interact(r, ui.id().with(("tool-strip", i)), Sense::click())
-            .on_hover_text(format!("{name} ({key})"));
+            .on_hover_text(tip);
         if resp.clicked() {
             st.tool = i;
         }

@@ -478,14 +478,20 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
 
                 let x0 = rect.left() + if k.d.tree == Tree::Columns { eye_w + 4.0 } else { 6.0 };
-                if k.d.tree == Tree::Guides && !selected {
-                    for level in 1..row.depth {
+                if k.d.tree == Tree::Guides {
+                    // A line down from each object this one lies in.
+                    let line = if selected {
+                        Color32::from_white_alpha(50)
+                    } else {
+                        t.border
+                    };
+                    for level in 1..=row.depth {
                         hair_v(
                             &p,
-                            x0 + level as f32 * indent - 9.0,
+                            (x0 + level as f32 * indent - 9.0).floor(),
                             rect.top(),
                             rect.bottom(),
-                            t.header,
+                            line,
                         );
                     }
                 }
@@ -659,13 +665,15 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// The context menu of an object in the Outliner. Returns what was chosen.
 fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> {
+    use crate::keymap::Action;
     use widgets::menu_item;
+    let key = |action: Action| st.keys.text(action);
     let mut command = None;
     let scene = st.doc.scene();
     let folder = row.kind == Kind::Folder;
     let character = row.kind == Kind::Character;
     let inside = row.id.and_then(|id| scene.get(id)).is_some_and(|o| o.parent.is_some());
-    if menu_item(ui, k, icon::CROSSHAIR, "Focus", "F", !folder) {
+    if menu_item(ui, k, icon::CROSSHAIR, "Focus", &key(Action::Focus), !folder) {
         command = Some(Command::Focus);
     }
     if character {
@@ -676,16 +684,16 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
         });
     }
     ui.separator();
-    if menu_item(ui, k, icon::PENCIL_SIMPLE, "Rename", "F2", true) {
+    if menu_item(ui, k, icon::PENCIL_SIMPLE, "Rename", &key(Action::Rename), true) {
         command = Some(Command::Rename);
     }
-    if menu_item(ui, k, icon::COPY, "Duplicate", "Ctrl+D", true) {
+    if menu_item(ui, k, icon::COPY, "Duplicate", &key(Action::Duplicate), true) {
         command = Some(Command::Duplicate);
     }
-    if menu_item(ui, k, icon::COPY, "Copy", "Ctrl+C", true) {
+    if menu_item(ui, k, icon::COPY, "Copy", &key(Action::Copy), true) {
         command = Some(Command::Copy);
     }
-    if menu_item(ui, k, icon::SCISSORS, "Cut", "Ctrl+X", true) {
+    if menu_item(ui, k, icon::SCISSORS, "Cut", &key(Action::Cut), true) {
         command = Some(Command::Cut);
     }
     if menu_item(
@@ -693,27 +701,55 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
         k,
         icon::CLIPBOARD,
         "Paste",
-        "Ctrl+V",
+        &key(Action::Paste),
         !st.scene_clipboard.is_empty(),
     ) {
         command = Some(Command::Paste);
     }
     ui.separator();
     let eye = if row.visible { icon::EYE_SLASH } else { icon::EYE };
-    if menu_item(ui, k, eye, if row.visible { "Hide" } else { "Show" }, "H", true) {
+    if menu_item(
+        ui,
+        k,
+        eye,
+        if row.visible { "Hide" } else { "Show" },
+        &key(Action::ToggleHidden),
+        true,
+    ) {
         command = Some(Command::ToggleHidden);
     }
-    if menu_item(ui, k, icon::SELECTION_ALL, "Select children", "", folder && row.parent) {
+    if menu_item(
+        ui,
+        k,
+        icon::SELECTION_ALL,
+        "Select children",
+        &key(Action::SelectChildren),
+        folder && row.parent,
+    ) {
         command = Some(Command::SelectChildren);
     }
-    if menu_item(ui, k, icon::FOLDER_SIMPLE_PLUS, "Add child folder", "", folder) {
+    if menu_item(
+        ui,
+        k,
+        icon::FOLDER_SIMPLE_PLUS,
+        "Add child folder",
+        &key(Action::NewFolder),
+        folder,
+    ) {
         command = Some(Command::AddChildFolder);
     }
-    if menu_item(ui, k, icon::ARROW_BEND_LEFT_UP, "Unparent", "", inside) {
+    if menu_item(
+        ui,
+        k,
+        icon::ARROW_BEND_LEFT_UP,
+        "Unparent",
+        &key(Action::Unparent),
+        inside,
+    ) {
         command = Some(Command::Unparent);
     }
     ui.separator();
-    if menu_item(ui, k, icon::TRASH, "Delete", "Del", true) {
+    if menu_item(ui, k, icon::TRASH, "Delete", &key(Action::Delete), true) {
         command = Some(Command::Delete);
     }
     command
@@ -721,7 +757,9 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
 
 /// The context menu of the scene's own row.
 fn scene_menu(ui: &mut Ui, k: &Look, st: &State) -> Option<Command> {
+    use crate::keymap::Action;
     use widgets::menu_item;
+    let key = |action: Action| st.keys.text(action);
     let mut command = None;
     if menu_item(ui, k, icon::FOLDER_SIMPLE_PLUS, "Add folder", "", true) {
         command = Some(Command::AddChildFolder);
@@ -740,7 +778,7 @@ fn scene_menu(ui: &mut Ui, k: &Look, st: &State) -> Option<Command> {
         k,
         icon::CLIPBOARD,
         "Paste",
-        "Ctrl+V",
+        &key(Action::Paste),
         !st.scene_clipboard.is_empty(),
     ) {
         command = Some(Command::Paste);

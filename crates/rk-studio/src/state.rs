@@ -293,6 +293,8 @@ pub struct State {
     /// Index into `modes::TOOLS`.
     pub tool: usize,
     pub snap: bool,
+    /// Selecting and the transform gizmos in the viewport.
+    pub gizmo: crate::gizmo::Gizmos,
     /// What the play, pause and stop buttons set: whether the scene's
     /// time runs. Animations and physics both go by it.
     pub playback: Playback,
@@ -336,6 +338,20 @@ pub struct State {
     /// Whether the window waits for the display, as chosen when it opened.
     pub vsync_at_start: bool,
     pub preferences_open: bool,
+    /// The keys of every action: the defaults with the user's changes.
+    pub keys: crate::keymap::Keymap,
+    pub shortcuts_open: bool,
+    pub shortcuts_search: String,
+    /// The action and the place the Keyboard shortcuts window waits for
+    /// keys for.
+    pub key_capture: Option<(crate::keymap::Action, usize)>,
+    /// The inputs shown in the viewport's corner.
+    pub inputs: Vec<crate::keymap::Input>,
+    /// The settings changed and wait to be written.
+    pub settings_changed: bool,
+    /// The folders folded away in the Content panel's tree; the project's
+    /// own is the empty path.
+    pub content_folded: HashSet<String>,
     /// Seconds per frame, smoothed, for the status bar.
     pub frame_time: f32,
 }
@@ -421,6 +437,7 @@ impl State {
             maximised: false,
             tool: 0,
             snap: true,
+            gizmo: Default::default(),
             playback: Playback::Stopped,
             clock: 0.0,
             sections: [
@@ -444,6 +461,13 @@ impl State {
             settings: Default::default(),
             vsync_at_start: true,
             preferences_open: false,
+            keys: Default::default(),
+            shortcuts_open: false,
+            shortcuts_search: String::new(),
+            key_capture: None,
+            inputs: Vec::new(),
+            settings_changed: false,
+            content_folded: HashSet::new(),
             frame_time: 0.0,
         }
     }

@@ -53,11 +53,6 @@ impl Transform {
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(Vec3::from(self.scale), self.quat(), Vec3::from(self.position))
     }
-
-    /// The largest of the three scales, for sizes that must stay one number.
-    pub fn largest_scale(&self) -> f32 {
-        self.scale.iter().fold(0.0f32, |a, s| a.max(s.abs()))
-    }
 }
 
 /// An animation on a character and how it is played. Some animations
@@ -307,6 +302,28 @@ impl Scene {
 
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.iter().find(|o| o.id == id)
+    }
+
+    /// The matrix that carries an object's own transform into the scene:
+    /// those of the folders it sits in, the outermost first.
+    pub fn parent_world(&self, id: ObjectId) -> Mat4 {
+        let mut matrix = Mat4::IDENTITY;
+        let mut at = self.get(id).and_then(|o| o.parent);
+        // A tree deeper than the scene has objects is a loop in the file.
+        for _ in 0..self.objects.len() {
+            let Some(parent) = at.and_then(|id| self.get(id)) else {
+                break;
+            };
+            matrix = parent.transform.matrix() * matrix;
+            at = parent.parent;
+        }
+        matrix
+    }
+
+    /// Where an object is in the scene, its folders counted in.
+    pub fn world(&self, id: ObjectId) -> Mat4 {
+        let own = self.get(id).map_or(Mat4::IDENTITY, |o| o.transform.matrix());
+        self.parent_world(id) * own
     }
 
     pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
@@ -980,6 +997,17 @@ impl Document {
     pub fn end_gesture(&mut self) {
         self.gesture = false;
     }
+
+    /// A drag was called off: the scene goes back to how it was before
+    /// the drag, and the drag leaves no step in the history.
+    pub fn cancel_gesture(&mut self) {
+        if self.gesture {
+            if let Some(snapshot) = self.undo.pop() {
+                self.restore(snapshot);
+            }
+        }
+        self.gesture = false;
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1255,40 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_drag_leaves_no_step() {
+        let (mut doc, [_, anna, ..]) = cast();
+        let start = doc.scene().clone();
+        let before = (doc.undo.len(), doc.redo.len());
+        for x in [0.1, 0.2] {
+            let mut edited = doc.scene().get(anna).unwrap().clone();
+            edited.transform.position[0] = x;
+            assert!(doc.edit(edited, true));
+        }
+        doc.cancel_gesture();
+        assert_eq!(doc.scene().objects(), start.objects());
+        assert_eq!((doc.undo.len(), doc.redo.len()), before);
+        // With no drag under way there is nothing to call off.
+        doc.cancel_gesture();
+        assert_eq!((doc.undo.len(), doc.redo.len()), before);
+    }
+
+    #[test]
+    fn an_object_is_where_its_folders_put_it() {
+        let (mut doc, [cast, anna, ..]) = cast();
+        let mut folder = doc.scene().get(cast).unwrap().clone();
+        folder.transform.position = [2.0, 0.0, 0.0];
+        folder.transform.rotation = [0.0, 90.0, 0.0];
+        doc.edit(folder, false);
+        let mut inside = doc.scene().get(anna).unwrap().clone();
+        inside.transform.position = [0.0, 0.0, 1.0];
+        doc.edit(inside, false);
+        // The folder's quarter turn around Y carries +Z to +X.
+        let place = doc.scene().world(anna).w_axis.truncate();
+        assert!((place - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-5, "{place:?}");
+        assert_eq!(doc.scene().parent_world(cast), Mat4::IDENTITY);
+    }
+
+    #[test]
     fn one_drag_is_one_step() {
         let (mut doc, [_, anna, ..]) = cast();
         let start = doc.scene().clone();
@@ -1299,7 +1361,6 @@ mod tests {
         // Turned 90 degrees around Y, forward (+Z) points along +X.
         let p = t.matrix().transform_point3(Vec3::Z);
         assert!((p - Vec3::new(3.0, 2.0, 3.0)).length() < 1e-5, "{p:?}");
-        assert_eq!(t.largest_scale(), 2.0);
     }
 
     #[test]

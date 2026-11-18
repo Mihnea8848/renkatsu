@@ -17,6 +17,9 @@ mod content;
 mod content_panel;
 mod design;
 mod dialogs;
+mod gizmo;
+mod gizmo_pass;
+mod keymap;
 mod kinds;
 mod library;
 mod live;
@@ -31,6 +34,7 @@ mod properties;
 mod scene;
 mod selector;
 mod settings;
+mod shortcuts;
 mod state;
 mod theme;
 mod viewport;
@@ -122,7 +126,8 @@ struct Cli {
     /// Click at X,Y before the screenshot, to picture menus and states.
     /// May be given several times; the clicks happen in order. A point
     /// that starts with `r`, as in `r120,48`, is clicked with the right
-    /// button, and one that starts with `d` is double clicked.
+    /// button, one that starts with `d` is double clicked, and one that
+    /// starts with `c` is clicked with Ctrl held.
     #[arg(long, value_parser = parse_click)]
     click: Vec<Click>,
     /// Leave the pointer at X,Y for the screenshot, to picture hover.
@@ -168,27 +173,63 @@ struct Cli {
     /// list (1 is Animations).
     #[arg(long, hide = true)]
     folder: Option<usize>,
+    /// The transform tool to start with, by name: view, select, move,
+    /// rotate, scale or pose.
+    #[arg(long, hide = true)]
+    tool: Option<String>,
+    /// The axes the gizmos follow at the start.
+    #[arg(long, hide = true, value_enum, default_value = "global")]
+    gizmo_space: gizmo::Space,
+    /// The point the gizmos sit at at the start.
+    #[arg(long, hide = true, value_enum, default_value = "origin")]
+    gizmo_pivot: gizmo::Pivot,
+    /// Press the left button at X1,Y1 after the clicks, drag to X2,Y2 and
+    /// hold it there for the screenshot, as X1,Y1:X2,Y2: to picture a
+    /// gizmo being dragged or a selection box.
+    #[arg(long, hide = true, value_parser = parse_drag)]
+    drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// Press these keys after the clicks, one a frame, each as the
+    /// settings write a key: `ctrl+z`.
+    #[arg(long, hide = true)]
+    key: Vec<String>,
+    /// Start with the inputs shown in the viewport's corner.
+    #[arg(long, hide = true)]
+    show_inputs: bool,
+    /// Start with the Keyboard shortcuts window open, to picture it.
+    #[arg(long, hide = true)]
+    shortcuts: bool,
 }
 
-/// A scripted click: where, with which button, and whether twice.
+/// A scripted click: where, with which button, whether twice, and
+/// whether with Ctrl held.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Click {
     at: egui::Pos2,
     right: bool,
     double: bool,
+    ctrl: bool,
 }
 
 fn parse_click(text: &str) -> Result<Click, String> {
-    let (right, double, point) = match text.as_bytes().first() {
-        Some(b'r') => (true, false, &text[1..]),
-        Some(b'd') => (false, true, &text[1..]),
-        _ => (false, false, text),
+    let (right, double, ctrl, point) = match text.as_bytes().first() {
+        Some(b'r') => (true, false, false, &text[1..]),
+        Some(b'd') => (false, true, false, &text[1..]),
+        Some(b'c') => (false, false, true, &text[1..]),
+        _ => (false, false, false, text),
     };
     Ok(Click {
         at: parse_point(point)?,
         right,
         double,
+        ctrl,
     })
+}
+
+fn parse_drag(text: &str) -> Result<(egui::Pos2, egui::Pos2), String> {
+    let (from, to) = text
+        .split_once(':')
+        .ok_or_else(|| "a drag must look like 120,48:200,90".to_owned())?;
+    Ok((parse_point(from)?, parse_point(to)?))
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -211,6 +252,9 @@ struct Studio {
     type_text: Option<String>,
     type_after: Option<usize>,
     hover: Option<egui::Pos2>,
+    drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// Keys pressed once the clicks are done, one a frame.
+    keys: Vec<keymap::Chord>,
     frames: u32,
     /// The window title as last given to the desktop.
     title: String,
@@ -327,6 +371,9 @@ impl Studio {
         let (mut state, fresh, temporary) = starting_project(cli, &settings)?;
         state.vsync_at_start = settings.frame_rate.vsync();
         state.settings = settings;
+        state.keys = keymap::Keymap::with(&state.settings.keys);
+        state.settings.show_inputs |= cli.show_inputs;
+        state.shortcuts_open = cli.shortcuts;
         state.scripted = cli.screenshot.is_some();
         if !state.scripted && state.settings.check_updates {
             state.check_for_update(&cc.egui_ctx);
@@ -418,6 +465,14 @@ impl Studio {
                 )
             }
         };
+        if let Some(name) = cli.tool.as_deref() {
+            state.tool = modes::TOOLS
+                .iter()
+                .position(|(_, tool, _)| tool.eq_ignore_ascii_case(name))
+                .with_context(|| format!("unknown tool {name:?}"))?;
+        }
+        state.gizmo.space = cli.gizmo_space;
+        state.gizmo.pivot = cli.gizmo_pivot;
         // What the command line put in the scene is where the history starts.
         if !cli.import_animation.is_empty() {
             let game = state.games.get(&state.project.mods_dir())?;
@@ -534,6 +589,12 @@ impl Studio {
             type_text: cli.type_text.clone(),
             type_after: cli.type_after,
             hover: cli.hover,
+            drag: cli.drag,
+            keys: cli
+                .key
+                .iter()
+                .map(|k| keymap::Chord::parse(k).with_context(|| format!("{k} is not a key")))
+                .collect::<Result<_>>()?,
             frames: 0,
             title: String::new(),
             closing: false,
@@ -637,8 +698,7 @@ impl eframe::App for Studio {
             self.entering = (!selecting).then_some(0.0);
         }
         if !selecting {
-            self.file_keys(ctx);
-            self.scene_keys(ctx);
+            keymap::handle(ctx, &mut self.state);
         }
         let t = k.t;
 
@@ -660,6 +720,7 @@ impl eframe::App for Studio {
         }
 
         preferences::show(ctx, &k, &mut self.state);
+        shortcuts::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
         packages::browser(ctx, &k, &mut self.state);
         anim_import::show(ctx, &k, &mut self.state);
@@ -680,6 +741,16 @@ impl eframe::App for Studio {
         // Frames come as often as the display shows them unless the user
         // chose to save power, when egui draws only on input.
         self.state.poll_update();
+        // Changed settings are written once the pointer lets go, so that a
+        // value being dragged is written once.
+        if self.state.settings_changed && !ctx.input(|i| i.pointer.any_down()) {
+            self.state.settings_changed = false;
+            if !self.state.scripted {
+                if let Err(e) = self.state.settings.save() {
+                    eprintln!("could not save the settings: {e:#}");
+                }
+            }
+        }
         if self.state.settings.frame_rate.continuous() {
             ctx.request_repaint();
         }
@@ -689,7 +760,7 @@ impl eframe::App for Studio {
 
         self.frames += 1;
         if let Some(path) = self.screenshot.clone() {
-            if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES {
+            if self.frames == 5 + (self.clicks.len() as u32 + 1) * CLICK_FRAMES + self.keys.len() as u32 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             }
             let shot = ctx.input(|i| {
@@ -714,7 +785,6 @@ impl Studio {
     /// the docked panels.
     fn editor(&mut self, ui: &mut egui::Ui, k: &Look) {
         let k = *k;
-        let ctx = &ui.ctx().clone();
         let t = k.t;
         let bar = |id: &'static str, height: f32| {
             let panel = if id == "status" {
@@ -744,11 +814,6 @@ impl Studio {
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(t.well))
                 .show(ui, |ui| chrome::window_rail(ui, &k, &mut self.state));
-        }
-
-        // Shift with Space gives the viewport the whole window, as in Unity.
-        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Space)) {
-            self.state.maximised = !self.state.maximised;
         }
 
         egui::CentralPanel::default()
@@ -820,81 +885,6 @@ impl Studio {
         }
     }
 
-    /// The keys of the File menu. They work while a text field has the
-    /// keyboard too, but not while a dialog is open.
-    fn file_keys(&mut self, ctx: &egui::Context) {
-        use egui::{Key, Modifiers};
-        if self.state.modal.is_some() {
-            return;
-        }
-        let keys = [
-            (Modifiers::COMMAND | Modifiers::SHIFT, Key::S, Command::SaveAs),
-            (Modifiers::COMMAND, Key::S, Command::Save),
-            (Modifiers::COMMAND, Key::N, Command::NewProject),
-            (Modifiers::COMMAND, Key::O, Command::OpenProject(None)),
-            (Modifiers::COMMAND, Key::I, Command::ImportCard),
-            (Modifiers::COMMAND, Key::Q, Command::Quit),
-        ];
-        for (modifiers, key, command) in keys {
-            if ctx.input_mut(|i| i.consume_key(modifiers, key)) {
-                self.state.ask(command, ctx);
-            }
-        }
-    }
-
-    /// The keys that act on the scene: Unity's, where it has them.
-    fn scene_keys(&mut self, ctx: &egui::Context) {
-        use egui::{Key, Modifiers};
-        if ctx.egui_wants_keyboard_input() {
-            return;
-        }
-        let redo = Modifiers::COMMAND | Modifiers::SHIFT;
-        let keys = [
-            (redo, Key::Z, Command::Redo),
-            (Modifiers::COMMAND, Key::Y, Command::Redo),
-            (Modifiers::COMMAND, Key::Z, Command::Undo),
-            (Modifiers::COMMAND, Key::D, Command::Duplicate),
-            (Modifiers::NONE, Key::Delete, Command::Delete),
-            (Modifiers::NONE, Key::H, Command::ToggleHidden),
-            (Modifiers::NONE, Key::F2, Command::Rename),
-        ];
-        // Copy, cut and paste reach the window as events of their own on
-        // some systems and as keys on others; either does it once.
-        let clipboard = [
-            (Key::C, Command::Copy),
-            (Key::X, Command::Cut),
-            (Key::V, Command::Paste),
-        ];
-        for (key, command) in clipboard {
-            let event = ctx.input(|i| {
-                i.events.iter().any(|e| {
-                    matches!(
-                        (e, key),
-                        (egui::Event::Copy, Key::C) | (egui::Event::Cut, Key::X) | (egui::Event::Paste(_), Key::V)
-                    )
-                })
-            });
-            let pressed = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key));
-            if event || pressed {
-                if command != Command::Paste {
-                    // The system's clipboard gets the name, so that a paste
-                    // has something to bring back.
-                    if let Some(object) = self.state.doc.selection() {
-                        ctx.copy_text(object.name.clone());
-                    }
-                }
-                self.state.run(command);
-            }
-        }
-        for (modifiers, key, command) in keys {
-            // Plain letters must not fire while Ctrl or Alt is held.
-            let plain = modifiers != Modifiers::NONE || ctx.input(|i| i.modifiers.is_none());
-            if plain && ctx.input_mut(|i| i.consume_key(modifiers, key)) {
-                self.state.run(command);
-            }
-        }
-    }
-
     /// Feeds the scripted clicks and the resting pointer of `--click` and
     /// `--hover` to egui as if they came from the mouse.
     fn scripted_pointer(&self, input: &mut egui::RawInput) {
@@ -934,12 +924,18 @@ impl Studio {
                 } else {
                     egui::PointerButton::Primary
                 };
+                let modifiers = if click.ctrl {
+                    egui::Modifiers::COMMAND | egui::Modifiers::CTRL
+                } else {
+                    egui::Modifiers::NONE
+                };
+                input.events.push(egui::Event::ModifiersChanged(modifiers));
                 let mut press = |pressed: bool| {
                     input.events.push(egui::Event::PointerButton {
                         pos,
                         button,
                         pressed,
-                        modifiers: egui::Modifiers::NONE,
+                        modifiers,
                     });
                 };
                 if phase == 1 || phase == 2 {
@@ -952,6 +948,41 @@ impl Studio {
                 }
                 return;
             }
+        }
+        // The scripted keys, once the clicks are done: one a frame.
+        if index >= self.clicks.len() && self.frames >= 2 {
+            let at = (step - self.clicks.len() as u32 * CLICK_FRAMES) as usize;
+            if let Some(chord) = at.checked_sub(1).and_then(|n| self.keys.get(n)) {
+                input.events.push(egui::Event::Key {
+                    key: chord.key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: chord.modifiers(),
+                });
+            }
+        }
+        // The scripted drag, once the clicks are done: a press, a first
+        // stretch of the way, then the rest, and the button stays down.
+        if let (Some((from, to)), true) = (self.drag, index >= self.clicks.len() && self.frames >= 2) {
+            let step = step - self.clicks.len() as u32 * CLICK_FRAMES;
+            let pos = match step {
+                0 | 1 => from,
+                2 => from + (to - from) * 0.3,
+                _ => to,
+            };
+            // A Ctrl click before the drag does not reach into it.
+            input.events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            input.events.push(egui::Event::PointerMoved(pos));
+            if step == 1 {
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            return;
         }
         if let Some(pos) = self.hover.or(self.clicks.last().map(|c| c.at)) {
             input.events.push(egui::Event::PointerMoved(pos));

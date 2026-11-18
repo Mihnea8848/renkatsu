@@ -443,10 +443,12 @@ fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
     );
 }
 
-/// The tree at the left: the project, its folders and, under the open
-/// one, the folders the user made.
+/// How far each level of the tree is indented.
+const INDENT: f32 = 14.0;
+
+/// The tree at the left: the project, its folders and the folders the
+/// user made in them. A folder that holds folders folds away.
 fn folder_tree(ui: &mut Ui, k: &Look, st: &mut State, tree: Rect, open: &str, asks: &mut Asks) {
-    let t = &k.t;
     let mut side = ui.new_child(UiBuilder::new().max_rect(tree));
     side.set_clip_rect(tree.intersect(ui.clip_rect()));
     egui::ScrollArea::vertical()
@@ -455,83 +457,136 @@ fn folder_tree(ui: &mut Ui, k: &Look, st: &mut State, tree: Rect, open: &str, as
         .show(&mut side, |ui| {
             ui.add_space(4.0);
             // The project folder holds the others, as on disk.
-            let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::hover());
-            let p = ui.painter();
-            let x = row.left() + 10.0;
-            glyph(p, k, Pos2::new(x, row.center().y), icon::CARET_DOWN, 10.0, t.text_dim);
-            glyph(
-                p,
-                k,
-                Pos2::new(x + 14.0, row.center().y),
-                icon::FOLDER_OPEN,
-                15.0,
-                t.text_dim,
-            );
-            let clip = p.with_clip_rect(row.with_max_x(row.right() - 4.0));
-            label(
-                &clip,
-                k,
-                Pos2::new(x + 28.0, row.center().y),
-                &st.project.file.name,
-                t.text_bright,
-            );
-            let open_top = content::top(open).to_owned();
+            let name = st.project.file.name.clone();
+            folder_row(ui, k, st, "", &name, Kind::Folder, Some(open), asks);
+            if st.content_folded.contains("") {
+                return;
+            }
             for top in project::FOLDERS {
                 let (kind, _) = folder_kind(top);
-                folder_row(ui, k, st, top, 0, kind, open, asks);
-                if top != open_top {
-                    continue;
-                }
-                for folder in content::folders(&st.project, top) {
-                    let depth = folder.matches('/').count();
-                    folder_row(ui, k, st, &folder, depth, kind, open, asks);
+                let below = content::folders(&st.project, top);
+                folder_row(ui, k, st, top, top, kind, below.first().map(|_| open), asks);
+                // What lies in a folded folder is passed over.
+                let mut folded: Option<String> = st.content_folded.contains(top).then(|| top.to_owned());
+                for (i, folder) in below.iter().enumerate() {
+                    if folded.as_deref().is_some_and(|f| in_open(folder, f)) {
+                        continue;
+                    }
+                    let parent = below.get(i + 1).is_some_and(|next| content::parent(next) == folder);
+                    folder_row(
+                        ui,
+                        k,
+                        st,
+                        folder,
+                        content::leaf(folder),
+                        kind,
+                        parent.then_some(open),
+                        asks,
+                    );
+                    folded = st.content_folded.contains(folder).then(|| folder.clone());
                 }
             }
         });
 }
 
-/// One folder of the tree.
+/// One folder of the tree; the project's own is the empty path. `parent`
+/// is given, with the open folder, for a folder that holds folders.
 #[allow(clippy::too_many_arguments)]
-fn folder_row(ui: &mut Ui, k: &Look, st: &mut State, rel: &str, depth: usize, kind: Kind, open: &str, asks: &mut Asks) {
+fn folder_row(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    rel: &str,
+    name: &str,
+    kind: Kind,
+    parent: Option<&str>,
+    asks: &mut Asks,
+) {
     let t = &k.t;
+    let project = rel.is_empty();
+    let depth = if project { 0 } else { 1 + rel.matches('/').count() };
+    let open = st.subfolder.as_str() == rel;
     let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-    if resp.clicked() {
+    let caret_x = row.left() + 10.0 + depth as f32 * INDENT;
+    // The arrow that folds the folders inside away.
+    let fold = Rect::from_center_size(Pos2::new(caret_x, row.center().y), Vec2::new(INDENT, row.height()));
+    let fold_resp = parent.map(|_| ui.interact(fold, ui.id().with(("fold", rel)), Sense::click()));
+    let folded = st.content_folded.contains(rel);
+    if fold_resp.as_ref().is_some_and(|r| r.clicked()) || (project && resp.clicked()) {
+        if !st.content_folded.remove(rel) {
+            st.content_folded.insert(rel.to_owned());
+            // The open folder stays in sight.
+            if !project && parent.is_some_and(|open| in_open(open, rel) && open != rel) {
+                asks.open = Some(rel.to_owned());
+            }
+        }
+    } else if resp.clicked() && !project {
         asks.open = Some(rel.to_owned());
     }
     if resp.double_clicked() && content::changeable(rel) {
         asks.rename = Some(rel.to_owned());
     }
-    let on = open == rel;
     {
         let p = ui.painter();
-        if on {
+        if open {
             p.rect_filled(row, 0.0, t.control);
         } else if resp.hovered() {
             p.rect_filled(row, 0.0, t.row_hover);
         }
-        if on && depth > 0 {
+        if open && depth > 1 {
             p.rect_filled(
                 Rect::from_min_size(row.left_top(), Vec2::new(2.0, row.height())),
                 0.0,
                 kind.color(),
             );
         }
+        // A line down from each folder this one lies in.
+        for level in 0..depth {
+            let x = (row.left() + 10.0 + level as f32 * INDENT).floor();
+            hair_v(p, x, row.top(), row.bottom(), t.border);
+        }
+        if let Some(fold_resp) = &fold_resp {
+            let g = if folded { icon::CARET_RIGHT } else { icon::CARET_DOWN };
+            let color = if fold_resp.hovered() { t.text_bright } else { t.text_dim };
+            glyph(p, k, fold.center(), g, 10.0, color);
+        }
     }
-    let x = row.left() + 34.0 + depth as f32 * 14.0;
-    let g = if on { icon::FOLDER_OPEN } else { icon::FOLDER_SIMPLE };
-    let tint = if depth == 0 { kind.color() } else { Kind::Folder.color() };
+    let x = caret_x + INDENT;
+    let g = if open || (project && !folded) {
+        icon::FOLDER_OPEN
+    } else {
+        icon::FOLDER_SIMPLE
+    };
+    let tint = match depth {
+        0 => t.text_dim,
+        1 => kind.color(),
+        _ => Kind::Folder.color(),
+    };
     glyph(ui.painter(), k, Pos2::new(x, row.center().y), g, 15.0, tint);
     let name_rect = Rect::from_min_max(
         Pos2::new(x + 10.0, row.top() + 1.0),
         Pos2::new(row.right() - 4.0, row.bottom() - 1.0),
     );
-    if !renaming(ui, k, st, rel, name_rect, asks) {
-        let color = if on { t.text_bright } else { t.text };
+    if project || !renaming(ui, k, st, rel, name_rect, asks) {
+        let color = if open || project { t.text_bright } else { t.text };
         let clip = ui.painter().with_clip_rect(row.with_max_x(row.right() - 4.0));
-        label(&clip, k, Pos2::new(x + 14.0, row.center().y), content::leaf(rel), color);
+        label(&clip, k, Pos2::new(x + 14.0, row.center().y), name, color);
     }
-    drop_into(ui, k, row, rel, asks);
-    resp.context_menu(|ui| folder_menu(ui, k, st, rel, asks));
+    if !project {
+        drop_into(ui, k, row, rel, asks);
+        resp.context_menu(|ui| folder_menu(ui, k, st, rel, asks));
+    }
+}
+
+/// Whether a project folder holds nothing at all: no file and no folder.
+fn bare(st: &State, top: &str) -> bool {
+    content::folders(&st.project, top).is_empty() && content::files(&st.project, top).is_empty()
+}
+
+/// A line of text in the middle of an empty folder.
+fn centred(ui: &Ui, k: &Look, area: Rect, text: &str) {
+    ui.painter()
+        .text(area.center(), Align2::CENTER_CENTER, text, k.font(), k.t.text_dim);
 }
 
 /// A line of text at the top left of an empty folder.
@@ -564,14 +619,19 @@ fn empty_state(ui: &mut Ui, k: &Look, grid: Rect, title: &str, line: &str, ways:
         k.font(),
         t.text_dim,
     );
-    let size = Vec2::new(176.0, 30.0);
-    let left = Rect::from_min_size(Pos2::new(c.x - size.x - 5.0, c.y + 12.0), size);
-    let right = Rect::from_min_size(Pos2::new(c.x + 5.0, c.y + 12.0), size);
+    // Each button is as wide as what it holds, so that the icon and the
+    // text have the same room around them in both.
+    let width = |text: &str| (14.0 + 16.0 + 7.0 + widgets::text_width(ui, text, k.font()) + 14.0).ceil();
+    let (texts, gap) = (["Import from file", "Import from package"], 10.0);
+    let widths = texts.map(width);
+    let x = (c.x - (widths[0] + gap + widths[1]) / 2.0).round();
+    let left = Rect::from_min_size(Pos2::new(x, c.y + 12.0), Vec2::new(widths[0], 30.0));
+    let right = Rect::from_min_size(Pos2::new(left.right() + gap, c.y + 12.0), Vec2::new(widths[1], 30.0));
     let [file, package] = ways;
-    if crate::selector::icon_button(ui, k, left, Some(icon::FILE), "Import from file", false, true) {
+    if crate::selector::icon_button(ui, k, left, Some(icon::FILE), texts[0], false, true) {
         asks.commands.push(file);
     }
-    if crate::selector::icon_button(ui, k, right, Some(icon::PACKAGE), "Import from package", true, true) {
+    if crate::selector::icon_button(ui, k, right, Some(icon::PACKAGE), texts[1], true, true) {
         asks.commands.push(package);
     }
 }
@@ -594,20 +654,16 @@ fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &
         .collect();
     if cards.is_empty() && !search.is_empty() {
         note(ui, k, grid, "No character matches the search");
-    } else if cards.is_empty() && open != project::CHARACTERS {
-        note(
-            ui,
-            k,
-            grid,
-            "This folder has no characters. Drag cards onto it in the tree.",
-        );
+    } else if cards.is_empty() && !bare(st, project::CHARACTERS) {
+        centred(ui, k, grid, "This folder is empty");
+        return;
     } else if cards.is_empty() {
         empty_state(
             ui,
             k,
             grid,
             empty,
-            "Imported cards are copied into the project, with the mods they need.",
+            "Characters can be imported from a file or a package.",
             [Command::ImportCard, Command::ImportFromPackage],
             asks,
         );
@@ -748,18 +804,17 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
                 || item.category().to_lowercase().contains(&search))
         })
         .collect();
+    if here.is_empty() && !bare(st, project::ANIMATIONS) {
+        centred(ui, k, grid, "This folder is empty");
+        return;
+    }
     if here.is_empty() {
-        let text = if st.animations.items.is_empty() {
-            "This project has no animations yet"
-        } else {
-            "This folder has no animations yet"
-        };
         empty_state(
             ui,
             k,
             grid,
-            text,
-            "Imported animations are copied into the project, so it plays them anywhere.",
+            "This project has no animations yet",
+            "Animations can be imported from a file or a package.",
             [Command::ImportAnimationFile, Command::ImportAnimations],
             asks,
         );
@@ -924,6 +979,10 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
         .flat_map(|f| content::files(&st.project, f))
         .filter(|f| search.is_empty() || content::leaf(f).to_lowercase().contains(&search))
         .collect();
+    if found.is_empty() && search.is_empty() && !bare(st, content::top(open)) {
+        centred(ui, k, grid, "This folder is empty");
+        return;
+    }
     if found.is_empty() {
         note(
             ui,

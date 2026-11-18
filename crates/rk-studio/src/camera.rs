@@ -295,7 +295,10 @@ impl ViewCamera {
     /// The object `now` names moved or changed size: a view focused on it
     /// goes with it, and so does the starting framing, so that moving an
     /// object does not count as moving the camera.
-    pub fn follow(&mut self, now: Focus) {
+    ///
+    /// With `hold` the view itself stays where it is, as while the object
+    /// is dragged in the viewport, where it has to be seen to move.
+    pub fn follow(&mut self, now: Focus, hold: bool) {
         let carry = |orbit: &mut Orbit, focus: &mut Option<Focus>| {
             if let Some(was) = focus.filter(|f| f.object == now.object && *f != now) {
                 orbit.target += now.center - was.center;
@@ -305,12 +308,18 @@ impl ViewCamera {
                 *focus = Some(now);
             }
         };
-        // A glide under way ends where the object went.
-        if let Some(glide) = &mut self.glide {
-            let mut focus = self.focus;
-            carry(&mut glide.to, &mut focus);
+        if hold {
+            if self.focus.is_some_and(|f| f.object == now.object) {
+                self.focus = Some(now);
+            }
+        } else {
+            // A glide under way ends where the object went.
+            if let Some(glide) = &mut self.glide {
+                let mut focus = self.focus;
+                carry(&mut glide.to, &mut focus);
+            }
+            carry(&mut self.orbit, &mut self.focus);
         }
-        carry(&mut self.orbit, &mut self.focus);
         carry(&mut self.home.0, &mut self.home.1);
     }
 
@@ -504,7 +513,7 @@ mod tests {
         cam.orbit.pan(Vec2::new(50.0, 0.0), 500.0);
         cam.focus_on(focus);
         focus.center += Vec3::X;
-        cam.follow(focus);
+        cam.follow(focus, false);
         cam.advance(GLIDE);
         assert_eq!(cam.orbit.target, focus.center);
     }
@@ -633,6 +642,26 @@ mod tests {
     }
 
     #[test]
+    fn a_held_view_stays_while_its_object_is_dragged() {
+        let mut cam = focused();
+        let start = cam.orbit;
+        let moved = Focus {
+            object: ObjectId(2),
+            center: Vec3::new(1.5, 1.0, 0.0),
+            distance: 2.0,
+        };
+        cam.follow(moved, true);
+        // The view did not move, but it knows where its object went, and
+        // the way back frames the object where it is now.
+        assert_eq!(cam.orbit, start);
+        assert_eq!(cam.focus, Some(moved));
+        assert!(cam.moved());
+        cam.glide_time = 0.0;
+        cam.reset();
+        assert!((cam.orbit.target - (start.target + Vec3::new(1.5, 0.0, 0.0))).length() < 1e-5);
+    }
+
+    #[test]
     fn the_view_goes_with_the_focused_object() {
         let mut cam = focused();
         let start = cam.orbit;
@@ -641,7 +670,7 @@ mod tests {
             center: Vec3::new(1.5, 1.0, 0.0),
             distance: 4.0,
         };
-        cam.follow(moved);
+        cam.follow(moved, false);
         assert_eq!(cam.focus, Some(moved));
         assert!((cam.orbit.target - (start.target + Vec3::new(1.5, 0.0, 0.0))).length() < 1e-5);
         assert!((cam.orbit.distance - start.distance * 2.0).abs() < 1e-5);
@@ -654,16 +683,19 @@ mod tests {
             ..moved
         };
         let before = cam.clone();
-        cam.follow(other);
+        cam.follow(other, false);
         assert_eq!(cam, before);
 
         // A free camera stays where it is, but its way back follows.
         cam.release();
         let free = cam.orbit;
-        cam.follow(Focus {
-            center: Vec3::ZERO,
-            ..moved
-        });
+        cam.follow(
+            Focus {
+                center: Vec3::ZERO,
+                ..moved
+            },
+            false,
+        );
         assert_eq!(cam.orbit, free);
         cam.reset();
         assert_eq!(cam.focus.map(|f| f.center), Some(Vec3::ZERO));
