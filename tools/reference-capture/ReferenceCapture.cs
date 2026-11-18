@@ -435,6 +435,20 @@ namespace Renkatsu
             s.Append(", \"ambient_mode\": ").Append(Str(RenderSettings.ambientMode.ToString()));
             s.Append(", \"ambient_light\": ").Append(C(RenderSettings.ambientLight));
             s.Append(", \"ambient_intensity\": ").Append(F(RenderSettings.ambientIntensity));
+            // What shaders with Unity's own lighting read: the ambient probe
+            // (nine coefficients per colour channel) and the default
+            // reflection.
+            UnityEngine.Rendering.SphericalHarmonicsL2 probe = RenderSettings.ambientProbe;
+            s.Append(", \"ambient_probe\": [");
+            for (int ch = 0; ch < 3; ch++)
+                for (int k = 0; k < 9; k++)
+                    s.Append(ch + k > 0 ? ", " : "").Append(F(probe[ch, k]));
+            s.Append("]");
+            Cubemap reflection = RenderSettings.customReflection;
+            s.Append(", \"reflection_mode\": ").Append(Str(RenderSettings.defaultReflectionMode.ToString()));
+            s.Append(", \"reflection_intensity\": ").Append(F(RenderSettings.reflectionIntensity));
+            s.Append(", \"custom_reflection\": ").Append(Str(reflection != null ? reflection.name : ""));
+            s.Append(", \"skybox\": ").Append(Str(RenderSettings.skybox != null ? RenderSettings.skybox.name : ""));
             s.Append("},\n");
 
             s.Append("\"lights\": [");

@@ -263,9 +263,17 @@ pub struct State {
     /// The folder open in the Content panel, relative to the project: one
     /// of the project's folders or a folder the user made below one.
     pub subfolder: String,
+    /// The folders opened before and after the open one, for the mouse's
+    /// back and forward buttons.
+    pub folder_back: Vec<String>,
+    pub folder_forward: Vec<String>,
     /// The file or folder being renamed in the Content panel, with the
     /// text so far.
     pub content_renaming: Option<(String, String)>,
+    /// The renaming in Content started in the folder tree.
+    pub renaming_in_tree: bool,
+    /// The panel last used, which keys such as F2 act in.
+    pub focus: crate::panels::Panel,
     /// The file or folder that was copied or cut in the Content panel,
     /// and whether it was cut.
     pub clipboard: Option<(String, bool)>,
@@ -357,6 +365,25 @@ pub struct State {
 }
 
 impl State {
+    /// Hands the face shots the Content panel asked for to their thread,
+    /// with the content the cards are built from.
+    pub fn take_face_shots(&mut self) {
+        if self.library.wanted.is_empty() {
+            return;
+        }
+        let wanted = std::mem::take(&mut self.library.wanted);
+        let backdrop = self.library.backdrop;
+        let Some(mugshots) = self.library.mugshots.as_mut() else {
+            return;
+        };
+        let Ok(game) = self.games.shared(&self.project.mods_dir()) else {
+            return;
+        };
+        for (card, shot) in wanted {
+            mugshots.ask(&card, game.clone(), shot, backdrop);
+        }
+    }
+
     /// What a project's card says about its character, read once.
     pub fn profile(&mut self, card: &Path) -> Option<crate::profile::Profile> {
         let path = self.project.resolve(card);
@@ -423,7 +450,11 @@ impl State {
             renaming: None,
             show_content: false,
             subfolder: project::FOLDERS[0].to_owned(),
+            folder_back: Vec::new(),
+            folder_forward: Vec::new(),
             content_renaming: None,
+            renaming_in_tree: false,
+            focus: crate::panels::Panel::Viewport,
             clipboard: None,
             scene_clipboard: Vec::new(),
             importer: None,
@@ -542,7 +573,17 @@ impl State {
             Command::Focus => self.focus_pending = selected,
             Command::File(op) => self.file_op(op),
             Command::Rename => {
-                self.renaming = self.doc.selection().map(|o| (o.id, o.name.clone()));
+                // In Content, the file or folder chosen there; elsewhere the
+                // selected object.
+                let asset = self.asset.as_ref().map(|a| a.to_string_lossy().replace('\\', "/"));
+                match asset {
+                    Some(rel) if self.focus == crate::panels::Panel::Content && content::changeable(&rel) => {
+                        let name = content::stem(&rel).to_owned();
+                        self.content_renaming = Some((rel, name));
+                        self.renaming_in_tree = false;
+                    }
+                    _ => self.renaming = self.doc.selection().map(|o| (o.id, o.name.clone())),
+                }
             }
             Command::Add(Kind::Character) => self.show_folder(0),
             Command::Add(kind) => {
@@ -621,7 +662,7 @@ impl State {
                     .map(|c| c.userdata().join("chara").join("female"));
                 self.pick(Pick::Card, cards, ctx);
             }
-            Command::ImportFromPackage => self.packages.browse(),
+            Command::ImportFromPackage => self.packages.browse(rk_core::Config::load().ok().as_ref()),
             Command::ImportAnimations => self.importer = Some(crate::anim_import::Importer::new(None)),
             Command::ImportAnimationFile => self.pick(Pick::Animation, None, ctx),
             Command::Packages => self.packages.open = true,
@@ -782,10 +823,14 @@ impl State {
         self.saved = scene.clone();
         self.doc = Document::new(scene);
         let eager = self.library.eager;
+        let mugshots = self.library.mugshots.take();
         self.library = Library::new(&self.project);
         self.library.eager = eager;
+        self.library.mugshots = mugshots;
         self.animations.refresh(&self.project);
         self.subfolder = project::FOLDERS[0].to_owned();
+        self.folder_back.clear();
+        self.folder_forward.clear();
         self.content_renaming = None;
         self.clipboard = None;
         self.scene_clipboard.clear();
@@ -1061,6 +1106,41 @@ impl State {
     }
 
     /// Opens a folder of the project in the Content panel.
+    /// Opens a folder in Content as the user goes there: the one it leaves
+    /// is kept to go back to.
+    pub fn go_to_folder(&mut self, rel: &str) {
+        if rel != self.subfolder {
+            self.folder_back.push(self.subfolder.clone());
+            self.folder_forward.clear();
+        }
+        self.open_folder(rel);
+    }
+
+    /// Goes back to the folder opened before, or forward again to the one
+    /// left by going back. Folders that are gone are passed over.
+    pub fn folder_history(&mut self, back: bool) {
+        loop {
+            let next = if back {
+                self.folder_back.pop()
+            } else {
+                self.folder_forward.pop()
+            };
+            let Some(rel) = next else { return };
+            if !self.project.root.join(&rel).is_dir() {
+                continue;
+            }
+            let left = self.subfolder.clone();
+            if back {
+                self.folder_forward.push(left);
+            } else {
+                self.folder_back.push(left);
+            }
+            self.open_folder(&rel);
+            self.asset = None;
+            return;
+        }
+    }
+
     pub fn open_folder(&mut self, rel: &str) {
         let top = content::top(rel);
         if let Some(at) = project::FOLDERS.iter().position(|f| *f == top) {
@@ -1150,7 +1230,7 @@ impl State {
         } else {
             self.log.error(format!(
                 "{} is neither an animation file (.rkanim) nor a zipmod. A package (.rkpkg) is installed under \
-                 Window, Packages first; its animations then show under Import from package.",
+                 Window, Packages first; its animations then show under Import from library.",
                 path.display()
             ));
         }
@@ -1189,6 +1269,9 @@ impl State {
             }
             FileOp::NewFolder(inside) => content::new_folder(&self.project, &inside, "New folder").map(|folder| {
                 self.content_renaming = Some((folder.clone(), content::leaf(&folder).to_owned()));
+                // Named on its tile when it is made in the open folder, else
+                // in the tree.
+                self.renaming_in_tree = inside != self.subfolder;
                 None
             }),
             FileOp::Copy(rel) => {
@@ -1334,6 +1417,34 @@ mod tests {
             _ => None,
         });
         character.expect("the scene has a character")
+    }
+
+    #[test]
+    fn the_mouse_goes_back_and_forward_through_folders() {
+        let home = scratch("history");
+        let mut st = editor(&home);
+        for folder in ["Animations/Dances", "Animations/Dances/Slow"] {
+            std::fs::create_dir_all(st.project.root.join(folder)).unwrap();
+        }
+        st.go_to_folder("Animations");
+        st.go_to_folder("Animations/Dances");
+        st.go_to_folder("Animations/Dances/Slow");
+        st.folder_history(true);
+        assert_eq!(st.subfolder, "Animations/Dances");
+        st.folder_history(true);
+        assert_eq!(st.subfolder, "Animations");
+        st.folder_history(false);
+        assert_eq!(st.subfolder, "Animations/Dances");
+        // A folder that is gone is passed over.
+        std::fs::remove_dir_all(st.project.root.join("Animations/Dances/Slow")).unwrap();
+        st.folder_history(false);
+        assert_eq!(st.subfolder, "Animations/Dances");
+        // Going somewhere new forgets the way forward.
+        st.folder_history(true);
+        st.go_to_folder("Characters");
+        st.folder_history(false);
+        assert_eq!(st.subfolder, "Characters");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

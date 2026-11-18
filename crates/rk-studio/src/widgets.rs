@@ -547,26 +547,40 @@ pub fn menu_sub(ui: &mut Ui, k: &Look, icon_glyph: &str, text: &str, add: impl F
 /// A text field over `rect` for renaming something in a list. Returns
 /// the name when Enter or a click elsewhere took it, an empty name when
 /// Escape gave it up, and `None` while the user types.
-pub fn rename_field(ui: &mut Ui, k: &Look, rect: Rect, text: &mut String) -> Option<String> {
+pub fn rename_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &mut String) -> Option<String> {
     let p = ui.painter();
     p.rect_filled(rect, k.radius(), k.t.input);
     p.rect_stroke(rect, k.radius(), Stroke::new(1.0, k.t.select), StrokeKind::Inside);
-    let edit = ui.put(
-        rect.shrink2(Vec2::new(4.0, 0.0)),
+    // In a child, so the field does not move where the panel lays out
+    // what comes next.
+    let inner = rect.shrink2(Vec2::new(4.0, 0.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+    let edit = child.add_sized(
+        inner.size(),
         egui::TextEdit::singleline(text)
+            .id(id)
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
             .font(k.font())
             .text_color(k.t.text_bright),
     );
+    // The menu or the double click that started the renaming may take the
+    // keyboard away in the first frames; only a field that kept it a while
+    // ends when it loses it.
+    let frames_id = id.with("frames");
+    let frames = ui.data(|d| d.get_temp::<u32>(frames_id)).unwrap_or(0);
+    let done = |ui: &Ui| ui.data_mut(|d| d.remove::<u32>(frames_id));
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        done(ui);
         Some(String::new())
-    } else if edit.lost_focus() {
+    } else if edit.lost_focus() && frames > 3 {
+        done(ui);
         Some(text.clone())
     } else {
         if !edit.has_focus() {
             edit.request_focus();
         }
+        ui.data_mut(|d| d.insert_temp(frames_id, frames + 1));
         None
     }
 }

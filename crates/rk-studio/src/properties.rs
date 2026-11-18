@@ -182,8 +182,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             show_cards = true;
                         }
                     });
-                    let outfits: Vec<String> = (1..=built.as_ref().map_or(1, |b| b.outfits.max(1)))
-                        .map(|n| format!("Outfit {n}"))
+                    let outfits: Vec<String> = (0..built.as_ref().map_or(1, |b| b.outfits.max(1)))
+                        .map(outfit_name)
                         .collect();
                     let outfits: Vec<&str> = outfits.iter().map(String::as_str).collect();
                     let waiting = built.is_none().then_some("The character is not built");
@@ -307,7 +307,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         let fill = if resp.hovered() { k.t.hover } else { k.t.control };
                         p.rect_filled(field, k.radius(), fill);
                         let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
-                        let name = animation.as_ref().map_or("None, as built", |a| a.name.as_str());
+                        let name = animation.as_ref().map_or("T-pose", |a| a.name.as_str());
                         p.with_clip_rect(field.with_max_x(field.right() - 22.0)).text(
                             Pos2::new(field.left() + 8.0, field.center().y),
                             Align2::LEFT_CENTER,
@@ -529,6 +529,23 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     if show_animations {
         st.show_folder(1);
     }
+}
+
+/// The game's names for a card's seven outfits, in their order; outfits a
+/// plugin adds after them are numbered.
+fn outfit_name(index: usize) -> String {
+    const NAMES: [&str; 7] = [
+        "In school",
+        "After school",
+        "Gym",
+        "Swimsuit",
+        "Club",
+        "Casual",
+        "Sleepover",
+    ];
+    NAMES
+        .get(index)
+        .map_or_else(|| format!("Outfit {}", index + 1), |name| (*name).to_owned())
 }
 
 /// The row of pages under a character's header, each a word with a line

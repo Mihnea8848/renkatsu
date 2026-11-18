@@ -253,7 +253,8 @@ pub fn count_text(n: usize) -> String {
 /// with the mods of one project searched together with the game's own.
 #[derive(Default)]
 pub struct Games {
-    game: Option<Game>,
+    /// Shared with the threads that read from it.
+    game: Option<std::sync::Arc<Game>>,
     mods: PathBuf,
 }
 
@@ -261,9 +262,18 @@ impl Games {
     /// The content with the zipmods of `mods_dir`. Another folder than
     /// last time opens it again; the index caches make that quick.
     pub fn get(&mut self, mods_dir: &Path) -> Result<&Game> {
+        Ok(self.open(mods_dir)?)
+    }
+
+    /// The same content, to hand to a thread.
+    pub fn shared(&mut self, mods_dir: &Path) -> Result<std::sync::Arc<Game>> {
+        Ok(self.open(mods_dir)?.clone())
+    }
+
+    fn open(&mut self, mods_dir: &Path) -> Result<&std::sync::Arc<Game>> {
         if self.game.is_none() || self.mods != mods_dir {
             self.game = None;
-            self.game = Some(Game::open_user(&[mods_dir.to_owned()])?);
+            self.game = Some(std::sync::Arc::new(Game::open_user(&[mods_dir.to_owned()])?));
             self.mods = mods_dir.to_owned();
         }
         Ok(self.game.as_ref().expect("opened above"))

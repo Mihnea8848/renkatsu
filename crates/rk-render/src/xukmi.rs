@@ -345,6 +345,7 @@ pub fn desc(mat: &MaterialInst, x: Xukmi) -> MaterialDesc {
         blend,
         outline: outline && matches!(kind, Kind::Item | Kind::Skin | Kind::Hair),
         zwrite,
+        prepass: false,
         stencil: state.stencil,
         stencil_ref: state.stencil_ref,
         shadow: state.shadow,

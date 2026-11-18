@@ -18,6 +18,7 @@ use crate::live::{Clock, Live};
 use crate::mods::Games;
 use crate::project::Project;
 use crate::scene::{self, Content, ObjectId, Scene};
+use crate::sources;
 use crate::state::{Log, Look, Playback, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, label};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -25,10 +26,49 @@ use egui_phosphor::regular as icon;
 use rk_chara::animations::{same_name, Branch, Library, Source, Timing};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-/// Time spent reading the animations' lengths in one frame.
-const BUDGET: Duration = Duration::from_millis(6);
+/// How many more animation lengths have to arrive before the list is
+/// worked out again.
+const TIMED_STEP: usize = 256;
+
+/// The lengths read so far while the app runs, by bundle, controller,
+/// state and override, so that the window opens on them the next time.
+static TIMINGS: std::sync::Mutex<Option<std::collections::HashMap<String, Timing>>> = std::sync::Mutex::new(None);
+
+/// Reads the lengths of `entries` on a thread of its own, so the window
+/// keeps its pace, and sends each with its place in the list. The thread
+/// stops when nobody listens any more.
+fn read_timings(
+    game: std::sync::Arc<rk_vfs::Game>,
+    entries: Vec<rk_chara::animations::Entry>,
+) -> std::sync::mpsc::Receiver<(usize, Timing)> {
+    let (send, receive) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("animation lengths".into())
+        .spawn(move || {
+            for (i, entry) in entries.iter().enumerate() {
+                let key = format!(
+                    "{}|{}|{}|{}|{}",
+                    entry.bundle, entry.controller, entry.state, entry.override_bundle, entry.override_controller
+                );
+                let known = TIMINGS
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.as_ref().and_then(|m| m.get(&key).copied()));
+                let timing = known.unwrap_or_else(|| {
+                    let timing = rk_chara::animations::timing_of(&game, entry, &Library::TIMING_BODY);
+                    if let Ok(mut map) = TIMINGS.lock() {
+                        map.get_or_insert_with(Default::default).insert(key, timing);
+                    }
+                    timing
+                });
+                if send.send((i, timing)).is_err() {
+                    return;
+                }
+            }
+        });
+    receive
+}
 
 /// One animation that can be imported.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,20 +206,11 @@ pub struct Node {
     pub caption: bool,
 }
 
-/// The tree: the sources, then the groups and categories of the chosen
-/// source, merged by name across everything that source covers.
-pub fn tree(entries: &[Entry], shown: &Shown, unfolded: &HashSet<String>) -> Vec<Node> {
-    let caption = |label: &str| Node {
-        depth: 0,
-        label: label.to_owned(),
-        count: 0,
-        shows: Shown::default(),
-        parent: false,
-        key: String::new(),
-        caption: true,
-    };
-    let mut rows = vec![caption("Source")];
-    let source_row = |depth: usize, label: &str, choice: Option<SourceChoice>, count: usize, parent: bool| Node {
+/// The sources the entries come from, as rows: all of them at once when
+/// there are several, then the packages, Koikatsu, and the mods a step
+/// further in under a row that shows them all.
+pub fn source_rows(entries: &[Entry]) -> Vec<Node> {
+    let row = |depth: usize, label: &str, choice: Option<SourceChoice>, count: usize, parent: bool| Node {
         depth,
         label: label.to_owned(),
         count,
@@ -192,8 +223,6 @@ pub fn tree(entries: &[Entry], shown: &Shown, unfolded: &HashSet<String>) -> Vec
         parent,
         caption: false,
     };
-    rows.push(source_row(0, "All sources", None, entries.len(), false));
-    // The game, then the packages, then the mods under one row.
     let mut sources: Vec<(&Source, &str, usize)> = Vec::new();
     for entry in entries {
         match sources.iter_mut().find(|(s, ..)| *s == &entry.source) {
@@ -202,44 +231,55 @@ pub fn tree(entries: &[Entry], shown: &Shown, unfolded: &HashSet<String>) -> Vec
         }
     }
     let rank = |source: &Source| match source {
-        Source::Game => 0,
-        Source::Package(_) => 1,
+        Source::Package(_) => 0,
+        Source::Game => 1,
         Source::Mod(_) => 2,
     };
     sources.sort_by_key(|(source, name, _)| (rank(source), name.to_lowercase()));
+    let mut rows = Vec::new();
+    if sources.len() > 1 {
+        rows.push(row(0, "All sources", None, entries.len(), false));
+    }
+    let one = |source: &Source| Some(SourceChoice::One(source.clone()));
     for (source, name, count) in sources.iter().filter(|(s, ..)| !matches!(s, Source::Mod(_))) {
-        rows.push(source_row(
-            0,
-            name,
-            Some(SourceChoice::One((*source).clone())),
-            *count,
-            false,
-        ));
+        rows.push(row(0, name, one(source), *count, false));
     }
     let mods: Vec<_> = sources.iter().filter(|(s, ..)| matches!(s, Source::Mod(_))).collect();
-    if !mods.is_empty() {
-        let all = source_row(
-            0,
-            "Mods",
-            Some(SourceChoice::Mods),
-            mods.iter().map(|m| m.2).sum(),
-            true,
-        );
-        let open = unfolded.contains(&all.key);
-        rows.push(all);
-        if open {
+    match mods[..] {
+        [] => {}
+        // A lone mod needs no row above it.
+        [(source, name, count)] => rows.push(row(0, name, one(source), *count, false)),
+        _ => {
+            let count = mods.iter().map(|m| m.2).sum();
+            rows.push(row(0, "Mods", Some(SourceChoice::Mods), count, true));
             for (source, name, count) in mods {
-                rows.push(source_row(
-                    1,
-                    name,
-                    Some(SourceChoice::One((*source).clone())),
-                    *count,
-                    false,
-                ));
+                rows.push(row(1, name, one(source), *count, false));
             }
         }
     }
-    rows.push(caption("Category"));
+    rows
+}
+
+/// The tree: the groups and categories of the chosen source, merged by
+/// name across everything that source covers. With `sources`, the
+/// sources are rows above them instead of a dropdown of their own.
+pub fn tree(entries: &[Entry], shown: &Shown, unfolded: &HashSet<String>, sources: bool) -> Vec<Node> {
+    let caption = |label: &str| Node {
+        depth: 0,
+        label: label.to_owned(),
+        count: 0,
+        shows: Shown::default(),
+        parent: false,
+        key: String::new(),
+        caption: true,
+    };
+    let mut rows = Vec::new();
+    if sources {
+        rows.push(caption("Source"));
+        let mods_open = unfolded.contains("source Mods");
+        rows.extend(source_rows(entries).into_iter().filter(|n| n.depth == 0 || mods_open));
+        rows.push(caption("Category"));
+    }
     let of_source: Vec<&Entry> = entries.iter().filter(|e| shown.source_takes(e)).collect();
     rows.push(Node {
         depth: 0,
@@ -440,6 +480,8 @@ pub struct Importer {
     stand_in: Option<Project>,
     games: Games,
     library: Option<Library>,
+    /// The lengths of the animations, as a thread reads them.
+    timings: Option<std::sync::mpsc::Receiver<(usize, Timing)>>,
     pub entries: Vec<Entry>,
     problem: Option<String>,
     pub search: String,
@@ -456,6 +498,9 @@ pub struct Importer {
     /// worked out from: both are the same from frame to frame until
     /// something is clicked, typed or read.
     view: Option<(ViewKey, Vec<Node>, Vec<usize>)>,
+    /// The sources as the dropdown lists them, with how many entries
+    /// they were worked out from.
+    sources: Option<(usize, Vec<Node>)>,
 }
 
 /// What the tree and the list depend on.
@@ -481,12 +526,21 @@ impl Importer {
             search: self.search.clone(),
             unfolded,
             entries: self.entries.len(),
-            timed: self.library.as_ref().map_or(0, Library::timed),
+            // The list is worked out again as lengths arrive, but not for
+            // every one of them.
+            timed: self.library.as_ref().map_or(0, |l| {
+                if l.timed() == l.entries.len() {
+                    usize::MAX
+                } else {
+                    l.timed() / TIMED_STEP
+                }
+            }),
         };
         match &self.view {
             Some((old, rows, list)) if *old == key => (rows.clone(), list.clone()),
             _ => {
-                let rows = tree(&self.entries, &self.shown, &self.unfolded);
+                // The sources are in the dropdown above the tree.
+                let rows = tree(&self.entries, &self.shown, &self.unfolded, false);
                 let list = matching(&self.entries, &self.shown, self.filter, &self.search);
                 self.view = Some((key, rows.clone(), list.clone()));
                 (rows, list)
@@ -503,6 +557,7 @@ impl Importer {
             stand_in: None,
             games: Games::default(),
             library: None,
+            timings: None,
             entries: Vec::new(),
             problem: None,
             search: String::new(),
@@ -515,23 +570,26 @@ impl Importer {
             preview: None,
             preview_problem: None,
             view: None,
+            sources: None,
         }
     }
 
     /// What is installed changed: the list is read again.
     pub fn reset(&mut self) {
         self.library = None;
+        self.timings = None;
         self.entries.clear();
         self.chosen.clear();
         self.highlighted = None;
         self.problem = None;
         self.view = None;
+        self.sources = None;
         self.games.reset();
     }
 
-    /// Reads the list when it is not read yet, and moves the reading of
-    /// the animations' lengths on by a frame's share. Returns whether
-    /// more is left to read.
+    /// Reads the list when it is not read yet, and takes the animations'
+    /// lengths read since the last frame. Returns whether more are to
+    /// come.
     fn advance(&mut self, st: &mut State) -> bool {
         if self.problem.is_some() {
             return false;
@@ -549,7 +607,7 @@ impl Importer {
             Some(project) => (project, &mut self.games),
             None => (&st.project, &mut st.games),
         };
-        let game = match games.get(&project.mods_dir()) {
+        let game = match games.shared(&project.mods_dir()) {
             Ok(game) => game,
             Err(e) => {
                 self.problem = Some(format!("{e:#}"));
@@ -557,7 +615,7 @@ impl Importer {
             }
         };
         if self.library.is_none() {
-            let library = Library::read(game);
+            let library = Library::read(&game);
             let installed = &st.packages.installed;
             let name_of = |source: &Source| match source {
                 Source::Package(id) => package_name(installed, id),
@@ -578,10 +636,19 @@ impl Importer {
             self.library = Some(library);
         }
         let library = self.library.as_mut().expect("read above");
-        let started = Instant::now();
-        let eager = st.scripted;
         let before = library.timed();
-        let done = library.time(game, &|| !eager && started.elapsed() > BUDGET);
+        let done = if st.scripted {
+            // A scripted picture waits for every length.
+            library.time(&game, &|| false)
+        } else {
+            let timings = self
+                .timings
+                .get_or_insert_with(|| read_timings(game.clone(), library.entries.clone()));
+            for (i, timing) in timings.try_iter() {
+                library.record(i, timing);
+            }
+            library.timed() == library.entries.len()
+        };
         if library.timed() != before {
             for entry in &mut self.entries {
                 if let Some(i) = entry.listed {
@@ -824,14 +891,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         .fixed_pos(window.min)
         .show(ctx, |ui| {
             ui.set_min_size(window.size());
-            let sources: BTreeSet<&str> = w.entries.iter().map(|e| e.source_name.as_str()).collect();
-            let under = match (&w.only, sources.len()) {
-                (Some(file), _) => format!("From {}", file.file_name().unwrap_or_default().to_string_lossy()),
-                (None, 0) => "Nothing with animations is installed".to_owned(),
-                (None, 1) => format!("From {}", sources.iter().next().unwrap_or(&"")),
-                (None, n) => format!("From {n} sources: Koikatsu, packages and mods"),
-            };
-            let (frame, closed) = crate::packages::frame(ui, k, window, "Import animations", &under);
+            let (frame, closed) = crate::packages::frame(ui, k, window, "Import animations", "");
             close |= closed;
             let (head, body, foot) = (frame.head, frame.body, frame.foot);
             if !w.entries.is_empty() {
@@ -877,7 +937,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                     }
                 }
             } else {
-                let tree_w = 232.0;
+                let tree_w = crate::sources::COLUMN;
                 let preview_w = (body.width() * 0.28).clamp(240.0, 340.0);
                 let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + tree_w, body.bottom()));
                 let side = Rect::from_min_max(Pos2::new(body.right() - preview_w, body.top()), body.max);
@@ -954,10 +1014,32 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     }
 }
 
-/// The tree of sources, groups and categories.
-fn tree_pane(ui: &mut Ui, k: &Look, w: &mut Importer, area: Rect) {
-    let t = &k.t;
+/// The left column: the dropdown of sources, and the tree of groups and
+/// categories.
+fn tree_pane(ui: &mut Ui, k: &Look, w: &mut Importer, column: Rect) {
     let (rows, _) = w.view();
+    let area = {
+        let count = w.entries.len();
+        if w.sources.as_ref().is_none_or(|(of, _)| *of != count) {
+            w.sources = Some((count, source_rows(&w.entries)));
+        }
+        let nodes = w.sources.as_ref().map_or(&[][..], |(_, nodes)| nodes);
+        let items: Vec<sources::Item> = nodes
+            .iter()
+            .map(|n| sources::Item {
+                label: n.label.clone(),
+                depth: n.depth,
+                count: Some(n.count),
+            })
+            .collect();
+        let chosen = nodes.iter().position(|n| n.shows.source == w.shown.source).unwrap_or(0);
+        let id = ui.id().with("animation source");
+        let (picked, rest) = sources::dropdown(ui, k, column, id, &items, chosen);
+        if let Some(node) = picked.and_then(|i| nodes.get(i)) {
+            w.shown = node.shows.clone();
+        }
+        rest
+    };
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
     child.set_clip_rect(area);
     egui::ScrollArea::vertical()
@@ -966,20 +1048,12 @@ fn tree_pane(ui: &mut Ui, k: &Look, w: &mut Importer, area: Rect) {
         .max_height(area.height())
         .show(&mut child, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(6.0);
             for node in &rows {
                 if node.caption {
-                    let (row, _) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 4.0), Sense::hover());
-                    ui.painter().text(
-                        Pos2::new(row.left() + 14.0, row.bottom() - 9.0),
-                        Align2::LEFT_CENTER,
-                        node.label.to_uppercase(),
-                        k.small(),
-                        t.text_dim,
-                    );
+                    sources::caption(ui, k, &node.label);
                     continue;
                 }
-                let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
                 // A source row is on when it is the source shown; a
                 // category row when it is the group and category shown.
                 let is_source = node.key.starts_with("source ");
@@ -988,50 +1062,20 @@ fn tree_pane(ui: &mut Ui, k: &Look, w: &mut Importer, area: Rect) {
                 } else {
                     node.shows == w.shown
                 };
-                let p = ui.painter();
-                if on {
-                    p.rect_filled(row, 0.0, t.control);
-                    p.rect_filled(
-                        Rect::from_min_size(row.left_top(), Vec2::new(2.0, row.height())),
-                        0.0,
-                        t.select,
-                    );
-                } else if resp.hovered() {
-                    p.rect_filled(row, 0.0, t.row_hover);
-                }
-                let x = row.left() + 14.0 + node.depth as f32 * 16.0;
-                let y = row.center().y;
-                let mut fold = false;
-                if node.parent {
-                    let open = w.unfolded.contains(&node.key);
-                    let g = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-                    let cell = Rect::from_center_size(Pos2::new(x + 4.0, y), Vec2::new(18.0, row.height()));
-                    let caret = ui.interact(cell, ui.id().with(("fold", &node.key)), Sense::click());
-                    fold = caret.clicked();
-                    let color = if caret.hovered() { t.text_bright } else { t.text_dim };
-                    glyph(ui.painter(), k, Pos2::new(x + 4.0, y), g, 10.0, color);
-                }
-                let p = ui.painter();
-                let color = if on { t.text_bright } else { t.text };
-                let clip = p.with_clip_rect(row.with_max_x(row.right() - 44.0));
-                label(&clip, k, Pos2::new(x + 16.0, y), &node.label, color);
-                p.text(
-                    Pos2::new(row.right() - 12.0, y),
-                    Align2::RIGHT_CENTER,
-                    node.count.to_string(),
-                    k.small(),
-                    t.text_dim,
-                );
-                if fold {
-                    if !w.unfolded.remove(&node.key) {
-                        w.unfolded.insert(node.key.clone());
-                    }
-                } else if resp.clicked() {
+                let of = sources::Row {
+                    label: &node.label,
+                    depth: node.depth,
+                    count: Some(node.count),
+                    on,
+                    open: node.parent.then(|| w.unfolded.contains(&node.key)),
+                };
+                let clicked = sources::row(ui, k, &node.key, of);
+                if clicked.row {
                     w.shown = node.shows.clone();
-                    // Choosing a group opens it; choosing it again folds it.
-                    if node.parent && !w.unfolded.remove(&node.key) {
-                        w.unfolded.insert(node.key.clone());
-                    }
+                }
+                // Choosing a group opens it; choosing it again folds it.
+                if (clicked.fold || (clicked.row && node.parent)) && !w.unfolded.remove(&node.key) {
+                    w.unfolded.insert(node.key.clone());
                 }
             }
             ui.add_space(8.0);
@@ -1385,13 +1429,13 @@ mod tests {
     fn categories_of_the_same_name_merge_across_sources() {
         let entries = entries();
         let mut unfolded = HashSet::new();
-        let rows = tree(&entries, &Shown::default(), &unfolded);
+        let rows = tree(&entries, &Shown::default(), &unfolded, true);
         assert_eq!(
             labels(&rows),
             [
                 (0, "All sources", 7),
-                (0, "Koikatsu", 3),
                 (0, "Dance pack", 2),
+                (0, "Koikatsu", 3),
                 (0, "Mods", 2),
                 (0, "All categories", 7),
                 (0, "Character", 2),
@@ -1402,7 +1446,7 @@ mod tests {
         // Unfolded, Studio's Dance holds the game's and the package's.
         unfolded.insert("group studio".to_owned());
         unfolded.insert("source Mods".to_owned());
-        let rows = tree(&entries, &Shown::default(), &unfolded);
+        let rows = tree(&entries, &Shown::default(), &unfolded, true);
         assert_eq!(
             labels(&rows)[3..],
             [
@@ -1428,7 +1472,7 @@ mod tests {
 
         // One source chosen: the tree shows what that source has.
         let pack = rows.iter().find(|n| n.label == "Dance pack").unwrap();
-        let rows = tree(&entries, &pack.shows, &unfolded);
+        let rows = tree(&entries, &pack.shows, &unfolded, true);
         assert_eq!(
             labels(&rows)[6..],
             [
@@ -1454,13 +1498,53 @@ mod tests {
     }
 
     #[test]
+    fn the_sources_are_a_list_of_their_own() {
+        let entries = entries();
+        // Packages, then the game, then the mods under a row for all.
+        assert_eq!(
+            labels(&source_rows(&entries)),
+            [
+                (0, "All sources", 7),
+                (0, "Dance pack", 2),
+                (0, "Koikatsu", 3),
+                (0, "Mods", 2),
+                (1, "Another mod", 1),
+                (1, "Masculine", 1),
+            ]
+        );
+        // With the sources in a dropdown, the tree is the categories alone.
+        let rows = tree(&entries, &Shown::default(), &HashSet::new(), false);
+        assert!(rows.iter().all(|n| !n.caption));
+        assert_eq!(
+            labels(&rows),
+            [
+                (0, "All categories", 7),
+                (0, "Character", 2),
+                (0, "Studio", 3),
+                (0, "Men", 2)
+            ]
+        );
+        // One source needs no row for all, and one mod none for the mods.
+        let mut some: Vec<Entry> = entries.iter().filter(|e| e.source == Source::Game).cloned().collect();
+        assert_eq!(labels(&source_rows(&some)), [(0, "Koikatsu", 3)]);
+        some.push(entries[5].clone());
+        assert_eq!(
+            labels(&source_rows(&some)),
+            [(0, "All sources", 4), (0, "Koikatsu", 3), (0, "Masculine", 1)]
+        );
+        // Without Koikatsu, it is not a source.
+        let without: Vec<Entry> = entries.iter().filter(|e| e.source != Source::Game).cloned().collect();
+        assert!(source_rows(&without).iter().all(|n| n.label != "Koikatsu"));
+    }
+
+    #[test]
     fn the_h_scenes_groups_sit_under_one_row() {
         let mut all = entries();
         all.push(h_entry("Stand 1", "H foreplay", "Stand", 2.0));
         all.push(h_entry("Chair 1", "H foreplay", "Chair sit", 2.0));
         all.push(h_entry("Lying 1", "Female H insertion", "Missionary", 2.0));
         let mut unfolded = HashSet::new();
-        let rows = tree(&all, &Shown::default(), &unfolded);
+        let rows = tree(&all, &Shown::default(), &unfolded, true);
         // CharaStudio's groups stay where they were; the H scenes' three
         // animations are one row, after them, with nothing of theirs
         // standing beside the studio's own groups.
@@ -1477,7 +1561,7 @@ mod tests {
         // Unfolded it holds its groups, and those their categories.
         unfolded.insert("group h scenes".to_owned());
         unfolded.insert("group h foreplay".to_owned());
-        let rows = tree(&all, &Shown::default(), &unfolded);
+        let rows = tree(&all, &Shown::default(), &unfolded, true);
         assert_eq!(
             &labels(&rows)[7..],
             [

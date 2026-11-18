@@ -27,7 +27,9 @@ fn all_local_cards_parse() {
                 assert!(c.face.shape_value_face.len() >= 52, "{}: face shapes", p.display());
                 assert!(c.body.shape_value_body.len() >= 44, "{}: body shapes", p.display());
             }
-            Err(CardError::NoTrailer | CardError::Product(_) | CardError::Marker(_)) => plain += 1,
+            Err(CardError::NoTrailer | CardError::Product(_) | CardError::Marker(_) | CardError::OtherGame(_)) => {
+                plain += 1
+            }
             Err(e) => failures.entry(e.to_string()).or_default().push(p.display().to_string()),
         }
     }

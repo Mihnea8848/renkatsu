@@ -170,6 +170,10 @@ impl TabViewer for Viewer<'_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
+        // The panel last clicked in is the one keys such as F2 act in.
+        if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.pointer.any_pressed()) {
+            self.st.focus = *tab;
+        }
         let header = self.viewport_header(ui);
         let (k, st) = (self.k, &mut *self.st);
         match tab {
@@ -801,12 +805,19 @@ pub fn animation_items(
     });
     let worn_rel = worn.and_then(|a| st.animations.of(a)).map(|i| i.rel.as_str());
     let mut chosen = None;
-    if widgets::check_item(ui, k, worn.is_none(), "None, as built", "").clicked() {
+    // A character is built in the T pose; the maker's pose is always on
+    // offer too, without importing it.
+    if widgets::check_item(ui, k, worn.is_none(), "T-pose", "").clicked() {
         chosen = Some(None);
         ui.close();
     }
+    let maker = worn.is_some_and(|a| a.file.is_none() && crate::scene::Animation::is_maker_pose(a));
+    if widgets::check_item(ui, k, maker, "Default pose", "Moving").clicked() {
+        chosen = Some(Some(crate::scene::Animation::maker_pose()));
+        ui.close();
+    }
     // An animation the scene has that the project does not own.
-    if let (Some(worn), None) = (worn, worn_rel) {
+    if let (Some(worn), None, false) = (worn, worn_rel, maker) {
         let text = format!("{} (not in the project)", worn.name);
         let _ = widgets::check_item(ui, k, true, &text, "");
     }

@@ -449,6 +449,11 @@ impl Library {
             let listed = mod_idx.map_or(Source::Game, |i| mod_source(&game.assets.index, i));
             library.add_bundle(None, &sheets, &listed, &installed);
         }
+        if installed(MAKER_POSE.0) {
+            library.entries.push(maker_pose(
+                source_of(&game.assets.index, MAKER_POSE.0).unwrap_or_default(),
+            ));
+        }
         library.entries.sort_by_key(|p| (p.group, p.category, p.number));
         library
     }
@@ -465,37 +470,35 @@ impl Library {
     /// when the caller has a frame to draw. An animation that cannot be
     /// read counts as one without length.
     pub fn time(&mut self, game: &Game, enough: &dyn Fn() -> bool) -> bool {
-        // A middling body, where blends by height sit between their clips.
-        let parameters = crate::motion::Parameters {
-            height: 0.5,
-            breast: 0.5,
-        };
+        let parameters = Self::TIMING_BODY;
         while self.timed < self.entries.len() {
             if enough() {
                 return false;
             }
             let pose = &mut self.entries[self.timed];
-            let timing = crate::motion::load(
-                game,
-                &pose.bundle,
-                &pose.controller,
-                &pose.state,
-                pose.over(),
-                &parameters,
-            )
-            .map(|m| Timing {
-                seconds: m.duration(),
-                loops: m.loops(),
-            })
-            .unwrap_or(Timing {
-                seconds: 0.0,
-                loops: false,
-            });
-            pose.timing = Some(timing);
+            pose.timing = Some(timing_of(game, pose, &parameters));
             self.timed += 1;
         }
         true
     }
+
+    /// Takes the timing of the animation at `index`, read elsewhere.
+    /// Animations are counted as timed in order, up to the first without.
+    pub fn record(&mut self, index: usize, timing: Timing) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.timing = Some(timing);
+        }
+        while self.entries.get(self.timed).is_some_and(|e| e.timing.is_some()) {
+            self.timed += 1;
+        }
+    }
+
+    /// The body timings are read for: a middling one, where blends by
+    /// height sit between their clips.
+    pub const TIMING_BODY: crate::motion::Parameters = crate::motion::Parameters {
+        height: 0.5,
+        breast: 0.5,
+    };
 
     /// The categories that have animations, in the game's order.
     pub fn categories(&self) -> Vec<Category> {
@@ -660,7 +663,9 @@ const WORDS: &[(&str, &str)] = &[
     ("ベンチで寝る", "Sleep on bench"),
     ("ポスターを貼る", "Put up poster"),
     ("立ちポーズ", "Standing pose"),
-    ("初期ポーズ", "Default pose"),
+    // The game's first animation holds the T pose; "Default pose" is the
+    // character maker's standing pose, listed before it.
+    ("初期ポーズ", "T-pose"),
     ("ポールダンス", "Pole dance"),
     ("ポーズ", "Pose"),
     ("ライフル", "Rifle"),
@@ -913,6 +918,52 @@ pub fn english(name: &str) -> String {
     } else {
         out
     }
+}
+
+/// The pose the game's character maker starts every character in: the
+/// first of its poses (`cus_pose` in `custom/customscenelist.unity3d`).
+pub const MAKER_POSE: (&str, &str, &str) = ("custom/custompose.unity3d", "custom_pose", "Stand_D_00");
+
+/// The maker's pose as the first entry of Character: Basic, before the
+/// game's own T pose. CharaStudio does not list it; Renkatsu does, as the
+/// default pose.
+pub fn maker_pose(source: Source) -> Entry {
+    Entry {
+        group: 0,
+        category: 0,
+        number: -1,
+        original: "基本".to_owned(),
+        name: "Default pose".to_owned(),
+        bundle: MAKER_POSE.0.to_owned(),
+        controller: MAKER_POSE.1.to_owned(),
+        state: MAKER_POSE.2.to_owned(),
+        override_bundle: String::new(),
+        override_controller: String::new(),
+        timing: None,
+        source,
+        h: false,
+    }
+}
+
+/// How long an animation is and whether it loops, from its clips. One that
+/// cannot be read counts as one without length.
+pub fn timing_of(game: &Game, entry: &Entry, parameters: &crate::motion::Parameters) -> Timing {
+    crate::motion::load(
+        game,
+        &entry.bundle,
+        &entry.controller,
+        &entry.state,
+        entry.over(),
+        parameters,
+    )
+    .map(|m| Timing {
+        seconds: m.duration(),
+        loops: m.loops(),
+    })
+    .unwrap_or(Timing {
+        seconds: 0.0,
+        loops: false,
+    })
 }
 
 #[cfg(test)]

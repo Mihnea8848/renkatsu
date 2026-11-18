@@ -61,6 +61,15 @@ enum Cmd {
         /// Camera angle around the character, in degrees.
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         yaw: f32,
+        /// Where the camera stands, as `x,y,z` in metres (the character
+        /// stands at the origin, facing +z, y up). Replaces the framing of
+        /// the whole character; give `--look-at` with it.
+        #[arg(long, allow_hyphen_values = true)]
+        eye: Option<String>,
+        /// The point the camera looks at, as `x,y,z` in metres. Without
+        /// `--eye` the camera keeps its direction and turns to this point.
+        #[arg(long, allow_hyphen_values = true)]
+        look_at: Option<String>,
         #[arg(long)]
         no_clothes: bool,
         #[arg(long)]
@@ -87,6 +96,13 @@ enum Cmd {
         /// Where in the animation, in passes: 0 the start, 0.5 half way.
         #[arg(long, default_value_t = 0.0)]
         time: f32,
+        /// Draw as Renkatsu Studio's viewport does: CharaStudio's screen
+        /// effects (occlusion, bloom, vignette) and its first colour filter.
+        #[arg(long)]
+        studio_look: bool,
+        /// The colour behind the character, as `r,g,b` from 0 to 1.
+        #[arg(long)]
+        background: Option<String>,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -366,6 +382,8 @@ fn main() -> Result<()> {
             width,
             height,
             yaw,
+            eye,
+            look_at,
             no_clothes,
             no_accessories,
             outdoor_shoes,
@@ -375,6 +393,8 @@ fn main() -> Result<()> {
             clothes,
             pose,
             time,
+            studio_look,
+            background,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -382,6 +402,8 @@ fn main() -> Result<()> {
             width,
             height,
             yaw,
+            eye: eye.as_deref(),
+            look_at: look_at.as_deref(),
             no_clothes,
             no_accessories,
             outdoor_shoes,
@@ -391,6 +413,8 @@ fn main() -> Result<()> {
             clothes: clothes.as_deref(),
             pose: pose.as_deref(),
             time,
+            studio_look,
+            background: background.as_deref(),
         }),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },

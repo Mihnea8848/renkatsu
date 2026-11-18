@@ -3022,6 +3022,7 @@ dependencies = [
  "rk-core",
  "rk-packages",
  "rk-render",
+ "rk-unityfs",
  "rk-vfs",
  "serde",
  "toml",

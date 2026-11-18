@@ -6,6 +6,7 @@
 
 pub mod effects;
 pub mod material;
+pub mod modshader;
 pub mod shadow;
 pub mod xukmi;
 mod xukmi_defaults;
@@ -23,7 +24,11 @@ use wgpu::util::DeviceExt;
 
 /// The surface shader: the game shader ports with the KKShadersPlus ports
 /// appended.
-const TOON_WGSL: &str = concat!(include_str!("toon.wgsl"), include_str!("xukmi.wgsl"));
+const TOON_WGSL: &str = concat!(
+    include_str!("toon.wgsl"),
+    include_str!("xukmi.wgsl"),
+    include_str!("modshader.wgsl")
+);
 
 /// The game renders in linear colour space: shaders write linear values,
 /// blending happens on them, and the target stores them as sRGB.
@@ -133,6 +138,9 @@ struct Globals {
     params: [f32; 4],
     shadow: [f32; 4],
     ambient_light: [f32; 4],
+    /// `unity_SHAr` to `unity_SHC`.
+    sh: [[f32; 4]; 7],
+    reflection: [f32; 4],
 }
 
 /// `_ambientshadowG` as the shaders read it: the scene's shadow colour with
@@ -185,6 +193,13 @@ pub struct Environment {
     /// Unity's ambient light (`RenderSettings.ambientLight`), as stored.
     /// Only the lens of glasses reads the scene's ambient light.
     pub ambient_light: [f32; 3],
+    /// Unity's ambient probe as its shaders read it (`unity_SHAr`, `SHAg`,
+    /// `SHAb`, `SHBr`, `SHBg`, `SHBb`, `SHC`); `modshader::sh_constants`
+    /// packs one. Shaders with Unity's own lighting read it.
+    pub ambient_probe: [[f32; 4]; 7],
+    /// What the scene's reflection probe shows in every direction, after
+    /// its HDR decoding.
+    pub reflection: [f32; 3],
     /// Unit vector pointing from the scene to the light. `None` puts the
     /// light at the camera's upper left.
     pub light_dir: Option<[f32; 3]>,
@@ -207,6 +222,10 @@ impl Default for Environment {
             ambient: 0.4,
             // Unity's default ambient colour for a new scene.
             ambient_light: [0.212, 0.227, 0.259],
+            // CharaStudio's scene stores an ambient probe of zero, has no
+            // skybox and no reflection cubemap, and the game sets none.
+            ambient_probe: [[0.0; 4]; 7],
+            reflection: [0.0; 3],
             light_dir: None,
             shadows: ShadowSettings::default(),
             effects: None,
@@ -438,6 +457,11 @@ struct PipelineKey {
     stencil: Stencil,
     /// Drawn into the half-float target the screen effects read.
     hdr: bool,
+    /// A pass that writes the depth of front faces and no colour.
+    depth_only: bool,
+    /// Drawn a little nearer than it is, so a layer that writes no depth
+    /// wins against the surface it lies on.
+    nearer: bool,
 }
 
 impl PipelineKey {
@@ -448,6 +472,24 @@ impl PipelineKey {
             blend: desc.blend,
             zwrite: desc.zwrite,
             stencil: desc.stencil,
+            depth_only: false,
+            // A surface whose depth pass ran first lies exactly on that
+            // depth, and pulled nearer it would show through what covers
+            // it, such as socks over pantyhose.
+            nearer: desc.blend != Blend::Off && !desc.zwrite && !desc.prepass,
+        }
+    }
+
+    /// The depth pass some shaders run ahead of their lit one.
+    fn prepass(hdr: bool) -> Self {
+        Self {
+            hdr,
+            outline: false,
+            blend: Blend::Off,
+            zwrite: true,
+            stencil: Stencil::None,
+            depth_only: true,
+            nearer: false,
         }
     }
 
@@ -463,6 +505,8 @@ impl PipelineKey {
                 Stencil::SkipEqual => Stencil::SkipEqual,
                 _ => Stencil::None,
             },
+            depth_only: false,
+            nearer: false,
         }
     }
 }
@@ -489,28 +533,54 @@ struct CasterKey {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Step {
     item: usize,
-    outline: bool,
+    pass: Pass,
+}
+
+/// Which of a material's passes a step draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pass {
+    Surface,
+    Outline,
+    /// Depth of the front faces, ahead of the surface.
+    Depth,
 }
 
 /// Draw order after the game: surfaces up to the last solid queue, then
 /// their outlines, then everything later in queue order, each with its
-/// outline first. `items` holds (queue, has outline) and is sorted by queue.
-fn draw_order(items: &[(i32, bool)]) -> Vec<Step> {
+/// outline first. A shader's depth pass comes right before its surface, as
+/// Unity draws an object's passes in turn. `items` holds (queue, has
+/// outline, has depth pass) and is sorted by queue.
+fn draw_order(items: &[(i32, bool, bool)]) -> Vec<Step> {
     let solid = |i: &usize| items[*i].0 <= shadow::LAST_SOLID_QUEUE;
     let mut steps = Vec::new();
     let all = 0..items.len();
-    steps.extend(all.clone().filter(solid).map(|item| Step { item, outline: false }));
-    steps.extend(
-        all.clone()
-            .filter(solid)
-            .filter(|i| items[*i].1)
-            .map(|item| Step { item, outline: true }),
-    );
+    let surface = |steps: &mut Vec<Step>, item: usize| {
+        if items[item].2 {
+            steps.push(Step {
+                item,
+                pass: Pass::Depth,
+            });
+        }
+        steps.push(Step {
+            item,
+            pass: Pass::Surface,
+        });
+    };
+    for item in all.clone().filter(solid) {
+        surface(&mut steps, item);
+    }
+    steps.extend(all.clone().filter(solid).filter(|i| items[*i].1).map(|item| Step {
+        item,
+        pass: Pass::Outline,
+    }));
     for item in all.filter(|i| !solid(i)) {
         if items[item].1 {
-            steps.push(Step { item, outline: true });
+            steps.push(Step {
+                item,
+                pass: Pass::Outline,
+            });
         }
-        steps.push(Step { item, outline: false });
+        surface(&mut steps, item);
     }
     steps
 }
@@ -764,7 +834,11 @@ impl Renderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: if key.hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
                     blend: blend_state(key.blend),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: if key.depth_only {
+                        wgpu::ColorWrites::empty()
+                    } else {
+                        wgpu::ColorWrites::ALL
+                    },
                 })],
                 compilation_options: Default::default(),
             }),
@@ -772,7 +846,13 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Cw,
                 // The outline is the mesh's back faces, pushed outward.
-                cull_mode: key.outline.then_some(wgpu::Face::Front),
+                cull_mode: if key.outline {
+                    Some(wgpu::Face::Front)
+                } else if key.depth_only {
+                    Some(wgpu::Face::Back)
+                } else {
+                    None
+                },
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -787,7 +867,7 @@ impl Renderer {
                 },
                 // Layers that do not write depth lie on the surface they
                 // decorate and must win against it.
-                bias: if key.blend != Blend::Off && !key.zwrite {
+                bias: if key.nearer {
                     wgpu::DepthBiasState {
                         constant: -8,
                         slope_scale: -1.0,
@@ -1049,6 +1129,8 @@ impl Renderer {
             // A colour, which Unity hands to shaders linearised.
             ambient_light: material::linear([env.ambient_light[0], env.ambient_light[1], env.ambient_light[2], 1.0]),
             shadow: [0.0; 4],
+            sh: env.ambient_probe,
+            reflection: [env.reflection[0], env.reflection[1], env.reflection[2], 0.0],
         };
         let ramp = match &env.ramp {
             Some(image) => self.texture(image),
@@ -1108,6 +1190,7 @@ impl Renderer {
             count: u32,
             queue: i32,
             outline: bool,
+            prepass: bool,
             surface_key: PipelineKey,
             outline_key: PipelineKey,
             stencil_ref: u32,
@@ -1272,6 +1355,7 @@ impl Renderer {
                     count: sm.index_count,
                     queue: desc.queue,
                     outline: desc.outline,
+                    prepass: desc.prepass,
                     surface_key: PipelineKey::surface(&desc, hdr),
                     outline_key: PipelineKey::outline(&desc, hdr),
                     stencil_ref: desc.stencil_ref as u32,
@@ -1293,14 +1377,14 @@ impl Renderer {
         }
         // Unity order: by render queue, ties in submission order.
         items.sort_by_key(|i| i.queue);
-        let order: Vec<(i32, bool)> = items.iter().map(|i| (i.queue, i.outline)).collect();
+        let order: Vec<(i32, bool, bool)> = items.iter().map(|i| (i.queue, i.outline, i.prepass)).collect();
         let steps = draw_order(&order);
         for step in &steps {
             let item = &items[step.item];
-            let key = if step.outline {
-                item.outline_key
-            } else {
-                item.surface_key
+            let key = match step.pass {
+                Pass::Outline => item.outline_key,
+                Pass::Surface => item.surface_key,
+                Pass::Depth => PipelineKey::prepass(hdr),
             };
             if !self.pipelines.contains_key(&key) {
                 let pipeline = self.make_pipeline(key);
@@ -1642,10 +1726,10 @@ impl Renderer {
                     current = None;
                 }
                 let item = &items[step.item];
-                let key = if step.outline {
-                    item.outline_key
-                } else {
-                    item.surface_key
+                let key = match step.pass {
+                    Pass::Outline => item.outline_key,
+                    Pass::Surface => item.surface_key,
+                    Pass::Depth => PipelineKey::prepass(hdr),
                 };
                 if current != Some(key) {
                     pass.set_pipeline(&self.pipelines[&key]);
@@ -2096,9 +2180,17 @@ mod tests {
 
     #[test]
     fn draw_order_follows_the_queues() {
-        let step = |item, outline| Step { item, outline };
+        let step = |item, outline| Step {
+            item,
+            pass: if outline { Pass::Outline } else { Pass::Surface },
+        };
         // Skin, cloth with outline, eye layer, fringe with outline.
-        let items = [(2350, true), (2450, true), (3000, false), (3040, true)];
+        let items = [
+            (2350, true, false),
+            (2450, true, false),
+            (3000, false, false),
+            (3040, true, false),
+        ];
         assert_eq!(
             draw_order(&items),
             vec![
@@ -2117,9 +2209,27 @@ mod tests {
     }
 
     #[test]
+    fn a_depth_pass_comes_right_before_its_surface() {
+        let step = |item, pass| Step { item, pass };
+        // Skin, a solid surface with a depth pass, a sheer one with it.
+        let items = [(2350, true, false), (2450, false, true), (3100, false, true)];
+        assert_eq!(
+            draw_order(&items),
+            vec![
+                step(0, Pass::Surface),
+                step(1, Pass::Depth),
+                step(1, Pass::Surface),
+                step(0, Pass::Outline),
+                step(2, Pass::Depth),
+                step(2, Pass::Surface),
+            ]
+        );
+    }
+
+    #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and seven vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 176);
+        // WGSL: mat4x4 and fifteen vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 304);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);

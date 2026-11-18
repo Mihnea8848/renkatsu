@@ -5,7 +5,7 @@ use anyhow::Result;
 use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_render::shadow::ShadowSettings;
-use rk_render::{bounds, save_png, Camera, Environment, Renderer};
+use rk_render::{bounds, save_png, Camera, Environment, Renderer, StudioEffects};
 use rk_vfs::Game;
 use std::path::Path;
 use std::time::Instant;
@@ -17,6 +17,10 @@ pub struct Args<'a> {
     pub width: u32,
     pub height: u32,
     pub yaw: f32,
+    /// Camera position as `x,y,z`.
+    pub eye: Option<&'a str>,
+    /// The point the camera looks at, as `x,y,z`.
+    pub look_at: Option<&'a str>,
     pub no_clothes: bool,
     pub no_accessories: bool,
     pub outdoor_shoes: bool,
@@ -30,6 +34,42 @@ pub struct Args<'a> {
     pub pose: Option<&'a str>,
     /// Where in the animation, in passes.
     pub time: f32,
+    /// Draw with the look of Renkatsu Studio's viewport.
+    pub studio_look: bool,
+    /// The colour behind the character, as `r,g,b` from 0 to 1.
+    pub background: Option<&'a str>,
+}
+
+/// The colour behind the character when none is asked for.
+const BACKGROUND: [f64; 4] = [0.93, 0.93, 0.95, 1.0];
+
+/// A colour written as `r,g,b`, each from 0 to 1.
+fn colour(text: &str) -> Result<[f64; 4]> {
+    let [r, g, b] = point(text)?;
+    anyhow::ensure!(
+        [r, g, b].iter().all(|c| (0.0..=1.0).contains(c)),
+        "`{text}` is not a colour; each of r,g,b goes from 0 to 1"
+    );
+    Ok([r.into(), g.into(), b.into(), 1.0])
+}
+
+/// The look of Renkatsu Studio's viewport: what a new CharaStudio scene has
+/// on, with its first colour filter when the game has it, around a plain
+/// `background` the effects leave alone.
+fn studio_look(game: &Game, background: [f64; 4]) -> StudioEffects {
+    let mut effects = StudioEffects::studio(rk_chara::build::color_filter(game, 0));
+    effects.backdrop = Some(background);
+    effects
+}
+
+/// A point written as `x,y,z`.
+fn point(text: &str) -> Result<[f32; 3]> {
+    let parts: Vec<f32> = text
+        .split(',')
+        .map(|p| p.trim().parse::<f32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| anyhow::anyhow!("`{text}` is not a point; write it as x,y,z"))?;
+    <[f32; 3]>::try_from(parts).map_err(|_| anyhow::anyhow!("`{text}` is not a point; write it as x,y,z"))
 }
 
 pub fn render(a: Args) -> Result<()> {
@@ -124,17 +164,25 @@ pub fn render(a: Args) -> Result<()> {
         }
     }
     let (min, max) = bounds(&draws);
-    let camera = Camera::frame(min, max, a.width as f32 / a.height as f32, a.yaw);
+    let mut camera = Camera::frame(min, max, a.width as f32 / a.height as f32, a.yaw);
+    if let Some(p) = a.look_at {
+        camera.target = point(p)?.into();
+    }
+    if let Some(p) = a.eye {
+        camera.eye = point(p)?.into();
+    }
+    let background = a.background.map(colour).transpose()?.unwrap_or(BACKGROUND);
     let mut renderer = Renderer::new()?;
     let env = Environment {
         ramp: chara.ramp.clone(),
+        effects: a.studio_look.then(|| studio_look(&game, background)),
         shadows: ShadowSettings {
             enabled: a.shadows,
             ..Default::default()
         },
         ..Default::default()
     };
-    let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, [0.93, 0.93, 0.95, 1.0])?;
+    let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, background)?;
     save_png(a.out, a.width, a.height, &pixels)?;
     println!(
         "{}: {} meshes, {} nodes, built in {:.2}s, total {:.2}s -> {}",
@@ -156,4 +204,25 @@ pub fn render(a: Args) -> Result<()> {
         println!("  warning: {w}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{colour, point};
+
+    #[test]
+    fn colours_are_three_numbers_from_0_to_1() {
+        assert_eq!(colour("0.25, 0.5,1").unwrap(), [0.25, 0.5, 1.0, 1.0]);
+        assert!(colour("0.2,0.2").is_err());
+        assert!(colour("0.2,0.2,1.5").is_err());
+        assert!(colour("-0.1,0,0").is_err());
+    }
+
+    #[test]
+    fn points_are_three_numbers() {
+        assert_eq!(point("0, -0.5,1.25").unwrap(), [0.0, -0.5, 1.25]);
+        assert!(point("1,2").is_err());
+        assert!(point("1,2,x").is_err());
+        assert!(point("1,2,3,4").is_err());
+    }
 }

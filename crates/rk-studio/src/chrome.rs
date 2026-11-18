@@ -360,14 +360,14 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             ("Save", key(Action::Save), Command::Save),
             ("Save as", key(Action::SaveAs), Command::SaveAs),
             ("Import card", key(Action::ImportCard), Command::ImportCard),
-            ("Import from a package", String::new(), Command::ImportFromPackage),
+            ("Import from library", String::new(), Command::ImportFromPackage),
             (
                 "Import animations from a file",
                 String::new(),
                 Command::ImportAnimationFile,
             ),
             (
-                "Import animations from a package",
+                "Import animations from library",
                 String::new(),
                 Command::ImportAnimations,
             ),

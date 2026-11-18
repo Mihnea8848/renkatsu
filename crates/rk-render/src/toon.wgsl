@@ -26,6 +26,10 @@ struct Globals {
     shadow: vec4<f32>,
     // rgb: the scene's ambient light
     ambient_light: vec4<f32>,
+    // Unity's ambient probe: unity_SHAr, SHAg, SHAb, SHBr, SHBg, SHBb, SHC
+    sh: array<vec4<f32>, 7>,
+    // rgb: what the scene's reflection probe shows, HDR decoded
+    reflection: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
@@ -1551,6 +1555,9 @@ fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
 
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (m.info.z >= MOD_FIRST) {
+        return mod_forward(i, front);
+    }
     if (m.info.z >= XK_FIRST) {
         return xk_forward(i, front);
     }
@@ -1674,6 +1681,9 @@ fn fs_caster(i: CasterOut, @builtin(front_facing) front: bool) {
     var keep = 1.0;
     if (has(CASTER_FALLBACK)) {
         // Legacy Shaders/VertexLit cuts nothing out.
+        keep = 1.0;
+    } else if (item >= MOD_FIRST) {
+        // The ported mod shaders have no caster pass that cuts.
         keep = 1.0;
     } else if (item >= XK_FIRST) {
         keep = select(0.0, 1.0, xk_casts(i.uv0, main_a));

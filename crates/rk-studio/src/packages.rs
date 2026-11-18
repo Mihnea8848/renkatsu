@@ -2,20 +2,18 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Packages in the studio: the Packages window, which lists, downloads,
-//! installs, checks and removes them, and the window that imports a
-//! package's cards into the project.
+//! installs, checks and removes them.
 //!
 //! Packages belong to the user, not to a project: they are installed
 //! once, in Renkatsu's data folder, and every project builds its
 //! characters from them. The work on them runs on a thread of its own,
 //! so the window keeps drawing and can stop it.
 
-use crate::dialogs::{Import, Pick};
+use crate::dialogs::Pick;
 use crate::state::{Look, State};
 use crate::widgets::hair_h;
-use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use rk_packages::{size_text, Installed, Known, Stage, Store, Task};
-use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -37,31 +35,12 @@ struct Job {
     result: Receiver<Result<String, String>>,
 }
 
-/// A card of an installed package, for the import window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageCard {
-    pub path: PathBuf,
-    /// The character's name, or the file's when the card has none.
-    pub name: String,
-    /// The name of the package it is in.
-    pub package: String,
-}
-
-/// The window that imports cards from installed packages.
-#[derive(Default)]
-pub struct Browser {
-    pub cards: Vec<PackageCard>,
-    pub chosen: BTreeSet<usize>,
-    pub search: String,
-    thumbs: HashMap<PathBuf, Option<TextureHandle>>,
-}
-
 #[derive(Default)]
 pub struct Packages {
     /// The Packages window shows.
     pub open: bool,
     /// The import window, while it shows.
-    pub browser: Option<Browser>,
+    pub browser: Option<crate::card_import::Browser>,
     store: Option<Store>,
     pub installed: Vec<Row>,
     known: Vec<Known>,
@@ -106,30 +85,6 @@ pub fn card_names(cards: &[(String, Option<String>)]) -> Vec<String> {
             }
             _ => stem.clone(),
         })
-        .collect()
-}
-
-/// The cards of some packages, with the names they show under.
-pub fn cards_of(packages: &[Installed]) -> Vec<PackageCard> {
-    let mut found = Vec::new();
-    for package in packages {
-        for path in package.cards() {
-            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            let name = rk_card::Card::load(&path).ok().map(|c| c.full_name());
-            // The name in the list Renkatsu ships, as the Packages window
-            // shows it, else the package's own.
-            let package_name = rk_packages::index::known()
-                .into_iter()
-                .find(|k| k.id == package.manifest.id)
-                .map_or_else(|| package.manifest.name.clone(), |k| k.name);
-            found.push((path, package_name, (stem, name)));
-        }
-    }
-    let names: Vec<(String, Option<String>)> = found.iter().map(|f| f.2.clone()).collect();
-    found
-        .into_iter()
-        .zip(card_names(&names))
-        .map(|((path, package, _), name)| PackageCard { path, name, package })
         .collect()
 }
 
@@ -300,13 +255,11 @@ impl Packages {
         self.refresh();
     }
 
-    /// Opens the import window on the cards of the installed packages.
-    pub fn browse(&mut self) {
+    /// Opens the window that imports characters, on the installed
+    /// packages and on Koikatsu when its folder is set.
+    pub fn browse(&mut self, game: Option<&rk_core::Config>) {
         let packages: Vec<Installed> = self.installed.iter().map(|r| r.package.clone()).collect();
-        self.browser = Some(Browser {
-            cards: cards_of(&packages),
-            ..Default::default()
-        });
+        self.browser = Some(crate::card_import::Browser::new(&packages, game));
     }
 }
 
@@ -336,7 +289,7 @@ enum Ask {
 /// takes no clicks. Returns whether the dimmed part was clicked.
 pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
     let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new((id, "veil")))
+    let clicked = egui::Area::new(egui::Id::new((id, "veil")))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
@@ -344,7 +297,12 @@ pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
             ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(120));
             resp.clicked()
         })
-        .inner
+        .inner;
+    // A click on the veil brings it to the front, and the next time the
+    // window opens it would cover the window: the window, the area named
+    // `id`, goes back on top.
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id)));
+    clicked
 }
 
 /// The parts of such a window: its header, body and foot.
@@ -370,8 +328,10 @@ pub(crate) fn frame(ui: &mut Ui, k: &Look, window: Rect, title: &str, under: &st
     hair_h(p, head.left(), head.right(), head.bottom() - 1.0, t.line);
     hair_h(p, foot.left(), foot.right(), foot.top(), t.divider);
     p.rect_stroke(window, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+    // Without a line under it, the title stands in the middle.
+    let lift = if under.is_empty() { 0.0 } else { 8.0 };
     p.text(
-        Pos2::new(head.left() + 20.0, head.center().y - 8.0),
+        Pos2::new(head.left() + 20.0, head.center().y - lift),
         egui::Align2::LEFT_CENTER,
         title,
         k.bold(15.0),
@@ -684,338 +644,9 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     }
 }
 
-/// The cards the search leaves, as indices.
-pub fn matching(cards: &[PackageCard], search: &str) -> Vec<usize> {
-    let search = search.trim().to_lowercase();
-    (0..cards.len())
-        .filter(|&i| {
-            let stem = cards[i]
-                .path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            search.is_empty() || cards[i].name.to_lowercase().contains(&search) || stem.contains(&search)
-        })
-        .collect()
-}
-
-/// The window that imports cards from the installed packages, drawn like
-/// the project selector: a header with the search, the cards in a grid,
-/// and a foot with what is chosen and the buttons.
-pub fn browser(ctx: &egui::Context, k: &Look, st: &mut State) {
-    let Some(mut browser) = st.packages.browser.take() else {
-        return;
-    };
-    let t = k.t;
-    let eager = st.scripted;
-    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    let mut import = false;
-    let mut to_packages = false;
-
-    // The editor dims behind the window and takes no clicks.
-    let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new("package browser veil"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(screen.min)
-        .show(ctx, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(120));
-            if resp.clicked() {
-                close = true;
-            }
-        });
-
-    let size = Vec2::new(
-        (screen.width() - 80.0).clamp(560.0, 820.0),
-        (screen.height() - 80.0).clamp(420.0, 620.0),
-    );
-    let window = Rect::from_center_size(screen.center(), size);
-    egui::Area::new(egui::Id::new("package browser"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(window.min)
-        .show(ctx, |ui| {
-            ui.set_min_size(size);
-            const HEAD: f32 = 52.0;
-            const FOOT: f32 = 56.0;
-            let head = Rect::from_min_size(window.min, Vec2::new(size.x, HEAD));
-            let foot = Rect::from_min_max(Pos2::new(window.left(), window.bottom() - FOOT), window.max);
-            let body = Rect::from_min_max(head.left_bottom(), foot.right_top());
-            {
-                let p = ui.painter();
-                p.rect_filled(window, 0.0, t.panel);
-                p.rect_filled(foot, 0.0, t.header);
-                hair_h(p, head.left(), head.right(), head.bottom() - 1.0, t.line);
-                hair_h(p, foot.left(), foot.right(), foot.top(), t.divider);
-                p.rect_stroke(window, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
-            }
-
-            // The header: the title, where the cards come from, the search
-            // and the close cell.
-            let p = ui.painter();
-            p.text(
-                Pos2::new(head.left() + 20.0, head.center().y - 8.0),
-                egui::Align2::LEFT_CENTER,
-                "Import characters",
-                k.bold(15.0),
-                t.text_bright,
-            );
-            let mut packages: Vec<&str> = browser.cards.iter().map(|c| c.package.as_str()).collect();
-            packages.dedup();
-            let from = match packages.len() {
-                0 => "No package with characters is installed".to_owned(),
-                1 => format!("From {}", packages[0]),
-                n => format!("From {n} packages"),
-            };
-            p.text(
-                Pos2::new(head.left() + 20.0, head.center().y + 10.0),
-                egui::Align2::LEFT_CENTER,
-                from,
-                k.small(),
-                t.text_dim,
-            );
-            let x_cell = Rect::from_center_size(Pos2::new(head.right() - 26.0, head.center().y), Vec2::splat(28.0));
-            let x = ui.interact(x_cell, ui.id().with("close"), Sense::click());
-            if x.hovered() {
-                ui.painter().rect_filled(x_cell, k.radius(), t.control);
-            }
-            crate::widgets::glyph(
-                ui.painter(),
-                k,
-                x_cell.center(),
-                egui_phosphor::regular::X,
-                14.0,
-                if x.hovered() { t.text_bright } else { t.text_dim },
-            );
-            if x.clicked() {
-                close = true;
-            }
-            if !browser.cards.is_empty() {
-                let search = Rect::from_min_size(
-                    Pos2::new(x_cell.left() - 12.0 - 240.0, head.center().y - k.field() / 2.0),
-                    Vec2::new(240.0, k.field()),
-                );
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(search));
-                crate::widgets::search(&mut child, k, &mut browser.search, "Search characters", 240.0);
-            }
-
-            if browser.cards.is_empty() {
-                let c = body.center();
-                ui.painter().text(
-                    c - Vec2::new(0.0, 30.0),
-                    egui::Align2::CENTER_CENTER,
-                    "No installed package has characters",
-                    k.bold(k.d.text),
-                    t.text_bright,
-                );
-                ui.painter().text(
-                    c - Vec2::new(0.0, 8.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Starter Content: Characters & Clothing brings Koikatsu's own characters.",
-                    k.font(),
-                    t.text_dim,
-                );
-                let open = Rect::from_center_size(c + Vec2::new(0.0, 28.0), Vec2::new(150.0, 30.0));
-                if crate::selector::button(ui, k, open, "Open Packages", true, true) {
-                    to_packages = true;
-                }
-            } else {
-                // The cards, evenly spaced in as many columns as fit.
-                let shown = matching(&browser.cards, &browser.search);
-                const GAP: f32 = 14.0;
-                let thumb = Vec2::new(116.0, (116.0 * 352.0 / 252.0_f32).round());
-                let tile = Vec2::new(thumb.x, thumb.y + 42.0);
-                let inner = body.shrink2(Vec2::new(20.0, 0.0));
-                let columns = ((inner.width() + GAP) / (tile.x + GAP)).floor().max(1.0) as usize;
-                let used = columns as f32 * tile.x + (columns - 1) as f32 * GAP;
-                let left = inner.left() + ((inner.width() - used) / 2.0).floor();
-                let rows = shown.len().div_ceil(columns);
-                let mut area = ui.new_child(egui::UiBuilder::new().max_rect(body));
-                area.set_clip_rect(body);
-                let mut loaded = false;
-                egui::ScrollArea::vertical()
-                    .id_salt("package cards")
-                    .auto_shrink(false)
-                    .max_height(body.height())
-                    .show(&mut area, |ui| {
-                        let height = 18.0 + rows as f32 * (tile.y + GAP);
-                        let (space, _) = ui.allocate_exact_size(Vec2::new(body.width(), height), Sense::hover());
-                        if shown.is_empty() {
-                            ui.painter().text(
-                                Pos2::new(body.center().x, space.top() + 40.0),
-                                egui::Align2::CENTER_CENTER,
-                                "No character matches the search",
-                                k.font(),
-                                t.text_dim,
-                            );
-                        }
-                        for (n, &i) in shown.iter().enumerate() {
-                            let min = Pos2::new(
-                                left + (n % columns) as f32 * (tile.x + GAP),
-                                space.top() + 18.0 + (n / columns) as f32 * (tile.y + GAP),
-                            );
-                            let rect = Rect::from_min_size(min, tile);
-                            if !ui.is_rect_visible(rect) {
-                                continue;
-                            }
-                            let card = &browser.cards[i];
-                            let resp = ui.interact(rect, ui.id().with(("package card", i)), Sense::click());
-                            if resp.clicked() && !browser.chosen.remove(&i) {
-                                browser.chosen.insert(i);
-                            }
-                            if resp.double_clicked() {
-                                browser.chosen.insert(i);
-                                import = true;
-                            }
-                            // Pictures load one a frame, so the window opens at once.
-                            if !browser.thumbs.contains_key(&card.path) && (eager || !loaded) {
-                                loaded = true;
-                                let texture = crate::library::picture(&card.path).map(|image| {
-                                    ui.ctx().load_texture(
-                                        format!("package card {}", card.path.display()),
-                                        image,
-                                        egui::TextureOptions::LINEAR,
-                                    )
-                                });
-                                browser.thumbs.insert(card.path.clone(), texture);
-                                ui.ctx().request_repaint();
-                            }
-                            let on = browser.chosen.contains(&i);
-                            let picture = Rect::from_min_size(rect.min, thumb);
-                            let p = ui.painter();
-                            p.rect_filled(picture, 0.0, t.input);
-                            match browser.thumbs.get(&card.path) {
-                                Some(Some(texture)) => {
-                                    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                                    let tint = if on || resp.hovered() {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::from_gray(222)
-                                    };
-                                    p.image(texture.id(), picture, uv, tint);
-                                }
-                                _ => crate::widgets::glyph(
-                                    p,
-                                    k,
-                                    picture.center(),
-                                    egui_phosphor::regular::USER,
-                                    32.0,
-                                    t.border,
-                                ),
-                            }
-                            let outline = if on {
-                                Some(Stroke::new(2.0, t.select))
-                            } else if resp.hovered() {
-                                Some(Stroke::new(1.0, t.hover))
-                            } else {
-                                None
-                            };
-                            if let Some(stroke) = outline {
-                                p.rect_stroke(picture, 0.0, stroke, StrokeKind::Outside);
-                            }
-                            if on {
-                                let badge = Pos2::new(picture.right() - 13.0, picture.top() + 13.0);
-                                p.circle_filled(badge, 9.0, t.select);
-                                crate::widgets::glyph(p, k, badge, egui_phosphor::regular::CHECK, 11.0, Color32::WHITE);
-                            }
-                            let sex = if card.path.components().any(|c| c.as_os_str() == "male") {
-                                "Male"
-                            } else {
-                                "Female"
-                            };
-                            crate::selector::line(
-                                ui,
-                                Pos2::new(rect.left(), picture.bottom() + 13.0),
-                                tile.x,
-                                &card.name,
-                                k.font(),
-                                if on { t.text_bright } else { t.text },
-                            );
-                            crate::selector::line(
-                                ui,
-                                Pos2::new(rect.left(), picture.bottom() + 30.0),
-                                tile.x,
-                                sex,
-                                k.small(),
-                                t.text_dim,
-                            );
-                            resp.on_hover_text(&card.name);
-                        }
-                    });
-            }
-
-            // The foot: what is chosen, and the buttons.
-            let n = browser.chosen.len();
-            let text = match n {
-                0 if browser.cards.is_empty() => String::new(),
-                0 => "Click characters to choose them, or double click one to import it".to_owned(),
-                1 => "1 character chosen. It is copied into the project.".to_owned(),
-                n => format!("{n} characters chosen. They are copied into the project."),
-            };
-            ui.painter().text(
-                Pos2::new(foot.left() + 20.0, foot.center().y),
-                egui::Align2::LEFT_CENTER,
-                text,
-                k.font(),
-                t.text_dim,
-            );
-            let import_rect = Rect::from_min_size(
-                Pos2::new(foot.right() - 20.0 - 104.0, foot.center().y - 15.0),
-                Vec2::new(104.0, 30.0),
-            );
-            let cancel_rect = import_rect.translate(Vec2::new(-104.0 - 8.0, 0.0));
-            if crate::selector::button(ui, k, cancel_rect, "Cancel", false, true) {
-                close = true;
-            }
-            if crate::selector::button(ui, k, import_rect, "Import", true, n > 0) {
-                import = true;
-            }
-        });
-
-    if to_packages {
-        st.packages.open = true;
-        return;
-    }
-    if import && !browser.chosen.is_empty() {
-        for &i in &browser.chosen {
-            st.imports.push_back(Import {
-                path: browser.cards[i].path.clone(),
-                place: false,
-                ask: true,
-                // The name the window showed, which tells namesakes apart.
-                name: Some(browser.cards[i].name.clone()),
-            });
-        }
-        return;
-    }
-    if !close {
-        st.packages.browser = Some(browser);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn card(name: &str, file: &str) -> PackageCard {
-        PackageCard {
-            path: PathBuf::from("/packages/starter/cards/female").join(file),
-            name: name.to_owned(),
-            package: "Starter Content: Characters & Clothing".to_owned(),
-        }
-    }
-
-    #[test]
-    fn the_search_looks_at_names_and_files() {
-        let cards = [
-            card("Sakura Aoi", "Default female.png"),
-            card("Kobayashi", "Story c-8.png"),
-        ];
-        assert_eq!(matching(&cards, ""), [0, 1]);
-        assert_eq!(matching(&cards, " sakura"), [0]);
-        assert_eq!(matching(&cards, "STORY"), [1]);
-        assert!(matching(&cards, "nobody").is_empty());
-    }
 
     /// A package with two cards, installed in a folder of its own.
     fn installed_in(home: &Path) -> Packages {
@@ -1061,25 +692,19 @@ mod tests {
         let default = root.join("cards/female/Default female.png");
         assert_eq!(packages.default_card(), Some(default.clone()));
 
-        packages.browse();
-        let browser = packages.browser.as_ref().unwrap();
-        let listed: Vec<(&str, &str)> = browser
-            .cards
-            .iter()
-            .map(|c| (c.name.as_str(), c.package.as_str()))
-            .collect();
-        assert_eq!(
-            listed,
-            [
-                ("Default female", "Starter Content: Characters & Clothing"),
-                ("Story player", "Starter Content: Characters & Clothing"),
-            ]
-        );
+        packages.browse(None);
+        let browser = packages.browser.as_mut().unwrap();
+        assert_eq!(browser.sources.len(), 1);
+        assert_eq!(browser.sources[0].name, "Starter Content: Characters & Clothing");
+        browser.sources[0].advance(true);
+        let cards = browser.sources[0].listing.cards.clone();
+        let listed: Vec<&str> = cards.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(listed, ["Default female", "Story player"]);
 
         // The card is copied into the project as one from disk is, and
         // the package keeps its own.
         let mut project = crate::project::Project::create(&home.join("P"), "P").unwrap();
-        let file = project.import_card(&browser.cards[0].path, "Renkatsu-Chan").unwrap();
+        let file = project.import_card(&cards[0].path, "Renkatsu-Chan").unwrap();
         assert_eq!(file, "Characters/Default female.png");
         assert_eq!(std::fs::read(home.join("P").join(&file)).unwrap(), b"her card");
         assert!(default.is_file());
