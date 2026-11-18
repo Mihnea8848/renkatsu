@@ -7,6 +7,7 @@
 //! the window's left edge.
 
 use crate::design::{Overlays, TitleBar};
+use crate::keymap::Action;
 use crate::kinds::Kind;
 use crate::modes::{tool_hint, MODES, PIPELINES, TOOLS};
 use crate::panels::{self, Panel};
@@ -352,23 +353,32 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
     let item = |ui: &mut Ui, text: &str, keys: &str| ui.add(egui::Button::new(text).shortcut_text(keys));
     ui.menu_button("File", |ui| {
         let mut chosen = None;
+        let key = |action: Action| st.keys.text(action);
         for (text, keys, command) in [
-            ("New project", "Ctrl+N", Command::NewProject),
-            ("Open project", "Ctrl+O", Command::OpenProject(None)),
-            ("Save", "Ctrl+S", Command::Save),
-            ("Save as", "Ctrl+Shift+S", Command::SaveAs),
-            ("Import card", "Ctrl+I", Command::ImportCard),
-            ("Import from a package", "", Command::ImportFromPackage),
-            ("Import animations from a file", "", Command::ImportAnimationFile),
-            ("Import animations from a package", "", Command::ImportAnimations),
-            ("Set project icon", "", Command::SetIcon),
-            ("Project selector", "", Command::ProjectSelector),
-            ("Quit", "Ctrl+Q", Command::Quit),
+            ("New project", key(Action::NewProject), Command::NewProject),
+            ("Open project", key(Action::OpenProject), Command::OpenProject(None)),
+            ("Save", key(Action::Save), Command::Save),
+            ("Save as", key(Action::SaveAs), Command::SaveAs),
+            ("Import card", key(Action::ImportCard), Command::ImportCard),
+            ("Import from a package", String::new(), Command::ImportFromPackage),
+            (
+                "Import animations from a file",
+                String::new(),
+                Command::ImportAnimationFile,
+            ),
+            (
+                "Import animations from a package",
+                String::new(),
+                Command::ImportAnimations,
+            ),
+            ("Set project icon", String::new(), Command::SetIcon),
+            ("Project selector", String::new(), Command::ProjectSelector),
+            ("Quit", key(Action::Quit), Command::Quit),
         ] {
             if matches!(text, "Save" | "Import card" | "Set project icon") {
                 ui.separator();
             }
-            if item(ui, text, keys).clicked() {
+            if item(ui, text, &keys).clicked() {
                 chosen = Some(command);
             }
             if text == "Open project" {
@@ -399,38 +409,55 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
     });
     ui.menu_button("Edit", |ui| {
         let chosen = st.doc.selected.is_some();
-        for (text, keys, enabled, command) in [
-            ("Undo", "Ctrl+Z", st.doc.can_undo(), Command::Undo),
-            ("Redo", "Ctrl+Y", st.doc.can_redo(), Command::Redo),
-            ("Duplicate", "Ctrl+D", chosen, Command::Duplicate),
-            ("Rename", "F2", chosen, Command::Rename),
-            ("Hide or show", "H", chosen, Command::ToggleHidden),
-            ("Delete", "Del", chosen, Command::Delete),
+        let any = !st.doc.scene().objects().is_empty();
+        for (text, enabled, action) in [
+            ("Undo", st.doc.can_undo(), Action::Undo),
+            ("Redo", st.doc.can_redo(), Action::Redo),
+            ("Copy", chosen, Action::Copy),
+            ("Cut", chosen, Action::Cut),
+            ("Paste", !st.scene_clipboard.is_empty(), Action::Paste),
+            ("Duplicate", chosen, Action::Duplicate),
+            ("Rename", chosen, Action::Rename),
+            ("Hide or show", chosen, Action::ToggleHidden),
+            ("Delete", chosen, Action::Delete),
+            ("Select all", any, Action::SelectAll),
+            ("Select none", chosen, Action::SelectNone),
         ] {
-            if text == "Duplicate" {
+            if matches!(text, "Copy" | "Select all") {
                 ui.separator();
             }
-            let button = egui::Button::new(text).shortcut_text(keys);
+            let button = egui::Button::new(text).shortcut_text(st.keys.text(action));
             if ui.add_enabled(enabled, button).clicked() {
-                st.run(command);
+                st.act(action, ui.ctx());
                 ui.close();
             }
         }
         ui.separator();
-        if item(ui, "Preferences", "").clicked() {
+        if item(ui, "Preferences", &st.keys.text(Action::Preferences)).clicked() {
             st.preferences_open = true;
+            ui.close();
         }
     });
     ui.menu_button("Add", |ui| panels::add_items(ui, k, st));
     ui.menu_button("View", |ui| {
-        if widgets::check_item(ui, k, !st.overlays_hidden, "Viewport tools", "`").clicked() {
+        let key = |action: Action| st.keys.text(action);
+        let (tools, maximise, palette, inputs) = (
+            key(Action::ViewportTools),
+            key(Action::Maximise),
+            key(Action::ModeTools),
+            key(Action::ShowInputs),
+        );
+        if widgets::check_item(ui, k, !st.overlays_hidden, "Viewport tools", &tools).clicked() {
             st.overlays_hidden = !st.overlays_hidden;
         }
-        if widgets::check_item(ui, k, st.maximised, "Maximise viewport", "Shift+Space").clicked() {
+        if widgets::check_item(ui, k, st.maximised, "Maximise viewport", &maximise).clicked() {
             st.maximised = !st.maximised;
         }
+        if widgets::check_item(ui, k, st.settings.show_inputs, "Show inputs", &inputs).clicked() {
+            st.act(Action::ShowInputs, ui.ctx());
+        }
         ui.separator();
-        if widgets::check_item(ui, k, st.palette_open, "Mode tools", "").clicked() {
+        if widgets::check_item(ui, k, st.palette_open, "Mode tools", &palette).clicked() {
             st.palette_open = !st.palette_open;
         }
         if widgets::check_item(ui, k, st.rail == Rail::Named, "Mode names", "").clicked() {
@@ -443,7 +470,8 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
         ui.separator();
         for (i, mode) in MODES.iter().enumerate() {
             let text = format!("{} mode", mode.name);
-            if widgets::check_item(ui, k, st.mode == i, &text, &(i + 1).to_string()).clicked() {
+            let keys = st.keys.text(Action::Mode(i as u8));
+            if widgets::check_item(ui, k, st.mode == i, &text, &keys).clicked() {
                 st.mode = i;
                 st.palette_open = true;
             }
@@ -457,7 +485,7 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             }
         }
         ui.separator();
-        if ui.button("Packages").clicked() {
+        if item(ui, "Packages", &st.keys.text(Action::Packages)).clicked() {
             st.ask(Command::Packages, ui.ctx());
             ui.close();
         }
@@ -468,7 +496,10 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
         }
     });
     ui.menu_button("Help", |ui| {
-        let _ = ui.button("Keyboard map");
+        if item(ui, "Keyboard shortcuts", &st.keys.text(Action::Shortcuts)).clicked() {
+            st.shortcuts_open = true;
+            ui.close();
+        }
         let _ = ui.button("About Renkatsu");
     });
 }
@@ -493,10 +524,11 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
         }
     }
     let tips = [
-        "Play the scene: animations and physics",
-        "Pause the scene",
-        "Stop, and put animations and physics back to their start",
-        "Simulation options",
+        st.keys.tip("Play the scene: animations and physics", Action::PlayPause),
+        st.keys.tip("Pause the scene", Action::PlayPause),
+        st.keys
+            .tip("Stop, and put animations and physics back to their start", Action::Stop),
+        "Simulation options".to_owned(),
     ];
     let mut x = group.left();
     for (i, tip) in tips.into_iter().enumerate() {

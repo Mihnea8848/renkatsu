@@ -31,7 +31,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.7, on the
+The latest version is 0.1.8, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -60,7 +60,11 @@ The latest version is 0.1.7, on the
   personality, birthday, club, traits and likes, changed per character in the
   scene without touching the card. The animation list puts the H scenes' nine
   groups under one row of their own.
-- Next: posing by hand (FK and IK).
+- 0.1.8 moves, rotates and scales objects in the viewport with gizmos, in
+  global or local axes, with snapping steps of your own. Objects are selected
+  with a click or a box, and every shortcut can be changed under Help.
+- Next: snapping to the floor and the grid, attaching objects to each other
+  and to bones, then posing by hand (FK and IK).
 
 ## Renkatsu Studio
 

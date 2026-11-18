@@ -188,24 +188,30 @@ pub const MODES: [Mode; 6] = [
     },
 ];
 
-/// The transform tools of the floating strip: icon, name, key.
+/// Modes that do not exist yet, shown greyed at the end of the rail:
+/// playing the scene as a game, in first or third person, and playing
+/// Ren'Py scripts.
+pub const LATER: [Entry; 2] = [(icon::GAME_CONTROLLER, "Game"), (icon::BOOK_OPEN_TEXT, "Story")];
+
+/// The transform tools of the floating strip: icon, name, and a key held
+/// for it that the keymap does not list.
 pub const TOOLS: [(&str, &str, &str); 6] = [
     (icon::HAND, "View", "Alt"),
-    (icon::CURSOR, "Select", "Q"),
-    (icon::ARROWS_OUT_CARDINAL, "Move", "W"),
-    (icon::ARROWS_CLOCKWISE, "Rotate", "E"),
-    (icon::ARROWS_OUT, "Scale", "R"),
-    (icon::BONE, "Pose", "T"),
+    (icon::CURSOR, "Select", ""),
+    (icon::ARROWS_OUT_CARDINAL, "Move", ""),
+    (icon::ARROWS_CLOCKWISE, "Rotate", ""),
+    (icon::ARROWS_OUT, "Scale", ""),
+    (icon::BONE, "Pose", ""),
 ];
 
 /// One line for the status bar about a transform tool.
 pub fn tool_hint(tool: usize) -> &'static str {
     match tool {
         0 => "Drag to orbit, middle drag to pan, wheel to zoom",
-        1 => "Click an object to select it, drag for a box",
-        2 => "Drag a handle to move, hold Ctrl to snap",
-        3 => "Drag a ring to rotate, hold Ctrl to snap",
-        4 => "Drag a handle to scale, hold Ctrl to snap",
+        1 => "Click to select, Ctrl+click to add or remove, drag for a box",
+        2 => "Drag an axis, a corner or the ball to move; Ctrl flips snapping, Esc cancels",
+        3 => "Drag an arc to rotate; Ctrl flips snapping, Esc cancels",
+        4 => "Drag an axis, a line between two or the middle cube to scale; Ctrl flips snapping, Esc cancels",
         _ => "Drag a bone handle to pose the character",
     }
 }

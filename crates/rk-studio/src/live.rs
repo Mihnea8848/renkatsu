@@ -9,16 +9,17 @@
 //! root to the object's transform and stepping its physics while it plays.
 
 use crate::camera::{Focus, Orbit, ViewCamera};
+use crate::gizmo_pass::{GizmoPass, Mesh};
 use crate::mods::Games;
 use crate::project::Project;
-use crate::scene::{Content, ObjectId, Scene, Transform};
+use crate::scene::{Content, ObjectId, Scene};
 use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use rk_chara::clothes_state::{self as cs, States};
 use rk_chara::motion::{self, Bound, Motion};
-use rk_chara::scene::Trs;
+use rk_chara::scene::{ShadowCasting, Trs};
 use rk_chara::Image;
 use rk_render::{bounds, Camera, Environment, Renderer, StudioEffects};
 use std::path::{Path, PathBuf};
@@ -49,8 +50,8 @@ struct Actor {
     /// The middle of the character as loaded and the distance that fits it.
     center: Vec3,
     distance: f32,
-    /// The object's transform as last given to the root.
-    applied: Option<Transform>,
+    /// Where the object is in the scene, as last given to the root.
+    applied: Option<Mat4>,
     /// How many outfits the card has.
     outfits: usize,
     /// The clothes states the character was last brought to.
@@ -115,28 +116,29 @@ impl Clock {
 impl Actor {
     /// The character as something to focus on, where its transform put it.
     fn subject(&self) -> Focus {
-        let t = self.applied.unwrap_or_default();
+        let world = self.applied.unwrap_or_default();
+        let (scale, ..) = world.to_scale_rotation_translation();
         Focus {
             object: self.id,
-            center: t.matrix().transform_point3(self.center),
-            distance: self.distance * t.largest_scale().max(1e-3),
+            center: world.transform_point3(self.center),
+            distance: self.distance * scale.abs().max_element().max(1e-3),
         }
     }
 
-    /// Puts the character's root where the object's transform says. The
+    /// Puts the character's root where the object is in the scene. The
     /// physics is put back on the bones unless it is running, when the
     /// move is something for it to react to.
-    fn place(&mut self, transform: &Transform, running: bool) -> bool {
-        if self.applied == Some(*transform) {
+    fn place(&mut self, world: Mat4, running: bool) -> bool {
+        if self.applied == Some(world) {
             return false;
         }
         let top = self.chara.top;
-        let (scale, rot, pos) = (transform.matrix() * self.rest[top].matrix()).to_scale_rotation_translation();
+        let (scale, rot, pos) = (world * self.rest[top].matrix()).to_scale_rotation_translation();
         self.chara.scene.nodes[top].local = Trs { pos, rot, scale };
         if !running {
             self.chara.physics.reset(&self.chara.scene);
         }
-        self.applied = Some(*transform);
+        self.applied = Some(world);
         true
     }
 
@@ -155,6 +157,7 @@ impl Actor {
     fn update(
         &mut self,
         object: &crate::scene::Object,
+        world: Mat4,
         game: &mut dyn FnMut() -> Result<Motion>,
         clock: &Clock,
         log: &mut Log,
@@ -227,7 +230,7 @@ impl Actor {
         if running {
             // A frame as the game runs it: the physics puts its bones
             // back, the animation writes, the physics simulates.
-            let moved = self.place(&object.transform, true);
+            let moved = self.place(world, true);
             if *simulate {
                 self.chara.physics.begin_frame(&mut self.chara.scene);
             }
@@ -241,11 +244,11 @@ impl Actor {
             return moved;
         }
         if !again && phase == self.phase {
-            return self.place(&object.transform, false);
+            return self.place(world, false);
         }
         // Nothing plays: the character is posed once and holds still.
         self.back_to_rest();
-        self.place(&object.transform, false);
+        self.place(world, false);
         self.chara.refresh_heels(&states);
         if let (Some(playing), Some(phase)) = (&self.playing, phase) {
             self.chara.animate(&playing.bound, phase, &states);
@@ -302,6 +305,11 @@ pub struct Live {
     failed: Vec<(ObjectId, Recipe, String)>,
     target: Option<Target>,
     pub cam: ViewCamera,
+    /// An object is being dragged in the viewport: the camera stays where
+    /// it is instead of going with what it is focused on.
+    pub hold_camera: bool,
+    /// The layer the transform gizmo is drawn into.
+    gizmo: GizmoPass,
     /// The camera was framed on a character once.
     framed: bool,
     /// The colour table of Studio's first colour filter, once it was looked
@@ -320,6 +328,7 @@ impl Live {
         if let Some(target) = self.target.take() {
             self.render_state.renderer.write().free_texture(&target.id);
         }
+        self.gizmo.release(&self.render_state);
     }
 
     /// Another renderer on the same device with a scene of its own, for a
@@ -339,6 +348,8 @@ impl Live {
             failed: Vec::new(),
             target: None,
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
+            hold_camera: false,
+            gizmo: GizmoPass::new(&render_state.device),
             framed: false,
             filter: None,
         })
@@ -512,8 +523,8 @@ impl Live {
                     &parameters,
                 )
             };
-            if actor.update(object, &mut read, &clock, log) {
-                self.cam.follow(actor.subject());
+            if actor.update(object, scene.world(actor.id), &mut read, &clock, log) {
+                self.cam.follow(actor.subject(), self.hold_camera);
             }
         }
     }
@@ -575,7 +586,11 @@ impl Live {
                 {
                     env.light_intensity = intensity;
                     env.shadows.enabled = shadows;
-                    env.light_dir = (!from_camera).then(|| light.light_direction());
+                    // A light shines along its own forward axis, wherever
+                    // its folders turned it.
+                    let turn = scene.parent_world(light.id).to_scale_rotation_translation().1;
+                    let own = Vec3::from(light.light_direction());
+                    env.light_dir = (!from_camera).then(|| (turn * own).to_array());
                 }
             }
             None => {
@@ -642,6 +657,71 @@ impl Live {
         Ok(target.id)
     }
 
+    /// Draws a transform gizmo into its layer of `size` pixels, as the
+    /// viewport's camera sees it, and returns the id egui shows it under.
+    pub fn paint_gizmo(&mut self, size: [u32; 2], view_proj: Mat4, mesh: &Mesh) -> egui::TextureId {
+        let size = [size[0].max(1), size[1].max(1)];
+        let eye = self.cam.orbit.camera().eye;
+        self.gizmo.paint(&self.render_state, size, view_proj, eye, mesh)
+    }
+
+    /// The character a ray from `origin` along `dir` meets first, by the
+    /// triangles of its meshes as they are posed, and how far along the
+    /// ray. Worked out on the CPU, which a click can afford.
+    pub fn pick(&self, scene: &Scene, origin: Vec3, dir: Vec3) -> Option<(ObjectId, f32)> {
+        let mut best: Option<(ObjectId, f32)> = None;
+        for actor in self.actors.iter().filter(|a| scene.shown(a.id)) {
+            for draw in actor.chara.scene.pose() {
+                if draw.renderer.cast_shadows == ShadowCasting::ShadowsOnly {
+                    continue;
+                }
+                let reach = best.map_or(f32::MAX, |(_, t)| t);
+                if draw.bounds.is_some_and(|b| !ray_meets_box(origin, dir, b, reach)) {
+                    continue;
+                }
+                let positions = draw.positions();
+                let mesh = &draw.renderer.mesh;
+                for sub in mesh.submeshes.iter().filter(|s| s.topology == 0) {
+                    let first = sub.first_index as usize;
+                    let Some(indices) = mesh.indices.get(first..first + sub.index_count as usize) else {
+                        continue;
+                    };
+                    for triangle in indices.chunks_exact(3) {
+                        let corner = |i: usize| positions.get(triangle[i] as usize).copied().map(Vec3::from);
+                        let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+                            continue;
+                        };
+                        if let Some(t) = ray_meets_triangle(origin, dir, a, b, c) {
+                            if best.is_none_or(|(_, nearest)| t < nearest) {
+                                best = Some((actor.id, t));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// The shown characters and where their bones are in the world, for
+    /// telling which of them a box on the screen touches.
+    pub fn bones(&self, scene: &Scene) -> Vec<(ObjectId, Vec<Vec3>)> {
+        self.actors
+            .iter()
+            .filter(|a| scene.shown(a.id))
+            .map(|a| {
+                let (world, active) = a.chara.scene.world();
+                let points = world
+                    .iter()
+                    .zip(&active)
+                    .filter(|(_, active)| **active)
+                    .map(|(m, _)| m.w_axis.truncate())
+                    .collect();
+                (a.id, points)
+            })
+            .collect()
+    }
+
     /// A small picture of the scene as the viewport's camera will see it
     /// once it is at rest, as RGBA bytes of `size` pixels, for the project
     /// selector. `None` when the scene shows no character: a picture of
@@ -662,4 +742,33 @@ impl Live {
             .render(&draws, &camera, &env, size[0], size[1], background)
             .map(Some)
     }
+}
+
+/// Whether a ray passes through a box before it has gone `reach` far.
+fn ray_meets_box(origin: Vec3, dir: Vec3, bounds: [[f32; 3]; 2], reach: f32) -> bool {
+    let (lo, hi) = (Vec3::from(bounds[0]), Vec3::from(bounds[1]));
+    let inv = dir.recip();
+    let (a, b) = ((lo - origin) * inv, (hi - origin) * inv);
+    let near = a.min(b).max_element();
+    let far = a.max(b).min_element();
+    far >= near.max(0.0) && near <= reach
+}
+
+/// How far along a ray it meets a triangle, from either side.
+fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    let (ab, ac) = (b - a, c - a);
+    let p = dir.cross(ac);
+    let det = ab.dot(p);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let s = origin - a;
+    let u = s.dot(p) / det;
+    let q = s.cross(ab);
+    let v = dir.dot(q) / det;
+    if u < 0.0 || v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = ac.dot(q) / det;
+    (t > 0.0).then_some(t)
 }

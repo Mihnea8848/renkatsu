@@ -126,10 +126,51 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     row(ui, k, "Card", None, |ui, rect| {
                         let side = rect.height();
                         let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
-                        let file = card.file_name().unwrap_or_default().to_string_lossy();
-                        widgets::value_box(ui, k, field, &file);
-                        ui.interact(field, id.with("card"), Sense::hover())
-                            .on_hover_text(card.display().to_string());
+                        // The card by its name in the project, or by its file.
+                        let file = match st.library.characters.iter().find(|c| c.file == *card) {
+                            Some(entry) => entry.name.clone(),
+                            None => card.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                        };
+                        // A dropdown of the project's cards.
+                        let resp = ui.interact(field, id.with("card"), Sense::click());
+                        let p = ui.painter();
+                        let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                        p.rect_filled(field, k.radius(), fill);
+                        let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+                        p.with_clip_rect(field.with_max_x(field.right() - 22.0)).text(
+                            Pos2::new(field.left() + 8.0, field.center().y),
+                            Align2::LEFT_CENTER,
+                            &file,
+                            k.font(),
+                            color,
+                        );
+                        glyph(
+                            p,
+                            k,
+                            Pos2::new(field.right() - 12.0, field.center().y + 1.0),
+                            icon::CARET_DOWN,
+                            10.0,
+                            color,
+                        );
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.set_min_width(field.width() - 10.0);
+                            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                                for entry in &st.library.characters {
+                                    // The folder tells cards of one name apart.
+                                    let rel = entry.file.to_string_lossy().replace('\\', "/");
+                                    let folder = crate::content::parent(&rel)
+                                        .strip_prefix(crate::project::CHARACTERS)
+                                        .unwrap_or_default()
+                                        .trim_start_matches('/')
+                                        .replace('/', " / ");
+                                    if widgets::check_item(ui, k, entry.file == *card, &entry.name, &folder).clicked() {
+                                        *card = entry.file.clone();
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        });
+                        resp.on_hover_text(card.display().to_string());
                         let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
                         let resp = ui
                             .interact(button, id.with("browse"), Sense::click())

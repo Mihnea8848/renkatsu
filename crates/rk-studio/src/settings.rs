@@ -120,7 +120,7 @@ pub fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub frame_rate: FrameRate,
@@ -132,7 +132,17 @@ pub struct Settings {
     pub recent_projects: Vec<Recent>,
     /// Ask GitHub at start whether a newer Renkatsu is out.
     pub check_updates: bool,
+    /// The keys and mouse buttons pressed show in the viewport's corner.
+    pub show_inputs: bool,
+    /// The steps snapping goes by: move in metres, rotate in degrees,
+    /// scale, and the grid's size in metres.
+    pub snap_steps: [f32; 4],
+    /// The keys the user changed, by the action's name; see `keymap`.
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
 }
+
+/// The snap steps a new install starts with.
+pub const SNAP_STEPS: [f32; 4] = [0.1, 15.0, 0.1, 1.0];
 
 impl Default for Settings {
     fn default() -> Settings {
@@ -142,6 +152,9 @@ impl Default for Settings {
             project_view: ProjectView::default(),
             recent_projects: Vec::new(),
             check_updates: true,
+            show_inputs: false,
+            snap_steps: SNAP_STEPS,
+            keys: Default::default(),
         }
     }
 }
@@ -226,6 +239,9 @@ mod tests {
             project_view: ProjectView::List,
             recent_projects: Vec::new(),
             check_updates: false,
+            show_inputs: true,
+            snap_steps: [0.5, 45.0, 0.25, 2.0],
+            keys: [("focus".to_owned(), vec!["Ctrl+F".to_owned()])].into(),
         };
         s.opened_at(
             std::path::Path::new("/home/someone/Documents/Renkatsu/First"),
