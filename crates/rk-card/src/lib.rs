@@ -37,6 +37,8 @@ pub enum CardError {
     Eof(&'static str),
     #[error("unsupported product number {0}")]
     Product(i32),
+    #[error("this is a card of {0}, not of Koikatsu")]
+    OtherGame(&'static str),
     #[error("unknown card marker {0:?}")]
     Marker(String),
     #[error("block {0} is missing")]
@@ -145,10 +147,10 @@ impl Card {
         let mut r = Reader::new(&file[image_len..]);
         let product_no = r.i32("product number")?;
         if product_no > 100 {
-            return Err(CardError::Product(product_no));
+            return Err(other_game(&file[image_len..]).map_or(CardError::Product(product_no), CardError::OtherGame));
         }
         let marker = r.string("marker")?;
-        let kind = CardKind::from_marker(&marker).ok_or(CardError::Marker(marker))?;
+        let kind = CardKind::from_marker(&marker).ok_or_else(|| marker_error(marker))?;
         let version = r.string("version")?;
         let face_png = r.len_bytes("face image")?.to_vec();
         let header_bytes = r.len_bytes("block header")?;
@@ -218,6 +220,89 @@ impl Card {
         })
     }
 
+    /// The character's name, read without the rest of the card: only
+    /// the block that holds it is taken from the file, so that a folder
+    /// of thousands of cards can be named without reading all of them.
+    pub fn name_of(path: impl AsRef<Path>) -> Result<String> {
+        Self::name_in(&mut std::io::BufReader::new(std::fs::File::open(path)?))
+    }
+
+    /// The same, from anything that can be read and sought.
+    pub fn name_in(file: &mut (impl std::io::Read + std::io::Seek)) -> Result<String> {
+        use std::io::SeekFrom;
+        // Reads at most this much at once, whatever a damaged file says.
+        const MOST: usize = 1 << 24;
+        let take = |file: &mut dyn std::io::Read, n: usize, what: &'static str| -> Result<Vec<u8>> {
+            if n > MOST {
+                return Err(CardError::Eof(what));
+            }
+            let mut buf = vec![0; n];
+            file.read_exact(&mut buf).map_err(|_| CardError::Eof(what))?;
+            Ok(buf)
+        };
+        // Past the image, chunk by chunk.
+        let sig = take(file, 8, "image")?;
+        if sig == b"\x89PNG\r\n\x1a\n" {
+            loop {
+                let head = take(file, 8, "image").map_err(|_| CardError::NotPng)?;
+                let len = u32::from_be_bytes(head[..4].try_into().unwrap());
+                file.seek(SeekFrom::Current(i64::from(len) + 4))?;
+                if &head[4..8] == b"IEND" {
+                    break;
+                }
+            }
+        } else {
+            file.seek(SeekFrom::Start(0))?;
+        }
+        let i32_of = |file: &mut dyn std::io::Read, what: &'static str| -> Result<i32> {
+            Ok(i32::from_le_bytes(take(file, 4, what)?.try_into().unwrap()))
+        };
+        let product_no = i32_of(file, "product number").map_err(|_| CardError::NoTrailer)?;
+        if product_no > 100 {
+            // What follows says which game the card is of.
+            let mut head = [0u8; 64];
+            let got = file.read(&mut head).unwrap_or(0);
+            let mut after = product_no.to_le_bytes().to_vec();
+            after.extend_from_slice(&head[..got]);
+            return Err(other_game(&after).map_or(CardError::Product(product_no), CardError::OtherGame));
+        }
+        // The marker and the version, each a .NET string.
+        for what in ["marker", "version"] {
+            let (mut len, mut shift) = (0usize, 0);
+            loop {
+                let b = take(file, 1, what)?[0];
+                len |= ((b & 0x7f) as usize) << shift;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+                if shift > 28 {
+                    return Err(CardError::Eof(what));
+                }
+            }
+            let text = take(file, len, what)?;
+            if what == "marker" {
+                let marker = String::from_utf8_lossy(&text).into_owned();
+                CardKind::from_marker(&marker).ok_or(CardError::Marker(marker))?;
+            }
+        }
+        let face = i32_of(file, "face image")?;
+        file.seek(SeekFrom::Current(i64::from(face.max(0))))?;
+        let header_len = i32_of(file, "block header")?.max(0) as usize;
+        let header: BlockHeader =
+            rmp_serde::from_slice(&take(file, header_len, "block header")?).map_err(dec("header"))?;
+        take(file, 8, "data size")?;
+        let block = header
+            .lst_info
+            .iter()
+            .find(|b| b.name == "Parameter")
+            .ok_or(CardError::MissingBlock("Parameter"))?;
+        file.seek(SeekFrom::Current(block.pos.max(0)))?;
+        let parameter = read_value(&take(file, block.size.max(0) as usize, "Parameter")?, "Parameter")?;
+        let part = |key| map_get(&parameter, key).and_then(Value::as_str).unwrap_or("");
+        Ok(format!("{} {}", part("lastname"), part("firstname")).trim().to_string())
+    }
+
     pub fn param_str(&self, key: &str) -> Option<&str> {
         map_get(&self.parameter, key)?.as_str()
     }
@@ -232,6 +317,38 @@ impl Card {
         let l = self.param_str("lastname").unwrap_or("");
         let f = self.param_str("firstname").unwrap_or("");
         format!("{l} {f}").trim().to_string()
+    }
+}
+
+/// The other Illusion games whose cards are PNG files with data after the
+/// picture, by what that data starts with or names.
+fn other_game(after: &[u8]) -> Option<&'static str> {
+    // Artificial Academy 2 writes 【エディット】 in Shift JIS first.
+    const AA2: &[u8] = b"\x81y\x83G\x83f\x83B\x83b\x83g\x81z";
+    if after.starts_with(AA2) {
+        return Some("Artificial Academy 2");
+    }
+    let head = &after[..after.len().min(64)];
+    let names: [(&[u8], &str); 4] = [
+        ("【HoneySelectCharaFemale】".as_bytes(), "Honey Select"),
+        ("【HoneySelectCharaMale】".as_bytes(), "Honey Select"),
+        ("【AIS_Chara】".as_bytes(), "AI-Shoujo or Honey Select 2"),
+        ("【PlayHome】".as_bytes(), "PlayHome"),
+    ];
+    names
+        .iter()
+        .find(|(name, _)| head.windows(name.len()).any(|w| w == *name))
+        .map(|(_, game)| *game)
+}
+
+/// The error for a marker that is not one of Koikatsu's.
+fn marker_error(marker: String) -> CardError {
+    if marker.contains("HoneySelect") {
+        CardError::OtherGame("Honey Select")
+    } else if marker.contains("AIS_Chara") {
+        CardError::OtherGame("AI-Shoujo or Honey Select 2")
+    } else {
+        CardError::Marker(marker)
     }
 }
 

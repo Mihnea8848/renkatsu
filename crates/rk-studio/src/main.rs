@@ -12,6 +12,7 @@
 mod anim_import;
 mod animations;
 mod camera;
+mod card_import;
 mod chrome;
 mod content;
 mod content_panel;
@@ -19,12 +20,15 @@ mod design;
 mod dialogs;
 mod gizmo;
 mod gizmo_pass;
+mod jobs;
 mod keymap;
 mod kinds;
+mod landing;
 mod library;
 mod live;
 mod modes;
 mod mods;
+mod mugshot;
 mod packages;
 mod panels;
 mod preferences;
@@ -35,6 +39,7 @@ mod scene;
 mod selector;
 mod settings;
 mod shortcuts;
+mod sources;
 mod state;
 mod theme;
 mod viewport;
@@ -91,6 +96,13 @@ struct Cli {
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
     project_selector: bool,
+    /// Show the project selector with a landing page of this layout, to
+    /// picture it.
+    #[arg(long, hide = true, value_enum)]
+    landing: Option<landing::Layout>,
+    /// Show work in progress in this way, on sample jobs, to picture it.
+    #[arg(long, hide = true, value_enum)]
+    loading: Option<jobs::Picture>,
     /// Show a newer Renkatsu as found, to picture the notice.
     #[arg(long, hide = true)]
     pretend_update: Option<String>,
@@ -271,6 +283,8 @@ struct Studio {
     /// Seconds since a project opened from the selector, while the editor
     /// still fades in.
     entering: Option<f32>,
+    /// The way of showing work that is being pictured.
+    loading: Option<jobs::Picture>,
 }
 
 impl Drop for Studio {
@@ -387,6 +401,12 @@ impl Studio {
         let selecting = state.project.is_none();
         if selecting {
             state.show_selector();
+            if let Some(selector) = &mut state.selector {
+                selector.landing = cli.landing;
+                if cli.landing == Some(landing::Layout::Home) {
+                    selector.tab = selector::Tab::Home;
+                }
+            }
         }
         state.mode = modes::MODES
             .iter()
@@ -401,9 +421,14 @@ impl Studio {
         state.library.eager = cli.screenshot.is_some();
         state.packages.open = cli.packages;
         if cli.package_browser {
-            state.packages.browse();
+            state.packages.browse(rk_core::Config::load().ok().as_ref());
         }
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            state.library.mugshots = Some(mugshot::Mugshots::new(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                cc.egui_ctx.clone(),
+            ));
             let mut live = live::Live::new(render_state)?;
             if state.scripted {
                 // A picture must not catch the camera on its way.
@@ -412,7 +437,9 @@ impl Studio {
             state.live = Some(live);
         }
         if fresh {
-            state.start_fresh(cli.card.is_empty());
+            // A project that is still being opened shows no character yet.
+            let waiting = matches!(cli.loading, Some(jobs::Picture::Modal | jobs::Picture::ModalList));
+            state.start_fresh(cli.card.is_empty() && !waiting);
         }
         state.remember();
         for card in &cli.card {
@@ -602,6 +629,7 @@ impl Studio {
             editor_size: editor_size(cli)?,
             small: selecting && cli.size.is_none(),
             entering: None,
+            loading: cli.loading,
         })
     }
 }
@@ -693,8 +721,17 @@ impl eframe::App for Studio {
         // resizes it in one step, so the editor's content fades in instead.
         if selecting != self.small {
             self.small = selecting;
+            // A project opens in a maximized window; scripted pictures keep
+            // their asked size. The selector goes back to its own size.
+            let maximize = !selecting && self.screenshot.is_none();
+            if !maximize {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            }
             let size = if selecting { selector::WINDOW } else { self.editor_size };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            if maximize {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
             self.entering = (!selecting).then_some(0.0);
         }
         if !selecting {
@@ -722,10 +759,13 @@ impl eframe::App for Studio {
         preferences::show(ctx, &k, &mut self.state);
         shortcuts::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
-        packages::browser(ctx, &k, &mut self.state);
+        card_import::show(ctx, &k, &mut self.state);
         anim_import::show(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);
+        if let Some(which) = self.loading {
+            jobs::picture(ui, &k, which);
+        }
         self.window(ctx);
 
         // Something asked for the cards: bring the Content panel forward.
@@ -1043,9 +1083,13 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let settings = settings::Settings::load();
     let mut size = editor_size(&cli)?;
-    if starts_on_selector(&cli, &settings) && cli.size.is_none() {
+    let selecting = starts_on_selector(&cli, &settings);
+    if selecting && cli.size.is_none() {
         size = selector::WINDOW;
     }
+    // Straight into a project, the window starts maximized, unless a size
+    // or a scripted picture was asked for.
+    let maximized = !selecting && cli.size.is_none() && cli.screenshot.is_none();
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -1053,6 +1097,7 @@ fn run() -> Result<()> {
             // Matches renkatsu.desktop, so the desktop shows the launcher's icon.
             .with_app_id("renkatsu")
             .with_inner_size(size)
+            .with_maximized(maximized)
             .with_min_inner_size([960.0, 600.0])
             // The window draws its own title bar and border, as Unreal does.
             .with_decorations(false),

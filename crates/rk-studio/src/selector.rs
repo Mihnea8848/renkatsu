@@ -12,6 +12,7 @@
 //! mark. A card's picture never stands for a project.
 
 use crate::dialogs::{Pick, ProjectForm};
+use crate::landing::Layout;
 use crate::project::{self, Start};
 use crate::settings::{self, ProjectView, Recent, Settings};
 use crate::state::{Look, State};
@@ -165,6 +166,8 @@ pub fn contents(scenes: usize, characters: usize) -> String {
 pub enum Tab {
     Recent,
     New,
+    /// The landing page, where the layout gives it a page of its own.
+    Home,
 }
 
 /// How long the content takes to fade in and rise into place, a row or a
@@ -224,6 +227,8 @@ pub struct Selector {
     pub starter: Option<PathBuf>,
     /// What the window shows of the packages, as of this frame.
     pub offer: crate::packages::Offer,
+    /// The landing page's layout, where one is being pictured.
+    pub landing: Option<crate::landing::Layout>,
 }
 
 impl Selector {
@@ -246,6 +251,7 @@ impl Selector {
             update: None,
             starter: None,
             offer: Default::default(),
+            landing: None,
         };
         selector.refresh(settings);
         selector
@@ -335,7 +341,7 @@ impl Selector {
 }
 
 /// What the user asked of the selector.
-enum Act {
+pub(crate) enum Act {
     Open(PathBuf),
     /// Take a project off the list.
     Remove(PathBuf),
@@ -578,7 +584,7 @@ const WHOLE: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
 /// The picture that stands for a project: its icon, shown whole, else the
 /// picture of its last saved scene, filling the frame, else a plain mark.
 /// `lit` is 0 at rest and 1 under the pointer or when chosen.
-fn project_picture(ui: &Ui, k: &Look, sel: &mut Selector, entry: &Entry, rect: Rect, lit: f32) {
+pub(crate) fn project_picture(ui: &Ui, k: &Look, sel: &mut Selector, entry: &Entry, rect: Rect, lit: f32) {
     let t = &k.t;
     ui.painter().rect_filled(rect, 0.0, t.input);
     let texture = match (&entry.picture, entry.missing) {
@@ -747,7 +753,9 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     let mut act = None;
 
     let side = Rect::from_min_max(full.min, Pos2::new(full.left() + SIDE, full.bottom()));
-    let main = Rect::from_min_max(Pos2::new(side.right(), full.top()), full.max);
+    let whole = Rect::from_min_max(Pos2::new(side.right(), full.top()), full.max);
+    let home = sel.landing == Some(Layout::Home);
+    let (main, banner, rail) = crate::landing::carve(sel.landing, whole);
     let head = Rect::from_min_size(main.min, Vec2::new(main.width(), HEAD));
     let foot = Rect::from_min_max(Pos2::new(main.left(), main.bottom() - FOOT), main.max);
     let body = Rect::from_min_max(head.left_bottom(), foot.right_top());
@@ -770,11 +778,16 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
             Vec2::new(SIDE - 1.0, 36.0),
         )
     };
+    // The home page, where there is one, comes first.
+    let first = if home { 1.0 } else { 0.0 };
+    if home && side_row(ui, k, row(0.0), icon::HOUSE, "Home", "", sel.tab == Tab::Home) {
+        sel.show_tab(Tab::Home);
+    }
     let recent = sel.tab == Tab::Recent;
     if side_row(
         ui,
         k,
-        row(0.0),
+        row(first),
         icon::CLOCK_COUNTER_CLOCKWISE,
         "Recent projects",
         "",
@@ -782,12 +795,20 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     ) {
         sel.show_tab(Tab::Recent);
     }
-    if side_row(ui, k, row(1.0), icon::PLUS, "New project", "Ctrl+N", !recent) {
+    if side_row(
+        ui,
+        k,
+        row(first + 1.0),
+        icon::PLUS,
+        "New project",
+        "Ctrl+N",
+        sel.tab == Tab::New,
+    ) {
         sel.show_tab(Tab::New);
     }
-    let y = row(2.0).top() + 8.0;
+    let y = row(first + 2.0).top() + 8.0;
     hair_h(ui.painter(), side.left() + 14.0, side.right() - 15.0, y, t.border);
-    let open = row(2.0).translate(Vec2::new(0.0, 17.0));
+    let open = row(first + 2.0).translate(Vec2::new(0.0, 17.0));
     if side_row(ui, k, open, icon::FOLDER_OPEN, "Open project", "Ctrl+O", false) {
         act = Some(Act::OpenOther);
     }
@@ -887,6 +908,12 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     let mut part = ui.new_child(UiBuilder::new().max_rect(main));
     part.multiply_opacity(come);
     let rise = Vec2::new(0.0, ((1.0 - come) * 10.0).round());
+    if sel.tab == Tab::Home {
+        // The home page takes the whole part, over its head and foot.
+        part.painter().rect_filled(whole, 0.0, t.panel);
+        let more = crate::landing::home(&mut part, k, whole);
+        return act.or(more);
+    }
     part.painter().text(
         Pos2::new(head.left() + 20.0, head.center().y),
         Align2::LEFT_CENTER,
@@ -898,7 +925,15 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         k.bold(15.0),
         t.text_bright,
     );
+    if let Some(banner) = banner {
+        crate::landing::banner(ui, k, banner);
+    }
+    if let Some(rail) = rail {
+        let more = crate::landing::rail(ui, k, rail, banner.is_none());
+        act = act.or(more);
+    }
     let more = match sel.tab {
+        Tab::Home => None,
         Tab::Recent => recent_part(&mut part, k, sel, view, now, free, head, body, foot, rise),
         Tab::New => new_part(&mut part, k, sel, free, body, foot, rise),
     };

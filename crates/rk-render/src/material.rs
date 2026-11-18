@@ -98,7 +98,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
 /// Shaders whose pixel program is ported from the game's own disassembly.
 /// Everything else goes through an approximation; `rk audit` reports how
 /// many materials that leaves.
-pub const PORTED: [&str; 41] = [
+pub const PORTED: [&str; 42] = [
     "Shader Forge/main_skin",
     "Shader Forge/main_hair",
     "Shader Forge/main_hair_front",
@@ -141,6 +141,8 @@ pub const PORTED: [&str; 41] = [
     "xukmi/HairFrontPlusTessReflect",
     "xukmi/EyePlus",
     "xukmi/EyeWPlus",
+    // Mod shaders, ported from the programs in the mods' own bundles.
+    "IBL_Shader_alpha",
 ];
 
 /// Texture slots in bind order.
@@ -198,6 +200,9 @@ pub struct MaterialDesc {
     pub blend: Blend,
     pub outline: bool,
     pub zwrite: bool,
+    /// The shader has a pass ahead of the lit one that writes the depth of
+    /// its front faces and no colour.
+    pub prepass: bool,
     pub stencil: Stencil,
     pub stencil_ref: u8,
     /// The shader's shadow caster pass.
@@ -207,7 +212,8 @@ pub struct MaterialDesc {
 }
 
 /// Material kind from a Unity shader name such as `Shader Forge/main_skin`.
-/// Mod shaders follow the same naming, so matching is by substring.
+/// Mod shaders follow the same naming, so matching is by substring. The
+/// mod shaders with a port of their own (`modshader.rs`) do not come here.
 pub fn classify(shader: &str) -> Kind {
     let name = shader.rsplit('/').next().unwrap_or(shader).to_lowercase();
     if name.contains("eyew") || name.contains("nose") || name.contains("eyebrow") || name.contains("eyelash") {
@@ -351,6 +357,9 @@ impl MaterialDesc {
         let mat = mat.unwrap_or(&empty);
         if let Some(x) = crate::xukmi::shader(&mat.shader) {
             return crate::xukmi::desc(mat, x);
+        }
+        if let Some(x) = crate::modshader::shader(&mat.shader) {
+            return crate::modshader::desc(mat, x);
         }
         let kind = classify(&mat.shader);
         let state = mat.draw.unwrap_or_else(|| state_for_name(&mat.shader, kind));
@@ -727,6 +736,7 @@ impl MaterialDesc {
             blend,
             outline: state.outline && matches!(kind, Kind::Item | Kind::Skin | Kind::Hair),
             zwrite: state.zwrite,
+            prepass: false,
             stencil: state.stencil,
             stencil_ref: state.stencil_ref,
             shadow: state.shadow,
@@ -1319,7 +1329,7 @@ mod tests {
     #[test]
     fn every_ported_item_shader_has_its_own_program() {
         for name in PORTED {
-            if crate::xukmi::shader(name).is_some() {
+            if crate::xukmi::shader(name).is_some() || crate::modshader::shader(name).is_some() {
                 continue;
             }
             if classify(name) == Kind::Item {

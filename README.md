@@ -1,8 +1,10 @@
 # Renkatsu
 
-[![CI](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml/badge.svg)](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/Mihnea8848/renkatsu)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-wgpu-b7410e?logo=rust&logoColor=white)](#how-it-works)
+[![Latest release](https://img.shields.io/github/v/release/Mihnea8848/renkatsu?label=latest)](https://github.com/Mihnea8848/renkatsu/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Mihnea8848/renkatsu/total)](https://github.com/Mihnea8848/renkatsu/releases)
+[![Windows and Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-installers-2f6fd0)](#installation)
+[![Works without Koikatsu](https://img.shields.io/badge/Koikatsu-not%20required-3c8c5a)](#requirements)
+[![License: PolyForm Shield 1.0](https://img.shields.io/badge/license-PolyForm%20Shield%201.0-555)](#license)
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mihnea8848)
 
@@ -13,6 +15,20 @@ does not use Unity and does not patch the game.
 
 Renkatsu Studio is the editor: projects that own their characters, a scene
 you build in a live viewport, and installers for Windows and Linux.
+
+<p align="center">
+  <img src="docs/images/studio.png" alt="Renkatsu Studio with a character in the viewport and the project's characters below" width="900">
+</p>
+
+Get the installer for Windows or Linux from the
+[latest release](https://github.com/Mihnea8848/renkatsu/releases/latest).
+You don't need Koikatsu: on first start Renkatsu offers Starter Content, the
+game's own characters, clothing and animations, as a separate download. If
+you have Koikatsu, Renkatsu reads your cards and mods from it too.
+
+<p align="center">
+  <img src="docs/images/import-characters.png" alt="Importing characters from Starter Content into a project" width="900">
+</p>
 
 ## Why I made this
 
@@ -226,7 +242,15 @@ rk render path/to/card.png -o out.png
 ```
 
 `--outfit 2` picks another outfit, `--yaw 30` turns the camera and
-`--outdoor-shoes` puts on the outdoor shoes.
+`--outdoor-shoes` puts on the outdoor shoes. For a close-up, place the
+camera yourself: `--eye 0.2,0.4,0.5 --look-at 0,0.8,0` stands it at that
+point and aims it at the other (metres; the character stands at the origin,
+faces +z, and y is up).
+
+`--studio-look` draws the picture as Renkatsu Studio's viewport does, with
+CharaStudio's screen effects (occlusion, bloom, vignette) and its first
+colour filter. `--background 0.2,0.2,0.2` sets the colour behind the
+character (`r,g,b` from 0 to 1).
 
 Compare a card with a capture made in CharaStudio by the reference capture
 plugin in `tools/reference-capture`:
@@ -300,6 +324,8 @@ The default look will stay anime style, with real shadows and better lighting
 than the game has.
 
 ## Contributing
+
+[![CI](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml/badge.svg)](https://github.com/Mihnea8848/renkatsu/actions/workflows/ci.yml)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Test results with your own cards and
 mods help a lot, because I can only test with what I have installed.

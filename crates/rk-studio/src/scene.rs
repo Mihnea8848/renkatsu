@@ -96,6 +96,32 @@ pub struct Animation {
     pub force_loop: bool,
 }
 
+impl Animation {
+    /// The pose the game's character maker starts every character in,
+    /// played from what is installed.
+    pub fn maker_pose() -> Animation {
+        let (bundle, controller, state) = rk_chara::animations::MAKER_POSE;
+        Animation {
+            name: "Default pose".to_owned(),
+            file: None,
+            bundle: bundle.to_owned(),
+            controller: controller.to_owned(),
+            state: state.to_owned(),
+            override_bundle: String::new(),
+            override_controller: String::new(),
+            speed: 1.0,
+            start: 0.0,
+            force_loop: false,
+        }
+    }
+
+    /// Whether this plays the maker's pose.
+    pub fn is_maker_pose(&self) -> bool {
+        let (bundle, controller, state) = rk_chara::animations::MAKER_POSE;
+        self.bundle == bundle && self.controller == controller && self.state == state
+    }
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -1376,6 +1402,17 @@ mod tests {
         assert!(text.contains("card = \"/cards/anna.png\""), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(&back, doc.scene());
+    }
+
+    #[test]
+    fn the_maker_pose_is_known_by_what_it_plays() {
+        let pose = Animation::maker_pose();
+        assert!(pose.is_maker_pose() && pose.file.is_none());
+        let other = Animation {
+            state: "Stand_00_00".into(),
+            ..pose.clone()
+        };
+        assert!(!other.is_maker_pose());
     }
 
     #[test]

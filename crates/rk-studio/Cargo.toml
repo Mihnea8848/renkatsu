@@ -24,6 +24,7 @@ glam.workspace = true
 rk-core.workspace = true
 rk-card.workspace = true
 rk-vfs.workspace = true
+rk-unityfs.workspace = true
 rk-packages.workspace = true
 rk-chara.workspace = true
 rk-render.workspace = true

@@ -238,12 +238,24 @@ fn marker_variants_and_errors() {
     );
     assert!(matches!(
         Card::parse(&card_bytes(true, "【AIS_Chara】")),
+        Err(CardError::OtherGame(_))
+    ));
+    assert!(matches!(
+        Card::parse(&card_bytes(true, "【SomethingElse】")),
         Err(CardError::Marker(_))
     ));
     assert!(matches!(Card::parse(&tiny_png()), Err(CardError::NoTrailer)));
     let mut wrong_product = tiny_png();
     wrong_product.extend_from_slice(&0x4747_4747i32.to_le_bytes());
     assert!(matches!(Card::parse(&wrong_product), Err(CardError::Product(_))));
+    // An Artificial Academy 2 card starts its data with 【エディット】 in
+    // Shift JIS, which reads as a huge product number.
+    let mut aa2 = tiny_png();
+    aa2.extend_from_slice(b"\x81y\x83G\x83f\x83B\x83b\x83g\x81z\0\0g");
+    let error = Card::parse(&aa2).unwrap_err();
+    assert!(matches!(error, CardError::OtherGame("Artificial Academy 2")), "{error}");
+    let named = Card::name_in(&mut std::io::Cursor::new(&aa2)).unwrap_err();
+    assert!(matches!(named, CardError::OtherGame("Artificial Academy 2")), "{named}");
     // Truncation anywhere must be an error, never a panic.
     let full = card_bytes(true, "【KoiKatuChara】");
     for cut in (tiny_png().len() + 1..full.len()).step_by(7) {
@@ -287,4 +299,18 @@ fn lz4_msgpack_plain_and_compressed() {
     assert_eq!(lz4_msgpack(&mp(&Value::Ext(99, payload))), Some(value));
 
     assert_eq!(lz4_msgpack(&mp(&Value::Ext(99, vec![0xd2, 0, 0, 1, 0, 0xff]))), None);
+}
+
+#[test]
+fn the_name_is_read_without_the_rest_of_the_card() {
+    for with_image in [true, false] {
+        let bytes = card_bytes(with_image, "【KoiKatuChara】");
+        let name = Card::name_in(&mut std::io::Cursor::new(&bytes)).unwrap();
+        assert_eq!(name, Card::parse(&bytes).unwrap().full_name());
+        // Cut short, it is an error and never a panic.
+        for cut in (0..bytes.len() - 1).step_by(5) {
+            let _ = Card::name_in(&mut std::io::Cursor::new(&bytes[..cut]));
+        }
+    }
+    assert!(Card::name_in(&mut std::io::Cursor::new(tiny_png())).is_err());
 }

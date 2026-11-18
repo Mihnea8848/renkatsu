@@ -55,6 +55,9 @@ pub struct Capture {
     pub line_width: Option<f32>,
     /// `RenderSettings.ambientLight` of the scene.
     pub ambient_light: Option<[f32; 3]>,
+    /// `RenderSettings.ambientProbe`: nine coefficients per colour channel.
+    /// Captures made before the plugin wrote it have none.
+    pub ambient_probe: Option<[f32; 27]>,
     /// The scene's screen effects, without the colour table.
     pub effects: StudioEffects,
     /// Number of the scene's colour filter (`ace_no`).
@@ -166,6 +169,7 @@ impl Capture {
             ambient_light: floats::<4>(&v["globals"]["ambient_light"])
                 .ok()
                 .map(|c| [c[0], c[1], c[2]]),
+            ambient_probe: floats::<27>(&v["globals"]["ambient_probe"]).ok(),
             effects: capture_effects(&v),
             color_filter: v["studio"]["ace_no"].as_i64().map(|n| n as i32),
         })
@@ -376,6 +380,9 @@ pub fn run(
         light_dir: cap.light_dir,
         light_intensity: cap.light_intensity,
         ambient_light: cap.ambient_light.unwrap_or(defaults.ambient_light),
+        ambient_probe: cap
+            .ambient_probe
+            .map_or(defaults.ambient_probe, |p| rk_render::modshader::sh_constants(&p)),
         shadows: ShadowSettings {
             enabled: shadows && cap.light_shadows.unwrap_or(true),
             strength: cap.shadow_strength.unwrap_or(defaults.shadows.strength),
@@ -806,6 +813,13 @@ mod tests {
         assert_eq!(c.ambient_light, Some([0.3, 0.3405, 0.3885]));
         let bare = Capture::parse(&SAMPLE.replace("\"ambient_light\"", "\"other\"")).unwrap();
         assert_eq!(bare.ambient_light, None);
+        // Older captures carry no ambient probe.
+        assert_eq!(c.ambient_probe, None);
+        let probe = SAMPLE.replace(
+            "\"ambient_light\"",
+            &format!("\"ambient_probe\": [{}], \"ambient_light\"", ["0.5"; 27].join(", ")),
+        );
+        assert_eq!(Capture::parse(&probe).unwrap().ambient_probe, Some([0.5; 27]));
     }
 
     #[test]

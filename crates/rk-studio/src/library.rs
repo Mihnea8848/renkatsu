@@ -22,6 +22,13 @@ pub struct Entry {
     pub path: PathBuf,
 }
 
+/// How thumbnails are filtered: they show much smaller than they are, so
+/// smaller copies smooth their edges instead of skipping pixels.
+const SHRUNK: egui::TextureOptions = egui::TextureOptions {
+    mipmap_mode: Some(egui::TextureFilter::Linear),
+    ..egui::TextureOptions::LINEAR
+};
+
 /// Time spent loading thumbnails in one frame.
 const BUDGET: Duration = Duration::from_millis(6);
 
@@ -34,6 +41,14 @@ pub struct Library {
     loading_since: Option<Instant>,
     /// Load every thumbnail asked for at once, for scripted pictures.
     pub eager: bool,
+    /// The project's folder, for the face shots.
+    root: PathBuf,
+    /// The thread that takes face shots, once there is a device to draw on.
+    pub mugshots: Option<crate::mugshot::Mugshots>,
+    /// The colour face shots are taken on, a little darker than the panel.
+    pub backdrop: [u8; 3],
+    /// Cards whose face shots are to be taken, with where they go.
+    pub wanted: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Library {
@@ -43,6 +58,10 @@ impl Library {
             thumbs: HashMap::new(),
             loading_since: None,
             eager: false,
+            root: PathBuf::new(),
+            mugshots: None,
+            backdrop: [30, 30, 30],
+            wanted: Vec::new(),
         };
         library.refresh(project);
         library
@@ -51,6 +70,7 @@ impl Library {
     /// Lists the project's characters again, and forgets the pictures of
     /// the cards that are gone.
     pub fn refresh(&mut self, project: &Project) {
+        self.root = project.root.clone();
         self.characters = project
             .characters()
             .into_iter()
@@ -65,13 +85,21 @@ impl Library {
         self.thumbs.retain(|path, _| characters.iter().any(|c| c.path == *path));
     }
 
-    /// A new frame: the thumbnail loading starts over.
+    /// A new frame: the thumbnail loading starts over, and the cards whose
+    /// face shots are now taken load them.
     pub fn begin_frame(&mut self) {
         self.loading_since = None;
+        if let Some(mugshots) = self.mugshots.as_mut() {
+            for card in mugshots.finished() {
+                self.thumbs.remove(&card);
+            }
+        }
     }
 
-    /// The thumbnail of a card. Pictures load a few per frame, so a card
-    /// may have none yet; the caller is told to draw again when so.
+    /// The thumbnail of a card: the face shot Renkatsu took of it, else the
+    /// card's own picture while the shot is taken. Pictures load a few per
+    /// frame, so a card may have none yet; the caller is told to draw again
+    /// when so.
     pub fn thumb(&mut self, ctx: &egui::Context, card: &Path) -> Option<&TextureHandle> {
         if !self.thumbs.contains_key(card) {
             let since = *self.loading_since.get_or_insert_with(Instant::now);
@@ -79,8 +107,26 @@ impl Library {
                 ctx.request_repaint();
                 return None;
             }
-            let texture = picture(card)
-                .map(|image| ctx.load_texture(format!("card {}", card.display()), image, egui::TextureOptions::LINEAR));
+            // The face shot Renkatsu took of the character, else the card's
+            // own picture until it is taken.
+            let shot = self
+                .characters
+                .iter()
+                .find(|c| c.path == card)
+                .map(|c| crate::mugshot::shot_path(&self.root, &c.file.to_string_lossy()));
+            let image = match &shot {
+                Some(shot) if crate::mugshot::fresh(shot, card) => std::fs::File::open(shot)
+                    .ok()
+                    .and_then(|f| decode(std::io::BufReader::new(f))),
+                Some(shot) => {
+                    self.wanted.push((card.to_owned(), shot.clone()));
+                    None
+                }
+                None => None,
+            };
+            let texture = image
+                .or_else(|| picture(card))
+                .map(|image| ctx.load_texture(format!("card {}", card.display()), image, SHRUNK));
             self.thumbs.insert(card.to_owned(), texture);
         }
         self.thumbs.get(card).and_then(Option::as_ref)
@@ -89,7 +135,12 @@ impl Library {
 
 /// A card's own picture: the PNG image the card file starts with.
 pub fn picture(card: &Path) -> Option<egui::ColorImage> {
-    let mut decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(card).ok()?));
+    decode(std::io::BufReader::new(std::fs::File::open(card).ok()?))
+}
+
+/// A PNG image as plain colour.
+fn decode(file: impl std::io::BufRead + std::io::Seek) -> Option<egui::ColorImage> {
+    let mut decoder = png::Decoder::new(file);
     // Palettes and 16-bit channels come out as plain 8-bit colour.
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
