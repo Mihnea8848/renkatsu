@@ -221,6 +221,9 @@ pub struct Selector {
     pub game: Option<PathBuf>,
     /// A newer Renkatsu, when the check at start found one.
     pub update: Option<rk_packages::update::Release>,
+    /// Install Update at work: what its line says, and why it stopped
+    /// when it failed.
+    pub updating: Option<(String, Option<String>)>,
     /// The default card an installed package brings, which new projects
     /// start with where the game is missing.
     pub starter: Option<PathBuf>,
@@ -248,6 +251,7 @@ impl Selector {
             window_age: 0.0,
             game: rk_core::Config::load().ok().map(|c| c.game_dir),
             update: None,
+            updating: None,
             starter: None,
             offer: Default::default(),
             news: Vec::new(),
@@ -363,6 +367,8 @@ pub(crate) enum Act {
     GetStarter,
     /// Open a web page.
     OpenUrl(String),
+    /// Download the newer Renkatsu, install it and start it again.
+    InstallUpdate,
 }
 
 fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
@@ -392,6 +398,12 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
         }
         Act::Packages => st.packages.open = true,
         Act::OpenUrl(url) => settings::open_url(&url),
+        Act::InstallUpdate => {
+            let busy = st.updating.as_ref().is_some_and(|u| u.busy());
+            if let (false, Some(release)) = (busy, st.update.clone()) {
+                st.updating = Some(crate::self_update::Updating::start(release, ctx));
+            }
+        }
         Act::GetStarter => {
             // The window shows how far the download is and can stop it.
             st.packages.open = true;
@@ -432,6 +444,10 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
     let Some(mut sel) = st.selector.take() else { return };
     sel.loaded = false;
     sel.update = st.update.clone();
+    if let Some(updating) = &mut st.updating {
+        updating.poll(ui.ctx());
+    }
+    sel.updating = st.updating.as_ref().map(|u| (u.text(), u.failed.clone()));
     sel.news.clone_from(&st.news);
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
     sel.age += dt;
@@ -522,18 +538,95 @@ pub(crate) fn icon_button(
 /// A row of a side column: an icon, a name and the keys that do the same.
 /// `on` marks the part of the window that shows.
 fn side_row(ui: &mut Ui, k: &Look, rect: Rect, glyph_name: &str, text: &str, keys: &str, on: bool) -> bool {
+    side_row_over(ui, k, rect, rect, glyph_name, text, keys, on)
+}
+
+/// A side row with a smaller line under it, which belongs to the row: the
+/// hover takes both.
+fn side_row_under(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    glyph_name: &str,
+    text: &str,
+    under: &str,
+    color: Color32,
+) -> bool {
+    let hit = if under.is_empty() {
+        rect
+    } else {
+        Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() + UNDER))
+    };
+    let clicked = side_row_over(ui, k, rect, hit, glyph_name, text, "", false);
+    line(
+        ui,
+        Pos2::new(rect.left() + 18.0, rect.bottom() + 2.0),
+        SIDE - 32.0,
+        under,
+        k.small(),
+        color,
+    );
+    clicked
+}
+
+/// The line under "Update available": Install Update, which works by
+/// itself once clicked, then says how far it is.
+fn install_line(ui: &mut Ui, k: &Look, row: Rect, updating: Option<&(String, Option<String>)>) -> bool {
     let t = &k.t;
-    let resp = ui.interact(rect, ui.id().with(("selector side", text)), Sense::click());
+    let pos = Pos2::new(row.left() + 18.0, row.bottom() + 2.0);
+    let (text, color, can) = match updating {
+        None => ("Install Update", t.accent, true),
+        Some((text, None)) => (text.as_str(), t.text_dim, false),
+        Some((text, Some(_))) => (text.as_str(), t.stop, true),
+    };
+    let width = widgets::text_width(ui, text, k.small()).ceil();
+    let rect = Rect::from_min_size(Pos2::new(pos.x, pos.y - 8.0), Vec2::new(width, 16.0));
+    let mut resp = ui.interact(rect, ui.id().with("install update"), Sense::click());
+    let hover = can && resp.hovered();
+    line(
+        ui,
+        pos,
+        SIDE - 32.0,
+        text,
+        k.small(),
+        if hover { t.text_bright } else { color },
+    );
+    if hover {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if let Some((_, Some(why))) = updating {
+        resp = resp.on_hover_text(why.as_str());
+    }
+    can && resp.clicked()
+}
+
+/// How far a side row's smaller line reaches below the row.
+const UNDER: f32 = 12.0;
+
+/// A side row drawn in `rect` that answers to the pointer over `hit`.
+#[allow(clippy::too_many_arguments)]
+fn side_row_over(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    hit: Rect,
+    glyph_name: &str,
+    text: &str,
+    keys: &str,
+    on: bool,
+) -> bool {
+    let t = &k.t;
+    let resp = ui.interact(hit, ui.id().with(("selector side", text)), Sense::click());
     let p = ui.painter();
     if on {
-        p.rect_filled(rect, 0.0, t.panel);
+        p.rect_filled(hit, 0.0, t.panel);
         p.rect_filled(
-            Rect::from_min_max(rect.min, Pos2::new(rect.left() + 2.0, rect.bottom())),
+            Rect::from_min_max(hit.min, Pos2::new(hit.left() + 2.0, hit.bottom())),
             0.0,
             t.select,
         );
     } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, t.row_hover);
+        p.rect_filled(hit, 0.0, t.row_hover);
     }
     let color = if on || resp.hovered() { t.text_bright } else { t.text };
     let y = rect.center().y;
@@ -811,35 +904,28 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         Pos2::new(side.left(), side.bottom() - 138.0 - lift),
         Vec2::new(SIDE - 1.0, 36.0),
     );
-    if side_row(ui, k, packages, icon::PACKAGE, "Packages", "", false) {
-        act = Some(Act::Packages);
-    }
     let under = match (&offer.busy, offer.starter) {
         (Some(busy), _) => busy.clone(),
         (None, true) => "Starter Content is installed".to_owned(),
         (None, false) => String::new(),
     };
-    line(
-        ui,
-        Pos2::new(side.left() + 18.0, packages.bottom() + 2.0),
-        SIDE - 32.0,
-        &under,
-        k.small(),
-        t.text_dim,
-    );
+    if side_row_under(ui, k, packages, icon::PACKAGE, "Packages", &under, t.text_dim) {
+        act = Some(Act::Packages);
+    }
     if let (None, false, None, Some(size)) = (&sel.game, offer.starter, &offer.busy, offer.download) {
         let get = packages.translate(Vec2::new(0.0, -54.0));
-        if side_row(ui, k, get, icon::DOWNLOAD_SIMPLE, "Get Starter Content", "", false) {
+        let under = format!("Characters & clothing, {} download", rk_packages::size_text(size));
+        if side_row_under(
+            ui,
+            k,
+            get,
+            icon::DOWNLOAD_SIMPLE,
+            "Get Starter Content",
+            &under,
+            t.accent,
+        ) {
             act = Some(Act::GetStarter);
         }
-        line(
-            ui,
-            Pos2::new(side.left() + 18.0, get.bottom() + 2.0),
-            SIDE - 32.0,
-            &format!("Characters & clothing, {} download", rk_packages::size_text(size)),
-            k.small(),
-            t.accent,
-        );
     }
     // Koikatsu cards are built from the user's own install. Renkatsu works
     // without it; the folder only adds Koikatsu characters.
@@ -851,21 +937,13 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         Some(_) => (icon::FOLDER_SIMPLE, "Koikatsu folder"),
         None => (icon::FOLDER_SIMPLE, "Add Koikatsu folder"),
     };
-    if side_row(ui, k, game, glyph_name, text, "", false) {
+    let under = match &sel.game {
+        Some(dir) => shown_path(dir),
+        None => "Optional".to_owned(),
+    };
+    if side_row_under(ui, k, game, glyph_name, text, &under, t.text_dim) {
         act = Some(Act::ChooseGame);
     }
-    let (under, color) = match &sel.game {
-        Some(dir) => (shown_path(dir), t.text_dim),
-        None => ("Optional".to_owned(), t.text_dim),
-    };
-    line(
-        ui,
-        Pos2::new(side.left() + 18.0, game.bottom() + 2.0),
-        SIDE - 32.0,
-        &under,
-        k.small(),
-        color,
-    );
     if let Some(release) = &sel.update {
         let row = Rect::from_min_size(
             Pos2::new(side.left(), side.bottom() - 84.0),
@@ -874,14 +952,9 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         if side_row(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", "", false) {
             act = Some(Act::OpenUrl(release.url.clone()));
         }
-        line(
-            ui,
-            Pos2::new(side.left() + 18.0, row.bottom() + 2.0),
-            SIDE - 32.0,
-            &format!("Renkatsu {} is out", release.version),
-            k.small(),
-            t.accent,
-        );
+        if install_line(ui, k, row, sel.updating.as_ref()) {
+            act = Some(Act::InstallUpdate);
+        }
     }
     ui.painter().text(
         Pos2::new(side.left() + 18.0, side.bottom() - 18.0),

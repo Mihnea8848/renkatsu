@@ -375,7 +375,7 @@ impl Cache {
     }
 }
 
-enum Answer {
+pub(crate) enum Answer {
     /// What the cache has is still what the server has.
     Same,
     /// The text and its ETag.
@@ -384,7 +384,7 @@ enum Answer {
 
 /// Asks for a page, with the ETag of the copy at hand. The request names
 /// the program and its version and nothing else.
-fn get(url: &str, etag: Option<&str>, limit: u64) -> Result<Answer> {
+pub(crate) fn get(url: &str, etag: Option<&str>, limit: u64) -> Result<Answer> {
     let mut request = crate::download::agent()
         .get(url)
         .header("Accept", "application/vnd.github+json");
