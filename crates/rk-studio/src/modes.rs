@@ -204,18 +204,6 @@ pub const TOOLS: [(&str, &str, &str); 6] = [
     (icon::BONE, "Pose", ""),
 ];
 
-/// One line for the status bar about a transform tool.
-pub fn tool_hint(tool: usize) -> &'static str {
-    match tool {
-        0 => "Drag to orbit, middle drag to pan, wheel to zoom",
-        1 => "Click to select, Ctrl+click to add or remove, drag for a box",
-        2 => "Drag an axis, a corner or the ball to move; Ctrl flips snapping, Esc cancels",
-        3 => "Drag an arc to rotate; Ctrl flips snapping, Esc cancels",
-        4 => "Drag an axis, a line between two or the middle cube to scale; Ctrl flips snapping, Esc cancels",
-        _ => "Drag a bone handle to pose the character",
-    }
-}
-
 /// An action of the selection bar: icon, name, whether it opens a menu.
 pub type Action = (&'static str, &'static str, bool);
 

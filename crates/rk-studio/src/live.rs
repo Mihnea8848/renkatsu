@@ -341,6 +341,8 @@ pub struct Built {
 }
 
 pub struct Live {
+    /// Cut-out edges are smoothed, from the settings.
+    pub smooth_edges: bool,
     renderer: Renderer,
     render_state: egui_wgpu::RenderState,
     actors: Vec<Actor>,
@@ -397,6 +399,7 @@ impl Live {
         // Until a character arrives, the view of a standing person.
         let empty = Camera::frame(Vec3::new(-0.4, 0.0, -0.2), Vec3::new(0.4, 1.5, 0.2), 16.0 / 9.0, 0.0);
         Ok(Live {
+            smooth_edges: true,
             renderer,
             render_state: render_state.clone(),
             actors: Vec::new(),
@@ -736,6 +739,7 @@ impl Live {
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
             effects: Some(effects),
+            alpha_to_coverage: self.smooth_edges,
             ..Default::default()
         };
         match scene.key_light() {

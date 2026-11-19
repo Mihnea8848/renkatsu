@@ -1,18 +1,42 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 //
-// BepInEx plugin for CharaStudio. On a hotkey it loads each card from a list,
-// saves two pictures of it and a JSON file describing the camera, lights,
-// global shader values, pose and drawn materials. Renkatsu uses these as the
-// reference when checking its own renders.
+// BepInEx plugin for CharaStudio. On a hotkey it works through a list of
+// cases, saves pictures of each and a JSON file describing the camera,
+// lights, global shader values, pose and drawn materials. Renkatsu uses
+// these as the reference when checking its own renders.
 //
-// Input:  UserData/renkatsu/cards.txt, one card path per line (relative paths
-//         start at UserData/chara/female). Without the file, the default card.
-//         "path|3" wears outfit 3 and names the files <name>.outfit3.
-// Output: UserData/renkatsu/out/<name>.<view>.studio.png  with Studio's effects
-//         UserData/renkatsu/out/<name>.<view>.plain.png   image effects off
-//         UserData/renkatsu/out/<name>.json
-//         The views are "body" and "face".
+// Ctrl+Shift+F9  reads UserData/renkatsu/cards.txt, writes to out/
+// Ctrl+Shift+F10 reads UserData/renkatsu/batch.txt, writes to out/batch/
+//
+// A list line is a card path (relative paths start at UserData/chara/female,
+// "-" is no character), then fields separated by "|":
+//   3 or outfit=3        wear outfit 3; files are named <name>.outfit3
+//   name=legs            added to the file names: <name>.legs
+//   view=body,face       pictures to take: body, face, back, side
+//   zoom=n:bone:half[:yaw[:pitch]]  a picture named n that looks at a bone
+//                        ("a+b" is the middle of two) and shows `half`
+//                        units above and below it
+//   cam=n:x,y,z:x,y,z[:fov]  a picture named n from a place towards a point
+//   res=1800x2800        picture size (900x1400 without it)
+//   msaa=1               samples per pixel of the picture (8 without it)
+//   pose=0/3/2           an animation of Studio's list, held still;
+//                        pose=maker is the character maker's first pose
+//   time=0.5             where in the animation, in passes
+//   frames=8, step=3     then let it play and take 8 more captures, one
+//                        every 3 frames of 1/30 s: <name>.f00 to .f08
+//   clothes=top:1,bot:3  clothing states (0 on, 1 and 2 half, 3 off)
+//   map=myroom           load a map, by scene file name or number
+//   sun=day|evening|night  the map's time of day
+//   settle=90            frames to wait before the picture
+//   plain                skip the pictures with Studio's effects
+// Without a list, the default card.
+//
+// Output: <name>.<view>.studio.png  with Studio's effects
+//         <name>.<view>.plain.png   image effects off
+//         <name>.json
+//         index.txt (batch only): one line per case
+//         The views are "body" and "face" unless the line says otherwise.
 
 using System;
 using System.Collections;
@@ -29,108 +53,632 @@ using UnityEngine;
 namespace Renkatsu
 {
     // Carries Renkatsu's own version (Cargo.toml), not a separate number.
-    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.1.0")]
+    [BepInPlugin("renkatsu.referencecapture", "Renkatsu reference capture", "0.1.8")]
     [BepInProcess("CharaStudio")]
     public class ReferenceCapture : BaseUnityPlugin
     {
-        private const int Width = 900;
-        private const int Height = 1400;
+        private const int DefaultWidth = 900;
+        private const int DefaultHeight = 1400;
         private const int SettleFrames = 90;
+        // Frames per second while a sequence plays, so every run steps alike.
+        private const int SequenceRate = 30;
+        private const string MakerBundle = "custom/custompose.unity3d";
+        private const string MakerController = "custom_pose";
+        private const string MakerState = "Stand_D_00";
 
         private ConfigEntry<KeyboardShortcut> hotkey;
+        private ConfigEntry<KeyboardShortcut> batchHotkey;
         private bool running;
 
         private void Awake()
         {
             hotkey = Config.Bind("General", "Capture hotkey", new KeyboardShortcut(KeyCode.F9, KeyCode.LeftControl, KeyCode.LeftShift),
                 "Loads every card from UserData/renkatsu/cards.txt and saves reference pictures.");
+            batchHotkey = Config.Bind("General", "Batch hotkey", new KeyboardShortcut(KeyCode.F10, KeyCode.LeftControl, KeyCode.LeftShift),
+                "Runs every case of UserData/renkatsu/batch.txt and saves to out/batch.");
         }
 
         private void Update()
         {
-            if (!running && hotkey.Value.IsDown() && Singleton<Studio.Studio>.IsInstance())
+            if (running || !Singleton<Studio.Studio>.IsInstance())
             {
-                StartCoroutine(Run());
+                return;
+            }
+            if (hotkey.Value.IsDown())
+            {
+                StartCoroutine(Run("cards.txt", ""));
+            }
+            else if (batchHotkey.Value.IsDown())
+            {
+                StartCoroutine(Run("batch.txt", "batch"));
             }
         }
 
-        private IEnumerator Run()
+        // What the batch changes in the scene besides its own objects.
+        private class Saved
+        {
+            public bool fog;
+            public FogMode fogMode;
+            public Color fogColor;
+            public float fogStart;
+            public float fogEnd;
+            public Texture lut;
+            public Texture lutBlend;
+            public float blend;
+            public int sun;
+            public bool vanish;
+        }
+
+        private IEnumerator Run(string list, string sub)
         {
             running = true;
             string root = Path.Combine(Paths.GameRootPath, "UserData/renkatsu");
             string outDir = Path.Combine(root, "out");
-            Directory.CreateDirectory(outDir);
-            List<Entry> cards = ReadList(Path.Combine(root, "cards.txt"));
-            Logger.LogMessage("Reference capture: " + cards.Count + " cards");
-
-            int done = 0;
-            foreach (Entry entry in cards)
+            if (sub.Length > 0)
             {
-                string card = entry.Path;
-                if (!File.Exists(card))
+                outDir = Path.Combine(outDir, sub);
+            }
+            Directory.CreateDirectory(outDir);
+            List<Entry> entries = ReadList(Path.Combine(root, list));
+            Logger.LogMessage("Reference capture: " + entries.Count + " cases from " + list);
+            Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+            StringBuilder index = new StringBuilder();
+            float startedAll = Time.realtimeSinceStartup;
+
+            Saved saved = null;
+            string mapNow = null;
+            OCICharFemale chara = null;
+            string loaded = null;
+            bool reload = false;
+            bool posed = false;
+            bool undressed = false;
+            int firstOutfit = 0;
+            int[] firstAnime = new int[3];
+            float firstSpeed = 1f;
+            int done = 0;
+
+            for (int n = 0; n < entries.Count; n++)
+            {
+                Entry e = entries[n];
+                float began = Time.realtimeSinceStartup;
+                string name = CaseName(e);
+
+                if (e.Map != mapNow)
                 {
-                    Logger.LogWarning("Reference capture: missing " + card);
-                    continue;
+                    if (saved == null)
+                    {
+                        saved = SaveScene(studio);
+                        // Walls hidden for Studio's own camera would be
+                        // missing from pictures taken from other places.
+                        studio.cameraCtrl.isConfigVanish = false;
+                    }
+                    int no = -1;
+                    bool found = false;
+                    try
+                    {
+                        no = e.Map == null ? -1 : FindMap(e.Map);
+                        found = e.Map == null || no >= 0;
+                        if (found)
+                        {
+                            studio.AddMap(no, false, false, true);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not load map " + e.Map + ": " + ex);
+                        found = false;
+                    }
+                    if (!found)
+                    {
+                        Logger.LogWarning("Reference capture: no map " + e.Map);
+                        index.Append(name).Append("\tno map ").Append(e.Map).Append("\n");
+                        continue;
+                    }
+                    int waited = 0;
+                    do
+                    {
+                        yield return null;
+                        waited++;
+                    }
+                    while (waited < 1800 && (Singleton<Map>.Instance.isLoading || (no >= 0 && Singleton<Map>.Instance.mapRoot == null)));
+                    for (int i = 0; i < 30; i++)
+                    {
+                        yield return null;
+                    }
+                    mapNow = e.Map;
                 }
-                OCICharFemale chara = null;
-                try
+                if (e.Map != null)
                 {
-                    chara = AddObjectFemale.Add(card);
+                    try
+                    {
+                        Singleton<Map>.Instance.sunType = (SunLightInfo.Info.Type)e.Sun;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not set the time of day: " + ex);
+                    }
                 }
-                catch (Exception e)
+
+                if (e.Path != loaded || reload)
                 {
-                    Logger.LogError("Reference capture: could not load " + card + ": " + e);
+                    if (chara != null)
+                    {
+                        studio.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
+                        chara = null;
+                        for (int i = 0; i < 5; i++)
+                        {
+                            yield return null;
+                        }
+                    }
+                    loaded = null;
+                    reload = false;
+                    posed = false;
+                    undressed = false;
+                    if (e.Path != null)
+                    {
+                        if (!File.Exists(e.Path))
+                        {
+                            Logger.LogWarning("Reference capture: missing " + e.Path);
+                            index.Append(name).Append("\tmissing card\n");
+                            continue;
+                        }
+                        try
+                        {
+                            chara = AddObjectFemale.Add(e.Path);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError("Reference capture: could not load " + e.Path + ": " + ex);
+                        }
+                        if (chara == null)
+                        {
+                            index.Append(name).Append("\tcould not load\n");
+                            continue;
+                        }
+                        loaded = e.Path;
+                        firstOutfit = chara.charInfo.fileStatus.coordinateType;
+                        firstAnime[0] = chara.oiCharInfo.animeInfo.group;
+                        firstAnime[1] = chara.oiCharInfo.animeInfo.category;
+                        firstAnime[2] = chara.oiCharInfo.animeInfo.no;
+                        firstSpeed = chara.animeSpeed;
+                    }
                 }
-                if (chara == null)
+
+                if (chara != null)
                 {
-                    continue;
+                    try
+                    {
+                        if (e.Outfit >= 0)
+                        {
+                            chara.SetCoordinateInfo((ChaFileDefine.CoordinateType)e.Outfit, true);
+                        }
+                        else if (chara.charInfo.fileStatus.coordinateType != firstOutfit)
+                        {
+                            chara.SetCoordinateInfo((ChaFileDefine.CoordinateType)firstOutfit, true);
+                        }
+                        if (undressed)
+                        {
+                            chara.charInfo.SetClothesStateAll(0);
+                            undressed = false;
+                        }
+                        foreach (KeyValuePair<int, int> state in e.Clothes)
+                        {
+                            chara.SetClothesState(state.Key, (byte)state.Value);
+                            undressed = true;
+                        }
+                        if (e.HasPose)
+                        {
+                            if (e.Pose[2] < 0)
+                            {
+                                // Studio does not list the maker's pose.
+                                chara.charInfo.LoadAnimation(MakerBundle, MakerController, "");
+                                chara.charInfo.animBody.Play(MakerState, 0, e.Time);
+                                chara.charInfo.setAnimatorParamFloat("height", chara.charInfo.fileBody.shapeValueBody[0]);
+                                // Studio no longer knows which controller is on.
+                                reload = true;
+                            }
+                            else
+                            {
+                                chara.LoadAnime(e.Pose[0], e.Pose[1], e.Pose[2], e.Time);
+                                chara.charInfo.animBody.Play(chara.charAnimeCtrl.nameHadh, 0, e.Time);
+                            }
+                            chara.animeSpeed = 0f;
+                            posed = true;
+                        }
+                        else if (posed)
+                        {
+                            chara.LoadAnime(firstAnime[0], firstAnime[1], firstAnime[2], 0f);
+                            chara.animeSpeed = firstSpeed;
+                            posed = false;
+                        }
+                        // A blink in the middle of a picture would make runs differ.
+                        chara.charInfo.ChangeEyesBlinkFlag(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not set up " + name + ": " + ex);
+                    }
                 }
-                if (entry.Outfit >= 0)
-                {
-                    chara.SetCoordinateInfo((ChaFileDefine.CoordinateType)entry.Outfit, true);
-                }
-                // A blink in the middle of a picture would make runs differ.
-                chara.charInfo.ChangeEyesBlinkFlag(false);
-                for (int i = 0; i < SettleFrames; i++)
+                for (int i = 0; i < e.Settle; i++)
                 {
                     yield return null;
                 }
                 yield return new WaitForEndOfFrame();
+
+                bool ok = false;
                 try
                 {
-                    string name = Path.GetFileNameWithoutExtension(card);
-                    if (entry.Outfit >= 0)
-                    {
-                        name += ".outfit" + entry.Outfit;
-                    }
-                    Capture(chara, card, Path.Combine(outDir, name));
+                    Capture(chara, e, Path.Combine(outDir, e.Frames > 0 ? name + ".f00" : name), 0);
+                    ok = true;
                     done++;
                 }
-                catch (Exception e)
+                catch (Exception ex)
                 {
-                    Logger.LogError("Reference capture: failed on " + card + ": " + e);
+                    Logger.LogError("Reference capture: failed on " + name + ": " + ex);
                 }
-                Singleton<Studio.Studio>.Instance.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
+
+                if (ok && e.Frames > 0 && chara != null)
+                {
+                    int oldRate = Time.captureFramerate;
+                    Time.captureFramerate = SequenceRate;
+                    chara.animeSpeed = 1f;
+                    for (int f = 1; f <= e.Frames; f++)
+                    {
+                        for (int k = 0; k < e.Step; k++)
+                        {
+                            yield return null;
+                        }
+                        yield return new WaitForEndOfFrame();
+                        try
+                        {
+                            Capture(chara, e, Path.Combine(outDir, name + ".f" + f.ToString("00")), f);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError("Reference capture: failed on " + name + " frame " + f + ": " + ex);
+                        }
+                    }
+                    chara.animeSpeed = 0f;
+                    Time.captureFramerate = oldRate;
+                }
+
+                float took = Time.realtimeSinceStartup - began;
+                index.Append(name).Append(ok ? "\tok\t" : "\tfailed\t").Append(F(took)).Append(" s\t").Append(e.Line).Append("\n");
+                Logger.LogMessage("Reference capture: " + (n + 1) + "/" + entries.Count + " " + name);
+            }
+
+            if (chara != null)
+            {
+                studio.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
                 for (int i = 0; i < 5; i++)
                 {
                     yield return null;
                 }
             }
-            Logger.LogMessage("Reference capture: saved " + done + " of " + cards.Count + " to " + outDir);
+            if (saved != null)
+            {
+                // Leave the scene without the batch's map and its settings.
+                if (mapNow != null)
+                {
+                    try
+                    {
+                        studio.AddMap(-1, false, false, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not unload the map: " + ex);
+                    }
+                    for (int i = 0; i < 30; i++)
+                    {
+                        yield return null;
+                    }
+                }
+                try
+                {
+                    RestoreScene(studio, saved);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("Reference capture: could not restore the scene: " + ex);
+                }
+            }
+            float total = Time.realtimeSinceStartup - startedAll;
+            index.Append("# ").Append(done).Append(" of ").Append(entries.Count).Append(" cases in ").Append(F(total)).Append(" s\n");
+            if (sub.Length > 0)
+            {
+                File.WriteAllText(Path.Combine(outDir, "index.txt"), index.ToString(), new UTF8Encoding(false));
+            }
+            Logger.LogMessage("Reference capture: saved " + done + " of " + entries.Count + " to " + outDir + " in " + (int)total + " s");
             running = false;
         }
 
-        private struct Entry
+        private static Saved SaveScene(Studio.Studio studio)
         {
-            public string Path;
-            // Outfit to wear, or -1 for the one the card loads with.
-            public int Outfit;
+            Saved s = new Saved();
+            s.fog = RenderSettings.fog;
+            s.fogMode = RenderSettings.fogMode;
+            s.fogColor = RenderSettings.fogColor;
+            s.fogStart = RenderSettings.fogStartDistance;
+            s.fogEnd = RenderSettings.fogEndDistance;
+            AmplifyColorEffect ace = Camera.main.GetComponent<AmplifyColorEffect>();
+            if (ace != null)
+            {
+                s.lut = ace.LutTexture;
+                s.lutBlend = ace.LutBlendTexture;
+                s.blend = ace.BlendAmount;
+            }
+            s.sun = studio.sceneInfo.sunLightType;
+            s.vanish = studio.cameraCtrl.isConfigVanish;
+            return s;
         }
 
-        private static List<Entry> ReadList(string listPath)
+        private static void RestoreScene(Studio.Studio studio, Saved s)
+        {
+            RenderSettings.fog = s.fog;
+            RenderSettings.fogMode = s.fogMode;
+            RenderSettings.fogColor = s.fogColor;
+            RenderSettings.fogStartDistance = s.fogStart;
+            RenderSettings.fogEndDistance = s.fogEnd;
+            AmplifyColorEffect ace = Camera.main.GetComponent<AmplifyColorEffect>();
+            if (ace != null)
+            {
+                ace.LutTexture = s.lut;
+                ace.LutBlendTexture = s.lutBlend;
+                ace.BlendAmount = s.blend;
+            }
+            studio.sceneInfo.sunLightType = s.sun;
+            studio.cameraCtrl.isConfigVanish = s.vanish;
+        }
+
+        // A map of Studio's list by number, or by the file name of its
+        // scene bundle ("myroom" for map/scene/myroom.unity3d). The lowest
+        // number wins, which is the game's own entry.
+        private static int FindMap(string name)
+        {
+            int number;
+            Dictionary<int, Info.MapLoadInfo> maps = Singleton<Info>.Instance.dicMapLoadInfo;
+            if (int.TryParse(name, out number))
+            {
+                return maps.ContainsKey(number) ? number : -1;
+            }
+            int found = -1;
+            foreach (KeyValuePair<int, Info.MapLoadInfo> m in maps)
+            {
+                string file = Path.GetFileNameWithoutExtension(m.Value.bundlePath ?? "");
+                if (string.Equals(file, name, StringComparison.OrdinalIgnoreCase) && (found < 0 || m.Key < found))
+                {
+                    found = m.Key;
+                }
+            }
+            return found;
+        }
+
+        private class ViewSpec
+        {
+            // "body", "face", "back", "side", "zoom" or "cam".
+            public string Kind;
+            public string Name;
+            public string Bone;
+            public float Half;
+            public float Yaw;
+            public float Pitch;
+            public Vector3 From;
+            public Vector3 To;
+            public float Fov;
+        }
+
+        private class Entry
+        {
+            // The list line as written.
+            public string Line = "";
+            // Card file, or null for no character.
+            public string Path;
+            // Outfit to wear, or -1 for the one the card loads with.
+            public int Outfit = -1;
+            public string Label = "";
+            public List<ViewSpec> Views = new List<ViewSpec>();
+            public int Width = DefaultWidth;
+            public int Height = DefaultHeight;
+            public int Msaa = 8;
+            public bool HasPose;
+            // Group, category and number; number -1 is the maker's pose.
+            public int[] Pose = new int[3];
+            public float Time;
+            public int Frames;
+            public int Step = 1;
+            public List<KeyValuePair<int, int>> Clothes = new List<KeyValuePair<int, int>>();
+            public string Map;
+            public int Sun;
+            public int Settle = SettleFrames;
+            public bool PlainOnly;
+        }
+
+        private static readonly string[] SunNames = { "day", "evening", "night" };
+
+        private static string CaseName(Entry e)
+        {
+            string name;
+            if (e.Path != null)
+            {
+                name = Path.GetFileNameWithoutExtension(e.Path);
+            }
+            else
+            {
+                name = "map." + (e.Map ?? "none");
+            }
+            if (e.Outfit >= 0)
+            {
+                name += ".outfit" + e.Outfit;
+            }
+            if (e.Path != null && e.Map != null)
+            {
+                name += "." + e.Map;
+            }
+            if (e.Map != null)
+            {
+                name += "." + SunNames[e.Sun];
+            }
+            if (e.Label.Length > 0)
+            {
+                name += "." + e.Label;
+            }
+            return name;
+        }
+
+        private static float Num(string text)
+        {
+            return float.Parse(text.Trim(), CultureInfo.InvariantCulture);
+        }
+
+        private static Vector3 Point(string text)
+        {
+            string[] p = text.Split(',');
+            return new Vector3(Num(p[0]), Num(p[1]), Num(p[2]));
+        }
+
+        private static readonly string[][] ClothesNames =
+        {
+            new[] { "top" }, new[] { "bot", "bottom" }, new[] { "bra" }, new[] { "shorts" }, new[] { "gloves" },
+            new[] { "panst", "pantyhose" }, new[] { "socks" }, new[] { "shoes_inner", "indoor" }, new[] { "shoes_outer", "outdoor" },
+        };
+
+        // Reads one field of a list line into the entry.
+        private static void Field(Entry e, string field)
+        {
+            int n;
+            if (int.TryParse(field, out n))
+            {
+                e.Outfit = n;
+                return;
+            }
+            if (field == "plain")
+            {
+                e.PlainOnly = true;
+                return;
+            }
+            int eq = field.IndexOf('=');
+            if (eq < 0)
+            {
+                throw new FormatException("unknown field " + field);
+            }
+            string key = field.Substring(0, eq).Trim();
+            string value = field.Substring(eq + 1).Trim();
+            string[] parts = value.Split(':');
+            switch (key)
+            {
+                case "outfit":
+                    e.Outfit = int.Parse(value);
+                    break;
+                case "name":
+                    e.Label = value;
+                    break;
+                case "view":
+                    foreach (string v in value.Split(','))
+                    {
+                        string kind = v.Trim();
+                        if (kind != "body" && kind != "face" && kind != "back" && kind != "side")
+                        {
+                            throw new FormatException("unknown view " + kind);
+                        }
+                        e.Views.Add(new ViewSpec { Kind = kind, Name = kind });
+                    }
+                    break;
+                case "zoom":
+                    e.Views.Add(new ViewSpec
+                    {
+                        Kind = "zoom",
+                        Name = parts[0],
+                        Bone = parts[1],
+                        Half = Num(parts[2]),
+                        Yaw = parts.Length > 3 ? Num(parts[3]) : 0f,
+                        Pitch = parts.Length > 4 ? Num(parts[4]) : 0f,
+                    });
+                    break;
+                case "cam":
+                    e.Views.Add(new ViewSpec
+                    {
+                        Kind = "cam",
+                        Name = parts[0],
+                        From = Point(parts[1]),
+                        To = Point(parts[2]),
+                        Fov = parts.Length > 3 ? Num(parts[3]) : 0f,
+                    });
+                    break;
+                case "res":
+                    string[] wh = value.Split('x');
+                    e.Width = int.Parse(wh[0]);
+                    e.Height = int.Parse(wh[1]);
+                    break;
+                case "msaa":
+                    e.Msaa = int.Parse(value);
+                    break;
+                case "pose":
+                    e.HasPose = true;
+                    if (value == "maker")
+                    {
+                        e.Pose = new[] { 0, 0, -1 };
+                    }
+                    else
+                    {
+                        string[] p = value.Split('/');
+                        e.Pose = new[] { int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2]) };
+                    }
+                    break;
+                case "time":
+                    e.Time = Num(value);
+                    break;
+                case "frames":
+                    e.Frames = int.Parse(value);
+                    break;
+                case "step":
+                    e.Step = Math.Max(1, int.Parse(value));
+                    break;
+                case "clothes":
+                    foreach (string pair in value.Split(','))
+                    {
+                        string[] ks = pair.Split(':');
+                        string kindName = ks[0].Trim();
+                        int kind;
+                        if (!int.TryParse(kindName, out kind))
+                        {
+                            kind = -1;
+                            for (int i = 0; i < ClothesNames.Length; i++)
+                            {
+                                if (Array.IndexOf(ClothesNames[i], kindName) >= 0)
+                                {
+                                    kind = i;
+                                }
+                            }
+                        }
+                        if (kind < 0 || kind >= ClothesNames.Length)
+                        {
+                            throw new FormatException("unknown clothing " + kindName);
+                        }
+                        e.Clothes.Add(new KeyValuePair<int, int>(kind, int.Parse(ks[1])));
+                    }
+                    break;
+                case "map":
+                    e.Map = value;
+                    break;
+                case "sun":
+                    e.Sun = Array.IndexOf(SunNames, value);
+                    if (e.Sun < 0)
+                    {
+                        throw new FormatException("unknown time of day " + value);
+                    }
+                    break;
+                case "settle":
+                    e.Settle = int.Parse(value);
+                    break;
+                default:
+                    throw new FormatException("unknown field " + key);
+            }
+        }
+
+        private List<Entry> ReadList(string listPath)
         {
             string female = Path.Combine(Paths.GameRootPath, "UserData/chara/female");
-            List<Entry> cards = new List<Entry>();
+            List<Entry> entries = new List<Entry>();
             if (File.Exists(listPath))
             {
                 foreach (string raw in File.ReadAllLines(listPath))
@@ -140,74 +688,262 @@ namespace Renkatsu
                     {
                         continue;
                     }
-                    int outfit = -1;
-                    int bar = line.LastIndexOf('|');
-                    if (bar >= 0 && int.TryParse(line.Substring(bar + 1).Trim(), out int n))
+                    string[] fields = line.Split('|');
+                    Entry e = new Entry();
+                    e.Line = line;
+                    string card = fields[0].Trim();
+                    if (card != "-" && card.Length > 0)
                     {
-                        outfit = n;
-                        line = line.Substring(0, bar).Trim();
+                        e.Path = Path.IsPathRooted(card) ? card : Path.Combine(female, card);
                     }
-                    string path = Path.IsPathRooted(line) ? line : Path.Combine(female, line);
-                    cards.Add(new Entry { Path = path, Outfit = outfit });
+                    try
+                    {
+                        for (int i = 1; i < fields.Length; i++)
+                        {
+                            string field = fields[i].Trim();
+                            if (field.Length > 0)
+                            {
+                                Field(e, field);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning("Reference capture: skipped line \"" + line + "\": " + ex.Message);
+                        continue;
+                    }
+                    if (e.Path == null && e.Map == null)
+                    {
+                        Logger.LogWarning("Reference capture: skipped line \"" + line + "\": no card and no map");
+                        continue;
+                    }
+                    entries.Add(e);
                 }
             }
-            if (cards.Count == 0)
+            if (entries.Count == 0)
             {
-                cards.Add(new Entry { Path = Path.Combine(female, "Simple.png"), Outfit = -1 });
+                entries.Add(new Entry { Path = Path.Combine(female, "Simple.png"), Line = "Simple.png" });
             }
-            return cards;
+            return entries;
         }
 
-        private struct View
+        private class View
         {
             public string name;
             public Vector3 position;
             public Quaternion rotation;
+            public float fov;
+            // Where the character's light pointed while this was taken.
+            public Vector3 light;
+            public bool hasLight;
         }
 
-        private void Capture(OCICharFemale chara, string card, string outBase)
+        // The directional light that lights the layer the character is
+        // drawn on; Studio's own one when several do.
+        private static Light CharaLight(Renderer[] renderers)
+        {
+            int layer = LayerMask.NameToLayer("Chara");
+            foreach (Renderer r in renderers)
+            {
+                if (r.enabled)
+                {
+                    layer = r.gameObject.layer;
+                    break;
+                }
+            }
+            Light best = null;
+            Light named = null;
+            foreach (Light l in FindObjectsOfType<Light>())
+            {
+                if (!l.isActiveAndEnabled || l.type != LightType.Directional)
+                {
+                    continue;
+                }
+                if (l.name == "Directional Chara")
+                {
+                    named = l;
+                }
+                if (layer >= 0 && (l.cullingMask & (1 << layer)) != 0 && (best == null || l == named))
+                {
+                    best = l;
+                }
+            }
+            return best ?? named;
+        }
+
+        private static Transform Bone(Transform[] bones, string name)
+        {
+            foreach (Transform t in bones)
+            {
+                if (t.name == name)
+                {
+                    return t;
+                }
+            }
+            return null;
+        }
+
+        // The cameras of a case, in the order asked for.
+        private List<View> Views(Camera cam, ChaControl cha, Renderer[] renderers, Entry e, float aspect)
+        {
+            List<View> views = new List<View>();
+            List<ViewSpec> specs = new List<ViewSpec>(e.Views);
+            if (specs.Count == 0 && cha != null)
+            {
+                specs.Add(new ViewSpec { Kind = "body", Name = "body" });
+                specs.Add(new ViewSpec { Kind = "face", Name = "face" });
+            }
+            if (specs.Count == 0)
+            {
+                // A map alone: Studio's own camera, then a look around from
+                // eye height where characters are placed.
+                View own = new View();
+                own.name = "studio";
+                own.position = cam.transform.position;
+                own.rotation = cam.transform.rotation;
+                own.fov = cam.fieldOfView;
+                views.Add(own);
+                string[] names = { "north", "east", "south", "west" };
+                for (int i = 0; i < 4; i++)
+                {
+                    View v = new View();
+                    v.name = names[i];
+                    v.position = new Vector3(0f, 1.4f, 0f);
+                    v.rotation = Quaternion.Euler(0f, 90f * i, 0f);
+                    v.fov = 60f;
+                    views.Add(v);
+                }
+                return views;
+            }
+            Vector3 forward = cha != null ? cha.transform.forward : Vector3.forward;
+            Transform[] bones = cha != null ? cha.objBodyBone.GetComponentsInChildren<Transform>(true) : new Transform[0];
+            float fov = cam.fieldOfView;
+            foreach (ViewSpec s in specs)
+            {
+                View v = null;
+                if (s.Kind == "cam")
+                {
+                    v = new View();
+                    v.position = s.From;
+                    v.rotation = Quaternion.LookRotation(s.To - s.From, Vector3.up);
+                    v.fov = s.Fov > 0f ? s.Fov : fov;
+                }
+                else if (cha == null)
+                {
+                    Logger.LogWarning("Reference capture: view " + s.Name + " needs a character");
+                    continue;
+                }
+                else if (s.Kind == "body")
+                {
+                    v = Frame(ExactBounds(renderers), 1.05f, fov, aspect, forward);
+                }
+                else if (s.Kind == "face")
+                {
+                    if (cha.objHead == null)
+                    {
+                        continue;
+                    }
+                    // Wide enough to keep most of the hair in the picture.
+                    v = Frame(ExactBounds(cha.objHead.GetComponentsInChildren<Renderer>(false)), 1.7f, fov, aspect, forward);
+                }
+                else if (s.Kind == "back" || s.Kind == "side")
+                {
+                    Vector3 dir = Quaternion.AngleAxis(s.Kind == "back" ? 180f : 90f, Vector3.up) * forward;
+                    v = FrameFrom(ExactBounds(renderers), 1.05f, fov, aspect, dir);
+                }
+                else
+                {
+                    Vector3 target = Vector3.zero;
+                    string[] names = s.Bone.Split('+');
+                    bool found = true;
+                    foreach (string boneName in names)
+                    {
+                        Transform t = Bone(bones, boneName.Trim());
+                        if (t == null)
+                        {
+                            Logger.LogWarning("Reference capture: no bone " + boneName + " for view " + s.Name);
+                            found = false;
+                            break;
+                        }
+                        target += t.position / names.Length;
+                    }
+                    if (!found)
+                    {
+                        continue;
+                    }
+                    Vector3 dir = Quaternion.AngleAxis(s.Yaw, Vector3.up) * forward;
+                    dir = Quaternion.AngleAxis(-s.Pitch, Vector3.Cross(Vector3.up, dir)) * dir;
+                    v = new View();
+                    v.position = target + dir * (s.Half / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad));
+                    v.rotation = Quaternion.LookRotation(-dir, Vector3.up);
+                }
+                v.name = s.Name;
+                if (v.fov <= 0f)
+                {
+                    v.fov = fov;
+                }
+                views.Add(v);
+            }
+            return views;
+        }
+
+        private void Capture(OCICharFemale chara, Entry e, string outBase, int frame)
         {
             Camera cam = Camera.main;
-            ChaControl cha = chara.charInfo;
-            Renderer[] renderers = cha.GetComponentsInChildren<Renderer>(false);
+            ChaControl cha = chara != null ? chara.charInfo : null;
+            Renderer[] renderers = cha != null ? cha.GetComponentsInChildren<Renderer>(false) : new Renderer[0];
 
             // Remember what gets changed, so Studio is left as it was.
             Vector3 oldPos = cam.transform.position;
             Quaternion oldRot = cam.transform.rotation;
+            float oldFov = cam.fieldOfView;
             CameraClearFlags oldFlags = cam.clearFlags;
             Color oldBack = cam.backgroundColor;
 
-            float aspect = (float)Width / Height;
-            Vector3 forward = cha.transform.forward;
-            List<View> views = new List<View>();
-            views.Add(Frame("body", ExactBounds(renderers), 1.05f, cam.fieldOfView, aspect, forward));
-            if (cha.objHead != null)
+            float aspect = (float)e.Width / e.Height;
+            List<View> views = Views(cam, cha, renderers, e, aspect);
+            // A sequence keeps its first picture only, to stay quick.
+            if (frame > 0 && views.Count > 1)
             {
-                // Wide enough to keep most of the hair in the picture.
-                views.Add(Frame("face", ExactBounds(cha.objHead.GetComponentsInChildren<Renderer>(false)), 1.7f, cam.fieldOfView, aspect, forward));
+                views.RemoveRange(1, views.Count - 1);
             }
 
-            cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = new Color(0.93f, 0.93f, 0.95f, 1f);
+            if (e.Map == null)
+            {
+                // A map keeps its sky; without one the back is one colour.
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0.93f, 0.93f, 0.95f, 1f);
+            }
             List<Behaviour> effects = ImageEffects(cam);
+            Light charaLight = CharaLight(renderers);
             try
             {
-                File.WriteAllText(outBase + ".json", Describe(cam, cha, chara, card, renderers, effects, aspect, views), new UTF8Encoding(false));
                 foreach (View v in views)
                 {
                     cam.transform.position = v.position;
                     cam.transform.rotation = v.rotation;
-                    File.WriteAllBytes(outBase + "." + v.name + ".studio.png", Shot(cam));
+                    cam.fieldOfView = v.fov;
+                    if (charaLight != null)
+                    {
+                        v.light = charaLight.transform.forward;
+                        v.hasLight = true;
+                    }
+                    if (!e.PlainOnly && frame == 0)
+                    {
+                        File.WriteAllBytes(outBase + "." + v.name + ".studio.png", Shot(cam, e));
+                    }
                     foreach (Behaviour b in effects)
                     {
                         b.enabled = false;
                     }
-                    File.WriteAllBytes(outBase + "." + v.name + ".plain.png", Shot(cam));
+                    File.WriteAllBytes(outBase + "." + v.name + ".plain.png", Shot(cam, e));
                     foreach (Behaviour b in effects)
                     {
                         b.enabled = true;
                     }
                 }
+                cam.fieldOfView = oldFov;
+                File.WriteAllText(outBase + ".json", Describe(cam, cha, chara, e, frame, charaLight, renderers, effects, aspect, views), new UTF8Encoding(false));
             }
             finally
             {
@@ -217,20 +953,32 @@ namespace Renkatsu
                 }
                 cam.transform.position = oldPos;
                 cam.transform.rotation = oldRot;
+                cam.fieldOfView = oldFov;
                 cam.clearFlags = oldFlags;
                 cam.backgroundColor = oldBack;
             }
         }
 
         // A camera in front of the character that fits the box, with a margin.
-        private static View Frame(string name, Bounds box, float margin, float fov, float aspect, Vector3 forward)
+        private static View Frame(Bounds box, float margin, float fov, float aspect, Vector3 forward)
         {
             float half = Mathf.Max(box.extents.y, box.extents.x / aspect) * margin;
             float dist = half / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad) + box.extents.z;
             View v = new View();
-            v.name = name;
             v.position = box.center + forward * dist;
             v.rotation = Quaternion.LookRotation(-forward, Vector3.up);
+            return v;
+        }
+
+        // The same from any side: the box may be wide either way.
+        private static View FrameFrom(Bounds box, float margin, float fov, float aspect, Vector3 dir)
+        {
+            float wide = Mathf.Max(box.extents.x, box.extents.z);
+            float half = Mathf.Max(box.extents.y, wide / aspect) * margin;
+            float dist = half / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad) + wide;
+            View v = new View();
+            v.position = box.center + dir * dist;
+            v.rotation = Quaternion.LookRotation(-dir, Vector3.up);
             return v;
         }
 
@@ -304,19 +1052,19 @@ namespace Renkatsu
             return found;
         }
 
-        private static byte[] Shot(Camera cam)
+        private static byte[] Shot(Camera cam, Entry e)
         {
-            RenderTexture rt = new RenderTexture(Width, Height, 24, RenderTextureFormat.ARGB32);
-            rt.antiAliasing = 8;
+            RenderTexture rt = new RenderTexture(e.Width, e.Height, 24, RenderTextureFormat.ARGB32);
+            rt.antiAliasing = e.Msaa;
             RenderTexture oldTarget = cam.targetTexture;
             RenderTexture oldActive = RenderTexture.active;
-            Texture2D tex = new Texture2D(Width, Height, TextureFormat.RGB24, false);
+            Texture2D tex = new Texture2D(e.Width, e.Height, TextureFormat.RGB24, false);
             try
             {
                 cam.targetTexture = rt;
                 cam.Render();
                 RenderTexture.active = rt;
-                tex.ReadPixels(new Rect(0, 0, Width, Height), 0, 0);
+                tex.ReadPixels(new Rect(0, 0, e.Width, e.Height), 0, 0);
                 tex.Apply();
                 return tex.EncodeToPNG();
             }
@@ -331,15 +1079,39 @@ namespace Renkatsu
             }
         }
 
-        private static string Describe(Camera cam, ChaControl cha, OCICharFemale chara, string card, Renderer[] renderers, List<Behaviour> effects, float aspect, List<View> views)
+        private static string Describe(Camera cam, ChaControl cha, OCICharFemale chara, Entry e, int frame, Light charaLight, Renderer[] renderers, List<Behaviour> effects, float aspect, List<View> views)
         {
             SceneInfo scene = Singleton<Studio.Studio>.Instance.sceneInfo;
             StringBuilder s = new StringBuilder(1 << 20);
             s.Append("{\n");
-            s.Append("\"card\": ").Append(Str(card)).Append(",\n");
+            s.Append("\"card\": ").Append(Str(e.Path ?? "")).Append(",\n");
             s.Append("\"unity\": ").Append(Str(Application.unityVersion)).Append(",\n");
             s.Append("\"color_space\": ").Append(Str(QualitySettings.activeColorSpace.ToString())).Append(",\n");
-            s.Append("\"size\": [").Append(Width).Append(", ").Append(Height).Append("],\n");
+            s.Append("\"size\": [").Append(e.Width).Append(", ").Append(e.Height).Append("],\n");
+
+            // What the list line asked for.
+            s.Append("\"case\": {");
+            s.Append("\"line\": ").Append(Str(e.Line));
+            s.Append(", \"label\": ").Append(Str(e.Label));
+            s.Append(", \"outfit\": ").Append(e.Outfit);
+            s.Append(", \"msaa\": ").Append(e.Msaa);
+            s.Append(", \"settle_frames\": ").Append(e.Settle);
+            s.Append(", \"studio_pictures\": ").Append(B(!e.PlainOnly && frame == 0));
+            if (e.HasPose)
+            {
+                s.Append(", \"pose\": {\"group\": ").Append(e.Pose[0]).Append(", \"category\": ").Append(e.Pose[1]);
+                s.Append(", \"number\": ").Append(e.Pose[2]).Append(", \"time\": ").Append(F(e.Time)).Append("}");
+            }
+            if (e.Frames > 0)
+            {
+                s.Append(", \"sequence\": {\"frame\": ").Append(frame).Append(", \"frames\": ").Append(e.Frames);
+                s.Append(", \"step\": ").Append(e.Step).Append(", \"rate\": ").Append(SequenceRate).Append("}");
+            }
+            if (e.Map != null)
+            {
+                s.Append(", \"map\": ").Append(Str(e.Map)).Append(", \"sun\": ").Append(Str(SunNames[e.Sun]));
+            }
+            s.Append("},\n");
 
             s.Append("\"camera\": {");
             s.Append("\"fov\": ").Append(F(cam.fieldOfView));
@@ -349,9 +1121,13 @@ namespace Renkatsu
             s.Append(", \"hdr\": ").Append(B(cam.allowHDR));
             s.Append(", \"path\": ").Append(Str(cam.actualRenderingPath.ToString()));
             s.Append(", \"background\": ").Append(C(cam.backgroundColor));
+            s.Append(", \"clear\": ").Append(Str(cam.clearFlags.ToString()));
+            s.Append(", \"culling_mask\": ").Append(cam.cullingMask);
+            s.Append(", \"screen_msaa\": ").Append(cam.allowMSAA ? QualitySettings.antiAliasing : 0);
             s.Append("},\n");
 
             // One picture pair per view: <name>.<view>.studio.png and .plain.png.
+            // A view's own "fov" and "light_direction" replace the scene's.
             s.Append("\"views\": [");
             for (int i = 0; i < views.Count; i++)
             {
@@ -359,32 +1135,50 @@ namespace Renkatsu
                 s.Append("{\"name\": ").Append(Str(views[i].name));
                 s.Append(", \"position\": ").Append(V(views[i].position));
                 s.Append(", \"rotation\": ").Append(Q(views[i].rotation));
+                s.Append(", \"fov\": ").Append(F(views[i].fov));
+                if (views[i].hasLight)
+                {
+                    s.Append(", \"light_direction\": ").Append(V(views[i].light));
+                }
                 s.Append("}");
             }
             s.Append("],\n");
 
-            ChaFileStatus st = cha.fileStatus;
-            s.Append("\"status\": {");
-            s.Append("\"coordinate\": ").Append(st.coordinateType);
-            s.Append(", \"shoes\": ").Append(st.shoesType);
-            s.Append(", \"clothes_state\": [");
-            for (int i = 0; i < st.clothesState.Length; i++)
+            if (cha != null)
             {
-                s.Append(i == 0 ? "" : ", ").Append(st.clothesState[i]);
+                ChaFileStatus st = cha.fileStatus;
+                s.Append("\"status\": {");
+                s.Append("\"coordinate\": ").Append(st.coordinateType);
+                s.Append(", \"shoes\": ").Append(st.shoesType);
+                s.Append(", \"clothes_state\": [");
+                for (int i = 0; i < st.clothesState.Length; i++)
+                {
+                    s.Append(i == 0 ? "" : ", ").Append(st.clothesState[i]);
+                }
+                s.Append("]");
+                s.Append(", \"eyes_pattern\": ").Append(st.eyesPtn);
+                s.Append(", \"eyes_open_max\": ").Append(F(st.eyesOpenMax));
+                s.Append(", \"eyes_blink\": ").Append(B(st.eyesBlink));
+                s.Append(", \"eyebrow_pattern\": ").Append(st.eyebrowPtn);
+                s.Append(", \"mouth_pattern\": ").Append(st.mouthPtn);
+                s.Append(", \"mouth_open_max\": ").Append(F(st.mouthOpenMax));
+                s.Append(", \"eyes_look_pattern\": ").Append(st.eyesLookPtn);
+                s.Append(", \"neck_look_pattern\": ").Append(st.neckLookPtn);
+                s.Append(", \"cheek_red\": ").Append(F(st.hohoAkaRate));
+                s.Append(", \"skin_gloss\": ").Append(F(st.skinTuyaRate));
+                s.Append(", \"hide_eye_highlight\": ").Append(B(st.hideEyesHighlight));
+                s.Append("},\n");
+                string animation;
+                try
+                {
+                    animation = Animation(cha, chara);
+                }
+                catch (Exception ex)
+                {
+                    animation = "{\"error\": " + Str(ex.Message) + "}";
+                }
+                s.Append("\"animation\": ").Append(animation).Append(",\n");
             }
-            s.Append("]");
-            s.Append(", \"eyes_pattern\": ").Append(st.eyesPtn);
-            s.Append(", \"eyes_open_max\": ").Append(F(st.eyesOpenMax));
-            s.Append(", \"eyes_blink\": ").Append(B(st.eyesBlink));
-            s.Append(", \"eyebrow_pattern\": ").Append(st.eyebrowPtn);
-            s.Append(", \"mouth_pattern\": ").Append(st.mouthPtn);
-            s.Append(", \"mouth_open_max\": ").Append(F(st.mouthOpenMax));
-            s.Append(", \"eyes_look_pattern\": ").Append(st.eyesLookPtn);
-            s.Append(", \"neck_look_pattern\": ").Append(st.neckLookPtn);
-            s.Append(", \"cheek_red\": ").Append(F(st.hohoAkaRate));
-            s.Append(", \"skin_gloss\": ").Append(F(st.skinTuyaRate));
-            s.Append(", \"hide_eye_highlight\": ").Append(B(st.hideEyesHighlight));
-            s.Append("},\n");
 
             s.Append("\"effects_on_camera\": [");
             for (int i = 0; i < effects.Count; i++)
@@ -423,7 +1217,15 @@ namespace Renkatsu
             s.Append(", \"chara_light_intensity\": ").Append(F(scene.charaLight.intensity));
             s.Append(", \"chara_light_rot\": [").Append(F(scene.charaLight.rot[0])).Append(", ").Append(F(scene.charaLight.rot[1])).Append("]");
             s.Append(", \"chara_light_shadow\": ").Append(B(scene.charaLight.shadow));
-            s.Append(", \"anime_speed\": ").Append(F(chara.animeSpeed));
+            s.Append(", \"anime_speed\": ").Append(F(chara != null ? chara.animeSpeed : 0f));
+            s.Append(", \"map\": ").Append(scene.map);
+            s.Append(", \"sun_light_type\": ").Append(scene.sunLightType);
+            s.Append(", \"map_option\": ").Append(B(scene.mapOption));
+            s.Append(", \"map_light_color\": ").Append(C(scene.mapLight.color));
+            s.Append(", \"map_light_intensity\": ").Append(F(scene.mapLight.intensity));
+            s.Append(", \"map_light_rot\": [").Append(F(scene.mapLight.rot[0])).Append(", ").Append(F(scene.mapLight.rot[1])).Append("]");
+            s.Append(", \"map_light_shadow\": ").Append(B(scene.mapLight.shadow));
+            s.Append(", \"map_light_type\": ").Append(Str(scene.mapLight.type.ToString()));
             s.Append("},\n");
 
             Texture ramp = Shader.GetGlobalTexture("_RampG");
@@ -449,16 +1251,71 @@ namespace Renkatsu
             s.Append(", \"reflection_intensity\": ").Append(F(RenderSettings.reflectionIntensity));
             s.Append(", \"custom_reflection\": ").Append(Str(reflection != null ? reflection.name : ""));
             s.Append(", \"skybox\": ").Append(Str(RenderSettings.skybox != null ? RenderSettings.skybox.name : ""));
+            s.Append(", \"skybox_shader\": ").Append(Str(RenderSettings.skybox != null && RenderSettings.skybox.shader != null ? RenderSettings.skybox.shader.name : ""));
+            s.Append(", \"ambient_sky\": ").Append(C(RenderSettings.ambientSkyColor));
+            s.Append(", \"ambient_equator\": ").Append(C(RenderSettings.ambientEquatorColor));
+            s.Append(", \"ambient_ground\": ").Append(C(RenderSettings.ambientGroundColor));
+            s.Append(", \"sun\": ").Append(Str(RenderSettings.sun != null ? RenderSettings.sun.name : ""));
+            s.Append(", \"fog\": ").Append(B(RenderSettings.fog));
+            s.Append(", \"fog_mode\": ").Append(Str(RenderSettings.fogMode.ToString()));
+            s.Append(", \"fog_color\": ").Append(C(RenderSettings.fogColor));
+            s.Append(", \"fog_start\": ").Append(F(RenderSettings.fogStartDistance));
+            s.Append(", \"fog_end\": ").Append(F(RenderSettings.fogEndDistance));
+            s.Append(", \"fog_density\": ").Append(F(RenderSettings.fogDensity));
+            // The colour filter that is on the camera now, whoever set it.
+            AmplifyColorEffect ace = cam.GetComponent<AmplifyColorEffect>();
+            if (ace != null)
+            {
+                s.Append(", \"ace_enabled\": ").Append(B(ace.enabled));
+                s.Append(", \"ace_lut\": ").Append(Str(ace.LutTexture != null ? ace.LutTexture.name : ""));
+                s.Append(", \"ace_lut_blend\": ").Append(Str(ace.LutBlendTexture != null ? ace.LutBlendTexture.name : ""));
+                s.Append(", \"ace_blend_amount\": ").Append(F(ace.BlendAmount));
+            }
             s.Append("},\n");
 
-            s.Append("\"lights\": [");
-            bool first = true;
+            s.Append("\"quality\": {");
+            s.Append("\"level\": ").Append(QualitySettings.GetQualityLevel());
+            s.Append(", \"anti_aliasing\": ").Append(QualitySettings.antiAliasing);
+            s.Append(", \"shadows\": ").Append(Str(QualitySettings.shadows.ToString()));
+            s.Append(", \"shadow_resolution\": ").Append(Str(QualitySettings.shadowResolution.ToString()));
+            s.Append(", \"shadow_projection\": ").Append(Str(QualitySettings.shadowProjection.ToString()));
+            s.Append(", \"shadow_distance\": ").Append(F(QualitySettings.shadowDistance));
+            s.Append(", \"shadow_near_plane_offset\": ").Append(F(QualitySettings.shadowNearPlaneOffset));
+            s.Append(", \"shadow_cascades\": ").Append(QualitySettings.shadowCascades);
+            s.Append(", \"shadow_cascade2_split\": ").Append(F(QualitySettings.shadowCascade2Split));
+            s.Append(", \"shadow_cascade4_split\": ").Append(V(QualitySettings.shadowCascade4Split));
+            s.Append(", \"pixel_light_count\": ").Append(QualitySettings.pixelLightCount);
+            s.Append(", \"anisotropic\": ").Append(Str(QualitySettings.anisotropicFiltering.ToString()));
+            s.Append(", \"texture_limit\": ").Append(QualitySettings.masterTextureLimit);
+            s.Append(", \"lod_bias\": ").Append(F(QualitySettings.lodBias));
+            s.Append("},\n");
+
+            // Layer names by number, for the lights' culling masks.
+            s.Append("\"layers\": [");
+            for (int i = 0; i < 32; i++)
+            {
+                s.Append(i == 0 ? "" : ", ").Append(Str(LayerMask.LayerToName(i)));
+            }
+            s.Append("],\n");
+
+            // The character's light first: with a map there are several
+            // directional lights, and readers take the first.
+            List<Light> lights = new List<Light>();
+            if (charaLight != null)
+            {
+                lights.Add(charaLight);
+            }
             foreach (Light l in FindObjectsOfType<Light>())
             {
-                if (!l.isActiveAndEnabled)
+                if (l.isActiveAndEnabled && l != charaLight)
                 {
-                    continue;
+                    lights.Add(l);
                 }
+            }
+            s.Append("\"lights\": [");
+            bool first = true;
+            foreach (Light l in lights)
+            {
                 s.Append(first ? "\n" : ",\n");
                 first = false;
                 s.Append("{\"name\": ").Append(Str(l.name));
@@ -470,9 +1327,38 @@ namespace Renkatsu
                 s.Append(", \"shadows\": ").Append(Str(l.shadows.ToString()));
                 s.Append(", \"shadow_strength\": ").Append(F(l.shadowStrength));
                 s.Append(", \"culling_mask\": ").Append(l.cullingMask);
+                s.Append(", \"layer\": ").Append(l.gameObject.layer);
+                s.Append(", \"parent\": ").Append(Str(l.transform.parent != null ? l.transform.parent.name : ""));
+                s.Append(", \"range\": ").Append(F(l.range));
+                s.Append(", \"spot_angle\": ").Append(F(l.spotAngle));
+                s.Append(", \"shadow_bias\": ").Append(F(l.shadowBias));
+                s.Append(", \"shadow_normal_bias\": ").Append(F(l.shadowNormalBias));
+                s.Append(", \"shadow_near_plane\": ").Append(F(l.shadowNearPlane));
+                s.Append(", \"render_mode\": ").Append(Str(l.renderMode.ToString()));
+                s.Append(", \"lights_character\": ").Append(B(l == charaLight));
                 s.Append("}");
             }
-            s.Append("\n],\n");
+            s.Append("\n]");
+
+            if (Singleton<Map>.IsInstance() && Singleton<Map>.Instance.mapRoot != null)
+            {
+                string map;
+                try
+                {
+                    map = MapData(cam);
+                }
+                catch (Exception ex)
+                {
+                    map = "{\"error\": " + Str(ex.Message) + "}";
+                }
+                s.Append(",\n\"map\": ").Append(map);
+            }
+            if (cha == null)
+            {
+                s.Append("\n}\n");
+                return s.ToString();
+            }
+            s.Append(",\n");
 
             // Every bone with its parent, so the exact pose and shape can be rebuilt.
             Transform[] bones = cha.objBodyBone.GetComponentsInChildren<Transform>(true);
@@ -514,6 +1400,7 @@ namespace Renkatsu
                 first = false;
                 s.Append("{\"name\": ").Append(Str(r.name));
                 s.Append(", \"kind\": ").Append(Str(r.GetType().Name));
+                s.Append(", \"layer\": ").Append(r.gameObject.layer);
                 s.Append(", \"cast\": ").Append(Str(r.shadowCastingMode.ToString()));
                 s.Append(", \"receive\": ").Append(r.receiveShadows ? "true" : "false");
                 SkinnedMeshRenderer skinned = r as SkinnedMeshRenderer;
@@ -585,17 +1472,247 @@ namespace Renkatsu
             return s.ToString();
         }
 
+        // The state the body's Animator is in, the clips it blends and the
+        // numbers it was given.
+        private static string Animation(ChaControl cha, OCICharFemale chara)
+        {
+            StringBuilder s = new StringBuilder("{");
+            Animator a = cha.animBody;
+            if (a == null || a.runtimeAnimatorController == null)
+            {
+                return "{}";
+            }
+            AnimatorStateInfo st = a.GetCurrentAnimatorStateInfo(0);
+            s.Append("\"controller\": ").Append(Str(a.runtimeAnimatorController.name));
+            s.Append(", \"group\": ").Append(chara.oiCharInfo.animeInfo.group);
+            s.Append(", \"category\": ").Append(chara.oiCharInfo.animeInfo.category);
+            s.Append(", \"number\": ").Append(chara.oiCharInfo.animeInfo.no);
+            s.Append(", \"state_hash\": ").Append(st.shortNameHash);
+            s.Append(", \"normalized_time\": ").Append(F(st.normalizedTime));
+            s.Append(", \"length\": ").Append(F(st.length));
+            s.Append(", \"state_speed\": ").Append(F(st.speed));
+            s.Append(", \"speed_multiplier\": ").Append(F(st.speedMultiplier));
+            s.Append(", \"loop\": ").Append(B(st.loop));
+            s.Append(", \"animator_speed\": ").Append(F(a.speed));
+            s.Append(", \"delta_time\": ").Append(F(Time.deltaTime));
+            s.Append(", \"force_loop\": ").Append(B(chara.charAnimeCtrl != null && chara.charAnimeCtrl.isForceLoop));
+            s.Append(", \"clips\": [");
+            AnimatorClipInfo[] clips = a.GetCurrentAnimatorClipInfo(0);
+            for (int i = 0; i < clips.Length; i++)
+            {
+                s.Append(i == 0 ? "" : ", ");
+                s.Append("{\"name\": ").Append(Str(clips[i].clip != null ? clips[i].clip.name : ""));
+                s.Append(", \"weight\": ").Append(F(clips[i].weight));
+                s.Append(", \"length\": ").Append(F(clips[i].clip != null ? clips[i].clip.length : 0f));
+                s.Append("}");
+            }
+            s.Append("], \"parameters\": {");
+            bool first = true;
+            foreach (AnimatorControllerParameter p in a.parameters)
+            {
+                if (p.type != AnimatorControllerParameterType.Float)
+                {
+                    continue;
+                }
+                s.Append(first ? "" : ", ").Append(Str(p.name)).Append(": ").Append(F(a.GetFloat(p.nameHash)));
+                first = false;
+            }
+            s.Append("}, \"layer_weights\": [");
+            for (int i = 0; i < a.layerCount; i++)
+            {
+                s.Append(i == 0 ? "" : ", ").Append(F(a.GetLayerWeight(i)));
+            }
+            s.Append("]}");
+            return s.ToString();
+        }
+
+        // The loaded map: its list entry, what each time of day sets, the
+        // lightmaps, reflection probes and every renderer with its layer.
+        private static string MapData(Camera cam)
+        {
+            Map map = Singleton<Map>.Instance;
+            GameObject root = map.mapRoot;
+            StringBuilder s = new StringBuilder("{");
+            s.Append("\"number\": ").Append(map.no);
+            Info.MapLoadInfo info;
+            if (Singleton<Info>.Instance.dicMapLoadInfo.TryGetValue(map.no, out info))
+            {
+                s.Append(", \"name\": ").Append(Str(info.name ?? ""));
+                s.Append(", \"bundle\": ").Append(Str(info.bundlePath ?? ""));
+                s.Append(", \"scene\": ").Append(Str(info.fileName ?? ""));
+            }
+            s.Append(", \"position\": ").Append(V(root.transform.position));
+            s.Append(", \"rotation\": ").Append(Q(root.transform.rotation));
+            s.Append(", \"sun_type\": ").Append(Str(map.sunType.ToString()));
+            s.Append(", \"has_options\": ").Append(B(map.isOption));
+
+            SunLightInfo sun = map.sunLightInfo;
+            s.Append(", \"sun_light_info\": ");
+            if (sun == null)
+            {
+                s.Append("null");
+            }
+            else
+            {
+                s.Append("{\"target_light\": ").Append(Str(sun.targetLight != null ? sun.targetLight.name : ""));
+                s.Append(", \"times\": [");
+                SunLightInfo.Info[] infos = sun.infos ?? new SunLightInfo.Info[0];
+                for (int i = 0; i < infos.Length; i++)
+                {
+                    SunLightInfo.Info t = infos[i];
+                    s.Append(i == 0 ? "\n" : ",\n");
+                    s.Append("{\"type\": ").Append(Str(t.type.ToString()));
+                    s.Append(", \"angle\": ").Append(V(t.angle));
+                    s.Append(", \"color\": ").Append(C(t.color));
+                    s.Append(", \"intensity\": ").Append(F(t.intensity));
+                    s.Append(", \"fog\": ").Append(B(t.fogUse));
+                    s.Append(", \"fog_color\": ").Append(C(t.fogColor));
+                    s.Append(", \"fog_start\": ").Append(F(t.fogStart));
+                    s.Append(", \"fog_end\": ").Append(F(t.fogEnd));
+                    s.Append(", \"sun_shafts_color\": ").Append(C(t.sunShaftsColor));
+                    s.Append(", \"sun_shafts_caster\": ").Append(Str(t.sunShaftsTransform != null ? t.sunShaftsTransform.name : ""));
+                    s.Append(", \"lut\": ").Append(Str(t.aceLutTexture != null ? t.aceLutTexture.name : ""));
+                    s.Append(", \"lut_blend\": ").Append(Str(t.aceLutBlendTexture != null ? t.aceLutBlendTexture.name : ""));
+                    s.Append(", \"lut_blend_amount\": ").Append(F(t.aceBlendAmount));
+                    s.Append(", \"back_texture\": ").Append(Str(t.backTexture != null ? t.backTexture.name : ""));
+                    s.Append(", \"visible\": [");
+                    for (int k = 0; k < t.visibleList.Count; k++)
+                    {
+                        s.Append(k == 0 ? "" : ", ").Append(Str(t.visibleList[k] != null ? t.visibleList[k].name : ""));
+                    }
+                    s.Append("]}");
+                }
+                s.Append("\n]}");
+            }
+
+            // The property was renamed between Unity versions.
+            LightmapData[] lightmaps = LightmapSettings.lightmaps ?? new LightmapData[0];
+            s.Append(", \"lightmaps_mode\": ").Append(Str(LightmapSettings.lightmapsMode.ToString()));
+            s.Append(", \"lightmaps\": [");
+            for (int i = 0; i < lightmaps.Length; i++)
+            {
+                Texture color = null;
+                Texture dir = null;
+                foreach (PropertyInfo p in typeof(LightmapData).GetProperties())
+                {
+                    if (p.Name == "lightmapColor" || p.Name == "lightmapLight" || p.Name == "lightmapFar")
+                    {
+                        color = color ?? p.GetValue(lightmaps[i], null) as Texture;
+                    }
+                    else if (p.Name == "lightmapDir" || p.Name == "lightmapNear")
+                    {
+                        dir = dir ?? p.GetValue(lightmaps[i], null) as Texture;
+                    }
+                }
+                s.Append(i == 0 ? "" : ", ");
+                s.Append("{\"color\": ").Append(Str(color != null ? color.name : ""));
+                s.Append(", \"size\": [").Append(color != null ? color.width : 0).Append(", ").Append(color != null ? color.height : 0).Append("]");
+                s.Append(", \"dir\": ").Append(Str(dir != null ? dir.name : "")).Append("}");
+            }
+            s.Append("]");
+
+            s.Append(", \"reflection_probes\": [");
+            bool first = true;
+            foreach (ReflectionProbe p in root.GetComponentsInChildren<ReflectionProbe>(true))
+            {
+                s.Append(first ? "" : ", ");
+                first = false;
+                s.Append("{\"name\": ").Append(Str(p.name));
+                s.Append(", \"active\": ").Append(B(p.isActiveAndEnabled));
+                s.Append(", \"position\": ").Append(V(p.transform.position));
+                s.Append(", \"center\": ").Append(V(p.center));
+                s.Append(", \"size\": ").Append(V(p.size));
+                s.Append(", \"mode\": ").Append(Str(p.mode.ToString()));
+                s.Append(", \"intensity\": ").Append(F(p.intensity));
+                s.Append(", \"box_projection\": ").Append(B(p.boxProjection));
+                s.Append(", \"importance\": ").Append(p.importance);
+                s.Append(", \"texture\": ").Append(Str(p.texture != null ? p.texture.name : "")).Append("}");
+            }
+            s.Append("]");
+
+            // Other cameras a map brings along.
+            s.Append(", \"cameras\": [");
+            first = true;
+            foreach (Camera c in root.GetComponentsInChildren<Camera>(true))
+            {
+                s.Append(first ? "" : ", ").Append(Str(c.name));
+                first = false;
+            }
+            s.Append("]");
+
+            Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+            Bounds box = new Bounds();
+            bool any = false;
+            s.Append(", \"renderers\": [");
+            first = true;
+            foreach (Renderer r in renderers)
+            {
+                bool shown = r.enabled && r.gameObject.activeInHierarchy;
+                if (shown)
+                {
+                    if (any)
+                    {
+                        box.Encapsulate(r.bounds);
+                    }
+                    else
+                    {
+                        box = r.bounds;
+                        any = true;
+                    }
+                }
+                s.Append(first ? "\n" : ",\n");
+                first = false;
+                s.Append("{\"name\": ").Append(Str(r.name));
+                s.Append(", \"kind\": ").Append(Str(r.GetType().Name));
+                s.Append(", \"shown\": ").Append(B(shown));
+                s.Append(", \"layer\": ").Append(r.gameObject.layer);
+                s.Append(", \"static\": ").Append(B(r.gameObject.isStatic));
+                s.Append(", \"cast\": ").Append(Str(r.shadowCastingMode.ToString()));
+                s.Append(", \"receive\": ").Append(B(r.receiveShadows));
+                s.Append(", \"lightmap\": ").Append(r.lightmapIndex);
+                Vector4 so = r.lightmapScaleOffset;
+                s.Append(", \"lightmap_st\": [").Append(F(so.x)).Append(", ").Append(F(so.y)).Append(", ").Append(F(so.z)).Append(", ").Append(F(so.w)).Append("]");
+                s.Append(", \"center\": ").Append(V(r.bounds.center));
+                s.Append(", \"extents\": ").Append(V(r.bounds.extents));
+                s.Append(", \"materials\": [");
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++)
+                {
+                    Material m = mats[i];
+                    s.Append(i == 0 ? "" : ", ");
+                    s.Append("{\"name\": ").Append(Str(m != null ? m.name : ""));
+                    s.Append(", \"shader\": ").Append(Str(m != null && m.shader != null ? m.shader.name : ""));
+                    s.Append(", \"queue\": ").Append(m != null ? m.renderQueue : 0);
+                    s.Append(", \"keywords\": [");
+                    string[] kw = m != null && m.shaderKeywords != null ? m.shaderKeywords : new string[0];
+                    for (int k = 0; k < kw.Length; k++)
+                    {
+                        s.Append(k == 0 ? "" : ", ").Append(Str(kw[k]));
+                    }
+                    s.Append("]}");
+                }
+                s.Append("]}");
+            }
+            s.Append("\n]");
+            s.Append(", \"bounds_center\": ").Append(V(box.center));
+            s.Append(", \"bounds_extents\": ").Append(V(box.extents));
+            s.Append("}");
+            return s.ToString();
+        }
+
         // Material properties to record, by type. Unity 5.6 cannot list a
         // material's properties at runtime, so these are the properties of
         // the game's shaders and the common modded ones (generated from the
         // shaders' property tables in mm_base, oo_base, co_top_00,
-        // ao_face_00, ao_hair_00 and xukmi Vanilla Plus).
+        // ao_face_00, ao_hair_00 and xukmi Vanilla Plus), with those of
+        // Unity's Standard shader and IBL_Shader_alpha after them.
         private static readonly string[] Colors = {
             "_Col0", "_Col1", "_Col2", "_Col3", "_Color", "_Color1_2",
             "_Color2", "_Color2_2", "_Color3", "_Color3_2", "_Color4", "_Color5",
             "_Color6", "_Color7", "_CustomAmbient", "_EmissionColor", "_FillColor", "_KKPRimColor",
             "_LineColor", "_OutlineColor", "_ReflectCol", "_ShadowColor", "_SpecularColor", "_overcolor1",
             "_overcolor2", "_overcolor3", "_shadowcolor",
+            "_SpecColor", "_rimcolor",
         };
 
         private static readonly string[] Vectors = {
@@ -625,6 +1742,9 @@ namespace Renkatsu
             "_notusetexspecular", "_outline", "_patternclamp1", "_patternclamp2", "_patternclamp3", "_patternrotator1",
             "_patternrotator2", "_patternrotator3", "_rimReflectMode", "_rimV", "_rimpower", "_rotation",
             "_src", "_tex1mask", "_transparency", "_yurayura",
+            "_BumpScale", "_Cull", "_DstBlend", "_GlossMapScale", "_Glossiness", "_Metallic",
+            "_Mode", "_NormalScale", "_NormalScale2", "_Occlusion", "_OcclusionStrength", "_Parallax",
+            "_SrcBlend", "_ZWrite",
         };
 
         private static readonly string[] Textures = {
@@ -634,6 +1754,7 @@ namespace Renkatsu
             "_ReflectMapDetail", "_ReflectMask", "_ReflectionMapCap", "_TessTex", "_Texture2", "_Texture3",
             "_Texture4", "_Texture5", "_Texture6", "_Texture7", "_expression", "_liquidmask",
             "_overtex1", "_overtex2", "_overtex3", "_paintmask",
+            "_BumpMap", "_EmissionMap", "_MetallicGlossMap", "_NormalMap2", "_OcclusionMap", "_ParallaxMap",
         };
 
         // Every recorded property the material has, with its stored value.

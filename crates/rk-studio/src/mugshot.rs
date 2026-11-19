@@ -151,6 +151,8 @@ fn shoot(renderer: &mut Option<Renderer>, device: &wgpu::Device, queue: &wgpu::Q
     let env = Environment {
         ramp: chara.ramp.clone(),
         effects: Some(effects),
+        // Shrunk into a tile, smoothed edges read cleaner.
+        alpha_to_coverage: true,
         ..Default::default()
     };
     if renderer.is_none() {

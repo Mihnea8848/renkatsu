@@ -1067,13 +1067,13 @@ pub fn has_options(st: &State) -> bool {
 }
 
 /// The names and icons of the two axis spaces and the two pivots.
-const SPACES: [(&str, &str, &str, Space); 2] = [
-    (icon::GLOBE, "Global", "the scene's axes", Space::Global),
-    (icon::CUBE, "Local", "the object's own axes", Space::Local),
+const SPACES: [(&str, &str, Space); 2] = [
+    (icon::GLOBE, "Global", Space::Global),
+    (icon::CUBE, "Local", Space::Local),
 ];
-const PIVOTS: [(&str, &str, &str, Pivot); 2] = [
-    (icon::CROSSHAIR_SIMPLE, "Origin", "Each object's origin", Pivot::Origin),
-    (icon::BOUNDING_BOX, "Centre", "Centre of the selection", Pivot::Centre),
+const PIVOTS: [(&str, &str, Pivot); 2] = [
+    (icon::CROSSHAIR_SIMPLE, "Origin", Pivot::Origin),
+    (icon::BOUNDING_BOX, "Centre", Pivot::Centre),
 ];
 
 /// The transform options from the left, for the block beside the tool
@@ -1081,22 +1081,20 @@ const PIVOTS: [(&str, &str, &str, Pivot); 2] = [
 /// the drop to the surface below.
 pub fn options(ui: &mut Ui, k: &Look, st: &mut State) {
     let (g, name, ..) = SPACES[st.gizmo.space as usize];
-    let resp = flat_button(ui, k, Some(g), name, true, false).on_hover_text("The axes the handles follow");
+    let resp = flat_button(ui, k, Some(g), name, true, false).on_hover_text("Axes");
     egui::Popup::menu(&resp).show(|ui| {
-        for (_, name, about, space) in SPACES {
-            let text = format!("{name}: {about}");
-            if widgets::check_item(ui, k, st.gizmo.space == space, &text, "").clicked() {
+        for (_, name, space) in SPACES {
+            if widgets::check_item(ui, k, st.gizmo.space == space, name, "").clicked() {
                 st.gizmo.space = space;
                 ui.close();
             }
         }
     });
     let (g, name, ..) = PIVOTS[st.gizmo.pivot as usize];
-    let resp = flat_button(ui, k, Some(g), name, true, false)
-        .on_hover_text("The point the selection moves, turns and scales around");
+    let resp = flat_button(ui, k, Some(g), name, true, false).on_hover_text("Pivot");
     egui::Popup::menu(&resp).show(|ui| {
-        for (_, _, about, pivot) in PIVOTS {
-            if widgets::check_item(ui, k, st.gizmo.pivot == pivot, about, "").clicked() {
+        for (_, name, pivot) in PIVOTS {
+            if widgets::check_item(ui, k, st.gizmo.pivot == pivot, name, "").clicked() {
                 st.gizmo.pivot = pivot;
                 ui.close();
             }
@@ -1104,15 +1102,12 @@ pub fn options(ui: &mut Ui, k: &Look, st: &mut State) {
     });
     bar_divider(ui, k);
     if flat_button(ui, k, Some(icon::MAGNET), "Snap", false, st.snap)
-        .on_hover_text(st.keys.tip(
-            "Snap while moving, rotating and scaling; Ctrl flips it for one drag",
-            Action::ToggleSnap,
-        ))
+        .on_hover_text(st.keys.tip("Snap", Action::ToggleSnap))
         .clicked()
     {
         st.snap = !st.snap;
     }
-    let resp = flat_button(ui, k, None, "", true, false).on_hover_text("The steps to snap by");
+    let resp = flat_button(ui, k, None, "", true, false).on_hover_text("Snap steps");
     egui::Popup::menu(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {

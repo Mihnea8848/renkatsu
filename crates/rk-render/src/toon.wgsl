@@ -157,6 +157,37 @@ fn has(flag: u32) -> bool {
     return (m.info.y & flag) != 0u;
 }
 
+// Alpha to coverage, a renderer option set per pipeline. With it on, an
+// alpha test spreads its edge over the pixel's four samples instead of
+// keeping or dropping the whole pixel: the alpha is carried to each
+// sample's place along its slope on screen, and the samples where it
+// reaches the cutoff stay. The colour's alpha is left alone, so blending and
+// the picture's own alpha do not change. With it off, each test is the
+// shader's own.
+override ALPHA_TO_COVERAGE: bool = false;
+// The samples the alpha tests of this pixel keep.
+var<private> coverage: u32 = 0xffffffffu;
+
+// An alpha test: `cut` is the shader's own test of `alpha` against
+// `cutoff`, true where it drops the pixel.
+fn alpha_test(alpha: f32, cutoff: f32, cut: bool) {
+    if (ALPHA_TO_COVERAGE) {
+        let slope = vec2<f32>(dpdxFine(alpha), dpdyFine(alpha));
+        // WebGPU's standard places of four samples, from the pixel's centre.
+        var keep = 0u;
+        keep |= select(0u, 1u, alpha + dot(slope, vec2<f32>(-0.125, -0.375)) >= cutoff);
+        keep |= select(0u, 2u, alpha + dot(slope, vec2<f32>(0.375, -0.125)) >= cutoff);
+        keep |= select(0u, 4u, alpha + dot(slope, vec2<f32>(-0.375, 0.125)) >= cutoff);
+        keep |= select(0u, 8u, alpha + dot(slope, vec2<f32>(0.125, 0.375)) >= cutoff);
+        coverage &= keep;
+        if (coverage == 0u) {
+            discard;
+        }
+    } else if (cut) {
+        discard;
+    }
+}
+
 // The shadow mask at this pixel, as the shaders' shadow variants sample it
 // with their screen position. Without shadows the game runs the variants
 // that do not have the term.
@@ -595,9 +626,7 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
         }
         // Brows, lashes and eye whites (toon_eyew): only pixels at least half
         // solid are kept, lit through the ramp with the material's shade.
-        if (t.a < 0.5) {
-            discard;
-        }
+        alpha_test(t.a, 0.5, t.a < 0.5);
         let shade = overlay(scene_shadow(), m.shadow.rgb);
         let base = t.rgb * m.color1.rgb;
         let dark = shade * base;
@@ -634,9 +663,7 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
 
     let s = read_surface(i);
     let blended = has(BLENDED);
-    if (s.alpha < m.p0.x) {
-        discard;
-    }
+    alpha_test(s.alpha, m.p0.x, s.alpha < m.p0.x);
 
     var n = normalize(i.normal);
     if (!front) {
@@ -689,9 +716,7 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
 
 fn outline_color(i: VsOut) -> vec4<f32> {
     let s = read_surface(i);
-    if (s.alpha < max(m.p0.x, 0.5)) {
-        discard;
-    }
+    alpha_test(s.alpha, max(m.p0.x, 0.5), s.alpha < max(m.p0.x, 0.5));
     if (m.info.x == KIND_HAIR) {
         // Hair: the hair colour overlaid with the material's line colour.
         let l = m.line.rgb;
@@ -804,9 +829,8 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let alpha = min(item_mask(i), main.a);
     // With the outline switch on, the inside of the cloth is not drawn.
     let side = select(1.0 - m.over3.z, 1.0, front);
-    if (min(side, alpha * 10.0) < 0.5) {
-        discard;
-    }
+    let solid = min(side, alpha * 10.0);
+    alpha_test(solid, 0.5, solid < 0.5);
     let n = item_normal(i, front);
     let l = normalize(g.light_dir.xyz);
     let view = normalize(g.eye.xyz - i.world);
@@ -851,9 +875,8 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
 // liquid layers left out).
 fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
-    if (min(item_mask(i), main.a) < 0.5) {
-        discard;
-    }
+    let solid = min(item_mask(i), main.a);
+    alpha_test(solid, 0.5, solid < 0.5);
     let n = item_normal(i, front);
     let l = normalize(g.light_dir.xyz);
     let view = normalize(g.eye.xyz - i.world);
@@ -1068,9 +1091,7 @@ fn item_main_base(i: VsOut) -> vec4<f32> {
         main = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
     }
     let a = clamp(main.a + main.a, 0.0, 1.0);
-    if (a - 0.5 < 0.0) {
-        discard;
-    }
+    alpha_test(a, 0.5, a - 0.5 < 0.0);
     var tint = vec3<f32>(1.0);
     if (has(HAS_COLOR_MASK)) {
         let cm = textureSample(color_mask_tex, samp, i.uv0 * m.st_alpha.xy + m.st_alpha.zw);
@@ -1278,9 +1299,7 @@ fn acc_main(i: VsOut) -> vec4<f32> {
         main = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
     }
     let a = clamp(main.a + main.a, 0.0, 1.0);
-    if (a - 0.5 < 0.0) {
-        discard;
-    }
+    alpha_test(a, 0.5, a - 0.5 < 0.0);
     return vec4<f32>(main.rgb, a);
 }
 
@@ -1293,9 +1312,8 @@ fn item_emblem(i: VsOut, front: bool) -> vec4<f32> {
         discard;
     }
     let main = textureSample(main_tex, samp, i.uv0 * m.st_main.xy + m.st_main.zw);
-    if (round(pow(main.a, 0.300000012)) - 0.5 < 0.0) {
-        discard;
-    }
+    let solid = pow(main.a, 0.300000012);
+    alpha_test(solid, 0.5, round(solid) - 0.5 < 0.0);
     let factor = shadow_factor_low(hue_tint(main.rgb));
     let ndl = dot(normalize(g.light_dir.xyz), normalize(i.normal));
     let lit = item_ramp(ndl) * shadow_mask(i);
@@ -1520,9 +1538,8 @@ fn item_studio_outline(i: VsOut) -> vec4<f32> {
 // mask's red into an added shine).
 fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
-    if (min(item_mask(i), main.a) - 0.5 < 0.0) {
-        discard;
-    }
+    let solid = min(item_mask(i), main.a);
+    alpha_test(solid, 0.5, solid - 0.5 < 0.0);
     let factor = shadow_factor_low(hue_tint(main.rgb * m.shadow.rgb));
     var tint = vec3<f32>(1.0);
     if (has(HAS_COLOR_MASK)) {
@@ -1555,6 +1572,23 @@ fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
 
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return forward(i, front);
+}
+
+// The colour with the samples the alpha tests keep, for pipelines with
+// alpha to coverage.
+struct Covered {
+    @location(0) color: vec4<f32>,
+    @builtin(sample_mask) mask: u32,
+};
+
+@fragment
+fn fs_main_covered(i: VsOut, @builtin(front_facing) front: bool) -> Covered {
+    let color = forward(i, front);
+    return Covered(color, coverage);
+}
+
+fn forward(i: VsOut, front: bool) -> vec4<f32> {
     if (m.info.z >= MOD_FIRST) {
         return mod_forward(i, front);
     }
@@ -1612,15 +1646,24 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 fn item_alpha_outline(i: VsOut) -> vec4<f32> {
     let main = item_main(i);
     let alpha = min(item_mask(i), main.a);
-    if (min(1.0 - m.over3.z, alpha * 10.0) < 0.5) {
-        discard;
-    }
+    let solid = min(1.0 - m.over3.z, alpha * 10.0);
+    alpha_test(solid, 0.5, solid < 0.5);
     let factor = item_shadow_factor(main.rgb);
     return vec4<f32>(item_lines(main.rgb * g.line_color.rgb * factor, light_color()), 1.0);
 }
 
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
+    return outline(i);
+}
+
+@fragment
+fn fs_outline_covered(i: VsOut) -> Covered {
+    let color = outline(i);
+    return Covered(color, coverage);
+}
+
+fn outline(i: VsOut) -> vec4<f32> {
     if (m.info.z >= XK_FIRST) {
         return xk_outline(i);
     }

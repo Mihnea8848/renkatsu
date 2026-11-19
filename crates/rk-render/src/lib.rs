@@ -207,6 +207,10 @@ pub struct Environment {
     pub shadows: ShadowSettings,
     /// CharaStudio's screen effects. `None` draws the plain picture.
     pub effects: Option<StudioEffects>,
+    /// Smooth the edges of cut-out surfaces (hair strands, lashes, lace)
+    /// over the samples of each pixel instead of cutting whole pixels. Not
+    /// the game's look, which cuts them hard.
+    pub alpha_to_coverage: bool,
 }
 
 impl Default for Environment {
@@ -229,6 +233,7 @@ impl Default for Environment {
             light_dir: None,
             shadows: ShadowSettings::default(),
             effects: None,
+            alpha_to_coverage: false,
         }
     }
 }
@@ -462,12 +467,15 @@ struct PipelineKey {
     /// Drawn a little nearer than it is, so a layer that writes no depth
     /// wins against the surface it lies on.
     nearer: bool,
+    /// Alpha tests keep the samples their edge covers (alpha to coverage).
+    covered: bool,
 }
 
 impl PipelineKey {
-    fn surface(desc: &MaterialDesc, hdr: bool) -> Self {
+    fn surface(desc: &MaterialDesc, hdr: bool, covered: bool) -> Self {
         Self {
             hdr,
+            covered,
             outline: false,
             blend: desc.blend,
             zwrite: desc.zwrite,
@@ -481,9 +489,10 @@ impl PipelineKey {
     }
 
     /// The depth pass some shaders run ahead of their lit one.
-    fn prepass(hdr: bool) -> Self {
+    fn prepass(hdr: bool, covered: bool) -> Self {
         Self {
             hdr,
+            covered,
             outline: false,
             blend: Blend::Off,
             zwrite: true,
@@ -495,9 +504,10 @@ impl PipelineKey {
 
     /// Outlines are solid and write depth. They respect marked pixels the
     /// way their surface does, and never mark any themselves.
-    fn outline(desc: &MaterialDesc, hdr: bool) -> Self {
+    fn outline(desc: &MaterialDesc, hdr: bool, covered: bool) -> Self {
         Self {
             hdr,
+            covered,
             outline: true,
             blend: Blend::Off,
             zwrite: true,
@@ -507,6 +517,20 @@ impl PipelineKey {
             },
             depth_only: false,
             nearer: false,
+        }
+    }
+}
+
+impl PipelineKey {
+    /// The vertex and fragment programs of `toon.wgsl` the pipeline runs,
+    /// and the values of the shader's overridable constants.
+    fn entry_points(&self) -> (&'static str, &'static str, &'static [(&'static str, f64)]) {
+        const COVERED: &[(&str, f64)] = &[("ALPHA_TO_COVERAGE", 1.0)];
+        match (self.outline, self.covered) {
+            (true, false) => ("vs_outline", "fs_outline", &[]),
+            (true, true) => ("vs_outline", "fs_outline_covered", COVERED),
+            (false, false) => ("vs_main", "fs_main", &[]),
+            (false, true) => ("vs_main", "fs_main_covered", COVERED),
         }
     }
 }
@@ -795,11 +819,7 @@ impl Renderer {
     }
 
     fn make_pipeline(&self, key: PipelineKey) -> wgpu::RenderPipeline {
-        let (vs, fs) = if key.outline {
-            ("vs_outline", "fs_outline")
-        } else {
-            ("vs_main", "fs_main")
-        };
+        let (vs, fs, constants) = key.entry_points();
         let face = match key.stencil {
             Stencil::None => wgpu::StencilFaceState::IGNORE,
             Stencil::Write => wgpu::StencilFaceState {
@@ -840,7 +860,10 @@ impl Renderer {
                         wgpu::ColorWrites::ALL
                     },
                 })],
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants,
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1146,6 +1169,7 @@ impl Renderer {
         // The screen effects read a half-float picture, and occlusion reads
         // the camera's depth texture.
         let hdr = env.effects.is_some();
+        let covered = env.alpha_to_coverage;
         let occlude = env.effects.as_ref().is_some_and(|fx| fx.ao.is_some());
         let base = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array(),
@@ -1384,8 +1408,8 @@ impl Renderer {
                     queue: desc.queue,
                     outline: desc.outline,
                     prepass: desc.prepass,
-                    surface_key: PipelineKey::surface(&desc, hdr),
-                    outline_key: PipelineKey::outline(&desc, hdr),
+                    surface_key: PipelineKey::surface(&desc, hdr, covered),
+                    outline_key: PipelineKey::outline(&desc, hdr, covered),
                     stencil_ref: desc.stencil_ref as u32,
                     bind,
                 });
@@ -1412,7 +1436,7 @@ impl Renderer {
             let key = match step.pass {
                 Pass::Outline => item.outline_key,
                 Pass::Surface => item.surface_key,
-                Pass::Depth => PipelineKey::prepass(hdr),
+                Pass::Depth => PipelineKey::prepass(hdr, covered),
             };
             if !self.pipelines.contains_key(&key) {
                 let pipeline = self.make_pipeline(key);
@@ -1757,7 +1781,7 @@ impl Renderer {
                 let key = match step.pass {
                     Pass::Outline => item.outline_key,
                     Pass::Surface => item.surface_key,
-                    Pass::Depth => PipelineKey::prepass(hdr),
+                    Pass::Depth => PipelineKey::prepass(hdr, covered),
                 };
                 if current != Some(key) {
                     pass.set_pipeline(&self.pipelines[&key]);
@@ -1985,6 +2009,63 @@ mod tests {
         )
         .validate(&module)
         .expect("toon.wgsl validates");
+    }
+
+    #[test]
+    fn alpha_to_coverage_picks_its_programs() {
+        let drawn = |outline, covered| PipelineKey {
+            outline,
+            blend: Blend::Off,
+            zwrite: true,
+            stencil: Stencil::None,
+            hdr: false,
+            depth_only: false,
+            nearer: false,
+            covered,
+        };
+        for covered in [false, true] {
+            for key in [
+                drawn(false, covered),
+                drawn(true, covered),
+                PipelineKey::prepass(false, covered),
+            ] {
+                let (_, fs, constants) = key.entry_points();
+                assert_eq!(fs.ends_with("_covered"), covered, "{key:?}");
+                assert_eq!(
+                    constants,
+                    if covered {
+                        &[("ALPHA_TO_COVERAGE", 1.0)][..]
+                    } else {
+                        &[][..]
+                    }
+                );
+            }
+        }
+        // The option off keeps the programs the picture was always drawn with.
+        assert_eq!(drawn(false, false).entry_points().1, "fs_main");
+        assert_eq!(drawn(true, false).entry_points().1, "fs_outline");
+    }
+
+    #[test]
+    fn shader_is_valid_with_alpha_to_coverage() {
+        let module = wgpu::naga::front::wgsl::parse_str(TOON_WGSL).expect("toon.wgsl parses");
+        let info = wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("toon.wgsl validates");
+        for fs in ["fs_main_covered", "fs_outline_covered"] {
+            let constants = PipelineKey::prepass(false, true).entry_points().2;
+            let constants = constants.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+            wgpu::naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                Some((wgpu::naga::ShaderStage::Fragment, fs)),
+                &constants,
+            )
+            .unwrap_or_else(|e| panic!("{fs} with alpha to coverage: {e}"));
+        }
     }
 
     #[test]

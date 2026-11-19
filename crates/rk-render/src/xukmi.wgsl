@@ -263,8 +263,9 @@ fn xk_cut(i: VsOut, sheer: bool) -> vec4<f32> {
     let main = xk_main(i);
     let mask = xk_body_mask(i.uv0);
     let cutoff = m.p0.x;
-    if (min(main.a, mask.x) - cutoff < 0.0 && m.p1.w != 0.0) {
-        discard;
+    if (m.p1.w != 0.0) {
+        let solid = min(main.a, mask.x);
+        alpha_test(solid, cutoff, solid - cutoff < 0.0);
     }
     var alpha = 1.0;
     if (sheer) {
@@ -384,8 +385,9 @@ fn xk_cloth_outline(i: VsOut) -> vec4<f32> {
     if (xk_is(XK_ALPHA)) {
         a *= m.p1.z;
     }
-    if (min(a, mask.x) - m.p0.x < 0.0 && m.p1.w != 0.0) {
-        discard;
+    if (m.p1.w != 0.0) {
+        let solid = min(a, mask.x);
+        alpha_test(solid, m.p0.x, solid - m.p0.x < 0.0);
     }
     let dm = xk_detail(i, i.uv0);
     let lm = xk_line_mask(i);
@@ -509,8 +511,9 @@ fn xk_item_outline(i: VsOut) -> vec4<f32> {
     if (sheer) {
         a *= m.p1.z;
     }
-    if (min(a, mask.x) - m.p0.x < 0.0 && m.p1.w != 0.0) {
-        discard;
+    if (m.p1.w != 0.0) {
+        let solid = min(a, mask.x);
+        alpha_test(solid, m.p0.x, solid - m.p0.x < 0.0);
     }
     let b = xk_item_base(i, main);
     var factor = xk_factor(hue_tint(b.base * m.shadow.rgb));
@@ -563,9 +566,8 @@ fn xk_skin_diffuse(i: VsOut) -> vec3<f32> {
 // ext[17]: _SpecularColor. ext[18]: _SpeclarHeight, _SpecularPower,
 // _SpecularPowerNail, _notusetexspecular.
 fn xk_skin(i: VsOut, front: bool) -> vec4<f32> {
-    if (xk_body_mask(i.uv0).x - 0.5 < 0.0) {
-        discard;
-    }
+    let solid = xk_body_mask(i.uv0).x;
+    alpha_test(solid, 0.5, solid - 0.5 < 0.0);
     let l = normalize(g.light_dir.xyz);
     let view = normalize(g.eye.xyz - i.world);
     var d = xk_skin_diffuse(i);
@@ -637,9 +639,8 @@ fn xk_skin(i: VsOut, front: bool) -> vec4<f32> {
 
 // Outline pass of xukmi/SkinPlus (pixel program 13).
 fn xk_skin_outline(i: VsOut) -> vec4<f32> {
-    if (xk_body_mask(i.uv0).x * select(0.0, 1.0, m.ext[16].z != 0.0) - 0.5 < 0.0) {
-        discard;
-    }
+    let solid = xk_body_mask(i.uv0).x * select(0.0, 1.0, m.ext[16].z != 0.0);
+    alpha_test(solid, 0.5, solid - 0.5 < 0.0);
     let d = xk_skin_diffuse(i);
     let hsv = rgb_to_hsv(d);
     let tint = hsv_to_rgb(vec3<f32>(hsv.x, hsv.y * 0.660000026, 1.0));
@@ -673,9 +674,7 @@ fn xk_hair_base(i: VsOut, main: vec3<f32>) -> vec3<f32> {
 fn xk_hair(i: VsOut, front: bool) -> vec4<f32> {
     let main = xk_main(i);
     let alpha = main.a * xk_body_mask(i.uv0).y;
-    if (alpha - m.p0.x < 0.0) {
-        discard;
-    }
+    alpha_test(alpha, m.p0.x, alpha - m.p0.x < 0.0);
     if (xk_culled(front)) {
         discard;
     }
@@ -756,9 +755,8 @@ fn xk_hair(i: VsOut, front: bool) -> vec4<f32> {
 fn xk_hair_outline(i: VsOut) -> vec4<f32> {
     let main = xk_main(i);
     let a = select(0.0, main.a, m.ext[16].z != 0.0);
-    if (xk_body_mask(i.uv0).y * a - m.p0.x < 0.0) {
-        discard;
-    }
+    let solid = xk_body_mask(i.uv0).y * a;
+    alpha_test(solid, m.p0.x, solid - m.p0.x < 0.0);
     let rgb = overlay(xk_hair_base(i, main.rgb), m.line.rgb) * xk_light();
     return vec4<f32>(xk_saturation(rgb), 1.0);
 }
@@ -816,9 +814,7 @@ fn xk_eye(i: VsOut) -> vec4<f32> {
 // pass is as EyePlus's. color1: _Color. shadow: _shadowcolor.
 fn xk_eyew(i: VsOut) -> vec4<f32> {
     let main = xk_main(i);
-    if (main.a - m.p0.x < 0.0) {
-        discard;
-    }
+    alpha_test(main.a, m.p0.x, main.a - m.p0.x < 0.0);
     let shade = overlay(scene_shadow(), m.shadow.rgb);
     let base = main.rgb * m.color1.rgb;
     let dark = shade * base;

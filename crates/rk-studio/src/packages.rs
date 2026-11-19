@@ -218,7 +218,7 @@ impl Packages {
         self.run(&name.clone(), ctx, move |store, task| {
             let problems = store.verify(&id, task)?;
             if problems.is_empty() {
-                Ok(format!("{name} is sound: every file matches its checksum"))
+                Ok(format!("{name} is sound"))
             } else {
                 anyhow::bail!("{name} is damaged; install it again\n{}", problems.join("\n"))
             }
@@ -510,13 +510,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         .fixed_pos(window.min)
         .show(ctx, |ui| {
             ui.set_min_size(window.size());
-            let (f, x) = frame(
-                ui,
-                k,
-                window,
-                "Packages",
-                "Content installed once and used by every project",
-            );
+            let (f, x) = frame(ui, k, window, "Packages", "");
             close |= x;
 
             // The packages Renkatsu knows, then the others that are installed.
