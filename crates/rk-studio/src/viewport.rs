@@ -34,6 +34,9 @@ pub enum RailShape {
 /// part of the viewport's tab row, which some designs use for the selection
 /// bar; without it that bar is drawn over the picture's top edge.
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
+    if let Some(live) = st.live.as_mut() {
+        live.smooth_edges = st.settings.smooth_edges;
+    }
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, st.backdrop);
     // A still picture stands in only until the scene has a character.
@@ -398,10 +401,7 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     for (g, text, menu) in actions(kind) {
         let resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
-            if resp
-                .on_hover_text("Pick a card and bring it into the project")
-                .clicked()
-            {
+            if resp.on_hover_text("Import card").clicked() {
                 st.ask(Command::ImportCard, ui.ctx());
             }
         } else if (kind, *text) == (crate::kinds::Kind::Item, "Attach to") {
@@ -416,7 +416,7 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             });
         } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
-                ui.label(egui::RichText::new(format!("{text} arrives with its feature")).color(k.t.text_dim));
+                ui.label(egui::RichText::new("Not available yet").color(k.t.text_dim));
             });
         }
     }
@@ -512,13 +512,13 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
         icon::CORNERS_OUT
     };
     if icon_button(ui, k, glyph, st.maximised)
-        .on_hover_text(st.keys.tip("Give the viewport the whole window", Action::Maximise))
+        .on_hover_text(st.keys.tip("Maximise viewport", Action::Maximise))
         .clicked()
     {
         st.maximised = !st.maximised;
     }
     if icon_button(ui, k, icon::EYE_SLASH, st.overlays_hidden)
-        .on_hover_text(st.keys.tip("Hide or show the viewport tools", Action::ViewportTools))
+        .on_hover_text(st.keys.tip("Viewport tools", Action::ViewportTools))
         .clicked()
     {
         st.overlays_hidden = !st.overlays_hidden;
@@ -723,7 +723,7 @@ pub fn rail(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect, shape: RailShape)
     let resp = ui
         .interact(fold, ui.id().with("rail-fold"), Sense::click())
         .on_hover_text(if named {
-            "Shrink the modes to icons"
+            "Hide the mode names"
         } else {
             "Show the mode names"
         });
@@ -779,7 +779,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
     );
     let resp = ui
         .interact(close, ui.id().with("palette-close"), Sense::click())
-        .on_hover_text("Close the tools; choosing the mode again does the same");
+        .on_hover_text("Close");
     icon_cell(ui, k, close, &resp, icon::X, false);
     if resp.clicked() {
         st.palette_open = false;
@@ -788,7 +788,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
     let resp = ui
         .interact(pin, ui.id().with("palette-pin"), Sense::click())
         .on_hover_text(if st.palette_pinned {
-            "Pinned: the tools stay open. Unpin to fold them when work starts in the viewport"
+            "Unpin the tools"
         } else {
             "Pin the tools open"
         });
@@ -897,18 +897,9 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
 
     let can_focus = st.doc.selected.and_then(|id| live.subject(id));
     let tip = match (&focus, can_focus) {
-        (Some((kind, name)), _) => format!(
-            "The camera is focused on the {} {name}: it orbits around it. Click to let go",
-            kind.label().to_lowercase()
-        ),
-        (None, Some(_)) => format!(
-            "The camera is free. Click or press {} to focus on the selection",
-            st.keys.text(Action::Focus)
-        ),
-        (None, None) => format!(
-            "The camera is free. Select a character and press {} to focus on it",
-            st.keys.text(Action::Focus)
-        ),
+        (Some((kind, name)), _) => format!("Focused on the {} {name}", kind.label().to_lowercase()),
+        (None, Some(_)) => st.keys.tip("Focus on the selection", Action::Focus),
+        (None, None) => "Free camera".to_owned(),
     };
     let resp = ui
         .interact(cell, ui.id().with("camera-focus"), Sense::click())
@@ -949,7 +940,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     if moved {
         let resp = ui
             .interact(reset, ui.id().with("camera-reset"), Sense::click())
-            .on_hover_text(st.keys.tip("Reset the view to the starting framing", Action::ResetView));
+            .on_hover_text(st.keys.tip("Reset view", Action::ResetView));
         let p = ui.painter();
         hair_v(
             p,
@@ -1133,6 +1124,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         st.doc.scene(),
         &st.project,
         &mut st.games,
+        &mut st.jobs,
         crate::live::Clock {
             was: st.last_playback,
             now: st.playback,

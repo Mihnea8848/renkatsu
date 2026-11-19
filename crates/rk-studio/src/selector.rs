@@ -12,7 +12,6 @@
 //! mark. A card's picture never stands for a project.
 
 use crate::dialogs::{Pick, ProjectForm};
-use crate::landing::Layout;
 use crate::project::{self, Start};
 use crate::settings::{self, ProjectView, Recent, Settings};
 use crate::state::{Look, State};
@@ -164,10 +163,10 @@ pub fn contents(scenes: usize, characters: usize) -> String {
 /// The parts of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// The banner and the news; the window opens on it.
+    Home,
     Recent,
     New,
-    /// The landing page, where the layout gives it a page of its own.
-    Home,
 }
 
 /// How long the content takes to fade in and rise into place, a row or a
@@ -227,8 +226,8 @@ pub struct Selector {
     pub starter: Option<PathBuf>,
     /// What the window shows of the packages, as of this frame.
     pub offer: crate::packages::Offer,
-    /// The landing page's layout, where one is being pictured.
-    pub landing: Option<crate::landing::Layout>,
+    /// The news of the home page, as of this frame.
+    pub news: Vec<rk_packages::news::Post>,
 }
 
 impl Selector {
@@ -237,7 +236,7 @@ impl Selector {
             entries: Vec::new(),
             selected: None,
             search: String::new(),
-            tab: Tab::Recent,
+            tab: Tab::Home,
             form: ProjectForm::new(),
             problem: None,
             icon_for: None,
@@ -251,7 +250,7 @@ impl Selector {
             update: None,
             starter: None,
             offer: Default::default(),
-            landing: None,
+            news: Vec::new(),
         };
         selector.refresh(settings);
         selector
@@ -433,6 +432,7 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
     let Some(mut sel) = st.selector.take() else { return };
     sel.loaded = false;
     sel.update = st.update.clone();
+    sel.news.clone_from(&st.news);
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
     sel.age += dt;
     sel.window_age += dt;
@@ -488,7 +488,10 @@ pub(crate) fn icon_button(
 ) -> bool {
     let t = &k.t;
     let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let resp = ui.interact(rect, ui.id().with(("selector button", text)), sense);
+    // Rows of a list carry buttons of the same text, so the place is part
+    // of the id.
+    let place = (rect.min.x.round() as i32, rect.min.y.round() as i32);
+    let resp = ui.interact(rect, ui.id().with(("selector button", text, place)), sense);
     let hot = ui
         .ctx()
         .animate_bool_with_time(resp.id.with("hot"), enabled && resp.hovered(), secs(ui.ctx(), ANSWER));
@@ -561,7 +564,7 @@ fn version() -> String {
 
 /// The part of a picture that fills a frame of another shape: the middle
 /// in width, and near the top in height, as texture coordinates.
-fn cover_uv(picture: Vec2, frame: Vec2) -> Rect {
+pub(crate) fn cover_uv(picture: Vec2, frame: Vec2) -> Rect {
     let (p, f) = (picture.x / picture.y.max(1.0), frame.x / frame.y.max(1.0));
     if p > f {
         let w = f / p;
@@ -688,27 +691,14 @@ fn entry_menu(resp: &egui::Response, entry: &Entry, act: &mut Option<Act>) {
 /// What a list says when it has nothing to show.
 fn nothing(ui: &Ui, k: &Look, sel: &Selector, rect: Rect) {
     let t = &k.t;
-    let (title, hint) = if sel.entries.is_empty() {
-        (
-            "No projects yet".to_owned(),
-            "Make a new project, or open one from disk.",
-        )
+    let title = if sel.entries.is_empty() {
+        "No projects yet".to_owned()
     } else {
-        (
-            format!("No project matches \"{}\"", sel.search.trim()),
-            "The search looks at names and folders.",
-        )
+        format!("No project matches \"{}\"", sel.search.trim())
     };
     let c = Pos2::new(rect.center().x, rect.top() + (rect.height() * 0.4).min(120.0));
-    let p = ui.painter();
-    p.text(c, Align2::CENTER_CENTER, title, k.bold(k.d.text + 1.0), t.text);
-    p.text(
-        c + Vec2::new(0.0, 22.0),
-        Align2::CENTER_CENTER,
-        hint,
-        k.font(),
-        t.text_dim,
-    );
+    ui.painter()
+        .text(c, Align2::CENTER_CENTER, title, k.bold(k.d.text + 1.0), t.text);
 }
 
 /// A scrolling column in `rect`, `height` tall inside. The content gets
@@ -754,8 +744,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
 
     let side = Rect::from_min_max(full.min, Pos2::new(full.left() + SIDE, full.bottom()));
     let whole = Rect::from_min_max(Pos2::new(side.right(), full.top()), full.max);
-    let home = sel.landing == Some(Layout::Home);
-    let (main, banner, rail) = crate::landing::carve(sel.landing, whole);
+    let main = whole;
     let head = Rect::from_min_size(main.min, Vec2::new(main.width(), HEAD));
     let foot = Rect::from_min_max(Pos2::new(main.left(), main.bottom() - FOOT), main.max);
     let body = Rect::from_min_max(head.left_bottom(), foot.right_top());
@@ -778,9 +767,8 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
             Vec2::new(SIDE - 1.0, 36.0),
         )
     };
-    // The home page, where there is one, comes first.
-    let first = if home { 1.0 } else { 0.0 };
-    if home && side_row(ui, k, row(0.0), icon::HOUSE, "Home", "", sel.tab == Tab::Home) {
+    let first = 1.0;
+    if side_row(ui, k, row(0.0), icon::HOUSE, "Home", "", sel.tab == Tab::Home) {
         sel.show_tab(Tab::Home);
     }
     let recent = sel.tab == Tab::Recent;
@@ -829,7 +817,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     let under = match (&offer.busy, offer.starter) {
         (Some(busy), _) => busy.clone(),
         (None, true) => "Starter Content is installed".to_owned(),
-        (None, false) => "Content for every project".to_owned(),
+        (None, false) => String::new(),
     };
     line(
         ui,
@@ -868,7 +856,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     }
     let (under, color) = match &sel.game {
         Some(dir) => (shown_path(dir), t.text_dim),
-        None => ("Optional, to import Koikatsu cards".to_owned(), t.text_dim),
+        None => ("Optional".to_owned(), t.text_dim),
     };
     line(
         ui,
@@ -911,7 +899,8 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     if sel.tab == Tab::Home {
         // The home page takes the whole part, over its head and foot.
         part.painter().rect_filled(whole, 0.0, t.panel);
-        let more = crate::landing::home(&mut part, k, whole);
+        let today = rk_packages::news::today(now);
+        let more = crate::landing::home(&mut part, k, whole, &sel.news, &today);
         return act.or(more);
     }
     part.painter().text(
@@ -925,13 +914,6 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         k.bold(15.0),
         t.text_bright,
     );
-    if let Some(banner) = banner {
-        crate::landing::banner(ui, k, banner);
-    }
-    if let Some(rail) = rail {
-        let more = crate::landing::rail(ui, k, rail, banner.is_none());
-        act = act.or(more);
-    }
     let more = match sel.tab {
         Tab::Home => None,
         Tab::Recent => recent_part(&mut part, k, sel, view, now, free, head, body, foot, rise),
@@ -1406,13 +1388,8 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
         Vec2::new(width, 220.0),
     )));
     let about = match sel.form.start {
-        Start::RenkatsuChan => {
-            "The project starts with Renkatsu-Chan, Koikatsu's default character, standing under a key light. \
-             Her card is copied into the project."
-        }
-        Start::Empty => {
-            "The project starts with a key light and nothing else. Characters come in with File, Import card."
-        }
+        Start::RenkatsuChan => "Renkatsu-Chan under a key light.",
+        Start::Empty => "A key light and nothing else.",
     };
     child.label(egui::RichText::new(about).color(t.text_dim));
     let below = Pos2::new(x, top + 44.0 + tile.y + 22.0);

@@ -62,6 +62,80 @@ pub struct Capture {
     pub effects: StudioEffects,
     /// Number of the scene's colour filter (`ace_no`).
     pub color_filter: Option<i32>,
+    /// From the scene towards the character's light while each view was
+    /// taken, where the capture says; it replaces `light_dir` for that view.
+    pub view_lights: Vec<Option<[f32; 3]>>,
+    /// What the capture list asked of the character.
+    pub case: Case,
+}
+
+/// An animation of CharaStudio's list held at a time, in passes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CasePose {
+    pub group: i32,
+    pub category: i32,
+    pub number: i32,
+    pub time: f32,
+}
+
+/// Where a capture stands in a played sequence: `frame` captures after the
+/// held one, `step` frames of `1 / rate` seconds apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaseSequence {
+    pub frame: u32,
+    pub step: u32,
+    pub rate: f32,
+}
+
+/// What a line of the capture list set on the character. Captures made
+/// before the plugin wrote it have everything on and no pose.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Case {
+    /// The clothing states the game ended up with (`status.clothes_state`).
+    pub clothes: rk_chara::clothes_state::States,
+    pub pose: Option<CasePose>,
+    pub sequence: Option<CaseSequence>,
+    /// The Animator's normalized time when the picture was taken.
+    pub normalized_time: Option<f32>,
+    /// The scene file name of the map the capture was taken in.
+    pub map: Option<String>,
+}
+
+impl Case {
+    fn parse(v: &Value) -> Self {
+        let mut case = Case::default();
+        let states = v["status"]["clothes_state"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for (slot, state) in case.clothes.iter_mut().zip(states) {
+            *slot = state.as_u64().unwrap_or(0).min(3) as u8;
+        }
+        let asked = &v["case"];
+        let int = |v: &Value| v.as_i64().map(|n| n as i32);
+        let pose = &asked["pose"];
+        if let (Some(group), Some(category), Some(number)) =
+            (int(&pose["group"]), int(&pose["category"]), int(&pose["number"]))
+        {
+            case.pose = Some(CasePose {
+                group,
+                category,
+                number,
+                time: pose["time"].as_f64().unwrap_or(0.0) as f32,
+            });
+        }
+        let sequence = &asked["sequence"];
+        if let Some(frame) = sequence["frame"].as_u64() {
+            case.sequence = Some(CaseSequence {
+                frame: frame as u32,
+                step: sequence["step"].as_u64().unwrap_or(1).max(1) as u32,
+                rate: sequence["rate"].as_f64().filter(|r| *r > 0.0).unwrap_or(30.0) as f32,
+            });
+        }
+        case.normalized_time = v["animation"]["normalized_time"].as_f64().map(|n| n as f32);
+        case.map = asked["map"].as_str().map(str::to_owned);
+        case
+    }
 }
 
 /// The screen effects a capture's scene had on. The switches come from
@@ -123,15 +197,22 @@ impl Capture {
         let cam = &v["camera"];
         let fov_y_deg = cam["fov"].as_f64().context("camera fov")? as f32;
         let mut views = Vec::new();
+        let mut view_lights = Vec::new();
         for view in v["views"].as_array().context("views")? {
             let eye = Vec3::from(floats::<3>(&view["position"])?);
             let rot = Quat::from_array(floats::<4>(&view["rotation"])?);
             let camera = Camera {
                 eye,
                 target: eye + rot * Vec3::Z,
-                fov_y_deg,
+                // A view with its own opening angle says so.
+                fov_y_deg: view["fov"].as_f64().map_or(fov_y_deg, |f| f as f32),
             };
             views.push((view["name"].as_str().context("view name")?.to_owned(), camera));
+            view_lights.push(
+                floats::<3>(&view["light_direction"])
+                    .ok()
+                    .map(|d| (-Vec3::from(d)).to_array()),
+            );
         }
         let mut light_dir = None;
         let mut light_intensity = 1.0;
@@ -172,6 +253,8 @@ impl Capture {
             ambient_probe: floats::<27>(&v["globals"]["ambient_probe"]).ok(),
             effects: capture_effects(&v),
             color_filter: v["studio"]["ace_no"].as_i64().map(|n| n as i32),
+            view_lights,
+            case: Case::parse(&v),
         })
     }
 }
@@ -289,6 +372,7 @@ pub fn shadow_difference(game: &[u8], ours: &[u8], plain: &[u8], background: [u8
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn reference(
     card_path: &Path,
     capture_path: &Path,
@@ -297,6 +381,7 @@ pub fn reference(
     watch: &[String],
     shadows: bool,
     studio: bool,
+    alpha_to_coverage: bool,
 ) -> Result<()> {
     let game = Game::open(&Config::load()?)?;
     let mut renderer = Renderer::new()?;
@@ -310,6 +395,7 @@ pub fn reference(
         watch,
         shadows,
         studio,
+        alpha_to_coverage,
         true,
     )?;
     Ok(())
@@ -325,6 +411,112 @@ pub struct Summary {
     pub queues_differ: usize,
     pub state: crate::state::Report,
     pub warnings: Vec<String>,
+    pub bones: BoneSummary,
+}
+
+/// How far our bones are from the capture's, in units (metres).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoneSummary {
+    pub compared: usize,
+    pub mean: f32,
+    /// The bone that is furthest off, and by how much.
+    pub worst: Option<(String, f32)>,
+    /// The same among the skirt's bones and among the bust's, which only
+    /// physics moves.
+    pub skirt: Option<f32>,
+    pub bust: Option<f32>,
+}
+
+impl BoneSummary {
+    fn of(rows: &[(f32, f32, &str)]) -> Self {
+        let worst_of = |part: &str| rows.iter().filter(|r| r.2.contains(part)).map(|r| r.0).reduce(f32::max);
+        Self {
+            compared: rows.len(),
+            mean: rows.iter().map(|r| r.0).sum::<f32>() / rows.len().max(1) as f32,
+            worst: rows
+                .iter()
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|r| (r.2.to_owned(), r.0)),
+            skirt: worst_of("cf_j_sk_"),
+            bust: worst_of("cf_j_bust"),
+        }
+    }
+}
+
+/// Puts the character in the pose a capture was taken in: the animation
+/// held at its time with the physics settled around it, then, for a later
+/// capture of a sequence, played on frame by frame as the game stepped it.
+/// Returns a line that says what was played.
+fn pose_as_captured(
+    game: &Game,
+    chara: &mut rk_chara::Character,
+    case: &Case,
+    pose: &CasePose,
+    opts: &BuildOptions,
+) -> Result<String> {
+    let library = rk_chara::animations::Library::read(game);
+    let entry = library.find(pose.group, pose.category, pose.number).with_context(|| {
+        format!(
+            "CharaStudio's list has no animation {}/{}/{}",
+            pose.group, pose.category, pose.number
+        )
+    })?;
+    let motion = rk_chara::motion::load(
+        game,
+        &entry.bundle,
+        &entry.controller,
+        &entry.state,
+        entry.over(),
+        &chara.parameters,
+    )?;
+    let bound = motion.bind(&rk_chara::motion::Skeleton::of(&chara.scene, chara.animator));
+    if let Some(heels) = &mut chara.heels {
+        heels.animation(Some(&entry.controller), Some(&entry.state));
+    }
+    let states = case.clothes;
+    let held = motion.phase(pose.time, false);
+    if opts.physics {
+        for _ in 0..opts.settle_frames {
+            chara.physics.begin_frame(&mut chara.scene);
+            chara.animate(&bound, held, &states);
+            chara.physics.end_frame(&mut chara.scene, opts.frame_time);
+        }
+    } else {
+        chara.animate(&bound, held, &states);
+    }
+    let mut end = pose.time;
+    if let Some(seq) = case.sequence.filter(|s| s.frame > 0) {
+        let steps = seq.frame * seq.step;
+        let dt = 1.0 / seq.rate;
+        // The game's own clock when it says, else our reading of the speed.
+        end = case
+            .normalized_time
+            .unwrap_or_else(|| motion.normalized(pose.time, steps as f32 * dt, 1.0));
+        for i in 1..=steps {
+            let at = sequence_time(pose.time, end, i, steps);
+            if opts.physics {
+                chara.physics.begin_frame(&mut chara.scene);
+            }
+            chara.animate(&bound, motion.phase(at, false), &states);
+            if opts.physics {
+                chara.physics.end_frame(&mut chara.scene, dt);
+            }
+        }
+    }
+    Ok(format!(
+        "pose: {} ({}/{}) at {:.3} of {:.2} s",
+        entry.name,
+        entry.controller,
+        entry.state,
+        end,
+        motion.duration()
+    ))
+}
+
+/// The normalized time of step `i` of `steps` between a sequence's start
+/// and the time the game reported at its end.
+fn sequence_time(start: f32, end: f32, i: u32, steps: u32) -> f32 {
+    start + (end - start) * i as f32 / steps.max(1) as f32
 }
 
 /// Builds, renders and compares one card. With `verbose` off nothing is
@@ -346,6 +538,7 @@ pub fn run(
     watch: &[String],
     shadows: bool,
     studio: bool,
+    alpha_to_coverage: bool,
     verbose: bool,
 ) -> Result<Summary> {
     macro_rules! say { ($($t:tt)*) => { if verbose { println!($($t)*); } } }
@@ -360,6 +553,17 @@ pub fn run(
     }
     let mut chara = rk_chara::build(game, &card, &opts)?;
     let capture_value: Value = serde_json::from_str(&capture_text)?;
+    if let Some(map) = &cap.case.map {
+        say!("  taken in the map {map}: Renkatsu draws no maps yet, so the numbers mean little");
+    }
+    if cap.case.clothes != [rk_chara::clothes_state::ON; rk_chara::clothes_state::KINDS] {
+        chara.set_clothes(&cap.case.clothes);
+        say!("  clothes states {:?}", cap.case.clothes);
+    }
+    if let Some(pose) = &cap.case.pose {
+        let line = pose_as_captured(game, &mut chara, &cap.case, pose, &opts)?;
+        say!("  {line}");
+    }
     // Clothing blend shapes are checked before the capture's shapes are
     // copied over for the face's expression.
     let clothing_shapes = crate::state::compare_clothing_shapes(&capture_value, &chara.scene);
@@ -389,6 +593,7 @@ pub fn run(
             soft: cap.light_soft.unwrap_or(defaults.shadows.soft),
             ..defaults.shadows
         },
+        alpha_to_coverage,
         ..defaults
     };
     say!(
@@ -427,7 +632,17 @@ pub fn run(
     }
     let mut scores = Vec::new();
 
-    for (name, camera) in &cap.views {
+    for (view, (name, camera)) in cap.views.iter().enumerate() {
+        // The light as it stood for this view, where the capture says.
+        let lit = |e: &Environment| match cap.view_lights.get(view).copied().flatten() {
+            Some(dir) => Environment {
+                light_dir: Some(dir),
+                ..e.clone()
+            },
+            None => e.clone(),
+        };
+        let env = lit(&env);
+        let fx_env = fx_env.as_ref().map(lit);
         let load = |kind: &str| -> Result<Vec<u8>> {
             let picture = capture_path.with_extension(format!("{name}.{kind}.png"));
             let (gw, gh, px) = load_png(&std::fs::read(&picture).with_context(|| picture.display().to_string())?)?;
@@ -530,6 +745,7 @@ pub fn run(
         crate::state::print(&state, 8);
         compare_bones(&capture_text, &chara.scene, watch)?;
     }
+    let (rows, _, _) = bone_rows(&capture_text, &chara.scene)?;
     Ok(Summary {
         name: card.full_name(),
         views,
@@ -537,6 +753,7 @@ pub fn run(
         queues_differ,
         state,
         warnings: chara.warnings.clone(),
+        bones: BoneSummary::of(&rows),
     })
 }
 
@@ -681,8 +898,12 @@ fn compare_queues(capture: &str, scene: &rk_chara::Scene, verbose: bool) -> Resu
     Ok(differ.len())
 }
 
-/// Lists the bones whose place or shape differs most from the capture.
-fn compare_bones(capture: &str, scene: &rk_chara::Scene, watch: &[String]) -> Result<()> {
+/// One row per bone both sides have: how far it is from the capture's
+/// place, how far its rotation and scale are off as matrix distance, and
+/// its name; then how many were compared and how many only the game has.
+type BoneRows<'a> = (Vec<(f32, f32, &'a str)>, usize, usize);
+
+fn bone_rows<'a>(capture: &str, scene: &'a rk_chara::Scene) -> Result<BoneRows<'a>> {
     let v: Value = serde_json::from_str(capture)?;
     let (world, _) = scene.world();
     let mut ours = std::collections::HashMap::new();
@@ -695,13 +916,14 @@ fn compare_bones(capture: &str, scene: &rk_chara::Scene, watch: &[String]) -> Re
     let (mut matched, mut missing) = (0, 0);
     for b in v["bones"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let Some(name) = b["name"].as_str() else { continue };
-        if !seen.insert(name) {
+        if !seen.insert(name.to_owned()) {
             continue;
         }
-        let Some(mine) = ours.get(name) else {
+        let Some((name, mine)) = ours.get_key_value(name) else {
             missing += 1;
             continue;
         };
+        let name: &'a str = name;
         matched += 1;
         // The capture stores rows; glam stores columns.
         let game = glam::Mat4::from_cols_array(&floats::<16>(&b["world"])?).transpose();
@@ -711,6 +933,12 @@ fn compare_bones(capture: &str, scene: &rk_chara::Scene, watch: &[String]) -> Re
             .fold(0.0f32, f32::max);
         rows.push((moved, shape, name));
     }
+    Ok((rows, matched, missing))
+}
+
+/// Lists the bones whose place or shape differs most from the capture.
+fn compare_bones(capture: &str, scene: &rk_chara::Scene, watch: &[String]) -> Result<()> {
+    let (mut rows, matched, missing) = bone_rows(capture, scene)?;
     println!("  bones: {matched} compared, {missing} only in the game");
     rows.sort_by(|a, b| (b.0 + b.1 * 0.1).total_cmp(&(a.0 + a.1 * 0.1)));
     println!("  largest differences (position in units, rotation and scale as matrix distance):");
@@ -820,6 +1048,70 @@ mod tests {
             &format!("\"ambient_probe\": [{}], \"ambient_light\"", ["0.5"; 27].join(", ")),
         );
         assert_eq!(Capture::parse(&probe).unwrap().ambient_probe, Some([0.5; 27]));
+    }
+
+    #[test]
+    fn capture_case() {
+        // An older capture: everything on, no pose, the scene's light.
+        let plain = Capture::parse(SAMPLE).unwrap();
+        assert_eq!(plain.case, Case::default());
+        assert_eq!(plain.view_lights, vec![None, None]);
+        let text = SAMPLE
+            .replace(
+                r#""studio": {"ramp_g": 2}"#,
+                r#""studio": {"ramp_g": 2},
+                   "status": {"clothes_state": [1, 3, 0, 0, 0, 0, 0, 0, 0]},
+                   "animation": {"normalized_time": 0.75},
+                   "case": {"pose": {"group": 0, "category": 3, "number": 2, "time": 0.5},
+                            "sequence": {"frame": 2, "frames": 8, "step": 3, "rate": 30},
+                            "map": "myroom"}"#,
+            )
+            .replace(
+                r#"{"name": "face", "position": [0, 1.5, 2], "rotation": [0, 1, 0, 0]}"#,
+                r#"{"name": "face", "position": [0, 1.5, 2], "rotation": [0, 1, 0, 0], "fov": 60,
+                    "light_direction": [0, -1, 0]}"#,
+            );
+        let c = Capture::parse(&text).unwrap();
+        assert_eq!(c.case.clothes, [1, 3, 0, 0, 0, 0, 0, 0, 0]);
+        let pose = c.case.pose.unwrap();
+        assert_eq!((pose.group, pose.category, pose.number, pose.time), (0, 3, 2, 0.5));
+        let seq = c.case.sequence.unwrap();
+        assert_eq!((seq.frame, seq.step, seq.rate), (2, 3, 30.0));
+        assert_eq!(c.case.normalized_time, Some(0.75));
+        assert_eq!(c.case.map.as_deref(), Some("myroom"));
+        // A view's own angle and light replace the scene's.
+        assert_eq!((c.views[0].1.fov_y_deg, c.views[1].1.fov_y_deg), (23.0, 60.0));
+        assert_eq!(c.view_lights, vec![None, Some([0.0, 1.0, 0.0])]);
+        // The maker's pose is number -1.
+        let maker = SAMPLE.replace(
+            r#""studio": {"ramp_g": 2}"#,
+            r#""studio": {"ramp_g": 2}, "case": {"pose": {"group": 0, "category": 0, "number": -1, "time": 0.25}}"#,
+        );
+        assert_eq!(Capture::parse(&maker).unwrap().case.pose.unwrap().number, -1);
+    }
+
+    #[test]
+    fn sequence_steps_run_from_the_held_time_to_the_reported_one() {
+        assert_eq!(sequence_time(0.5, 1.1, 0, 6), 0.5);
+        assert!((sequence_time(0.5, 1.1, 3, 6) - 0.8).abs() < 1e-6);
+        assert!((sequence_time(0.5, 1.1, 6, 6) - 1.1).abs() < 1e-6);
+        assert_eq!(sequence_time(0.5, 1.1, 1, 0), 1.1);
+    }
+
+    #[test]
+    fn bone_summary_names_the_worst_and_the_physics_bones() {
+        let rows = [
+            (0.01, 0.0, "cf_j_head"),
+            (0.03, 0.0, "cf_j_sk_00_01"),
+            (0.02, 0.0, "cf_j_sk_03_02"),
+            (0.005, 0.0, "cf_j_bust02_L"),
+        ];
+        let s = BoneSummary::of(&rows);
+        assert_eq!(s.compared, 4);
+        assert!((s.mean - 0.01625).abs() < 1e-6);
+        assert_eq!(s.worst, Some(("cf_j_sk_00_01".to_owned(), 0.03)));
+        assert_eq!((s.skirt, s.bust), (Some(0.03), Some(0.005)));
+        assert_eq!(BoneSummary::of(&[]), BoneSummary::default());
     }
 
     #[test]

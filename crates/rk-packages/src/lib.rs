@@ -22,6 +22,7 @@ pub mod download;
 pub mod hash;
 pub mod index;
 pub mod manifest;
+pub mod news;
 pub mod pack;
 pub mod store;
 pub mod update;

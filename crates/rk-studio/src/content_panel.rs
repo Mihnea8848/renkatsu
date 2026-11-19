@@ -32,12 +32,12 @@ fn folder_kind(top: &str) -> (Kind, &'static str) {
     match top {
         project::CHARACTERS => (Kind::Character, "This project has no characters yet"),
         project::ANIMATIONS => (Kind::Animation, "This project has no animations yet"),
-        project::POSES => (Kind::Pose, "Poses made by hand arrive with FK and IK posing"),
-        "Maps" => (Kind::Map, "Maps arrive with their feature"),
-        "Items" => (Kind::Item, "Items arrive with their feature"),
-        project::SCENES => (Kind::Scene, "A project holds one scene for now"),
-        "Renders" => (Kind::Camera, "Renders arrive with baking"),
-        _ => (Kind::Folder, "Imported cards copy the mods they need here"),
+        project::POSES => (Kind::Pose, "This project has no poses yet"),
+        "Maps" => (Kind::Map, "Not available yet"),
+        "Items" => (Kind::Item, "Not available yet"),
+        project::SCENES => (Kind::Scene, "This folder is empty"),
+        "Renders" => (Kind::Camera, "This project has no renders yet"),
+        _ => (Kind::Folder, "This project has no mods yet"),
     }
 }
 
@@ -290,28 +290,20 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let bar = toolbar(ui, k, |ui| {
         match top {
             project::CHARACTERS => {
-                if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import card", false, false)
-                    .on_hover_text("Pick a card and copy it into the project, with the mods it needs")
-                    .clicked()
-                {
+                if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import card", false, false).clicked() {
                     asks.commands.push(Command::ImportCard);
                 }
-                if flat_button(ui, k, Some(icon::BOOKS), "From library", false, false)
-                    .on_hover_text("Choose characters of the installed packages and copy their cards into the project")
-                    .clicked()
-                {
+                if flat_button(ui, k, Some(icon::BOOKS), "From library", false, false).clicked() {
                     asks.commands.push(Command::ImportFromPackage);
                 }
                 let card = st.asset.clone().filter(|a| slashes(a).to_lowercase().ends_with(".png"));
-                let why = if card.is_some() {
-                    "Add the selected character to the scene"
+                let add = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false);
+                let add = if card.is_none() {
+                    add.on_hover_text("No character selected")
                 } else {
-                    "Select a character first, or double click one"
+                    add
                 };
-                if flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false)
-                    .on_hover_text(why)
-                    .clicked()
-                {
+                if add.clicked() {
                     if let Some(card) = card {
                         asks.commands.push(Command::AddCard(card));
                     }
@@ -321,7 +313,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             _ => {}
         }
         if icon_button(ui, k, icon::ARROWS_CLOCKWISE, false)
-            .on_hover_text("Read the project's folders again")
+            .on_hover_text("Refresh")
             .clicked()
         {
             st.refresh_content();
@@ -422,16 +414,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// The toolbar of the Animations folder.
 fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
-    if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false)
-        .on_hover_text("Pick an animation file or a zipmod and copy animations from it into the project")
-        .clicked()
-    {
+    if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false).clicked() {
         asks.commands.push(Command::ImportAnimationFile);
     }
-    if flat_button(ui, k, Some(icon::BOOKS), "Import from library", false, false)
-        .on_hover_text("Choose animations of the installed packages, of Koikatsu and of mods, and copy them in")
-        .clicked()
-    {
+    if flat_button(ui, k, Some(icon::BOOKS), "Import from library", false, false).clicked() {
         asks.commands.push(Command::ImportAnimations);
     }
     let character = st.doc.selection().is_some_and(|o| o.kind() == Kind::Character);
@@ -441,16 +427,17 @@ fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
         .and_then(|a| st.animations.find(&slashes(a)))
         .map(|i| i.reference());
     let why = match (character, chosen.is_some()) {
-        (false, _) => "Select a character in the scene first",
-        (true, false) => "Select an animation first, or double click one",
-        (true, true) => "Give the selected character the selected animation",
+        (false, _) => Some("No character selected"),
+        (true, false) => Some("No animation selected"),
+        (true, true) => None,
     };
-    ui.add_enabled_ui(character && chosen.is_some(), |ui| {
-        if flat_button(ui, k, Some(icon::PLAY), "Apply to selection", false, false)
-            .on_hover_text(why)
-            .on_disabled_hover_text(why)
-            .clicked()
-        {
+    ui.add_enabled_ui(why.is_none(), |ui| {
+        let apply = flat_button(ui, k, Some(icon::PLAY), "Apply to selection", false, false);
+        let apply = match why {
+            Some(why) => apply.on_hover_text(why).on_disabled_hover_text(why),
+            None => apply,
+        };
+        if apply.clicked() {
             asks.commands.push(Command::Animate(chosen.clone()));
         }
     });
@@ -924,9 +911,7 @@ fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &
         let name = card.name.as_str();
         let resp = ui
             .interact(cell, ui.id().with(("card", &rel)), Sense::click_and_drag())
-            .on_hover_text(format!(
-                "{name}\n{rel}\nDouble click or drag into the scene to add. Right click for more."
-            ));
+            .on_hover_text(format!("{name}\n{rel}"));
         resp.dnd_set_drag_payload(DragCard(card.file.clone()));
         if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
             asks.select = Some(rel.clone());
@@ -1046,7 +1031,7 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
             }
         });
         resp.on_hover_text(format!(
-            "{}\n{}, {}\n{}{from}\nDouble click to give it to the selected character. Right click for more.",
+            "{}\n{}, {}\n{}{from}",
             item.name,
             item.category(),
             item.kind_text(),

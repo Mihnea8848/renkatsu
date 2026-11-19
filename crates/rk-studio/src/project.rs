@@ -207,13 +207,6 @@ impl Start {
             Start::Empty => "Empty",
         }
     }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Start::RenkatsuChan => "The default character under a key light.",
-            Start::Empty => "Only the key light.",
-        }
-    }
 }
 
 /// The environment variable that names another folder for new projects,

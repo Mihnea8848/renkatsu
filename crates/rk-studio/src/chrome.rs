@@ -9,7 +9,7 @@
 use crate::design::{Overlays, TitleBar};
 use crate::keymap::Action;
 use crate::kinds::Kind;
-use crate::modes::{tool_hint, MODES, PIPELINES, TOOLS};
+use crate::modes::{MODES, PIPELINES, TOOLS};
 use crate::panels::{self, Panel};
 use crate::state::{Command, Look, Playback, Rail, State};
 use crate::viewport::{self, RailShape};
@@ -524,10 +524,9 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
         }
     }
     let tips = [
-        st.keys.tip("Play the scene: animations and physics", Action::PlayPause),
+        st.keys.tip("Play", Action::PlayPause),
         st.keys.tip("Pause the scene", Action::PlayPause),
-        st.keys
-            .tip("Stop, and put animations and physics back to their start", Action::Stop),
+        st.keys.tip("Stop", Action::Stop),
         "Simulation options".to_owned(),
     ];
     let mut x = group.left();
@@ -609,7 +608,6 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     let (tool_glyph, tool, _) = TOOLS[st.tool];
     glyph(p, k, Pos2::new(rect.left() + 17.0, y), tool_glyph, 13.0, t.text);
     let x = small(rect.left() + 29.0, Align2::LEFT_CENTER, tool, t.text).right();
-    let x = small(x + 10.0, Align2::LEFT_CENTER, tool_hint(st.tool), t.text_dim).right();
     if st.playback != Playback::Stopped {
         let text = if st.playback == Playback::Playing {
             "Scene playing"
@@ -620,6 +618,9 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
         small(x + 31.0, Align2::LEFT_CENTER, text, t.text);
     }
 
+    // The work in the background, in the middle of the bar.
+    crate::jobs::status_line(ui, k, &st.jobs, rect);
+
     let mut x = rect.right() - 12.0;
     // A newer Renkatsu, as the check at start found: a click opens its page.
     if let Some(release) = &st.update {
@@ -629,7 +630,7 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
         if resp.clicked() {
             crate::settings::open_url(&release.url);
         }
-        resp.on_hover_text("Open the release page, with the installers");
+        resp.on_hover_text("Open the release page");
         x = r.left() - 12.0;
         hair_v(p, x, rect.top() + 6.0, rect.bottom() - 5.0, t.border);
         x -= 12.0;

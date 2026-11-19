@@ -654,6 +654,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                 place: false,
                 ask: true,
                 name,
+                first: false,
             });
         }
         return;

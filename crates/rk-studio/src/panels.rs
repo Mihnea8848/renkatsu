@@ -890,7 +890,6 @@ pub fn animation_items(
     if st.animations.items.is_empty() {
         ui.separator();
         ui.label(egui::RichText::new("This project has no animations yet").color(k.t.text_dim));
-        ui.label(egui::RichText::new("Import some in Content, Animations").color(k.t.text_dim));
         return chosen;
     }
     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -1036,7 +1035,7 @@ fn timeline(ui: &mut Ui, k: &Look) {
             t.text_dim,
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let text = "The timeline arrives with animation";
+            let text = "Not available yet";
             let w = widgets::text_width(ui, text, k.font()).ceil();
             let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
             label(ui.painter(), k, rect.left_center(), text, t.text_dim);

@@ -29,7 +29,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         ui.painter().text(
             rect.center_top() + Vec2::new(0.0, 40.0),
             Align2::CENTER_CENTER,
-            "Select an object to see its properties",
+            "Nothing selected",
             k.font(),
             t.text_dim,
         );
@@ -101,11 +101,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 Content::Character { .. } => [None; 3],
                 Content::Light { from_camera, .. } => [
                     Some("A directional light has no position"),
-                    (*from_camera).then_some("The light follows the camera. Choose Own under Direction to turn it"),
+                    (*from_camera).then_some("The light follows the camera"),
                     Some("A light has no size"),
                 ],
-                Content::Camera { .. } => [Some("Shot cameras arrive with baking"); 3],
-                _ => [Some("Items and maps arrive with their feature"); 3],
+                Content::Camera { .. } => [Some("Not available yet"); 3],
+                _ => [Some("Not available yet"); 3],
             };
             let transform = &mut object.transform;
             let values = [
@@ -211,7 +211,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
                         let resp = ui
                             .interact(button, id.with("browse"), Sense::click())
-                            .on_hover_text("Show the cards in the Content panel");
+                            .on_hover_text("Show in Content");
                         let fill = if resp.hovered() { k.t.hover } else { k.t.control };
                         ui.painter().rect_filled(button, k.radius(), fill);
                         glyph(ui.painter(), k, button.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
@@ -243,7 +243,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         });
                     } else if let Some(count) = built.as_ref().map(|b| b.warnings).filter(|n| *n > 0) {
                         row(ui, k, "Warnings", None, |ui, rect| {
-                            let text = format!("{count}, listed in the Console");
+                            let text = count.to_string();
                             label(
                                 &ui.painter().with_clip_rect(rect),
                                 k,
@@ -369,17 +369,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         if let Some(a) = animation.as_ref() {
                             let from = match &a.file {
                                 Some(file) => file.clone(),
-                                None => format!(
-                                    "{} of {} in {}, played from what is installed",
-                                    a.state, a.controller, a.bundle
-                                ),
+                                None => format!("{} of {} in {}", a.state, a.controller, a.bundle),
                             };
                             resp.on_hover_text(from);
                         }
                         let at = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
                         let browse = ui
                             .interact(at, id.with("browse animations"), Sense::click())
-                            .on_hover_text("Show the project's animations in the Content panel");
+                            .on_hover_text("Show in Content");
                         let fill = if browse.hovered() { k.t.hover } else { k.t.control };
                         ui.painter().rect_filled(at, k.radius(), fill);
                         glyph(ui.painter(), k, at.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
@@ -400,7 +397,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         row(ui, k, "Kind", None, |ui, rect| {
                             let text = match playing {
                                 None => "Not read".to_owned(),
-                                Some((true, ..)) => "Static: holds one pose".to_owned(),
+                                Some((true, ..)) => "Static".to_owned(),
                                 Some((_, true, seconds)) => format!("Moving: loops every {seconds:.1} s"),
                                 Some((_, false, seconds)) => format!("Moving: plays {seconds:.1} s once"),
                             };
@@ -448,7 +445,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
                 if section(ui, k, st, 2, "Expression") {
-                    let later = Some("Expressions arrive with posing");
+                    let later = Some("Not available yet");
                     for name in ["Eyes", "Mouth"] {
                         row(ui, k, name, later, |ui, rect| {
                             widgets::combo(ui, k, rect, id.with(name), &mut 0, &["Default"]);
@@ -457,8 +454,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
                 if section(ui, k, st, 3, "Modules") {
-                    let later =
-                        Some("Every module runs for every character for now; choosing arrives with the Modules panel");
+                    let later = Some("Not available yet");
                     for name in ["MaterialEditor", "ABMX", "Stiletto", "Clothing Unlocker"] {
                         row(ui, k, name, later, |ui, rect| {
                             widgets::checkbox(ui, k, rect, id.with(name), &mut true, "");
@@ -473,10 +469,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 shadows,
             } => {
                 if section(ui, k, st, 1, "Light") {
-                    row(ui, k, "Type", Some("Point and spot lights arrive later"), |ui, rect| {
+                    row(ui, k, "Type", Some("Not available yet"), |ui, rect| {
                         widgets::combo(ui, k, rect, id.with("light"), &mut 0, &["Directional"]);
                     });
-                    row(ui, k, "Colour", Some("The light's colour arrives later"), |ui, rect| {
+                    row(ui, k, "Colour", Some("Not available yet"), |ui, rect| {
                         widgets::value_box(ui, k, rect, "       FFFFFF");
                         let swatch =
                             Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
@@ -497,9 +493,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     });
                     if !lights {
                         row(ui, k, "In use", None, |ui, rect| {
-                            let text = "No: the first light that shows lights the scene";
+                            let text = "No";
                             ui.interact(rect, id.with("in-use"), Sense::hover())
-                                .on_hover_text("The renderer has one light for now");
+                                .on_hover_text("Only one light is used");
                             label(
                                 &ui.painter().with_clip_rect(rect),
                                 k,
@@ -518,7 +514,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 far,
             } => {
                 if section(ui, k, st, 1, "Lens") {
-                    let later = Some("Shot cameras arrive with baking");
+                    let later = Some("Not available yet");
                     let values = [("Focal length", focal_length), ("Near", near), ("Far", far)];
                     for (i, (name, value)) in values.into_iter().enumerate() {
                         row(ui, k, name, later, |ui, rect| {
@@ -801,7 +797,7 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &P
     }
     if section(ui, k, st, 11, "Card data") {
         let changed = from_card != *p;
-        let why = (!changed).then_some("Everything here is as the card has it");
+        let why = (!changed).then_some("No changes");
         row(ui, k, "Values", why, |ui, rect| {
             if crate::selector::button(ui, k, rect, "Reset to card values", false, changed) {
                 *p = from_card.clone();
@@ -896,7 +892,7 @@ fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>,
         let x = Rect::from_center_size(Pos2::new(boxed.right() + 12.0, place.center().y), Vec2::splat(18.0));
         let resp = ui
             .interact(x, id.with(("remove", n)), Sense::click())
-            .on_hover_text("Remove it");
+            .on_hover_text("Remove");
         let color = if resp.hovered() {
             ui.painter().rect_filled(x, k.radius(), t.hover);
             t.text_bright

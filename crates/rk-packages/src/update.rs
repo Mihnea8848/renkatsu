@@ -1,17 +1,11 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! Whether a newer Renkatsu is out: the latest release on GitHub, read
-//! from its public API. Nothing about the user is sent; the request only
-//! names the program and its version, as every download does.
+//! Whether a newer Renkatsu is out: the latest release on GitHub. The
+//! releases are asked for together with the news, in `news.rs`.
 
 use crate::manifest::version_key;
 use anyhow::{Context, Result};
-use std::io::Read;
-
-/// The latest release of the repository on GitHub. Releases of content,
-/// such as Starter Content, are not marked as the latest.
-pub const LATEST: &str = "https://api.github.com/repos/Mihnea8848/renkatsu/releases/latest";
 
 /// A release of Renkatsu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +16,7 @@ pub struct Release {
     pub url: String,
 }
 
-/// Reads a release from the API's answer.
+/// Reads one release from the API's answer.
 pub fn parse(json: &str) -> Result<Release> {
     let v: serde_json::Value = serde_json::from_str(json).context("reading the release")?;
     let tag = v["tag_name"].as_str().context("the release has no tag")?;
@@ -36,18 +30,6 @@ pub fn parse(json: &str) -> Result<Release> {
 /// program that asks.
 pub fn newer(release: Release, running: &str) -> Option<Release> {
     (version_key(&release.version) > version_key(running)).then_some(release)
-}
-
-/// Asks GitHub for the latest release.
-pub fn latest() -> Result<Release> {
-    let mut answer = crate::download::agent()
-        .get(LATEST)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .context("asking GitHub for the latest release")?;
-    let mut text = String::new();
-    answer.body_mut().as_reader().take(1 << 20).read_to_string(&mut text)?;
-    parse(&text)
 }
 
 #[cfg(test)]

@@ -25,6 +25,9 @@ pub struct Import {
     pub ask: bool,
     /// The name it goes by in the project; the card's own when `None`.
     pub name: Option<String>,
+    /// The character a new project starts with: once it is in, the
+    /// project is saved as where it starts.
+    pub first: bool,
 }
 
 /// An import that waits for the user's word on its mods.
@@ -215,10 +218,8 @@ fn import(ui: &mut Ui, k: &Look, pending: &mut PendingImport) -> Choice {
     heading(ui, k, &format!("Import {}", pending.title));
     let n = pending.plan.copy.len();
     ui.label(format!(
-        "This card needs {} that the project does not have yet. Importing copies {} into the project, \
-         which adds {}.",
+        "This card needs {} the project does not have: {}.",
         count_text(n),
-        if n == 1 { "it" } else { "them" },
         size_text(pending.plan.bytes())
     ));
     ui.add_space(6.0);
@@ -263,7 +264,7 @@ fn import(ui: &mut Ui, k: &Look, pending: &mut PendingImport) -> Choice {
         let lost = pending.missing.len();
         ui.label(
             RichText::new(format!(
-                "{} the card names {} not installed and cannot be copied; the character may miss parts:",
+                "{} {} not installed:",
                 count_text(lost),
                 if lost == 1 { "is" } else { "are" }
             ))
@@ -285,17 +286,9 @@ fn import(ui: &mut Ui, k: &Look, pending: &mut PendingImport) -> Choice {
     }
 }
 
-fn unsaved(ui: &mut Ui, k: &Look, scene: &str, after: &After) -> Choice {
+fn unsaved(ui: &mut Ui, k: &Look, scene: &str) -> Choice {
     heading(ui, k, "Unsaved changes");
-    ui.label(format!(
-        "{scene} has changes that are not saved. Save them before {}?",
-        match after {
-            After::New => "making a new project",
-            After::Open(_) => "opening another project",
-            After::Selector => "closing the project",
-            After::Quit => "quitting",
-        }
-    ));
+    ui.label(format!("Save the changes to {scene}?"));
     match buttons(ui, &[("Cancel", true), ("Discard", true), ("Save", true)]) {
         Some(0) => Choice::Cancel,
         Some(1) => Choice::Discard,
@@ -334,8 +327,7 @@ fn project_form(ui: &mut Ui, k: &Look, form: &mut ProjectForm) -> Choice {
                 ui.label("Starts with");
                 ui.horizontal(|ui| {
                     for start in Start::ALL {
-                        ui.radio_value(&mut form.start, start, start.label())
-                            .on_hover_text(start.hint());
+                        ui.radio_value(&mut form.start, start, start.label());
                     }
                 });
                 ui.end_row();
@@ -368,7 +360,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         ui.set_width(WIDTH);
         match &mut modal {
             Modal::Import(pending) => import(ui, k, pending),
-            Modal::Unsaved(after) => unsaved(ui, k, &scene, after),
+            Modal::Unsaved(_) => unsaved(ui, k, &scene),
             Modal::Project(form) => project_form(ui, k, form),
         }
     });

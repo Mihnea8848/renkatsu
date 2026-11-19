@@ -33,14 +33,6 @@ impl FrameRate {
         }
     }
 
-    pub fn hint(self) -> &'static str {
-        match self {
-            FrameRate::Monitor => "Redraws every frame, in step with the display.",
-            FrameRate::Uncapped => "Redraws as fast as the GPU allows, without waiting for the display.",
-            FrameRate::PowerSaving => "Redraws only when something changes.",
-        }
-    }
-
     /// Whether the window waits for the display before showing a frame.
     /// This is chosen when the window opens, so changing it needs a restart.
     pub fn vsync(self) -> bool {
@@ -132,8 +124,13 @@ pub struct Settings {
     pub recent_projects: Vec<Recent>,
     /// Ask GitHub at start whether a newer Renkatsu is out.
     pub check_updates: bool,
+    /// Show the project's news on the home page.
+    pub show_news: bool,
     /// The keys and mouse buttons pressed show in the viewport's corner.
     pub show_inputs: bool,
+    /// Cut-out edges, such as lashes and lace, are smoothed
+    /// (alpha-to-coverage); the game draws them hard.
+    pub smooth_edges: bool,
     /// The steps snapping goes by: move in metres, rotate in degrees,
     /// scale, and the grid's size in metres.
     pub snap_steps: [f32; 4],
@@ -152,7 +149,9 @@ impl Default for Settings {
             project_view: ProjectView::default(),
             recent_projects: Vec::new(),
             check_updates: true,
+            show_news: true,
             show_inputs: false,
+            smooth_edges: true,
             snap_steps: SNAP_STEPS,
             keys: Default::default(),
         }
@@ -239,7 +238,9 @@ mod tests {
             project_view: ProjectView::List,
             recent_projects: Vec::new(),
             check_updates: false,
+            show_news: false,
             show_inputs: true,
+            smooth_edges: false,
             snap_steps: [0.5, 45.0, 0.25, 2.0],
             keys: [("focus".to_owned(), vec!["Ctrl+F".to_owned()])].into(),
         };

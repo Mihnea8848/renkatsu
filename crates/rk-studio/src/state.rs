@@ -8,6 +8,7 @@
 use crate::content;
 use crate::design::{Spec, TitleBar};
 use crate::dialogs::{After, Import, Modal, PendingImport, Pick, Picker, ProjectForm};
+use crate::jobs::{Item, Jobs, Show, Stage};
 use crate::kinds::Kind;
 use crate::library::Library;
 use crate::mods::{self, Games};
@@ -223,6 +224,66 @@ pub fn default_card(game: Option<&rk_core::Config>, package: Option<PathBuf>) ->
         .or(package)
 }
 
+/// A project on its way in: the selector's window shows what loads, and
+/// the editor appears when all of it is there.
+pub struct Opening {
+    /// The project's name.
+    pub name: String,
+    /// The step, the count and the list, as the splash shows them.
+    pub progress: crate::jobs::Progress,
+    started: std::time::Instant,
+    /// Seconds the content took to open, once it is open.
+    content: Option<f32>,
+    /// The viewport drew every character once.
+    drawn: bool,
+    /// The parts of the bar: the content, the characters, the viewport.
+    parts: [crate::jobs::Progress; 3],
+    /// The most textures seen waiting for the GPU.
+    textures: usize,
+    /// A sample for a picture of the window: nothing moves it on.
+    pub pictured: bool,
+}
+
+impl Opening {
+    pub fn new(name: &str, wake: Option<egui::Context>) -> Opening {
+        let progress = crate::jobs::Progress::new(wake);
+        // The characters are most of the wait.
+        let parts = [progress.child(0.1), progress.child(0.7), progress.child(0.2)];
+        Opening {
+            name: name.to_owned(),
+            parts,
+            textures: 0,
+            progress,
+            started: std::time::Instant::now(),
+            content: None,
+            drawn: false,
+            pictured: false,
+        }
+    }
+
+    /// A project halfway open, to picture its splash.
+    pub fn sample() -> Opening {
+        let mut opening = Opening::new("DevTest1", None);
+        opening.pictured = true;
+        let item = |name: &str, stage, note: &str| Item {
+            name: name.to_owned(),
+            stage,
+            note: note.to_owned(),
+        };
+        opening.progress.set_items(vec![
+            item("Content", Stage::Done, "0.2 s"),
+            item("Loaded Default female", Stage::Done, "3.4 s"),
+            item("Maria Kujou", Stage::Running, ""),
+            item("Viewport", Stage::Waiting, ""),
+        ]);
+        opening.progress.step("Loading Maria Kujou");
+        opening.progress.set(2, 4);
+        opening.parts[0].set(1, 1);
+        opening.parts[1].set(1, 2);
+        opening
+    }
+}
+
 pub struct State {
     /// The window's title bar.
     pub title_bar: TitleBar,
@@ -243,6 +304,20 @@ pub struct State {
     saved: Scene,
     /// The game's files, opened with the project's mods.
     pub games: Games,
+    /// The work that runs off the window's thread.
+    pub jobs: Jobs,
+    /// The project that is still opening, while its splash shows.
+    pub opening: Option<Opening>,
+    /// The mods folder the content is being opened with, by a job.
+    content_pending: Option<PathBuf>,
+    /// The mods folder the content could not be opened with.
+    content_failed: Option<PathBuf>,
+    /// Imports whose mods are being copied.
+    importing: usize,
+    /// The package work that shows as a job.
+    package_job: Option<crate::jobs::Tracker>,
+    /// The news of the home page.
+    pub news: Vec<rk_packages::news::Post>,
     /// The user's installed packages, with their windows.
     pub packages: crate::packages::Packages,
     /// The question that is open over the window.
@@ -256,8 +331,6 @@ pub struct State {
     pub scripted: bool,
     /// A newer Renkatsu on GitHub, when the check at start found one.
     pub update: Option<rk_packages::update::Release>,
-    /// The check for a newer Renkatsu while it runs.
-    pub update_check: Option<std::sync::mpsc::Receiver<Option<rk_packages::update::Release>>>,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -381,12 +454,13 @@ impl State {
         if self.library.wanted.is_empty() {
             return;
         }
+        // The shots wait for the content, which a job opens.
+        let Some(game) = self.content() else {
+            return;
+        };
         let wanted = std::mem::take(&mut self.library.wanted);
         let backdrop = self.library.backdrop;
         let Some(mugshots) = self.library.mugshots.as_mut() else {
-            return;
-        };
-        let Ok(game) = self.games.shared(&self.project.mods_dir()) else {
             return;
         };
         for (card, shot) in wanted {
@@ -407,32 +481,286 @@ impl State {
             .clone()
     }
 
-    /// Asks GitHub, on a thread of its own, whether a newer Renkatsu is
-    /// out. Nothing waits for the answer.
-    pub fn check_for_update(&mut self, ctx: &egui::Context) {
-        let (send, answer) = std::sync::mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let newer = rk_packages::update::latest()
-                .ok()
-                .and_then(|r| rk_packages::update::newer(r, env!("CARGO_PKG_VERSION")));
-            let _ = send.send(newer);
-            ctx.request_repaint();
-        });
-        self.update_check = Some(answer);
+    /// The content characters are built from, when it is open. A job
+    /// opens it; a scripted run opens it here and waits.
+    pub fn content(&mut self) -> Option<std::sync::Arc<rk_vfs::Game>> {
+        let mods = self.project.mods_dir();
+        if self.scripted {
+            return self.games.shared(&mods).ok();
+        }
+        self.games.ready(&mods)
     }
 
-    /// Takes the answer of the update check once it came.
-    pub fn poll_update(&mut self) {
-        let Some(check) = &self.update_check else { return };
-        if let Ok(newer) = check.try_recv() {
-            if let Some(release) = &newer {
-                self.log
-                    .info(format!("Renkatsu {} is out: {}", release.version, release.url));
-            }
-            self.update = newer;
-            self.update_check = None;
+    /// Moves the background work on, once a frame at the window's time
+    /// `now`: takes in what finished, and starts what the project needs.
+    pub fn tick(&mut self, now: f64) {
+        for apply in self.jobs.poll(now) {
+            apply(self);
         }
+        self.want_content();
+        self.track_packages();
+        self.advance_opening();
+    }
+
+    /// Has the content of the open project opened by a job, unless it is
+    /// open, on its way or known to fail.
+    fn want_content(&mut self) {
+        if self.project.is_none() || self.scripted {
+            return;
+        }
+        let mods = self.project.mods_dir();
+        let same = |known: &Option<PathBuf>| known.as_deref() == Some(mods.as_path());
+        if self.games.ready(&mods).is_some() || same(&self.content_pending) || same(&self.content_failed) {
+            return;
+        }
+        self.content_pending = Some(mods.clone());
+        // While a project opens its splash lists the content.
+        let show = if self.opening.is_some() {
+            Show::Quiet
+        } else {
+            Show::Notice
+        };
+        let theirs = mods.clone();
+        self.jobs.spawn(
+            "Opening the content",
+            show,
+            move |_| rk_vfs::Game::open_user(&[theirs]).map(std::sync::Arc::new),
+            move |st: &mut State, result| {
+                if st.content_pending.as_deref() == Some(mods.as_path()) {
+                    st.content_pending = None;
+                }
+                // The project may have changed while the content opened.
+                if st.project.is_none() || st.project.mods_dir() != mods {
+                    return;
+                }
+                match result {
+                    Ok(game) => st.games.install(&mods, game),
+                    Err(e) => {
+                        st.log.error(format!("The content could not be opened: {e:#}"));
+                        st.content_failed = Some(mods);
+                    }
+                }
+            },
+        );
+    }
+
+    /// Shows the work on a package, which has a thread of its own, as a
+    /// job: its stage, its bytes, and a way to stop it.
+    fn track_packages(&mut self) {
+        let Some((name, task)) = self.packages.task() else {
+            if let Some(job) = self.package_job.take() {
+                let ended = match &self.packages.note {
+                    Some((text, true)) => Err(text.clone()),
+                    Some((text, false)) => {
+                        job.progress.step(text);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                };
+                job.end(ended);
+            }
+            return;
+        };
+        if self.package_job.is_none() {
+            let name = name.to_owned();
+            self.package_job = Some(self.jobs.track(&name, Show::Notice));
+        }
+        if let Some(job) = &self.package_job {
+            let (stage, done, total) = task.progress();
+            job.progress.step(stage.label());
+            job.progress.set_bytes(done.min(total), total);
+            if job.progress.cancelled() {
+                task.cancel();
+            }
+        }
+    }
+
+    /// Starts the splash of a project that was just adopted.
+    pub fn begin_opening(&mut self) {
+        if self.scripted || self.project.is_none() {
+            return;
+        }
+        self.opening = Some(Opening::new(&self.project.file.name, self.jobs.wake.clone()));
+    }
+
+    /// Moves the opening of a project on: the content, its characters
+    /// and their first draw. The editor shows when all of it is there.
+    fn advance_opening(&mut self) {
+        let Some(mut opening) = self.opening.take() else { return };
+        if opening.pictured {
+            self.opening = Some(opening);
+            return;
+        }
+        if opening.progress.cancelled() {
+            self.show_selector();
+            return;
+        }
+        let mods = self.project.mods_dir();
+        let failed = self.content_failed.as_deref() == Some(mods.as_path());
+        let ready = self.games.ready(&mods).is_some();
+        if ready && opening.content.is_none() {
+            opening.content = Some(opening.started.elapsed().as_secs_f32());
+        }
+        let content = match (opening.content, failed) {
+            (Some(took), _) => (Stage::Done, format!("{took:.1} s")),
+            (None, true) => (Stage::Failed, String::new()),
+            (None, false) => (Stage::Running, String::new()),
+        };
+        let mut items = vec![Item {
+            name: "Content".to_owned(),
+            stage: content.0,
+            note: content.1,
+        }];
+        let mut step = "Opening the content".to_owned();
+
+        // Cards still on their way into the project.
+        let importing = !self.imports.is_empty() || self.importing > 0 || self.modal.is_some();
+        let mut building = false;
+        let mut uploads = 0;
+        if let Some(live) = self.live.as_mut() {
+            live.show_builds = Show::Quiet;
+            let clock = crate::live::Clock {
+                time: self.clock,
+                ..crate::live::Clock::stopped()
+            };
+            let scene = self.doc.scene();
+            live.follow(
+                scene,
+                &self.project,
+                &mut self.games,
+                &mut self.jobs,
+                clock,
+                &mut self.log,
+            );
+            // The draw sends the textures to the GPU, a few a frame, and
+            // makes what the first frame of the editor would wait for.
+            if let Err(e) = live.paint(scene, [64, 64], [0.22, 0.22, 0.23, 1.0]) {
+                self.log.error(format!("The viewport could not be drawn: {e:#}"));
+            }
+            uploads = live.uploads_left();
+            for object in scene.objects().iter().filter(|o| o.kind() == Kind::Character) {
+                use crate::live::Progress as Built;
+                let built = live.progress(object.id);
+                let (stage, note) = match built.clone() {
+                    Built::Ready(took) => (Stage::Done, format!("{took:.1} s")),
+                    Built::Failed => (Stage::Failed, String::new()),
+                    Built::Waiting if failed => (Stage::Failed, String::new()),
+                    Built::Waiting => (Stage::Waiting, String::new()),
+                    Built::Building | Built::Uploading => (Stage::Running, String::new()),
+                };
+                if stage == Stage::Running || stage == Stage::Waiting {
+                    if !building {
+                        step = format!("Loading {}", object.name);
+                    }
+                    building = true;
+                }
+                items.push(Item {
+                    name: match built {
+                        Built::Ready(_) => format!("Loaded {}", object.name),
+                        _ => object.name.clone(),
+                    },
+                    stage,
+                    note,
+                });
+            }
+            if ready && !building && !importing {
+                opening.drawn = true;
+            }
+        } else {
+            opening.drawn = ready || failed;
+        }
+        let waiting = importing || building || !(ready || failed);
+        items.push(Item {
+            name: "Viewport".to_owned(),
+            stage: match (opening.drawn, waiting) {
+                (true, _) => Stage::Done,
+                (false, true) => Stage::Waiting,
+                (false, false) => Stage::Running,
+            },
+            note: if uploads > 0 {
+                format!("{uploads} textures")
+            } else {
+                String::new()
+            },
+        });
+        let done = items.iter().filter(|i| i.stage == Stage::Done).count();
+        // The bar: each part by how far it is.
+        let characters = items.len() - 2;
+        let built = items[1..=characters]
+            .iter()
+            .filter(|i| matches!(i.stage, Stage::Done | Stage::Failed))
+            .count();
+        opening.textures = opening.textures.max(uploads);
+        let [content, people, viewport] = &opening.parts;
+        content.set(u64::from(ready || failed), 1);
+        if characters == 0 {
+            people.set(u64::from(ready || failed), 1);
+        } else {
+            people.set(built as u64, characters as u64);
+        }
+        if opening.drawn {
+            viewport.set(1, 1);
+        } else {
+            viewport.set((opening.textures - uploads) as u64, opening.textures.max(1) as u64);
+        }
+        opening.progress.set(done as u64, items.len() as u64);
+        opening.progress.set_items(items);
+        opening.progress.step(&step);
+        if (opening.drawn || failed) && !waiting {
+            if let Some(live) = self.live.as_mut() {
+                live.show_builds = Show::Notice;
+            }
+            return;
+        }
+        self.opening = Some(opening);
+    }
+
+    /// Reads the news and the newest release: what the cache has at
+    /// once, and what GitHub says by a job when the cache is old. Nothing
+    /// waits for the answer.
+    pub fn fetch_feed(&mut self) {
+        use rk_packages::news::{Cache, Wanted};
+        let wanted = Wanted {
+            news: self.settings.show_news,
+            updates: self.settings.check_updates,
+        };
+        if !wanted.news {
+            self.news.clear();
+        }
+        if self.scripted || !(wanted.news || wanted.updates) {
+            return;
+        }
+        const RUNNING: &str = env!("CARGO_PKG_VERSION");
+        let now = crate::settings::now();
+        let file = Cache::file();
+        let mut cache = Cache::load(&file);
+        let feed = cache.feed(wanted, RUNNING, now);
+        self.news = feed.posts;
+        self.update = feed.update.or(self.update.take());
+        self.jobs.spawn(
+            "News",
+            Show::Quiet,
+            move |_| {
+                if cache.refresh(wanted, now) {
+                    // A cache that cannot be written is asked for again.
+                    let _ = cache.save(&file);
+                }
+                Ok(cache.feed(wanted, RUNNING, now))
+            },
+            |st: &mut State, result| {
+                let Ok(feed) = result else { return };
+                if st.settings.show_news {
+                    st.news = feed.posts;
+                }
+                if let Some(release) = feed.update.filter(|_| st.settings.check_updates) {
+                    if st.update.as_ref() != Some(&release) {
+                        st.log
+                            .info(format!("Renkatsu {} is out: {}", release.version, release.url));
+                    }
+                    st.update = Some(release);
+                }
+            },
+        );
     }
 
     /// The editor on a project and its scene.
@@ -447,13 +775,19 @@ impl State {
             saved: scene.clone(),
             doc: Document::new(scene),
             games: Games::default(),
+            jobs: Jobs::default(),
+            opening: None,
+            content_pending: None,
+            content_failed: None,
+            importing: 0,
+            package_job: None,
+            news: Vec::new(),
             packages: crate::packages::Packages::new(),
             modal: None,
             picker: None,
             imports: VecDeque::new(),
             scripted: false,
             update: None,
-            update_check: None,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,
@@ -838,6 +1172,7 @@ impl State {
                 place: false,
                 ask: true,
                 name: None,
+                first: false,
             }),
             Pick::Project => self.open_or_tell(&path),
             Pick::Animation => self.import_animation_file(&path),
@@ -913,6 +1248,8 @@ impl State {
         self.folder = 0;
         self.imports.clear();
         self.selector = None;
+        self.opening = None;
+        self.content_failed = None;
         if let Some(live) = self.live.as_mut() {
             live.reset();
         }
@@ -963,6 +1300,7 @@ impl State {
             self.log.warn(note);
         }
         self.adopt(project, scene);
+        self.begin_opening();
         Ok(())
     }
 
@@ -973,6 +1311,7 @@ impl State {
         let project = Project::create(root, name)?;
         self.adopt(project, Scene::new());
         self.start_fresh(start == Start::RenkatsuChan);
+        self.begin_opening();
         Ok(())
     }
 
@@ -996,13 +1335,39 @@ impl State {
     /// Saves a copy of the project in another folder and goes on there.
     pub fn save_as(&mut self, root: &Path, name: &str) -> Result<()> {
         let scene = self.doc.scene().clone();
-        let mut copy = self.project.copy_to(root, name)?;
-        copy.save_scene(&scene)?;
-        self.log.info(format!("Saved {name} in {}", root.display()));
+        if self.scripted {
+            let mut copy = self.project.copy_to(root, name)?;
+            copy.save_scene(&scene)?;
+            self.saved_as(copy, scene);
+            return Ok(());
+        }
+        // The copy can be large: the window waits for it with a bar.
+        let project = self.project.clone();
+        let (root, name) = (root.to_owned(), name.to_owned());
+        self.jobs.spawn(
+            &format!("Saving {name}"),
+            Show::Wait,
+            move |p| {
+                p.step(&root.display().to_string());
+                let mut copy = project.copy_to(&root, &name)?;
+                copy.save_scene(&scene)?;
+                Ok((copy, scene))
+            },
+            |st: &mut State, result| match result {
+                Ok((copy, scene)) => st.saved_as(copy, scene),
+                Err(e) => st.log.error(format!("The copy could not be saved: {e:#}")),
+            },
+        );
+        Ok(())
+    }
+
+    /// Goes on in the copy a Save as made.
+    fn saved_as(&mut self, copy: Project, scene: Scene) {
+        self.log
+            .info(format!("Saved {} in {}", copy.file.name, copy.root.display()));
         let selected = self.doc.selected;
         self.adopt(copy, scene);
         self.doc.selected = selected;
-        Ok(())
     }
 
     /// What characters are built from changed: the Koikatsu folder was
@@ -1011,6 +1376,7 @@ impl State {
     /// built get another try.
     pub fn content_changed(&mut self) {
         self.games.reset();
+        self.content_failed = None;
         self.animations.refresh(&self.project);
         if let Some(importer) = &mut self.importer {
             importer.reset();
@@ -1046,20 +1412,35 @@ impl State {
             ));
             return;
         };
-        self.begin_import(Import {
+        let import = Import {
             path: card,
             place: true,
             ask: false,
             name: Some(DEFAULT_NAME.to_owned()),
-        });
+            first: true,
+        };
+        if self.scripted {
+            self.begin_import(import);
+        } else {
+            // It waits for the content, which a job opens.
+            self.imports.push_back(import);
+        }
     }
 
     /// Starts the next import that waits, once no dialog is open.
     pub fn next_import(&mut self) {
-        if self.modal.is_none() {
-            if let Some(import) = self.imports.pop_front() {
-                self.begin_import(import);
-            }
+        if self.modal.is_some() || self.importing > 0 || self.imports.is_empty() {
+            return;
+        }
+        // The mods a card needs are worked out from the content, which a
+        // job opens: the import waits for it.
+        let mods = self.project.mods_dir();
+        let failed = self.content_failed.as_deref() == Some(mods.as_path());
+        if !self.scripted && !failed && self.games.ready(&mods).is_none() {
+            return;
+        }
+        if let Some(import) = self.imports.pop_front() {
+            self.begin_import(import);
         }
     }
 
@@ -1128,17 +1509,64 @@ impl State {
             missing,
             ..
         } = pending;
-        if !plan.copy.is_empty() {
-            match mods::copy(&plan, &self.project.mods_dir()) {
-                Ok(()) => self.log.info(format!(
-                    "Copied {} for {title} into the project: {}",
-                    mods::count_text(plan.copy.len()),
-                    mods::size_text(plan.bytes())
-                )),
-                Err(e) => self
-                    .log
-                    .error(format!("The mods of {title} could not be copied: {e:#}")),
-            }
+        if plan.copy.is_empty() {
+            self.imported(import, title, missing);
+            return;
+        }
+        let dir = self.project.mods_dir();
+        let what = format!(
+            "{}, {}",
+            mods::count_text(plan.copy.len()),
+            mods::size_text(plan.bytes())
+        );
+        if self.scripted {
+            let copied = mods::copy(&plan, &dir);
+            self.copied_mods(&title, &what, copied);
+            self.imported(import, title, missing);
+            return;
+        }
+        // The copy can be large: a job does it, and can be stopped.
+        self.importing += 1;
+        let (total, said) = (plan.bytes(), what.clone());
+        self.jobs.spawn(
+            &format!("Importing {title}"),
+            Show::Notice,
+            move |p| {
+                p.set_bytes(0, total);
+                mods::copy_counted(&plan, &dir, &mut |bytes| {
+                    p.add(bytes);
+                    p.check()
+                })?;
+                p.step(&said);
+                Ok(())
+            },
+            move |st: &mut State, copied| {
+                st.importing = st.importing.saturating_sub(1);
+                if copied.as_ref().is_err_and(crate::jobs::was_cancelled) {
+                    st.log.info(format!("The import of {title} was cancelled"));
+                    return;
+                }
+                st.copied_mods(&title, &what, copied);
+                st.imported(import, title, missing);
+            },
+        );
+    }
+
+    /// Says how the copy of an import's mods went.
+    fn copied_mods(&mut self, title: &str, what: &str, copied: Result<()>) {
+        match copied {
+            Ok(()) => self.log.info(format!("Copied {what} for {title} into the project")),
+            Err(e) => self
+                .log
+                .error(format!("The mods of {title} could not be copied: {e:#}")),
+        }
+    }
+
+    /// Brings the card of an import into the project, once its mods are
+    /// there, and puts the character in the scene when that was asked for.
+    fn imported(&mut self, import: Import, title: String, missing: Vec<String>) {
+        if self.project.is_none() {
+            return;
         }
         for guid in &missing {
             self.log
@@ -1162,6 +1590,11 @@ impl State {
             self.add_card(file);
         } else {
             self.show_folder(0);
+        }
+        if import.first {
+            // What a new project starts with is where its history starts.
+            self.doc.clear_history();
+            self.save();
         }
     }
 
@@ -1248,9 +1681,48 @@ impl State {
         let needs_game = picks
             .iter()
             .any(|p| matches!(p.from, crate::animations::From::Installed { .. }));
-        let game = if needs_game { self.games.get(&mods).ok() } else { None };
-        let done = crate::animations::import(&self.project, game, picks, &folder, by_category);
-        self.imported_animations(done, &folder);
+        if self.scripted || picks.len() == 1 {
+            let game = if needs_game { self.games.get(&mods).ok() } else { None };
+            let done = crate::animations::import(&self.project, game, picks, &folder, by_category);
+            self.imported_animations(done, &folder);
+            return;
+        }
+        // Many clips take a while: a job copies them, and can be stopped
+        // between two of them.
+        let game = if needs_game {
+            self.games.shared(&mods).ok()
+        } else {
+            None
+        };
+        let (project, picks, total) = (self.project.clone(), picks.to_vec(), picks.len() as u64);
+        let (theirs, root) = (folder.clone(), self.project.root.clone());
+        self.jobs.spawn(
+            "Importing animations",
+            Show::Notice,
+            move |p| {
+                let done = crate::animations::import_watched(
+                    &project,
+                    game.as_deref(),
+                    &picks,
+                    &theirs,
+                    by_category,
+                    &mut |n, name| {
+                        p.set(n as u64, total);
+                        p.step(name);
+                        !p.cancelled()
+                    },
+                );
+                p.set(total, total);
+                p.step(&crate::selector::counted(done.files.len(), "animation"));
+                Ok(done)
+            },
+            move |st: &mut State, result| {
+                // What was copied belongs to the project it was copied into.
+                if let (Ok(done), true) = (result, st.project.root == root) {
+                    st.imported_animations(done, &folder);
+                }
+            },
+        );
     }
 
     /// Says what an import of animations did and shows the folder they

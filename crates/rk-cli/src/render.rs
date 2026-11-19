@@ -36,6 +36,8 @@ pub struct Args<'a> {
     pub time: f32,
     /// Draw with the look of Renkatsu Studio's viewport.
     pub studio_look: bool,
+    /// Smooth cut-out edges with alpha to coverage.
+    pub alpha_to_coverage: bool,
     /// The colour behind the character, as `r,g,b` from 0 to 1.
     pub background: Option<&'a str>,
 }
@@ -180,6 +182,7 @@ pub fn render(a: Args) -> Result<()> {
             enabled: a.shadows,
             ..Default::default()
         },
+        alpha_to_coverage: a.alpha_to_coverage,
         ..Default::default()
     };
     let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, background)?;
