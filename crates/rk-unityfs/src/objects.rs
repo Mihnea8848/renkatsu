@@ -99,6 +99,9 @@ pub struct Renderer {
     /// where its part of that lightmap lies: scale x, y and offset x, y.
     pub lightmap_index: u32,
     pub lightmap_scale_offset: [f32; 4],
+    /// False when the renderer's use of reflection probes is switched off
+    /// (`m_ReflectionProbeUsage` 0): it reflects the scene's default.
+    pub reflection_probes: bool,
 }
 
 impl Renderer {
@@ -118,6 +121,7 @@ impl Renderer {
                 .array("m_BlendShapeWeights")
                 .map(|a| a.iter().filter_map(UValue::as_f32).collect())
                 .unwrap_or_default(),
+            reflection_probes: o.i64("m_ReflectionProbeUsage").unwrap_or(1) != 0,
             lightmap_index: o.i64("m_LightmapIndex").unwrap_or(0xFFFF) as u32,
             lightmap_scale_offset: o
                 .get("m_LightmapTilingOffset")
@@ -850,6 +854,8 @@ impl Texture2D {
             }
             10 => bc(texture2ddecoder::decode_bc1, &mut out)?,
             12 => bc(texture2ddecoder::decode_bc3, &mut out)?,
+            // BC6H holds a high range; what is above white is cut off here.
+            24 => bc(texture2ddecoder::decode_bc6_unsigned, &mut out)?,
             25 => bc(texture2ddecoder::decode_bc7, &mut out)?,
             26 => bc(texture2ddecoder::decode_bc4, &mut out)?,
             27 => bc(texture2ddecoder::decode_bc5, &mut out)?,

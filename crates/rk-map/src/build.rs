@@ -11,7 +11,10 @@ use crate::unity::{self, Light, LightmapSettings, RenderSettings, SunLightInfo, 
 use anyhow::{Context, Result};
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use rk_chara::scene::Image;
-use rk_render::map::{Blend, Fog, Lightmap, MapImage, MapLight, MapMaterial, MapMesh, MapObject, MapScene};
+use rk_render::map::{
+    pick_probe, Blend, Detail, Fog, Lightmap, MapImage, MapLight, MapMaterial, MapMesh, MapObject, MapScene,
+    Reflection, ReflectionProbe, SmoothnessFrom, Surface,
+};
 use rk_render::sky::{Sky, SkyTexture, HDR_PLAIN};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
 use rk_unityfs::{class, PPtr};
@@ -19,6 +22,9 @@ use rk_vfs::assets::{AssetFile, LoadedBundle, ObjRef};
 use rk_vfs::Game;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// The lowest and highest corner of a box in the world.
+type Bounds = ([f32; 3], [f32; 3]);
 
 /// What was left out while building, by reason, with how often.
 pub type Skipped = HashMap<String, usize>;
@@ -56,6 +62,7 @@ pub fn build(
         meshes: HashMap::new(),
         materials: HashMap::new(),
         images: HashMap::new(),
+        cubes: HashMap::new(),
         skipped: Skipped::new(),
         compressed,
         dome: None,
@@ -65,7 +72,12 @@ pub fn build(
     let mut lights: Vec<(Light, Mat4)> = Vec::new();
     let mut settings: Option<RenderSettings> = None;
     let mut sky: Option<Sky> = None;
+    let mut reflection: Option<Reflection> = None;
     let mut lightmaps: Vec<Lightmap> = Vec::new();
+    let mut probes: Vec<ReflectionProbe> = Vec::new();
+    // The bounds each object looks for its reflection probe with; `None`
+    // for a renderer that uses none.
+    let mut probe_bounds: Vec<Option<Bounds>> = Vec::new();
     for file in &loaded.files {
         let sf = &file.sf;
         // The hierarchy of this file: transforms by id, game objects by id.
@@ -175,7 +187,43 @@ pub fn build(
         if let Some(obj) = sf.objects_of(unity::class::RENDER_SETTINGS).next() {
             let read = RenderSettings::read(&sf.read(obj)?);
             sky = b.sky(file, read.skybox);
+            // What is reflected outside every probe: the cubemap Unity
+            // baked from the sky, or the scene's custom one.
+            let cube = if read.reflection_mode == 1 {
+                read.custom_reflection
+            } else {
+                read.sky_reflection
+            };
+            reflection = Some(b.reflection(file, cube, read.reflection_intensity));
             settings = Some(read);
+        }
+        for obj in sf.objects_of(unity::class::REFLECTION_PROBE) {
+            let Ok(o) = sf.read(obj) else { continue };
+            let probe = unity::ReflectionProbe::read(&o);
+            let go = probe.game_object.path_id;
+            if !probe.enabled || !tree.shown(go, &hidden, &now) {
+                continue;
+            }
+            // Baked and custom probes hold a cubemap; a real-time one is
+            // drawn while the game runs, and reflects nothing here.
+            let cube = match probe.mode {
+                0 => probe.baked,
+                2 => probe.custom,
+                _ => {
+                    *b.skipped.entry("real-time reflection probe".to_owned()).or_default() += 1;
+                    PPtr::default()
+                }
+            };
+            let position = tree.world_of(go).transform_point3(Vec3::ZERO);
+            probes.push(ReflectionProbe {
+                position: position.to_array(),
+                // The box follows the probe, without its turn or scale.
+                centre: (position + Vec3::from(probe.offset)).to_array(),
+                half: (Vec3::from(probe.size) * 0.5).to_array(),
+                box_projection: probe.box_projection,
+                importance: probe.importance,
+                reflection: b.reflection(file, cube, probe.intensity),
+            });
         }
         for obj in sf.objects_of(class::MESH_RENDERER) {
             let Ok(renderer) = sf.read(obj).and_then(|o| Renderer::read(&o)) else {
@@ -191,9 +239,10 @@ pub fn build(
                     .then_some((renderer.lightmap_index as usize, renderer.lightmap_scale_offset)),
             };
             match b.object(file, &tree, &renderer, lightmap) {
-                Ok(Some(mut o)) => {
+                Ok(Some((mut o, bounds))) => {
                     o.vanish = hidden_by.get(&go).cloned().unwrap_or_default();
-                    objects.push(o)
+                    objects.push(o);
+                    probe_bounds.push(bounds.filter(|_| renderer.reflection_probes));
                 }
                 Ok(None) => {}
                 Err(e) => *b.skipped.entry(format!("{e:#}")).or_default() += 1,
@@ -209,11 +258,18 @@ pub fn build(
     // scene's Unity skybox is kept for drawing on request.
     light.unity_sky = sky;
     light.sky = b.dome.take();
+    if let Some(reflection) = reflection {
+        light.reflection = reflection;
+    }
+    for (o, bounds) in objects.iter_mut().zip(&probe_bounds) {
+        o.probe = bounds.and_then(|bounds| pick_probe(bounds, &probes));
+    }
     Ok((
         MapScene {
             objects,
             lightmaps,
             light,
+            probes,
             camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
             vanish: volumes,
         },
@@ -307,6 +363,16 @@ fn map_light(
                 strength: l.shadow_strength,
                 distance: 50.0,
             }),
+        // Black without a cubemap, as Unity's default reflection is.
+        reflection: Reflection {
+            cube: None,
+            hdr: rk_render::sky::HDR_PLAIN,
+        },
+        // Stored linear: the colour equals the ambient probe's constant
+        // term in the maps that have both.
+        indirect_specular: settings.map_or([0.0; 3], |s| {
+            [s.indirect_specular[0], s.indirect_specular[1], s.indirect_specular[2]]
+        }),
     }
 }
 
@@ -473,6 +539,8 @@ struct Builder<'a> {
     meshes: HashMap<(String, i64), Arc<Mesh>>,
     materials: HashMap<(String, i64), Option<Arc<MapMaterial>>>,
     images: HashMap<(String, i64), Option<Arc<MapImage>>>,
+    /// Reflection cubemaps with their decoding, before any intensity.
+    cubes: HashMap<(String, i64), (Arc<rk_render::sky::MapCube>, [f32; 4])>,
     skipped: Skipped,
     compressed: bool,
     /// The sky dome's sky, from the first shown renderer with a skybox
@@ -504,7 +572,7 @@ impl Builder<'_> {
         tree: &Tree,
         renderer: &Renderer,
         lightmap: Option<(usize, [f32; 4])>,
-    ) -> Result<Option<MapObject>> {
+    ) -> Result<Option<(MapObject, Option<Bounds>)>> {
         let go = renderer.game_object.path_id;
         let name = tree.objects.get(&go).map(|o| o.name.clone()).unwrap_or_default();
         let Some(filter) = tree
@@ -542,7 +610,10 @@ impl Builder<'_> {
             return Ok(None);
         }
         let world = tree.world_of(go);
-        Ok(Some(MapObject {
+        // The renderer's bounds as Unity keeps them: the box around the
+        // mesh's own box, moved into the world.
+        let bounds = mesh.local_aabb.map(|(centre, half)| world_box(world, centre, half));
+        let object = MapObject {
             name,
             mesh: place(&mesh, world, lightmap.map(|l| l.1)),
             materials,
@@ -553,7 +624,9 @@ impl Builder<'_> {
             shadows_only: renderer.cast_shadows == 3,
             layer: tree.objects.get(&go).map_or(0, |o| o.layer.max(0) as u32),
             vanish: Vec::new(),
-        }))
+            probe: None,
+        };
+        Ok(Some((object, bounds)))
     }
 
     fn mesh(&mut self, file: &Arc<AssetFile>, p: PPtr) -> Result<Option<Arc<Mesh>>> {
@@ -605,10 +678,9 @@ impl Builder<'_> {
             } else {
                 Blend::Fade
             }
-        } else if keywords.contains("_ALPHABLEND_ON")
-            || keywords.contains("_ALPHAPREMULTIPLY_ON")
-            || lower.contains("transparent") && !lower.contains("cutout")
-        {
+        } else if keywords.contains("_ALPHAPREMULTIPLY_ON") {
+            Blend::Premultiplied
+        } else if keywords.contains("_ALPHABLEND_ON") || lower.contains("transparent") && !lower.contains("cutout") {
             Blend::Fade
         } else if keywords.contains("_ALPHATEST_ON") || lower.contains("cutout") {
             Blend::Cutout
@@ -618,7 +690,7 @@ impl Builder<'_> {
         let default_queue = match blend {
             Blend::Opaque => 2000,
             Blend::Cutout => 2450,
-            Blend::Fade | Blend::Additive => 3000,
+            Blend::Fade | Blend::Additive | Blend::Premultiplied => 3000,
         };
         let main = m.texture("_MainTex");
         let albedo = main.and_then(|t| self.image(&r.file, t.texture));
@@ -641,6 +713,12 @@ impl Builder<'_> {
         } else {
             ([0.0; 3], None)
         };
+        let surface = (standard && !unlit).then(|| {
+            let file = r.file.clone();
+            surface_of(&m, &keywords, lower.contains("specular setup"), &mut |p| {
+                self.image(&file, p)
+            })
+        });
         let two_sided =
             particle || lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
         Some(Arc::new(MapMaterial {
@@ -660,7 +738,41 @@ impl Builder<'_> {
             } else {
                 default_queue
             },
+            surface,
         }))
+    }
+
+    /// A cubemap to reflect with its mip levels, scaled by `intensity`.
+    /// Black when there is none, as Unity's default reflection is.
+    fn reflection(&mut self, file: &Arc<AssetFile>, p: PPtr, intensity: f32) -> Reflection {
+        let none = Reflection {
+            cube: None,
+            hdr: rk_render::sky::HDR_PLAIN,
+        };
+        let Some(r) = self.deref(file, p) else {
+            return none;
+        };
+        let key = (r.file.cab.clone(), r.info.path_id);
+        let cached = self.cubes.get(&key).cloned();
+        let made = cached.map(Ok).unwrap_or_else(|| {
+            let (tex, raw) = self.game.assets.texture_raw(&r)?;
+            let hdr = sky::reflection_hdr(&tex, 1.0)
+                .with_context(|| format!("reflection cubemap usage {}", tex.lightmap_format))?;
+            Ok::<_, anyhow::Error>((Arc::new(sky::cube_levels(&tex, &raw, self.compressed)?), hdr))
+        });
+        match made {
+            Ok((cube, hdr)) => {
+                self.cubes.insert(key, (cube.clone(), hdr));
+                Reflection {
+                    cube: Some(cube),
+                    hdr: [hdr[0] * intensity, hdr[1], hdr[2], hdr[3]],
+                }
+            }
+            Err(e) => {
+                *self.skipped.entry(format!("reflection: {e:#}")).or_default() += 1;
+                none
+            }
+        }
     }
 
     /// Whether a material uses one of Unity's skybox shaders.
@@ -820,14 +932,103 @@ impl Builder<'_> {
 /// Unity's built-in "grey" texture, which the skybox shaders name as the
 /// default of their textures: half grey, half transparent.
 fn grey() -> Arc<MapImage> {
+    plain("default_grey", [128; 4], false)
+}
+
+/// What Standard reads of a material, by the keywords that pick its
+/// program: a map counts only with its keyword, as in the game. `load`
+/// reads a texture.
+fn surface_of(
+    m: &Material,
+    keywords: &str,
+    specular_setup: bool,
+    load: &mut dyn FnMut(PPtr) -> Option<Arc<MapImage>>,
+) -> Surface {
+    let has = |k: &str| keywords.split_whitespace().any(|w| w == k);
+    let mut image = |name: &str| m.texture(name).and_then(|t| load(t.texture));
+    let float = |name: &str, default: f32| m.float(name).unwrap_or(default);
+    let gloss_keyword = if specular_setup {
+        "_SPECGLOSSMAP"
+    } else {
+        "_METALLICGLOSSMAP"
+    };
+    let gloss_map = has(gloss_keyword)
+        .then(|| {
+            image(if specular_setup {
+                "_SpecGlossMap"
+            } else {
+                "_MetallicGlossMap"
+            })
+        })
+        .flatten();
+    let smoothness_from = if has("_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A") {
+        SmoothnessFrom::AlbedoAlpha
+    } else if has(gloss_keyword) {
+        SmoothnessFrom::MapAlpha
+    } else {
+        SmoothnessFrom::Value
+    };
+    let detail = has("_DETAIL_MULX2").then(|| {
+        let st = m.texture("_DetailAlbedoMap").map_or([1.0, 1.0, 0.0, 0.0], |t| {
+            [t.scale[0], t.scale[1], t.offset[0], t.offset[1]]
+        });
+        Detail {
+            // Unity's defaults where a map is not set: grey, which
+            // doubled is about white, and a flat normal map.
+            albedo: image("_DetailAlbedoMap").or_else(|| Some(plain("default_grey", [128; 4], true))),
+            normal: image("_DetailNormalMap").or_else(|| Some(plain("default_bump", [128, 128, 255, 128], false))),
+            mask: image("_DetailMask"),
+            normal_scale: float("_DetailNormalMapScale", 1.0),
+            st,
+            second_uv: float("_UVSec", 0.0) != 0.0,
+        }
+    });
+    Surface {
+        // The shader marks `_Metallic` as a gamma value (flag 32 of the
+        // property in the game's Shader object), so Unity hands it over
+        // linearised, as it does colours.
+        metallic: to_linear(float("_Metallic", 0.0)),
+        smoothness: match smoothness_from {
+            SmoothnessFrom::Value => float("_Glossiness", 0.5),
+            _ => float("_GlossMapScale", 1.0),
+        },
+        smoothness_from,
+        gloss_map,
+        specular: specular_setup.then(|| linear3(m.color("_SpecColor").unwrap_or([0.2, 0.2, 0.2, 1.0]))),
+        normal_map: has("_NORMALMAP").then(|| image("_BumpMap")).flatten(),
+        normal_scale: float("_BumpScale", 1.0),
+        occlusion_map: image("_OcclusionMap"),
+        occlusion_strength: float("_OcclusionStrength", 1.0),
+        detail,
+        height: has("_PARALLAXMAP")
+            .then(|| image("_ParallaxMap"))
+            .flatten()
+            .map(|map| (map, float("_Parallax", 0.02))),
+        highlights: !has("_SPECULARHIGHLIGHTS_OFF"),
+        reflections: !has("_GLOSSYREFLECTIONS_OFF"),
+    }
+}
+
+/// A one texel texture of one colour, for Unity's default textures.
+fn plain(name: &str, rgba: [u8; 4], srgb: bool) -> Arc<MapImage> {
     Arc::new(MapImage::Decoded(Arc::new(Image {
-        name: "default_grey".into(),
+        name: name.into(),
         width: 1,
         height: 1,
-        rgba: vec![128; 4],
-        srgb: false,
+        rgba: rgba.to_vec(),
+        srgb,
         repeat: true,
     })))
+}
+
+/// The box in the world around a box given by its centre and half size
+/// in an object's own space.
+fn world_box(world: Mat4, centre: [f32; 3], half: [f32; 3]) -> Bounds {
+    let c = world.transform_point3(Vec3::from(centre));
+    let m = Mat3::from_mat4(world);
+    let h = Vec3::from(half);
+    let reach = m.x_axis.abs() * h.x + m.y_axis.abs() * h.y + m.z_axis.abs() * h.z;
+    ((c - reach).to_array(), (c + reach).to_array())
 }
 
 /// The MeshFilter among a game object's components.
@@ -859,6 +1060,18 @@ fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
         .collect();
     // A mirrored object turns its triangles inside out; turn them back.
     let mirrored = world.determinant() < 0.0;
+    // Tangents turn with the object; the binormal's sign turns once more
+    // for a mirrored one (Unity's `unity_WorldTransformParams.w`).
+    let linear = Mat3::from_mat4(world);
+    let flip = if mirrored { -1.0 } else { 1.0 };
+    let tangents = mesh
+        .tangents
+        .iter()
+        .map(|t| {
+            let w = (linear * Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
+            [w.x, w.y, w.z, t[3] * flip]
+        })
+        .collect();
     let mut indices = mesh.indices.clone();
     if mirrored {
         for tri in indices.chunks_exact_mut(3) {
@@ -891,11 +1104,164 @@ fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
     MapMesh {
         uv2,
         colors: mesh.colors.clone(),
+        tangents,
+        uv1: mesh.uv[1].clone(),
         bounds: MapMesh::compute_bounds(&positions),
         positions,
         normals,
         uv: mesh.uv[0].clone(),
         indices,
         submeshes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rk_unityfs::objects::TexEnv;
+
+    fn standard(keywords: &str, floats: &[(&str, f32)], textures: &[&str]) -> Material {
+        Material {
+            keywords: keywords.to_owned(),
+            floats: floats.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
+            textures: textures
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let env = TexEnv {
+                        texture: PPtr {
+                            file_id: 0,
+                            path_id: i as i64 + 1,
+                        },
+                        scale: [2.0, 3.0],
+                        offset: [0.25, 0.5],
+                    };
+                    ((*name).to_owned(), env)
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Every texture that is set loads.
+    fn load(p: PPtr) -> Option<Arc<MapImage>> {
+        (!p.is_null()).then(|| plain("set", [255; 4], false))
+    }
+
+    #[test]
+    fn a_plain_standard_material_reads_its_values() {
+        let m = standard(
+            "",
+            &[("_Metallic", 0.5), ("_Glossiness", 0.3), ("_GlossMapScale", 0.9)],
+            &[],
+        );
+        let s = surface_of(&m, "", false, &mut load);
+        // The shader takes `_Metallic` as a gamma value.
+        assert!((s.metallic - to_linear(0.5)).abs() < 1e-6);
+        assert_eq!(s.smoothness, 0.3);
+        assert_eq!(s.smoothness_from, SmoothnessFrom::Value);
+        assert!(s.gloss_map.is_none() && s.normal_map.is_none() && s.detail.is_none() && s.height.is_none());
+        assert!(s.highlights && s.reflections && s.specular.is_none());
+        assert_eq!((s.normal_scale, s.occlusion_strength), (1.0, 1.0));
+    }
+
+    #[test]
+    fn maps_count_only_with_their_keyword() {
+        let textures = [
+            "_MetallicGlossMap",
+            "_BumpMap",
+            "_ParallaxMap",
+            "_OcclusionMap",
+            "_DetailAlbedoMap",
+        ];
+        let floats = [("_Glossiness", 0.3), ("_GlossMapScale", 0.9), ("_Parallax", 0.05)];
+        let m = standard("", &floats, &textures);
+        let s = surface_of(&m, "", false, &mut load);
+        assert!(s.gloss_map.is_none() && s.normal_map.is_none() && s.height.is_none() && s.detail.is_none());
+        // Standard reads the occlusion map without a keyword.
+        assert!(s.occlusion_map.is_some());
+
+        let keywords = "_METALLICGLOSSMAP _NORMALMAP _PARALLAXMAP _DETAIL_MULX2 _SPECULARHIGHLIGHTS_OFF";
+        let s = surface_of(&m, keywords, false, &mut load);
+        assert!(s.gloss_map.is_some() && s.normal_map.is_some());
+        assert_eq!(s.smoothness_from, SmoothnessFrom::MapAlpha);
+        assert_eq!(s.smoothness, 0.9);
+        assert_eq!(s.height.as_ref().map(|h| h.1), Some(0.05));
+        assert!(!s.highlights && s.reflections);
+        let d = s.detail.expect("detail");
+        assert_eq!(d.st, [2.0, 3.0, 0.25, 0.5]);
+        // The maps that are not set read Unity's defaults.
+        assert!(d.albedo.is_some() && d.normal.is_some() && d.mask.is_none());
+        assert!(!d.second_uv);
+
+        let s = surface_of(
+            &m,
+            "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A _GLOSSYREFLECTIONS_OFF",
+            false,
+            &mut load,
+        );
+        assert_eq!(s.smoothness_from, SmoothnessFrom::AlbedoAlpha);
+        assert_eq!(s.smoothness, 0.9);
+        assert!(!s.reflections);
+    }
+
+    #[test]
+    fn the_specular_setup_reads_its_own_colour_and_map() {
+        let mut m = standard("", &[("_Glossiness", 0.4)], &["_SpecGlossMap", "_MetallicGlossMap"]);
+        m.colors.push(("_SpecColor".to_owned(), [1.0, 0.5, 0.0, 1.0]));
+        let s = surface_of(&m, "_METALLICGLOSSMAP", true, &mut load);
+        assert_eq!(s.specular, Some([1.0, to_linear(0.5), 0.0]));
+        assert!(s.gloss_map.is_none());
+        assert_eq!(s.smoothness_from, SmoothnessFrom::Value);
+        let s = surface_of(&m, "_SPECGLOSSMAP", true, &mut load);
+        assert!(s.gloss_map.is_some());
+        assert_eq!(s.smoothness_from, SmoothnessFrom::MapAlpha);
+    }
+
+    #[test]
+    fn a_box_moved_into_the_world_keeps_everything_inside() {
+        // A quarter turn about Y swaps the box's x and z sizes.
+        let world =
+            Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)) * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let (lo, hi) = world_box(world, [0.0, 1.0, 0.0], [1.0, 2.0, 3.0]);
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-4);
+        assert!(near(lo, [7.0, -1.0, -1.0]), "{lo:?}");
+        assert!(near(hi, [13.0, 3.0, 1.0]), "{hi:?}");
+    }
+
+    fn quad() -> Mesh {
+        Mesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
+            tangents: vec![[1.0, 0.0, 0.0, -1.0]; 3],
+            uv: [
+                vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                vec![[0.5, 0.5]; 3],
+                Vec::new(),
+                Vec::new(),
+            ],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tangents_turn_with_the_object() {
+        let world = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2) * Mat4::from_scale(Vec3::splat(3.0));
+        let placed = place(&quad(), world, None);
+        let t = placed.tangents[0];
+        // +X turns to -Z, stays a unit vector, and keeps its sign.
+        assert!(
+            (t[0]).abs() < 1e-5 && (t[2] + 1.0).abs() < 1e-5 && t[3] == -1.0,
+            "{t:?}"
+        );
+        assert_eq!(placed.uv1, vec![[0.5, 0.5]; 3]);
+    }
+
+    #[test]
+    fn a_mirrored_object_turns_the_binormal() {
+        let placed = place(&quad(), Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)), None);
+        assert_eq!(placed.tangents[0], [-1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(placed.indices, vec![0, 2, 1]);
     }
 }

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! Drawing maps: many static objects, each a mesh already in world space
-//! with a material per submesh. This first path lights them plainly (the
-//! sun, the scene's ambient light and fog); maps get their own physically
-//! based shading later. Characters keep their own path in `lib.rs`.
+//! with a material per submesh. Materials of Unity's Standard shader are
+//! lit as that shader lights them (sun, baked or ambient light, reflection
+//! probes); the rest plainly. Characters keep their own path in `lib.rs`.
 
 use crate::{Camera, Renderer, COLOR_FORMAT};
 use anyhow::Result;
@@ -32,15 +32,21 @@ pub enum Blend {
     Fade,
     /// Added onto what is behind, by alpha, drawn with the blended ones.
     Additive,
+    /// Standard's "Transparent" mode: the colour arrives already faded by
+    /// its alpha (Unity's Blend One OneMinusSrcAlpha), so that reflections
+    /// stay on clear glass.
+    Premultiplied,
 }
 
 impl Blend {
-    /// The pipeline's blending: 0 none, 1 by alpha, 2 added.
+    /// The pipeline's blending: 0 none, 1 by alpha, 2 added, 3 already
+    /// faded.
     fn kind(self) -> u8 {
         match self {
             Blend::Opaque | Blend::Cutout => 0,
             Blend::Fade => 1,
             Blend::Additive => 2,
+            Blend::Premultiplied => 3,
         }
     }
 }
@@ -82,6 +88,92 @@ impl MapImage {
     }
 }
 
+/// Where a Standard material's smoothness comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmoothnessFrom {
+    /// `_Glossiness`, one value.
+    #[default]
+    Value,
+    /// The alpha of the metallic (or specular) map, times `_GlossMapScale`.
+    MapAlpha,
+    /// The alpha of the albedo, times `_GlossMapScale`.
+    AlbedoAlpha,
+}
+
+/// Standard's detail maps (`_DETAIL_MULX2`).
+#[derive(Debug, Default)]
+pub struct Detail {
+    pub albedo: Option<Arc<MapImage>>,
+    pub normal: Option<Arc<MapImage>>,
+    /// Where the detail shows, in its alpha; everywhere without one.
+    pub mask: Option<Arc<MapImage>>,
+    pub normal_scale: f32,
+    /// The detail maps' own scale in xy and offset in zw.
+    pub st: [f32; 4],
+    /// Read with the mesh's second UV set (`_UVSec` 1).
+    pub second_uv: bool,
+}
+
+/// What Unity's Standard shader reads of a material besides its colour and
+/// emission.
+#[derive(Debug)]
+pub struct Surface {
+    pub metallic: f32,
+    /// `_Glossiness`, or `_GlossMapScale` when a texture gives it.
+    pub smoothness: f32,
+    pub smoothness_from: SmoothnessFrom,
+    /// `_MetallicGlossMap`: metallic in red, smoothness in alpha. In the
+    /// specular setup `_SpecGlossMap`: specular colour and smoothness.
+    pub gloss_map: Option<Arc<MapImage>>,
+    /// The specular setup's `_SpecColor`, linear; `None` for the metallic
+    /// setup.
+    pub specular: Option<[f32; 3]>,
+    pub normal_map: Option<Arc<MapImage>>,
+    pub normal_scale: f32,
+    pub occlusion_map: Option<Arc<MapImage>>,
+    pub occlusion_strength: f32,
+    pub detail: Option<Detail>,
+    /// `_ParallaxMap` and `_Parallax`.
+    pub height: Option<(Arc<MapImage>, f32)>,
+    /// False with `_SPECULARHIGHLIGHTS_OFF`.
+    pub highlights: bool,
+    /// False with `_GLOSSYREFLECTIONS_OFF`.
+    pub reflections: bool,
+}
+
+impl Default for Surface {
+    /// Standard's own defaults.
+    fn default() -> Surface {
+        Surface {
+            metallic: 0.0,
+            smoothness: 0.5,
+            smoothness_from: SmoothnessFrom::Value,
+            gloss_map: None,
+            specular: None,
+            normal_map: None,
+            normal_scale: 1.0,
+            occlusion_map: None,
+            occlusion_strength: 1.0,
+            detail: None,
+            height: None,
+            highlights: true,
+            reflections: true,
+        }
+    }
+}
+
+/// The shader's flags of a material (`F_*` in `map.wgsl`).
+const F_STANDARD: u32 = 1;
+const F_GLOSS_MAP: u32 = 2;
+const F_NORMAL_MAP: u32 = 4;
+const F_DETAIL: u32 = 8;
+const F_PARALLAX: u32 = 16;
+const F_SMOOTH_ALBEDO: u32 = 32;
+const F_NO_HIGHLIGHTS: u32 = 64;
+const F_NO_REFLECTIONS: u32 = 128;
+const F_PREMULTIPLY: u32 = 256;
+const F_SPECULAR_SETUP: u32 = 512;
+
 /// A map material, as far as this path reads it.
 #[derive(Debug)]
 pub struct MapMaterial {
@@ -106,6 +198,9 @@ pub struct MapMaterial {
     pub drawn: bool,
     /// Unity's render queue: blended surfaces are drawn in its order first.
     pub queue: i32,
+    /// Set for Unity's Standard shaders, which are lit as Standard lights;
+    /// without it a lit material is lit plainly.
+    pub surface: Option<Surface>,
 }
 
 impl MapMaterial {
@@ -124,7 +219,89 @@ impl MapMaterial {
             particle: false,
             drawn: false,
             queue: 2000,
+            surface: None,
         }
+    }
+
+    /// Every texture the material reads.
+    pub fn images(&self) -> impl Iterator<Item = &Arc<MapImage>> {
+        let surface = self.surface.iter().flat_map(|s| {
+            let detail = s
+                .detail
+                .iter()
+                .flat_map(|d| d.albedo.iter().chain(&d.normal).chain(&d.mask));
+            s.gloss_map
+                .iter()
+                .chain(&s.normal_map)
+                .chain(&s.occlusion_map)
+                .chain(s.height.iter().map(|h| &h.0))
+                .chain(detail)
+        });
+        self.albedo.iter().chain(&self.emission_map).chain(surface)
+    }
+
+    /// The material's numbers as the shader reads them.
+    fn uniform(&self, receives: bool, sunlit: bool) -> MaterialUniform {
+        let mut u = MaterialUniform {
+            color: self.color,
+            st: self.st,
+            emission: [self.emission[0], self.emission[1], self.emission[2], 0.0],
+            params: [
+                if self.blend == Blend::Cutout { self.cutoff } else { -1.0 },
+                if self.blend.kind() > 0 { 1.0 } else { 0.0 },
+                // 0 lit, 1 unlit, 2 a particle shader.
+                if self.particle {
+                    2.0
+                } else if self.unlit {
+                    1.0
+                } else {
+                    0.0
+                },
+                // 1 when shadows fall on it, 2 more when the sun lights it
+                // at all.
+                f32::from(u8::from(receives)) + 2.0 * f32::from(u8::from(sunlit)),
+            ],
+            surface: [0.0, 0.5, 1.0, 1.0],
+            detail_st: [1.0, 1.0, 0.0, 0.0],
+            detail: [1.0, 0.0, 0.0, 0.0],
+            spec_color: [0.0; 4],
+            flags: [0; 4],
+        };
+        let Some(s) = self.surface.as_ref().filter(|_| !self.unlit && !self.particle) else {
+            return u;
+        };
+        let mut flags = F_STANDARD;
+        let mut set = |on: bool, flag: u32| {
+            if on {
+                flags |= flag;
+            }
+        };
+        set(s.smoothness_from == SmoothnessFrom::AlbedoAlpha, F_SMOOTH_ALBEDO);
+        // Without its texture a map reads Unity's default for it: white
+        // for the metallic map, a flat normal map, no height.
+        set(
+            s.gloss_map.is_some() || s.smoothness_from == SmoothnessFrom::MapAlpha,
+            F_GLOSS_MAP,
+        );
+        set(s.normal_map.is_some(), F_NORMAL_MAP);
+        set(s.detail.is_some(), F_DETAIL);
+        set(s.height.is_some(), F_PARALLAX);
+        set(!s.highlights, F_NO_HIGHLIGHTS);
+        set(!s.reflections, F_NO_REFLECTIONS);
+        set(self.blend == Blend::Premultiplied, F_PREMULTIPLY);
+        set(s.specular.is_some(), F_SPECULAR_SETUP);
+        u.surface = [s.metallic, s.smoothness, s.normal_scale, s.occlusion_strength];
+        if let Some(d) = &s.detail {
+            u.detail_st = d.st;
+            u.detail[0] = d.normal_scale;
+            u.detail[1] = f32::from(u8::from(d.second_uv));
+        }
+        u.detail[2] = s.height.as_ref().map_or(0.0, |h| h.1);
+        if let Some([r, g, b]) = s.specular {
+            u.spec_color = [r, g, b, 0.0];
+        }
+        u.flags[0] = flags;
+        u
     }
 }
 
@@ -139,6 +316,13 @@ pub struct MapMesh {
     pub uv2: Vec<[f32; 2]>,
     /// Vertex colours as stored; empty for white.
     pub colors: Vec<[f32; 4]>,
+    /// Tangents in the world, with the sign of the binormal in w (turned
+    /// for a mirrored object, as Unity's `unity_WorldTransformParams`
+    /// does). Empty for a mesh without them: its normal maps stay flat.
+    pub tangents: Vec<[f32; 4]>,
+    /// The second UV set as stored, for detail maps that read it; empty
+    /// when it is the first.
+    pub uv1: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// First index and count of each submesh.
     pub submeshes: Vec<(u32, u32)>,
@@ -206,6 +390,56 @@ pub struct MapObject {
     /// The volumes of `MapScene::vanish` that hide it while the camera is
     /// inside one.
     pub vanish: Vec<usize>,
+    /// The reflection probe it reflects, by its place in
+    /// `MapScene::probes`; without one, the scene's default reflection.
+    pub probe: Option<usize>,
+}
+
+/// A cubemap to reflect, with Unity's decoding of its colour
+/// (`unity_SpecCube0_HDR`: x scales it, the probe's intensity included).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reflection {
+    /// Without a cubemap the reflection is black, Unity's default.
+    pub cube: Option<Arc<crate::sky::MapCube>>,
+    pub hdr: [f32; 4],
+}
+
+/// A reflection probe: its box in the world, which is never turned, and
+/// what it reflects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReflectionProbe {
+    /// Where the probe stands.
+    pub position: [f32; 3],
+    /// The middle of its box and half its size.
+    pub centre: [f32; 3],
+    pub half: [f32; 3],
+    /// Whether the cubemap is projected on the box.
+    pub box_projection: bool,
+    pub importance: i32,
+    pub reflection: Reflection,
+}
+
+/// The probe an object reflects: among those whose box touches the
+/// object's bounds, the most important, then the one sharing the most
+/// volume with the bounds, then the smallest. Unity's rule for its forward
+/// path, from its manual; where Unity would blend two probes of the same
+/// importance, only the first is taken here.
+pub fn pick_probe(bounds: ([f32; 3], [f32; 3]), probes: &[ReflectionProbe]) -> Option<usize> {
+    let (lo, hi) = (Vec3::from(bounds.0), Vec3::from(bounds.1));
+    let mut best: Option<(usize, i32, f32, f32)> = None;
+    for (i, p) in probes.iter().enumerate() {
+        let (centre, half) = (Vec3::from(p.centre), Vec3::from(p.half));
+        let shared = (hi.min(centre + half) - lo.max(centre - half)).max(Vec3::ZERO);
+        if hi.cmplt(centre - half).any() || lo.cmpgt(centre + half).any() {
+            continue;
+        }
+        let (volume, size) = (shared.x * shared.y * shared.z, half.x * half.y * half.z);
+        let better = best.is_none_or(|(_, importance, v, s)| (p.importance, volume, -size) > (importance, v, -s));
+        if better {
+            best = Some((i, p.importance, volume, size));
+        }
+    }
+    best.map(|b| b.0)
 }
 
 /// A volume of a map's table of walls that hide (CharaStudio's vanish):
@@ -289,6 +523,12 @@ pub struct MapLight {
     pub cut_above: Option<f32>,
     /// The sun's real-time shadows, when it casts them.
     pub shadows: Option<SunShadows>,
+    /// What objects outside every reflection probe reflect: the cubemap
+    /// Unity baked from the sky, or the scene's custom one.
+    pub reflection: Reflection,
+    /// Unity's `unity_IndirectSpecColor`: what a material with its
+    /// reflections switched off reflects instead.
+    pub indirect_specular: [f32; 3],
 }
 
 /// How the sun's shadows are drawn.
@@ -306,6 +546,8 @@ pub struct MapScene {
     pub objects: Vec<MapObject>,
     pub lightmaps: Vec<Lightmap>,
     pub light: MapLight,
+    /// The reflection probes objects name.
+    pub probes: Vec<ReflectionProbe>,
     /// The volumes of the walls that hide.
     pub vanish: Vec<VanishVolume>,
     /// The layers the camera draws, a bit each. Objects on other layers
@@ -348,6 +590,45 @@ struct Vertex {
     uv: [f32; 2],
     uv2: [f32; 2],
     color: [f32; 4],
+    tangent: [f32; 4],
+    uv1: [f32; 2],
+}
+
+/// One probe as the shader reads it: Unity's `unity_SpecCube0_BoxMax`,
+/// `_BoxMin`, `_ProbePosition` and `_HDR`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
+struct ProbeUniform {
+    box_max: [f32; 4],
+    /// w: how much of this probe shows over the second, 1 for all.
+    box_min: [f32; 4],
+    /// w: 1 when the cubemap is projected on the box.
+    position: [f32; 4],
+    hdr: [f32; 4],
+}
+
+impl ProbeUniform {
+    /// The scene's default reflection: no box.
+    fn plain(r: &Reflection) -> ProbeUniform {
+        ProbeUniform {
+            box_max: [0.0; 4],
+            box_min: [0.0, 0.0, 0.0, 1.0],
+            position: [0.0; 4],
+            hdr: r.hdr,
+        }
+    }
+
+    fn of(p: &ReflectionProbe) -> ProbeUniform {
+        let (c, h) = (Vec3::from(p.centre), Vec3::from(p.half));
+        ProbeUniform {
+            box_max: (c + h).extend(0.0).to_array(),
+            box_min: (c - h).extend(1.0).to_array(),
+            position: Vec3::from(p.position)
+                .extend(f32::from(u8::from(p.box_projection)))
+                .to_array(),
+            hdr: p.reflection.hdr,
+        }
+    }
 }
 
 #[repr(C)]
@@ -419,15 +700,25 @@ struct Globals {
     sh: [[f32; 4]; 7],
     fog_color: [f32; 4],
     fog_range: [f32; 4],
+    indirect_spec: [f32; 4],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
 struct MaterialUniform {
     color: [f32; 4],
     st: [f32; 4],
     emission: [f32; 4],
     params: [f32; 4],
+    /// Metallic, smoothness, the normal map's scale, the occlusion's
+    /// strength.
+    surface: [f32; 4],
+    detail_st: [f32; 4],
+    /// The detail normal's scale, 1 for the second UV set, the height
+    /// map's scale.
+    detail: [f32; 4],
+    spec_color: [f32; 4],
+    flags: [u32; 4],
 }
 
 /// The map pass's pipelines, made the first time a map is drawn.
@@ -435,6 +726,11 @@ pub(crate) struct Pipelines {
     globals: wgpu::BindGroupLayout,
     material: wgpu::BindGroupLayout,
     lightmap: wgpu::BindGroupLayout,
+    reflection: wgpu::BindGroupLayout,
+    /// Reads reflection cubemaps: between texels and between levels.
+    cube_sampler: wgpu::Sampler,
+    /// What is reflected without a cubemap.
+    black_cube: wgpu::TextureView,
     cascade: wgpu::BindGroupLayout,
     /// Shadow casters, by cut-out and by culling.
     casters: HashMap<(bool, bool), wgpu::RenderPipeline>,
@@ -556,38 +852,6 @@ impl Pipelines {
             label: Some("map shadow cascade"),
             entries: &[uniform(0, wgpu::ShaderStages::VERTEX)],
         });
-        let material = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("map material"),
-            entries: &[
-                uniform(0, wgpu::ShaderStages::FRAGMENT),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -598,6 +862,46 @@ impl Pipelines {
             },
             count: None,
         };
+        let cube = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let filtering = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        // The uniform, the albedo and its sampler, the emission map, then
+        // Standard's maps (metallic, normal, occlusion, detail albedo,
+        // detail normal, detail mask, height) and the detail maps' sampler.
+        let material = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("map material"),
+            entries: &[
+                uniform(0, wgpu::ShaderStages::FRAGMENT),
+                texture(1),
+                filtering(2),
+                texture(3),
+                texture(4),
+                texture(5),
+                texture(6),
+                texture(7),
+                texture(8),
+                texture(9),
+                texture(10),
+                filtering(11),
+            ],
+        });
+        let reflection = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("map reflection"),
+            entries: &[uniform(0, wgpu::ShaderStages::FRAGMENT), cube(1), cube(2), filtering(3)],
+        });
         let lightmap = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("map lightmap"),
             entries: &[
@@ -614,13 +918,12 @@ impl Pipelines {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("map"),
-            bind_group_layouts: &[Some(&globals), Some(&material), Some(&lightmap)],
+            bind_group_layouts: &[Some(&globals), Some(&material), Some(&lightmap), Some(&reflection)],
             immediate_size: 0,
         });
-        let attributes =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4];
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32x4, 6 => Float32x2];
         let mut pipelines = HashMap::new();
-        for blend in [0u8, 1, 2] {
+        for blend in [0u8, 1, 2, 3] {
             let blended = blend > 0;
             for cull in [false, true] {
                 let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -645,6 +948,8 @@ impl Pipelines {
                             blend: match blend {
                                 0 => None,
                                 1 => Some(wgpu::BlendState::ALPHA_BLENDING),
+                                // Unity's Blend One OneMinusSrcAlpha.
+                                3 => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                                 // Unity's Blend SrcAlpha One.
                                 _ => Some(wgpu::BlendState {
                                     color: wgpu::BlendComponent {
@@ -760,10 +1065,32 @@ impl Pipelines {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let cube_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("map reflection"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let black_cube = crate::sky::upload_cube(
+            device,
+            queue,
+            &crate::sky::MapCube {
+                name: "black".into(),
+                size: 1,
+                faces: std::array::from_fn(|_| vec![0, 0, 0, 255]),
+                srgb: false,
+                bc6h: false,
+                mips: Vec::new(),
+            },
+        );
         Pipelines {
             globals,
             material,
             lightmap,
+            reflection,
+            cube_sampler,
+            black_cube,
             cascade,
             casters,
             compare,
@@ -782,6 +1109,8 @@ struct Draw {
     vb: usize,
     /// The lightmap's bind group: 0 for none, then one per lightmap.
     lightmap: usize,
+    /// The reflection's bind group: 0 for the scene's, then one per probe.
+    reflection: usize,
     first: u32,
     count: u32,
     material: usize,
@@ -829,6 +1158,12 @@ impl Renderer {
             sh: l.ambient_sh,
             fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
             fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
+            indirect_spec: [
+                l.indirect_specular[0],
+                l.indirect_specular[1],
+                l.indirect_specular[2],
+                0.0,
+            ],
         };
 
         // Textures first: the caches need the renderer mutably.
@@ -836,11 +1171,7 @@ impl Renderer {
         let images = map
             .objects
             .iter()
-            .flat_map(|o| {
-                o.materials
-                    .iter()
-                    .flat_map(|m| m.albedo.iter().chain(m.emission_map.iter()))
-            })
+            .flat_map(|o| o.materials.iter().flat_map(|m| m.images()))
             .chain(
                 map.lightmaps
                     .iter()
@@ -881,6 +1212,17 @@ impl Renderer {
             }
             _ => None,
         };
+        // The reflections' cubemaps: the scene's, then each probe's.
+        let cubes: Vec<wgpu::TextureView> = std::iter::once(&l.reflection)
+            .chain(map.probes.iter().map(|p| &p.reflection))
+            .map(|r| {
+                let pipes = self.map.as_mut().expect("made above");
+                match &r.cube {
+                    Some(cube) => pipes.sky.cube(&self.device, &self.queue, cube),
+                    None => pipes.black_cube.clone(),
+                }
+            })
+            .collect();
         let white = self.white.clone();
         let device = &self.device;
         let pipes = self.map.as_ref().expect("made above");
@@ -1040,6 +1382,43 @@ impl Renderer {
             lightmaps.push(lightmap_group(info, &light, direction.as_ref().unwrap_or(&white)));
         }
 
+        // The reflections' bind groups: the scene's default first. A second
+        // probe is never blended in (see `pick_probe`), so the first one's
+        // cubemap fills both places.
+        let reflections: Vec<wgpu::BindGroup> = std::iter::once(ProbeUniform::plain(&l.reflection))
+            .chain(map.probes.iter().map(ProbeUniform::of))
+            .zip(&cubes)
+            .map(|(probe, cube)| {
+                let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("map reflection"),
+                    contents: bytemuck::cast_slice(&[probe, probe]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("map reflection"),
+                    layout: &pipes.reflection,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(cube),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(cube),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&pipes.cube_sampler),
+                        },
+                    ],
+                })
+            })
+            .collect();
+
         // One bind group per material and whether shadows fall on it.
         let mut materials: Vec<wgpu::BindGroup> = Vec::new();
         let mut material_index: HashMap<(usize, bool, bool), usize> = HashMap::new();
@@ -1047,70 +1426,65 @@ impl Renderer {
             *material_index
                 .entry((Arc::as_ptr(m) as usize, receives, sunlit))
                 .or_insert_with(|| {
-                    let uniform = MaterialUniform {
-                        color: m.color,
-                        st: m.st,
-                        emission: [m.emission[0], m.emission[1], m.emission[2], 0.0],
-                        params: [
-                            if m.blend == Blend::Cutout { m.cutoff } else { -1.0 },
-                            if m.blend.kind() > 0 { 1.0 } else { 0.0 },
-                            // 0 lit, 1 unlit, 2 a particle shader.
-                            if m.particle {
-                                2.0
-                            } else if m.unlit {
-                                1.0
-                            } else {
-                                0.0
-                            },
-                            // 1 when shadows fall on it, 2 more when the sun
-                            // lights it at all.
-                            f32::from(u8::from(receives)) + 2.0 * f32::from(u8::from(sunlit)),
-                        ],
-                    };
+                    let uniform = m.uniform(receives, sunlit);
                     let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("map material"),
                         contents: bytemuck::bytes_of(&uniform),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
-                    let view = m
-                        .albedo
-                        .as_ref()
-                        .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
-                        .unwrap_or(&white);
-                    let repeat = m.albedo.as_ref().is_none_or(|i| i.repeat());
-                    materials.push(
-                        device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("map material"),
-                            layout: &pipes.material,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: buf.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: wgpu::BindingResource::Sampler(if repeat {
-                                        &pipes.repeat
-                                    } else {
-                                        &pipes.clamp
-                                    }),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 3,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        m.emission_map
-                                            .as_ref()
-                                            .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
-                                            .unwrap_or(&white),
-                                    ),
-                                },
-                            ],
-                        }),
-                    );
+                    let view = |image: Option<&Arc<MapImage>>| {
+                        image
+                            .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
+                            .unwrap_or(&white)
+                    };
+                    let sampler = |image: Option<&Arc<MapImage>>| {
+                        if image.is_none_or(|i| i.repeat()) {
+                            &pipes.repeat
+                        } else {
+                            &pipes.clamp
+                        }
+                    };
+                    let surface = m.surface.as_ref();
+                    let detail = surface.and_then(|s| s.detail.as_ref());
+                    // Albedo, emission, then Standard's maps in the order
+                    // of the layout. A map left out reads white, which is
+                    // Unity's default for the metallic, occlusion and
+                    // detail mask maps; the others are switched off by
+                    // their flag.
+                    let maps = [
+                        (1, m.albedo.as_ref()),
+                        (3, m.emission_map.as_ref()),
+                        (4, surface.and_then(|s| s.gloss_map.as_ref())),
+                        (5, surface.and_then(|s| s.normal_map.as_ref())),
+                        (6, surface.and_then(|s| s.occlusion_map.as_ref())),
+                        (7, detail.and_then(|d| d.albedo.as_ref())),
+                        (8, detail.and_then(|d| d.normal.as_ref())),
+                        (9, detail.and_then(|d| d.mask.as_ref())),
+                        (10, surface.and_then(|s| s.height.as_ref()).map(|h| &h.0)),
+                    ];
+                    let mut entries = vec![
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(sampler(m.albedo.as_ref())),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::Sampler(sampler(detail.and_then(|d| d.albedo.as_ref()))),
+                        },
+                    ];
+                    entries.extend(maps.iter().map(|(binding, image)| wgpu::BindGroupEntry {
+                        binding: *binding,
+                        resource: wgpu::BindingResource::TextureView(view(*image)),
+                    }));
+                    materials.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("map material"),
+                        layout: &pipes.material,
+                        entries: &entries,
+                    }));
                     materials.len() - 1
                 })
         };
@@ -1147,6 +1521,8 @@ impl Renderer {
                     uv: mesh.uv.get(i).copied().unwrap_or([0.0, 0.0]),
                     uv2: mesh.uv2.get(i).copied().unwrap_or([0.0, 0.0]),
                     color: mesh.colors.get(i).copied().unwrap_or([1.0; 4]),
+                    tangent: mesh.tangents.get(i).copied().unwrap_or([0.0; 4]),
+                    uv1: mesh.uv1.get(i).or(mesh.uv.get(i)).copied().unwrap_or([0.0, 0.0]),
                 })
                 .collect();
             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1180,6 +1556,7 @@ impl Renderer {
                     draws.push(Draw {
                         vb,
                         lightmap: o.lightmap.filter(|i| *i < map.lightmaps.len()).map_or(0, |i| i + 1),
+                        reflection: o.probe.filter(|i| *i < map.probes.len()).map_or(0, |i| i + 1),
                         first,
                         count,
                         material: index,
@@ -1316,6 +1693,7 @@ impl Renderer {
                 pass.set_pipeline(&pipes.pipelines[&(d.blend, d.cull)]);
                 pass.set_bind_group(1, &materials[d.material], &[]);
                 pass.set_bind_group(2, &lightmaps[d.lightmap], &[]);
+                pass.set_bind_group(3, &reflections[d.reflection], &[]);
                 let (vb, ib) = &buffers[d.vb];
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -1362,5 +1740,167 @@ impl Renderer {
             out.extend_from_slice(&data[start..start + row as usize]);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid(source: &str) {
+        let module = wgpu::naga::front::wgsl::parse_str(source).expect("parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("validates");
+    }
+
+    #[test]
+    fn the_map_shaders_are_valid() {
+        valid(include_str!("map.wgsl"));
+        valid(include_str!("map_shadow.wgsl"));
+    }
+
+    #[test]
+    fn the_uniforms_are_as_wide_as_the_shader_reads_them() {
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 9 * 16);
+        assert_eq!(std::mem::size_of::<ProbeUniform>(), 4 * 16);
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 13 * 16);
+        assert_eq!(std::mem::size_of::<Vertex>(), 80);
+    }
+
+    fn probe(centre: [f32; 3], half: f32, importance: i32) -> ReflectionProbe {
+        ReflectionProbe {
+            position: centre,
+            centre,
+            half: [half; 3],
+            box_projection: false,
+            importance,
+            reflection: Reflection {
+                cube: None,
+                hdr: [1.0, 1.0, 0.0, 0.0],
+            },
+        }
+    }
+
+    #[test]
+    fn an_object_reflects_the_probe_it_touches() {
+        let object = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert_eq!(pick_probe(object, &[]), None);
+        // Out of reach on one axis is out of reach.
+        assert_eq!(pick_probe(object, &[probe([5.0, 0.5, 0.5], 1.0, 1)]), None);
+        assert_eq!(
+            pick_probe(
+                object,
+                &[probe([5.0, 0.5, 0.5], 1.0, 1), probe([1.5, 0.5, 0.5], 1.0, 1)]
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_more_important_probe_wins_then_the_one_sharing_more() {
+        let object = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        // The second holds all of the object, the first half of it.
+        let half = probe([-0.5, 0.5, 0.5], 1.0, 1);
+        let whole = probe([0.5, 0.5, 0.5], 1.0, 1);
+        assert_eq!(pick_probe(object, &[half.clone(), whole.clone()]), Some(1));
+        let mut important = half.clone();
+        important.importance = 2;
+        assert_eq!(pick_probe(object, &[important, whole.clone()]), Some(0));
+        // Both hold all of it: the smaller one is the nearer fit.
+        let wide = probe([0.5, 0.5, 0.5], 9.0, 1);
+        assert_eq!(pick_probe(object, &[wide, whole]), Some(1));
+    }
+
+    #[test]
+    fn a_probe_hands_its_box_to_the_shader() {
+        let mut p = probe([1.0, 2.0, 3.0], 2.0, 1);
+        p.position = [1.0, 2.5, 3.0];
+        p.box_projection = true;
+        p.reflection.hdr = [0.5, 1.0, 0.0, 0.0];
+        let u = ProbeUniform::of(&p);
+        assert_eq!(u.box_max, [3.0, 4.0, 5.0, 0.0]);
+        // All of this probe shows: no second one is blended in.
+        assert_eq!(u.box_min, [-1.0, 0.0, 1.0, 1.0]);
+        assert_eq!(u.position, [1.0, 2.5, 3.0, 1.0]);
+        assert_eq!(u.hdr, [0.5, 1.0, 0.0, 0.0]);
+        assert_eq!(ProbeUniform::plain(&p.reflection).position[3], 0.0);
+    }
+
+    fn image() -> Option<Arc<MapImage>> {
+        Some(Arc::new(MapImage::Decoded(Arc::new(Image {
+            name: "t".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+            srgb: false,
+            repeat: true,
+        }))))
+    }
+
+    #[test]
+    fn only_standard_materials_are_lit_as_standard() {
+        let mut m = MapMaterial::hidden();
+        assert_eq!(m.uniform(true, true).flags[0], 0);
+        m.surface = Some(Surface::default());
+        let u = m.uniform(true, true);
+        assert_eq!(u.flags[0], F_STANDARD);
+        assert_eq!(u.surface, [0.0, 0.5, 1.0, 1.0]);
+        assert_eq!(u.params[3], 3.0);
+        // An unlit material stays unlit whatever else it holds.
+        m.unlit = true;
+        assert_eq!(m.uniform(false, false).flags[0], 0);
+    }
+
+    #[test]
+    fn a_material_tells_the_shader_what_it_uses() {
+        let mut m = MapMaterial::hidden();
+        m.blend = Blend::Premultiplied;
+        m.surface = Some(Surface {
+            metallic: 0.25,
+            smoothness: 0.75,
+            smoothness_from: SmoothnessFrom::MapAlpha,
+            normal_map: image(),
+            normal_scale: 2.0,
+            occlusion_strength: 0.5,
+            detail: Some(Detail {
+                albedo: image(),
+                normal_scale: 0.5,
+                st: [4.0, 4.0, 0.5, 0.5],
+                second_uv: true,
+                ..Default::default()
+            }),
+            height: image().map(|i| (i, 0.02)),
+            highlights: false,
+            reflections: false,
+            ..Default::default()
+        });
+        let u = m.uniform(false, true);
+        // The metallic map is read even when it is not set: it is white.
+        let all = F_STANDARD
+            | F_GLOSS_MAP
+            | F_NORMAL_MAP
+            | F_DETAIL
+            | F_PARALLAX
+            | F_NO_HIGHLIGHTS
+            | F_NO_REFLECTIONS
+            | F_PREMULTIPLY;
+        assert_eq!(u.flags[0], all);
+        assert_eq!(u.surface, [0.25, 0.75, 2.0, 0.5]);
+        assert_eq!(u.detail_st, [4.0, 4.0, 0.5, 0.5]);
+        assert_eq!(u.detail, [0.5, 1.0, 0.02, 0.0]);
+        // Blended: the alpha is kept.
+        assert_eq!(u.params[1], 1.0);
+        assert_eq!(m.images().count(), 3);
+
+        let s = m.surface.as_mut().expect("set above");
+        s.smoothness_from = SmoothnessFrom::AlbedoAlpha;
+        s.specular = Some([0.1, 0.2, 0.3]);
+        let u = m.uniform(false, true);
+        assert_eq!(u.flags[0], (all & !F_GLOSS_MAP) | F_SMOOTH_ALBEDO | F_SPECULAR_SETUP);
+        assert_eq!(u.spec_color, [0.1, 0.2, 0.3, 0.0]);
     }
 }

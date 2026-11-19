@@ -136,7 +136,90 @@ pub fn cube(tex: &Texture2D, raw: &[u8]) -> Result<MapCube> {
         size: tex.width,
         faces,
         srgb: tex.color_space != 0,
+        bc6h: false,
+        mips: Vec::new(),
     })
+}
+
+/// Unity's BC6H texture format: high range colour in blocks.
+const BC6H: i32 = 24;
+
+/// The bytes one level of a face takes as stored, for the formats cubemaps
+/// come in.
+fn level_bytes(format: i32, side: u32) -> Option<usize> {
+    let (side, blocks) = (side as usize, side.div_ceil(4) as usize);
+    match format {
+        // DXT1 and BC4; DXT5, BC6H, BC7 and BC5.
+        10 | 26 => Some(blocks * blocks * 8),
+        12 | 24 | 25 | 27 => Some(blocks * blocks * 16),
+        3 => Some(side * side * 3),
+        4 | 5 | 14 => Some(side * side * 4),
+        17 => Some(side * side * 8),
+        20 => Some(side * side * 16),
+        _ => None,
+    }
+}
+
+/// A Cubemap object with its mip levels, for reflections: Unity bakes a
+/// reflection's smaller levels blurrier, and rough surfaces read those.
+/// With `blocks`, BC6H data is kept as stored for the GPU, with its high
+/// range; without, it is decoded, and what is brighter than white is lost.
+pub fn cube_levels(tex: &Texture2D, raw: &[u8], blocks: bool) -> Result<MapCube> {
+    ensure!(
+        tex.width == tex.height && tex.width > 0,
+        "cubemap {} is not square",
+        tex.name
+    );
+    ensure!(
+        !raw.is_empty() && raw.len().is_multiple_of(6),
+        "cubemap {} does not hold six faces",
+        tex.name
+    );
+    let keep = blocks && tex.format == BC6H && tex.width.is_multiple_of(4);
+    let each = raw.len() / 6;
+    let mut levels: Vec<[Vec<u8>; 6]> = Vec::new();
+    let mut at = 0usize;
+    for level in 0..tex.mip_count.max(1) {
+        let side = tex.width >> level;
+        let Some(len) = level_bytes(tex.format, side).filter(|len| side > 0 && at + len <= each) else {
+            break;
+        };
+        let mut faces: [Vec<u8>; 6] = Default::default();
+        for (i, face) in faces.iter_mut().enumerate() {
+            let data = &raw[i * each + at..i * each + at + len];
+            *face = if keep {
+                data.to_vec()
+            } else {
+                let mut one = tex.clone();
+                (one.width, one.height) = (side, side);
+                one.decode_rgba8(data)?
+            };
+        }
+        levels.push(faces);
+        at += len;
+    }
+    ensure!(!levels.is_empty(), "cubemap {} holds no whole level", tex.name);
+    let faces = levels.remove(0);
+    Ok(MapCube {
+        name: tex.name.clone(),
+        size: tex.width,
+        faces,
+        srgb: !keep && tex.color_space != 0,
+        bc6h: keep,
+        mips: levels,
+    })
+}
+
+/// `unity_SpecCube0_HDR` for a reflection cubemap of this usage and
+/// format, its intensity included. A BC6H cubemap holds the light itself
+/// and has no alpha, so only the scale counts.
+pub fn reflection_hdr(tex: &Texture2D, intensity: f32) -> Option<[f32; 4]> {
+    let [scale, exponent, _, alpha] = if tex.format == BC6H {
+        HDR_PLAIN
+    } else {
+        hdr_of(tex.lightmap_format)?
+    };
+    Some([scale * intensity, exponent, 0.0, alpha])
 }
 
 #[cfg(test)]
@@ -246,6 +329,62 @@ mod tests {
         for (i, face) in cube.faces.iter().enumerate() {
             assert_eq!(face, &vec![i as u8 * 10; 16]);
         }
+    }
+
+    #[test]
+    fn a_reflection_keeps_its_levels() {
+        // Two by two faces with a second level of one texel each.
+        let mut raw = Vec::new();
+        for face in 0..6u8 {
+            raw.extend(std::iter::repeat_n(face * 10, 16));
+            raw.extend([face; 4]);
+        }
+        let cube = cube_levels(&cube_texture(2, 2), &raw, true).expect("splits");
+        assert!(!cube.bc6h);
+        assert_eq!(cube.mips.len(), 1);
+        for i in 0..6 {
+            assert_eq!(cube.faces[i], vec![i as u8 * 10; 16]);
+            assert_eq!(cube.mips[0][i], vec![i as u8; 4]);
+        }
+        assert_eq!(cube.whole_levels(), 2);
+        // A level that is cut short is left out, with those after it.
+        let short: Vec<u8> = raw.chunks(20).flat_map(|f| f[..18].to_vec()).collect();
+        let cube = cube_levels(&cube_texture(2, 2), &short, true).expect("splits");
+        assert!(cube.mips.is_empty());
+    }
+
+    #[test]
+    fn bc6h_blocks_are_kept_for_a_gpu_that_draws_them() {
+        let mut tex = cube_texture(8, 3);
+        tex.format = BC6H;
+        tex.color_space = 0;
+        // Levels of 8, 4 and 2 texels: 4, 1 and 1 blocks of 16 bytes.
+        let raw: Vec<u8> = (0..6u8).flat_map(|f| vec![f; 96]).collect();
+        let cube = cube_levels(&tex, &raw, true).expect("splits");
+        assert!(cube.bc6h && !cube.srgb);
+        assert_eq!(cube.faces[3], vec![3; 64]);
+        assert_eq!(cube.mips.len(), 2);
+        assert_eq!(cube.mips[1][5], vec![5; 16]);
+        assert_eq!(cube.whole_levels(), 3);
+        // Decoded when the GPU does not draw blocks.
+        let cube = cube_levels(&tex, &raw, false).expect("decodes");
+        assert!(!cube.bc6h);
+        assert_eq!(cube.faces[0].len(), 8 * 8 * 4);
+        assert_eq!(cube.mips[1][0].len(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn a_reflection_is_decoded_by_its_format_and_scaled_by_its_intensity() {
+        let mut tex = cube_texture(8, 1);
+        tex.format = BC6H;
+        assert_eq!(reflection_hdr(&tex, 0.5), Some([0.5, 1.0, 0.0, 0.0]));
+        tex.format = 4;
+        tex.lightmap_format = 2;
+        let hdr = reflection_hdr(&tex, 2.0).expect("RGBM");
+        assert_eq!(hdr[0], 2.0 * rk_render::map::RGBM_SCALE);
+        assert_eq!(hdr[3], 1.0);
+        tex.lightmap_format = 9;
+        assert_eq!(reflection_hdr(&tex, 1.0), None);
     }
 
     #[test]
