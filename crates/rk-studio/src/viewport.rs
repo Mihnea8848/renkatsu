@@ -404,6 +404,16 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             if resp.on_hover_text("Import card").clicked() {
                 st.ask(Command::ImportCard, ui.ctx());
             }
+        } else if (kind, *text) == (crate::kinds::Kind::Item, "Attach to") {
+            egui::Popup::menu(&resp).show(|ui| {
+                let chosen = st
+                    .doc
+                    .selected
+                    .and_then(|id| crate::panels::attach_items(ui, k, st, id));
+                if let Some((to, bone)) = chosen {
+                    st.run(Command::Attach(to, bone));
+                }
+            });
         } else if *menu {
             egui::Popup::menu(&resp).show(|ui| {
                 ui.label(egui::RichText::new("Not available yet").color(k.t.text_dim));
@@ -1123,6 +1133,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         },
         &mut st.log,
     );
+    st.doc.set_poses(live.poses().clone());
     if st.playback == crate::state::Playback::Playing {
         ui.ctx().request_repaint();
     }
@@ -1156,6 +1167,8 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         (full.width() * ppp).round() as u32,
         (full.height() * ppp).round() as u32,
     ];
+    // The grid is drawn behind what this picture shows.
+    live.keep_depth = st.gizmo.grid;
     match live.paint(st.doc.scene(), size, [0.22, 0.22, 0.23, 1.0]) {
         Ok(id) => {
             ui.painter().image(

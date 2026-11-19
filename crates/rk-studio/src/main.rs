@@ -11,6 +11,7 @@
 
 mod anim_import;
 mod animations;
+mod bones;
 mod brand;
 mod camera;
 mod card_import;
@@ -21,6 +22,7 @@ mod design;
 mod dialogs;
 mod gizmo;
 mod gizmo_pass;
+mod grid_pass;
 mod jobs;
 mod keymap;
 mod kinds;
@@ -42,6 +44,7 @@ mod settings;
 mod shortcuts;
 mod sources;
 mod state;
+mod surface;
 mod theme;
 mod viewport;
 mod widgets;

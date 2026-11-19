@@ -290,6 +290,8 @@ struct Row {
     shown: bool,
     parent: bool,
     folded: bool,
+    /// The bone of its parent the object is attached to, as it is shown.
+    bone: Option<String>,
 }
 
 /// What a frame of the Outliner asks for, carried out once it is drawn.
@@ -322,6 +324,7 @@ fn rows(st: &State) -> Vec<Row> {
         shown: true,
         parent: !scene.objects().is_empty(),
         folded: st.scene_folded,
+        bone: None,
     }];
     let mut hide_below: Option<usize> = st.scene_folded.then_some(0);
     for (depth, id) in scene.rows() {
@@ -344,6 +347,7 @@ fn rows(st: &State) -> Vec<Row> {
             shown: scene.shown(id),
             parent: scene.has_children(id),
             folded: st.folded.contains(&id),
+            bone: object.bone.as_deref().map(|bone| crate::bones::label(bone).to_owned()),
         });
     }
     rows
@@ -550,7 +554,11 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                     _ => {
                         let clip = Rect::from_min_max(rect.min, Pos2::new(name_end - 4.0, rect.bottom()));
-                        label(&p.with_clip_rect(clip), k, Pos2::new(x + 36.0, y), &row.name, text);
+                        let p = p.with_clip_rect(clip);
+                        let end = label(&p, k, Pos2::new(x + 36.0, y), &row.name, text);
+                        if let Some(bone) = &row.bone {
+                            p.text(Pos2::new(end + 8.0, y), Align2::LEFT_CENTER, bone, k.small(), faint);
+                        }
                     }
                 }
                 if k.d.tree == Tree::Columns {
@@ -569,7 +577,9 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     let part = (at - rect.top()) / rect.height();
                     let place = match (row.id, row.kind) {
                         (None, _) => Place::Into(None),
-                        (Some(id), Kind::Folder) if (0.25..=0.75).contains(&part) => Place::Into(Some(id)),
+                        // On a folder it goes into it, on anything else it
+                        // is attached to it.
+                        (Some(id), _) if (0.25..=0.75).contains(&part) => Place::Into(Some(id)),
                         (Some(id), _) if part < 0.5 => Place::Before(id),
                         (Some(id), _) => Place::After(id),
                     };
@@ -640,8 +650,8 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     vec![id]
                 };
                 if st.doc.place_many(&all, place) > 0 {
-                    if let Place::Into(Some(folder)) = place {
-                        st.folded.remove(&folder);
+                    if let Place::Into(Some(parent)) = place {
+                        st.folded.remove(&parent);
                     }
                 }
             }
@@ -728,7 +738,7 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
         icon::SELECTION_ALL,
         "Select children",
         &key(Action::SelectChildren),
-        folder && row.parent,
+        row.parent,
     ) {
         command = Some(Command::SelectChildren);
     }
@@ -742,11 +752,18 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
     ) {
         command = Some(Command::AddChildFolder);
     }
+    widgets::menu_sub(ui, k, icon::LINK, "Attach to", |ui| {
+        if let Some(id) = row.id {
+            if let Some((to, bone)) = attach_items(ui, k, st, id) {
+                command = Some(Command::Attach(to, bone));
+            }
+        }
+    });
     if menu_item(
         ui,
         k,
         icon::ARROW_BEND_LEFT_UP,
-        "Unparent",
+        "Detach",
         &key(Action::Unparent),
         inside,
     ) {
@@ -757,6 +774,55 @@ fn object_menu(ui: &mut Ui, k: &Look, st: &State, row: &Row) -> Option<Command> 
         command = Some(Command::Delete);
     }
     command
+}
+
+/// What an object can be attached to, as menu items: the other objects
+/// of the scene, a character opening its main bones. The object takes
+/// the rest of the selection along when it is part of it. Returns what
+/// was chosen, with the bone when it was one.
+pub fn attach_items(ui: &mut Ui, k: &Look, st: &State, id: ObjectId) -> Option<(ObjectId, Option<String>)> {
+    let scene = st.doc.scene();
+    let moving = if st.doc.is_selected(id) {
+        st.doc.selected_all()
+    } else {
+        vec![id]
+    };
+    let fits = |to: ObjectId| {
+        let place = Place::Into(Some(to));
+        !moving.contains(&to) && moving.iter().all(|m| scene.can_place(*m, place))
+    };
+    // What the object is attached to now carries a mark.
+    let now = scene.get(id).map(|o| (o.parent, o.bone.as_deref()));
+    let mut chosen = None;
+    let mut any = false;
+    for (_, to) in scene.rows() {
+        let Some(target) = scene.get(to).filter(|o| o.kind() != Kind::Folder && fits(to)) else {
+            continue;
+        };
+        any = true;
+        let on = now.is_some_and(|(parent, _)| parent == Some(to));
+        if target.kind() == Kind::Character {
+            widgets::menu_sub(ui, k, target.kind().glyph(), &target.name, |ui| {
+                let bone = now.filter(|_| on).and_then(|(_, bone)| bone);
+                if widgets::check_item(ui, k, on && bone.is_none(), "Origin", "").clicked() {
+                    chosen = Some((to, None));
+                }
+                ui.separator();
+                if let Some(name) = crate::bones::main_items(ui, k, bone) {
+                    chosen = Some((to, Some(name.to_owned())));
+                }
+                if chosen.is_some() {
+                    ui.close();
+                }
+            });
+        } else if widgets::menu_item(ui, k, target.kind().glyph(), &target.name, "", true) {
+            chosen = Some((to, None));
+        }
+    }
+    if !any {
+        widgets::menu_item(ui, k, "", "Nothing to attach to", "", false);
+    }
+    chosen
 }
 
 /// The context menu of the scene's own row.

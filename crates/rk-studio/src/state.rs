@@ -149,8 +149,16 @@ pub enum Command {
     Cut,
     /// Paste what was copied beside the selection.
     Paste,
-    /// Take the selection out of its folder, to the top of the scene.
+    /// Take the selection out of what it sits in or is attached to, to
+    /// the top of the scene. It stays where it is.
     Unparent,
+    /// Attach the selection to an object, or to a bone of a character
+    /// by the bone's name.
+    Attach(ObjectId, Option<String>),
+    /// Attach the rest of the selection to the object selected last.
+    AttachToLast,
+    /// Drop the selection onto the surface below it.
+    SnapToFloor,
     /// Add a folder inside the selected folder.
     AddChildFolder,
     /// Select everything directly inside the selected folder.
@@ -383,7 +391,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 15],
+    pub sections: [bool; 16],
     /// The page of a character's Properties: the scene's settings, the
     /// card's profile or its likes.
     pub property_tab: usize,
@@ -394,6 +402,8 @@ pub struct State {
 
     pub scene_search: String,
     pub property_search: String,
+    /// What is typed into the search of the menu that chooses a bone.
+    pub bone_search: String,
     pub content_search: String,
     pub console_search: String,
     pub command_search: String,
@@ -806,13 +816,14 @@ impl State {
             playback: Playback::Stopped,
             clock: 0.0,
             sections: [
-                true, true, true, false, true, true, true, true, true, true, true, true, true, true, true,
+                true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true,
             ],
             property_tab: 0,
             profiles: Default::default(),
             animations: Default::default(),
             scene_search: String::new(),
             property_search: String::new(),
+            bone_search: String::new(),
             content_search: String::new(),
             console_search: String::new(),
             command_search: String::new(),
@@ -843,6 +854,54 @@ impl State {
     }
 
     /// Carries out a command on the scene.
+    /// Attaches objects to another object, or to a bone of a character
+    /// by the bone's name. They stay where they are.
+    pub fn attach(&mut self, ids: &[ObjectId], to: ObjectId, bone: Option<&str>) {
+        let ids: Vec<ObjectId> = ids.iter().copied().filter(|id| *id != to).collect();
+        // Where the bone is now; a character that is not built yet has
+        // its bones at its origin until it is.
+        let pose = bone.map(|name| {
+            let live = self.live.as_ref();
+            (name, live.and_then(|l| l.bone(to, name)).unwrap_or_default())
+        });
+        if self.doc.attach(&ids, to, pose) > 0 {
+            self.folded.remove(&to);
+        }
+    }
+
+    /// Drops each selected object straight down onto the first surface
+    /// below its lowest point: a character lands by its feet. One step
+    /// of the history.
+    fn snap_to_floor(&mut self) {
+        use crate::surface::{floor_below, Surface};
+        let scene = self.doc.scene();
+        let live = self.live.as_ref();
+        let mut dropped = Vec::new();
+        for id in self.doc.selected_all() {
+            let Some(mut object) = scene.get(id).cloned() else {
+                continue;
+            };
+            let origin = scene.world(id).w_axis.truncate();
+            let lowest = live.and_then(|l| l.lowest(id)).unwrap_or(origin);
+            // Everything but the object itself and what goes with it.
+            let others = live.map(|l| l.surface(scene, scene.subtree(id)));
+            let surfaces: Vec<&dyn Surface> = others.iter().map(|s| s as &dyn Surface).collect();
+            let fall = floor_below(lowest, &surfaces) - lowest.y;
+            let landed = scene
+                .parent_world(id)
+                .inverse()
+                .transform_point3(origin + glam::Vec3::Y * fall);
+            if landed.is_finite() {
+                object.transform.position = crate::scene::clean(landed);
+                dropped.push(object);
+            }
+        }
+        for object in dropped {
+            self.doc.edit(object, true);
+        }
+        self.doc.end_gesture();
+    }
+
     pub fn run(&mut self, command: Command) {
         let selected = self.doc.selected;
         match command {
@@ -889,6 +948,16 @@ impl State {
                 let all = self.doc.selected_all();
                 self.doc.place_many(&all, crate::scene::Place::Into(None));
             }
+            Command::Attach(to, bone) => {
+                let all = self.doc.selected_all();
+                self.attach(&all, to, bone.as_deref());
+            }
+            Command::AttachToLast => {
+                if let [rest @ .., last] = &self.doc.selected_all()[..] {
+                    self.attach(rest, *last, None);
+                }
+            }
+            Command::SnapToFloor => self.snap_to_floor(),
             Command::AddChildFolder => {
                 let inside = self.doc.selection().filter(|o| o.kind() == Kind::Folder).map(|o| o.id);
                 let id = self.doc.add_in("Folder", Content::Folder, inside);
@@ -1889,6 +1958,63 @@ mod tests {
             _ => None,
         });
         character.expect("the scene has a character")
+    }
+
+    #[test]
+    fn the_selection_drops_to_the_ground_in_one_step() {
+        let mut st = State::new(Project::none(), Scene::new());
+        let folder = st.doc.add("Folder", Content::Folder);
+        st.doc.selected = Some(folder);
+        let high = st.doc.add("High", Content::Item);
+        st.doc.selected = None;
+        let low = st.doc.add("Low", Content::Item);
+        for (id, position) in [
+            (folder, [0.0, 1.0, 0.0]),
+            (high, [0.5, 2.0, 0.0]),
+            (low, [1.0, -3.0, 0.0]),
+        ] {
+            let mut object = st.doc.scene().get(id).unwrap().clone();
+            object.transform.position = position;
+            st.doc.edit(object, false);
+        }
+        st.doc.clear_history();
+        // One is three metres up in its folder, the other under the ground.
+        st.doc.select_many(&[high, low]);
+        st.run(Command::SnapToFloor);
+        let at = |st: &State, id| st.doc.scene().world(id).w_axis.truncate();
+        assert_eq!(at(&st, high), glam::Vec3::new(0.5, 0.0, 0.0));
+        assert_eq!(at(&st, low), glam::Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(st.doc.scene().get(high).unwrap().transform.position, [0.5, -1.0, 0.0]);
+        st.run(Command::Undo);
+        assert_eq!(at(&st, high).y, 3.0);
+        assert_eq!(at(&st, low).y, -3.0);
+        assert!(!st.doc.can_undo());
+    }
+
+    #[test]
+    fn the_selection_is_attached_to_the_object_selected_last() {
+        let mut st = State::new(Project::none(), Scene::new());
+        let light = st
+            .doc
+            .selection()
+            .map(|o| o.id)
+            .or(st.doc.scene().objects().first().map(|o| o.id))
+            .unwrap();
+        st.doc.selected = None;
+        let cup = st.doc.add("Cup", Content::Item);
+        st.doc.selected = None;
+        let table = st.doc.add("Table", Content::Item);
+        st.doc.select_many(&[cup, light, table]);
+        st.run(Command::AttachToLast);
+        let parent = |st: &State, id| st.doc.scene().get(id).unwrap().parent;
+        assert_eq!(
+            (parent(&st, cup), parent(&st, light), parent(&st, table)),
+            (Some(table), Some(table), None)
+        );
+        // Detached, they are at the top again.
+        st.doc.select_many(&[cup, light]);
+        st.run(Command::Unparent);
+        assert_eq!((parent(&st, cup), parent(&st, light)), (None, None));
     }
 
     #[test]

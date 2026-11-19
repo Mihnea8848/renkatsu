@@ -7,6 +7,8 @@
 //! `camera.rs`. The scene model says what exists; this follows it, building
 //! a character when one appears, dropping it when it leaves, moving its
 //! root to the object's transform and stepping its physics while it plays.
+//! It also says where the bones are that objects are attached to, and
+//! what of the characters lies under a point, for dropping things on them.
 //!
 //! A character is built in two halves. Reading its bundles, meshes and
 //! textures is work for another thread, a job; what the job made is taken
@@ -16,10 +18,11 @@
 
 use crate::camera::{Focus, Orbit, ViewCamera};
 use crate::gizmo_pass::{GizmoPass, Mesh};
+use crate::grid_pass::{Grid, GridPass};
 use crate::jobs::{Handle, Jobs, Show};
 use crate::mods::Games;
 use crate::project::Project;
-use crate::scene::{Content, ObjectId, Scene};
+use crate::scene::{Content, ObjectId, Poses, Scene};
 use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
@@ -184,6 +187,14 @@ impl Actor {
         }
         self.applied = Some(world);
         true
+    }
+
+    /// Where a bone is, by its name, in the space of the character's
+    /// object.
+    fn bone(&self, name: &str) -> Option<Mat4> {
+        let node = self.chara.scene.find(self.chara.top, name)?;
+        let (world, _) = self.chara.scene.world();
+        Some(self.applied.unwrap_or_default().inverse() * world[node])
     }
 
     /// Puts the bones back as they were loaded.
@@ -365,11 +376,19 @@ pub struct Live {
     pub hold_camera: bool,
     /// The layer the transform gizmo is drawn into.
     gizmo: GizmoPass,
+    /// The layer the grid on the ground is drawn into.
+    grid: GridPass,
+    /// The scene's picture keeps its depth, which the grid is drawn
+    /// behind.
+    pub keep_depth: bool,
     /// The camera was framed on a character once.
     framed: bool,
     /// The colour table of Studio's first colour filter, once it was looked
     /// for in the game; the inner `None` when the game has none.
     filter: Option<Option<Arc<Image>>>,
+    /// Where the bones are that objects are attached to, as of the last
+    /// frame followed.
+    poses: Poses,
 }
 
 /// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
@@ -384,6 +403,7 @@ impl Live {
             self.render_state.renderer.write().free_texture(&target.id);
         }
         self.gizmo.release(&self.render_state);
+        self.grid.release(&self.render_state);
     }
 
     /// Another renderer on the same device with a scene of its own, for a
@@ -412,8 +432,11 @@ impl Live {
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
             hold_camera: false,
             gizmo: GizmoPass::new(&render_state.device),
+            grid: GridPass::new(&render_state.device),
+            keep_depth: false,
             framed: false,
             filter: None,
+            poses: Poses::default(),
         })
     }
 
@@ -654,7 +677,13 @@ impl Live {
             }
         }
 
-        for actor in &mut self.actors {
+        // A character comes after what it is attached to, so that one on
+        // a bone is put where the bone is in this frame.
+        let mut order: Vec<usize> = (0..self.actors.len()).collect();
+        order.sort_by_key(|i| scene.depth(self.actors[*i].id));
+        self.poses.clear();
+        for at in order {
+            let actor = &mut self.actors[at];
             let Some(object) = scene.get(actor.id) else { continue };
             let parameters = actor.chara.parameters;
             let mut read = || -> Result<Motion> {
@@ -685,9 +714,69 @@ impl Live {
                     &parameters,
                 )
             };
-            if actor.update(object, scene.world(actor.id), &mut read, &clock, log) {
+            let world = scene.world_by(actor.id, &self.poses);
+            if actor.update(object, world, &mut read, &clock, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
             }
+            // The bones that objects follow, now that they are posed.
+            let on_bones = |o: &&crate::scene::Object| o.parent == Some(actor.id) && o.bone.is_some();
+            let attached: Vec<_> = scene.objects().iter().filter(on_bones).collect();
+            if !attached.is_empty() {
+                let (bones, _) = actor.chara.scene.world();
+                let back = world.inverse();
+                for object in attached {
+                    let name = object.bone.as_deref().unwrap_or_default();
+                    if let Some(node) = actor.chara.scene.find(actor.chara.top, name) {
+                        self.poses.set(object.id, back * bones[node]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where the bones are that objects are attached to, for the scene.
+    pub fn poses(&self) -> &Poses {
+        &self.poses
+    }
+
+    /// Where a bone of a built character is, in the space of the
+    /// character's object.
+    pub fn bone(&self, id: ObjectId, name: &str) -> Option<Mat4> {
+        self.actors.iter().find(|a| a.id == id)?.bone(name)
+    }
+
+    /// The names of a built character's bones and of the points the game
+    /// hangs accessories on, in the order of its skeleton.
+    pub fn bone_names(&self, id: ObjectId) -> Vec<String> {
+        let Some(actor) = self.actors.iter().find(|a| a.id == id) else {
+            return Vec::new();
+        };
+        let scene = &actor.chara.scene;
+        let mut names: Vec<String> = Vec::new();
+        for node in scene.subtree(actor.chara.top) {
+            let name = &scene.nodes[node].name;
+            let bone = ["cf_j_", "cm_j_", "a_n_"].iter().any(|start| name.starts_with(start));
+            if bone && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+
+    /// The lowest point of a built character as it is posed: the middle
+    /// of its bounds, at their bottom.
+    pub fn lowest(&self, id: ObjectId) -> Option<Vec3> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let (min, max) = bounds(&actor.chara.scene.pose());
+        Some(Vec3::new((min.x + max.x) * 0.5, min.y, (min.z + max.z) * 0.5))
+    }
+
+    /// The characters as a surface to drop things on, without `except`.
+    pub fn surface<'a>(&'a self, scene: &'a Scene, except: Vec<ObjectId>) -> impl crate::surface::Surface + 'a {
+        Meshes {
+            live: self,
+            scene,
+            except,
         }
     }
 
@@ -739,6 +828,7 @@ impl Live {
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
             effects: Some(effects),
+            camera_depth: self.keep_depth,
             alpha_to_coverage: self.smooth_edges,
             ..Default::default()
         };
@@ -839,12 +929,32 @@ impl Live {
         self.gizmo.paint(&self.render_state, size, view_proj, eye, mesh)
     }
 
+    /// Draws the grid on the ground into its layer of `size` pixels, under
+    /// what the scene's picture of that size shows, and returns the id
+    /// egui shows it under. `None` before the scene was drawn at that
+    /// size.
+    pub fn paint_grid(&mut self, size: [u32; 2], view_proj: Mat4, grid: &Grid) -> Option<egui::TextureId> {
+        let size = [size[0].max(1), size[1].max(1)];
+        if self.target.as_ref().is_none_or(|t| t.size != size) {
+            return None;
+        }
+        let depth = self.renderer.camera_depth()?.clone();
+        let eye = self.cam.orbit.camera().eye;
+        Some(self.grid.paint(&self.render_state, size, view_proj, eye, &depth, grid))
+    }
+
     /// The character a ray from `origin` along `dir` meets first, by the
     /// triangles of its meshes as they are posed, and how far along the
     /// ray. Worked out on the CPU, which a click can afford.
     pub fn pick(&self, scene: &Scene, origin: Vec3, dir: Vec3) -> Option<(ObjectId, f32)> {
+        self.cast(scene, origin, dir, &[])
+    }
+
+    /// `pick` among the characters that are not in `except`.
+    fn cast(&self, scene: &Scene, origin: Vec3, dir: Vec3, except: &[ObjectId]) -> Option<(ObjectId, f32)> {
         let mut best: Option<(ObjectId, f32)> = None;
-        for actor in self.actors.iter().filter(|a| scene.shown(a.id)) {
+        let wanted = |a: &&Actor| scene.shown(a.id) && !except.contains(&a.id);
+        for actor in self.actors.iter().filter(wanted) {
             for draw in actor.chara.scene.pose() {
                 if draw.renderer.cast_shadows == ShadowCasting::ShadowsOnly {
                     continue;
@@ -915,6 +1025,21 @@ impl Live {
         self.renderer
             .render(&draws, &camera, &env, size[0], size[1], background)
             .map(Some)
+    }
+}
+
+/// The posed meshes of the scene's characters as a surface.
+struct Meshes<'a> {
+    live: &'a Live,
+    scene: &'a Scene,
+    except: Vec<ObjectId>,
+}
+
+impl crate::surface::Surface for Meshes<'_> {
+    fn meet(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
+        self.live
+            .cast(self.scene, origin, dir, &self.except)
+            .map(|(_, far)| far)
     }
 }
 

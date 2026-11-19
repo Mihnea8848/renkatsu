@@ -10,6 +10,11 @@
 //! tree order, each naming its parent by id, so a scene file is readable
 //! text and a change to one object touches a few lines.
 //!
+//! An object sits in a folder or is attached to another object, which it
+//! then follows. Attached to a character it may also name one of the
+//! character's bones. Where that bone is comes from the built character,
+//! so `live.rs` hands it in as `Poses`.
+//!
 //! `Document` wraps a scene with the selection and the undo history. Undo
 //! keeps whole snapshots: a scene is a short list of small values, so a
 //! snapshot costs little and every operation is undone the same way.
@@ -17,6 +22,7 @@
 use crate::kinds::Kind;
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Names one object for as long as the scene lives. Ids are never reused,
@@ -52,6 +58,52 @@ impl Transform {
 
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(Vec3::from(self.scale), self.quat(), Vec3::from(self.position))
+    }
+
+    /// The transform that makes a matrix, as far as one can: a matrix
+    /// that shears has none.
+    pub fn from_matrix(matrix: Mat4) -> Transform {
+        let (scale, turn, position) = matrix.to_scale_rotation_translation();
+        let (y, x, z) = turn.normalize().to_euler(glam::EulerRot::YXZ);
+        Transform {
+            position: clean(position),
+            rotation: clean(Vec3::new(x, y, z) * (180.0 / std::f32::consts::PI)),
+            scale: clean(scale),
+        }
+    }
+}
+
+/// Rounds away the noise of going through matrices, so that the numbers
+/// in the Properties panel stay clean.
+pub fn clean(v: Vec3) -> [f32; 3] {
+    v.to_array().map(|x| (x * 1e4).round() / 1e4 + 0.0)
+}
+
+/// Where the bones are that objects are attached to: for each attached
+/// object, its bone as a matrix in the space of the character's object.
+/// It follows the built characters and is no part of what a scene is, so
+/// two scenes are the same whatever theirs say.
+#[derive(Debug, Clone, Default)]
+pub struct Poses(HashMap<ObjectId, Mat4>);
+
+impl Poses {
+    pub fn set(&mut self, object: ObjectId, bone: Mat4) {
+        self.0.insert(object, bone);
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    fn of(&self, object: &Object) -> Mat4 {
+        let known = object.bone.as_ref().and_then(|_| self.0.get(&object.id));
+        known.copied().unwrap_or(Mat4::IDENTITY)
+    }
+}
+
+impl PartialEq for Poses {
+    fn eq(&self, _: &Poses) -> bool {
+        true
     }
 }
 
@@ -258,9 +310,14 @@ fn yes() -> bool {
 pub struct Object {
     pub id: ObjectId,
     pub name: String,
-    /// The folder the object sits in; none at the top of the scene.
+    /// The folder the object sits in or the object it is attached to;
+    /// none at the top of the scene.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ObjectId>,
+    /// The bone of the parent character the object follows, by its name
+    /// in the character's skeleton; none follows the parent itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bone: Option<String>,
     #[serde(default = "yes")]
     pub visible: bool,
     #[serde(flatten)]
@@ -304,6 +361,8 @@ pub struct Scene {
     next_id: u64,
     #[serde(default)]
     objects: Vec<Object>,
+    #[serde(skip)]
+    poses: Poses,
 }
 
 impl Scene {
@@ -312,6 +371,7 @@ impl Scene {
             name: "Untitled scene".to_owned(),
             next_id: 1,
             objects: Vec::new(),
+            poses: Poses::default(),
         }
     }
 
@@ -331,25 +391,53 @@ impl Scene {
     }
 
     /// The matrix that carries an object's own transform into the scene:
-    /// those of the folders it sits in, the outermost first.
+    /// those of the objects it sits in, the outermost first, each with
+    /// the bone the next one follows.
     pub fn parent_world(&self, id: ObjectId) -> Mat4 {
+        self.parent_world_by(id, &self.poses)
+    }
+
+    /// `parent_world` with the bones where `poses` has them.
+    pub fn parent_world_by(&self, id: ObjectId, poses: &Poses) -> Mat4 {
         let mut matrix = Mat4::IDENTITY;
-        let mut at = self.get(id).and_then(|o| o.parent);
+        let mut child = self.get(id);
         // A tree deeper than the scene has objects is a loop in the file.
         for _ in 0..self.objects.len() {
-            let Some(parent) = at.and_then(|id| self.get(id)) else {
+            let Some(object) = child else { break };
+            let Some(parent) = object.parent.and_then(|id| self.get(id)) else {
                 break;
             };
-            matrix = parent.transform.matrix() * matrix;
-            at = parent.parent;
+            matrix = parent.transform.matrix() * poses.of(object) * matrix;
+            child = Some(parent);
         }
         matrix
     }
 
-    /// Where an object is in the scene, its folders counted in.
+    /// Where an object is in the scene, what it sits in counted in.
     pub fn world(&self, id: ObjectId) -> Mat4 {
+        self.world_by(id, &self.poses)
+    }
+
+    /// `world` with the bones where `poses` has them.
+    pub fn world_by(&self, id: ObjectId, poses: &Poses) -> Mat4 {
         let own = self.get(id).map_or(Mat4::IDENTITY, |o| o.transform.matrix());
-        self.parent_world(id) * own
+        self.parent_world_by(id, poses) * own
+    }
+
+    /// Takes the bones from the built characters.
+    pub fn set_poses(&mut self, poses: Poses) {
+        self.poses = poses;
+    }
+
+    /// How deep an object sits: 0 at the top of the scene.
+    pub fn depth(&self, id: ObjectId) -> usize {
+        let mut at = self.get(id).and_then(|o| o.parent);
+        let mut depth = 0;
+        while let Some(parent) = at.filter(|_| depth < self.objects.len()) {
+            depth += 1;
+            at = self.get(parent).and_then(|o| o.parent);
+        }
+        depth
     }
 
     pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
@@ -465,6 +553,7 @@ impl Scene {
             id,
             name: self.free_name(name),
             parent,
+            bone: None,
             visible: true,
             content,
             transform,
@@ -575,7 +664,7 @@ impl Scene {
     }
 
     /// Whether an object may be moved to a place: the target must exist,
-    /// only folders hold objects, and a folder cannot go inside itself.
+    /// and nothing can go inside itself.
     pub fn can_place(&self, id: ObjectId, place: Place) -> bool {
         if self.get(id).is_none() {
             return false;
@@ -594,12 +683,12 @@ impl Scene {
         };
         match parent {
             None => true,
-            Some(p) => self.get(p).is_some_and(|o| o.kind() == Kind::Folder) && !self.contains(id, p),
+            Some(p) => self.get(p).is_some() && !self.contains(id, p),
         }
     }
 
     /// Moves an object, with everything below it, to a place in the tree.
-    /// Returns whether it moved.
+    /// It follows no bone there. Returns whether it moved.
     pub fn place(&mut self, id: ObjectId, place: Place) -> bool {
         if !self.can_place(id, place) {
             return false;
@@ -622,6 +711,7 @@ impl Scene {
         let Some(from) = self.index(id) else { return false };
         let mut object = self.objects.remove(from);
         object.parent = parent;
+        object.bone = None;
         let to = before.and_then(|b| self.index(b)).unwrap_or(self.objects.len());
         self.objects.insert(to, object);
         true
@@ -806,7 +896,8 @@ impl Document {
     }
 
     /// Moves several objects to a place in the tree as one step of the
-    /// history, in the order given. Returns how many moved.
+    /// history, in the order given. They stay where they are in the
+    /// scene. Returns how many moved.
     pub fn place_many(&mut self, ids: &[ObjectId], place: Place) -> usize {
         let movable: Vec<ObjectId> = ids
             .iter()
@@ -817,7 +908,73 @@ impl Document {
             return 0;
         }
         self.checkpoint();
-        movable.iter().filter(|id| self.scene.place(**id, place)).count()
+        movable
+            .iter()
+            .filter(|id| self.keeping_place(**id, |scene| scene.place(**id, place)))
+            .count()
+    }
+
+    /// Changes where an object sits in the tree and leaves it where it is
+    /// in the scene: its transform is worked out again for what it sits
+    /// in now.
+    fn keeping_place(&mut self, id: ObjectId, change: impl FnOnce(&mut Scene) -> bool) -> bool {
+        let sits = |scene: &Scene| scene.get(id).map(|o| (o.parent, o.bone.clone()));
+        let (before, world) = (sits(&self.scene), self.scene.world(id));
+        if !change(&mut self.scene) {
+            return false;
+        }
+        if sits(&self.scene) != before {
+            let own = self.scene.parent_world(id).inverse() * world;
+            if let Some(object) = self.scene.get_mut(id).filter(|_| own.is_finite()) {
+                object.transform = Transform::from_matrix(own);
+            }
+        }
+        true
+    }
+
+    /// Attaches objects to another object as one step of the history: to
+    /// the object itself, or to a bone of a character, which is at `pose`
+    /// in the character's space. They stay where they are in the scene.
+    /// Returns how many were attached.
+    pub fn attach(&mut self, ids: &[ObjectId], to: ObjectId, bone: Option<(&str, Mat4)>) -> usize {
+        let place = Place::Into(Some(to));
+        let name = bone.map(|(name, _)| name);
+        let new = |scene: &Scene, id: ObjectId| {
+            scene
+                .get(id)
+                .is_some_and(|o| o.parent != Some(to) || o.bone.as_deref() != name)
+        };
+        let movable: Vec<ObjectId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.scene.can_place(*id, place) && new(&self.scene, *id))
+            .collect();
+        if movable.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        for id in &movable {
+            self.keeping_place(*id, |scene| {
+                // An object that is there already keeps its place among
+                // the others.
+                if scene.get(*id).is_some_and(|o| o.parent != Some(to)) {
+                    scene.place(*id, place);
+                }
+                if let Some(object) = scene.get_mut(*id) {
+                    object.bone = name.map(str::to_owned);
+                }
+                if let Some((_, pose)) = bone {
+                    scene.poses.set(*id, pose);
+                }
+                true
+            });
+        }
+        movable.len()
+    }
+
+    /// Takes the bones from the built characters. No step of the history.
+    pub fn set_poses(&mut self, poses: Poses) {
+        self.scene.set_poses(poses);
     }
 
     pub fn selection(&self) -> Option<&Object> {
@@ -857,6 +1014,8 @@ impl Document {
             scene: std::mem::replace(&mut self.scene, snapshot.scene),
             selected: self.selected,
         };
+        // The bones are where they are now, not where they were then.
+        self.scene.poses = now.scene.poses.clone();
         // Ids handed out since the snapshot stay used.
         self.scene.next_id = self.scene.next_id.max(now.scene.next_id);
         self.selected = snapshot.selected;
@@ -1014,8 +1173,8 @@ impl Document {
         }
         self.gesture = held;
         // The tree is not edited this way.
-        let parent = self.scene.objects[at].parent;
-        self.scene.objects[at] = Object { parent, ..edited };
+        let (parent, bone) = (self.scene.objects[at].parent, self.scene.objects[at].bone.clone());
+        self.scene.objects[at] = Object { parent, bone, ..edited };
         true
     }
 
@@ -1101,13 +1260,124 @@ mod tests {
     }
 
     #[test]
-    fn only_folders_hold_objects() {
+    fn new_objects_go_into_folders_only() {
         let mut scene = Scene::empty();
         let light = scene.add("Light", Content::light(), None);
         let item = scene.add("Chair", Content::Item, Some(light));
         assert_eq!(scene.get(item).unwrap().parent, None);
-        assert!(!scene.can_place(item, Place::Into(Some(light))));
         assert!(!scene.place(item, Place::Into(Some(ObjectId(99)))));
+        // Attached it can be to anything but itself and what it holds.
+        assert!(scene.can_place(item, Place::Into(Some(light))));
+        assert!(scene.place(light, Place::Into(Some(item))));
+        assert!(!scene.can_place(item, Place::Into(Some(light))));
+        assert!(!scene.can_place(item, Place::Into(Some(item))));
+    }
+
+    /// A character that is turned and moved, with a light and an item
+    /// beside it.
+    fn stage() -> (Document, [ObjectId; 3]) {
+        let mut doc = Document::new(Scene::empty());
+        let anna = doc.add_character("Anna", card("anna"));
+        let light = doc.add("Light", Content::light());
+        let cup = doc.add("Cup", Content::Item);
+        let mut turned = doc.scene().get(anna).unwrap().clone();
+        turned.transform = Transform {
+            position: [1.0, 0.0, 2.0],
+            rotation: [0.0, 90.0, 0.0],
+            scale: [1.0; 3],
+        };
+        doc.edit(turned, false);
+        let mut held = doc.scene().get(cup).unwrap().clone();
+        held.transform.position = [0.3, 1.1, -0.4];
+        held.transform.rotation = [10.0, 20.0, 30.0];
+        doc.edit(held, false);
+        doc.clear_history();
+        (doc, [anna, light, cup])
+    }
+
+    fn near(a: Mat4, b: Mat4) -> bool {
+        a.abs_diff_eq(b, 2e-3)
+    }
+
+    /// A bone that stands off the character's origin, turned and tilted.
+    fn hand(at: f32) -> Mat4 {
+        Mat4::from_rotation_translation(
+            Quat::from_euler(glam::EulerRot::YXZ, at, 0.4, -0.2),
+            Vec3::new(0.4, 1.0 + at, 0.1),
+        )
+    }
+
+    #[test]
+    fn attaching_and_detaching_keep_the_place_in_the_scene() {
+        let (mut doc, [anna, light, cup]) = stage();
+        let (cup_before, light_before) = (doc.scene().world(cup), doc.scene().world(light));
+        // To the character itself, as one step for both.
+        assert_eq!(doc.attach(&[cup, light], anna, None), 2);
+        assert_eq!(doc.scene().get(cup).unwrap().parent, Some(anna));
+        assert_ne!(
+            doc.scene().get(cup).unwrap().transform.position,
+            [0.3, 1.1, -0.4],
+            "the transform is the character's now"
+        );
+        assert!(near(doc.scene().world(cup), cup_before));
+        assert!(near(doc.scene().world(light), light_before));
+        // On to a bone of it.
+        assert_eq!(doc.attach(&[cup], anna, Some(("cf_j_hand_L", hand(0.0)))), 1);
+        assert_eq!(doc.scene().get(cup).unwrap().bone.as_deref(), Some("cf_j_hand_L"));
+        assert!(near(doc.scene().world(cup), cup_before));
+        // The same again changes nothing and leaves no step.
+        assert_eq!(doc.attach(&[cup], anna, Some(("cf_j_hand_L", hand(0.0)))), 0);
+        // Off again, to the top of the scene.
+        assert_eq!(doc.place_many(&[cup], Place::Into(None)), 1);
+        let free = doc.scene().get(cup).unwrap();
+        assert_eq!((free.parent, free.bone.clone()), (None, None));
+        assert!(near(doc.scene().world(cup), cup_before));
+        // Each was one step.
+        assert!(doc.undo() && doc.undo() && doc.undo() && !doc.undo());
+        assert_eq!(doc.scene().get(light).unwrap().parent, None);
+        assert!(near(doc.scene().world(cup), cup_before));
+    }
+
+    #[test]
+    fn an_attached_object_follows_its_bone() {
+        let (mut doc, [anna, _, cup]) = stage();
+        doc.attach(&[cup], anna, Some(("cf_j_hand_L", hand(0.0))));
+        let own = doc.scene().get(cup).unwrap().transform.matrix();
+        // The animation moves the hand on.
+        let mut poses = Poses::default();
+        poses.set(cup, hand(0.5));
+        doc.set_poses(poses);
+        let character = doc.scene().world(anna);
+        assert!(near(doc.scene().world(cup), character * hand(0.5) * own));
+        // It also goes along when the character moves as a whole.
+        let mut moved = doc.scene().get(anna).unwrap().clone();
+        moved.transform.position = [-2.0, 0.0, 0.5];
+        doc.edit(moved, false);
+        let character = doc.scene().world(anna);
+        assert!(near(doc.scene().world(cup), character * hand(0.5) * own));
+        // An undo leaves the bone where it is now.
+        doc.undo();
+        let character = doc.scene().world(anna);
+        assert!(near(doc.scene().world(cup), character * hand(0.5) * own));
+        // A bone nobody knows, as of a character that is not built, is at
+        // the character's origin.
+        doc.set_poses(Poses::default());
+        assert!(near(doc.scene().world(cup), character * own));
+    }
+
+    #[test]
+    fn the_scene_file_names_the_bone() {
+        let (mut doc, [anna, light, cup]) = stage();
+        doc.attach(&[cup], anna, Some(("cf_j_hand_L", hand(0.0))));
+        doc.attach(&[light], anna, None);
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("bone = \"cf_j_hand_L\""), "{text}");
+        assert_eq!(text.matches("bone = ").count(), 1, "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(&back, doc.scene());
+        let read = back.get(cup).unwrap();
+        assert_eq!((read.parent, read.bone.as_deref()), (Some(anna), Some("cf_j_hand_L")));
+        assert_eq!(back.get(light).unwrap().bone, None);
     }
 
     #[test]

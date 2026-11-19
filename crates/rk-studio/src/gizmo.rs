@@ -10,11 +10,14 @@
 //! `gizmo_pass` draws and the shapes the pointer is tested against. A drag
 //! works from the transforms the objects had when it started, so that it
 //! can be snapped, shown as one number and called off.
+//!
+//! The grid on the ground and the drop onto the surface below are here
+//! too: they belong to the same block of the viewport's bar.
 
 use crate::gizmo_pass::{Mesh, Vertex};
 use crate::keymap::Action;
 use crate::kinds::Kind;
-use crate::scene::{Object, ObjectId, Transform};
+use crate::scene::{clean, Object, ObjectId, Transform};
 use crate::state::{Look, State};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, icon_button};
@@ -117,7 +120,7 @@ const STEPS: [Step; 4] = [
 pub struct Gizmos {
     pub space: Space,
     pub pivot: Pivot,
-    /// The grid's button; the grid itself does not exist yet.
+    /// Whether the grid on the ground shows.
     pub grid: bool,
     hover: Option<Handle>,
     drag: Option<Drag>,
@@ -259,6 +262,8 @@ struct Drag {
     handle: Handle,
     /// The gizmo as the drag found it.
     frame: Frame,
+    /// A move along the scene's own axes, which snaps to world positions.
+    on_grid: bool,
     pivot: Pivot,
     starts: Vec<Start>,
     press: Pos2,
@@ -303,10 +308,23 @@ fn snapped(value: f32, step: Option<f32>) -> f32 {
     }
 }
 
-/// Rounds away the noise of going through matrices, so that the numbers
-/// in the Properties panel stay clean.
-fn clean(v: Vec3) -> [f32; 3] {
-    v.to_array().map(|x| (x * 1e4).round() / 1e4 + 0.0)
+/// How to snap a drag: by a step from where it started, and, for a move
+/// along the scene's axes, to a grid of the scene instead.
+#[derive(Clone, Copy, Default)]
+struct Snap {
+    step: Option<f32>,
+    grid: Option<f32>,
+}
+
+impl Snap {
+    /// A move of `by` from `from` along one axis, snapped: to world
+    /// positions in steps of `grid` when it is set, else by the step.
+    fn moved(&self, from: f32, by: f32) -> f32 {
+        match self.grid {
+            Some(cell) => snapped(from + by, Some(cell)) - from,
+            None => snapped(by, self.step),
+        }
+    }
 }
 
 impl Drag {
@@ -333,6 +351,7 @@ impl Drag {
             tool,
             handle,
             frame,
+            on_grid: tool == MOVE && frame.axes == [Vec3::X, Vec3::Y, Vec3::Z],
             pivot,
             starts,
             press,
@@ -377,9 +396,14 @@ impl Drag {
     }
 
     /// Works out how far the drag has gone with the pointer at `pos`,
-    /// snapped to `step` when there is one.
-    fn follow(&mut self, view: &View, pos: Pos2, step: Option<f32>) {
+    /// snapped as `snap` says.
+    fn follow(&mut self, view: &View, pos: Pos2, snap: Snap) {
         let frame = &self.frame;
+        let step = snap.step;
+        let snap = Snap {
+            grid: snap.grid.filter(|_| self.on_grid),
+            ..snap
+        };
         let ray = view.ray(pos);
         let pulled = pos - self.press;
         match (self.tool, self.handle) {
@@ -387,7 +411,7 @@ impl Drag {
                 let Some(t) = along_axis(ray, frame.origin, frame.axes[i]) else {
                     return;
                 };
-                let t = snapped(t - self.along, step);
+                let t = snap.moved(frame.origin.dot(frame.axes[i]), t - self.along);
                 self.amount = Amount::Move(frame.axes[i] * t);
                 self.readout = format!("{t:.2} m");
             }
@@ -403,10 +427,17 @@ impl Drag {
                 if let Handle::Plane(n) = handle {
                     // Each of the plane's two axes snaps by itself.
                     let (a, b) = (frame.axes[(n + 1) % 3], frame.axes[(n + 2) % 3]);
-                    let (u, v) = (snapped(delta.dot(a), step), snapped(delta.dot(b), step));
+                    let u = snap.moved(frame.origin.dot(a), delta.dot(a));
+                    let v = snap.moved(frame.origin.dot(b), delta.dot(b));
                     delta = a * u + b * v;
                     self.readout = format!("{u:.2}, {v:.2} m");
                 } else {
+                    if snap.grid.is_some() {
+                        // Across the screen it goes from one crossing of
+                        // the grid to another.
+                        let to = |i: usize| snap.moved(frame.origin[i], delta[i]);
+                        delta = Vec3::new(to(0), to(1), to(2));
+                    }
                     self.readout = format!("{:.2} m", delta.length());
                 }
                 self.amount = Amount::Move(delta);
@@ -867,9 +898,15 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
         } else {
             // Ctrl turns snapping on for this drag, or off when it is on.
             let row = drag.tool - MOVE;
-            let step = (st.snap != ctrl).then(|| st.settings.snap_steps[row]);
+            let steps = st.settings.snap_steps;
+            let snap = Snap {
+                step: (st.snap != ctrl).then(|| steps[row]),
+                // Along the scene's axes a move lands on world positions in
+                // steps of the move step; the grid size is for drawing.
+                grid: (st.snap != ctrl).then(|| steps[0]),
+            };
             if let Some(pos) = pos {
-                drag.follow(&view, pos, step);
+                drag.follow(&view, pos, snap);
             }
             for start in &drag.starts {
                 let mut object = start.object.clone();
@@ -902,7 +939,7 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
         match (over(Some(press)), at) {
             (Some(handle), Some(at)) => {
                 let mut drag = Drag::begin(tool, handle, at, st.gizmo.pivot, &view, press, st);
-                drag.follow(&view, press, None);
+                drag.follow(&view, press, Snap::default());
                 st.gizmo.drag = Some(drag);
                 st.gizmo.hover = None;
                 if let Some(live) = st.live.as_mut() {
@@ -982,14 +1019,43 @@ fn boxed(st: &State, view: &View, area: Rect) -> Vec<ObjectId> {
     found
 }
 
-/// Draws what the pointer works with over the scene's picture: the icons
-/// of the objects that have no picture, the gizmo of the active tool, the
-/// amount of a drag beside it, and the selection box.
+/// The grid's lines among the design's colours, as the screen shows them.
+fn grid_look(k: &Look, cell: f32, camera: &rk_render::Camera) -> crate::grid_pass::Grid {
+    let tone = |color: Color32, alpha: f32| {
+        let [r, g, b, _] = color.to_array().map(|c| f32::from(c) / 255.0);
+        [r, g, b, alpha]
+    };
+    crate::grid_pass::Grid {
+        cell,
+        // Far enough to lie under the whole of what the camera frames.
+        reach: ((camera.eye - camera.target).length() * 8.0).clamp(12.0, 600.0),
+        line: tone(k.t.text_dim, 0.34),
+        axis_x: tone(k.t.axis[0], 0.6),
+        axis_z: tone(k.t.axis[2], 0.6),
+    }
+}
+
+/// Draws what the pointer works with over the scene's picture: the grid,
+/// the icons of the objects that have no picture, the gizmo of the active
+/// tool, the amount of a drag beside it, and the selection box.
 pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
-    let Some(live) = st.live.as_ref() else { return };
-    let view = View::of(&live.cam.orbit.camera(), full);
+    let Some(live) = st.live.as_mut() else { return };
+    let camera = live.cam.orbit.camera();
+    let view = View::of(&camera, full);
     let p = ui.painter().with_clip_rect(full);
     let tool = st.tool;
+    let ppp = ui.ctx().pixels_per_point();
+    let pixels = [
+        (full.width() * ppp).round() as u32,
+        (full.height() * ppp).round() as u32,
+    ];
+    let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if st.gizmo.grid {
+        let grid = grid_look(k, st.settings.snap_steps[3], &camera);
+        if let Some(id) = live.paint_grid(pixels, view.view_proj, &grid) {
+            p.image(id, full, whole, Color32::WHITE);
+        }
+    }
 
     for (id, kind, world) in icons(st) {
         let Some(at) = view.screen(world) else { continue };
@@ -1013,11 +1079,6 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
         let drag = st.gizmo.drag.as_ref();
         let hot = drag.map(|d| d.handle).or(st.gizmo.hover);
         let mesh = build(drag.map_or(tool, |d| d.tool), &at, &view, hot, drag);
-        let ppp = ui.ctx().pixels_per_point();
-        let size = [
-            (full.width() * ppp).round() as u32,
-            (full.height() * ppp).round() as u32,
-        ];
         let readout = drag.and_then(|d| {
             // Beside the spoke of a dial, or below the pivot.
             let place = match (d.tool, d.amount, d.handle) {
@@ -1037,13 +1098,8 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
             }
         }
         if let Some(live) = st.live.as_mut() {
-            let id = live.paint_gizmo(size, view.view_proj, &mesh);
-            p.image(
-                id,
-                full,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            let id = live.paint_gizmo(pixels, view.view_proj, &mesh);
+            p.image(id, full, whole, Color32::WHITE);
         }
         if let Some((place, text)) = readout {
             let font = k.bold(k.d.text + 1.0);
@@ -1123,13 +1179,16 @@ pub fn options(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         });
     bar_divider(ui, k);
-    // Snapping to the floor needs the surfaces of maps and items, which
-    // come later.
-    ui.add_enabled_ui(false, |ui| {
-        flat_button(ui, k, Some(icon::ARROW_LINE_DOWN), "Snap to floor", false, false)
-    })
-    .inner
-    .on_disabled_hover_text(st.keys.tip("Snap to floor", Action::DropToSurface));
+    let tip = st.keys.tip("Snap to floor", Action::DropToSurface);
+    let any = st.doc.selected.is_some();
+    let drop = ui
+        .add_enabled_ui(any, |ui| {
+            flat_button(ui, k, Some(icon::ARROW_LINE_DOWN), "Snap to floor", false, false)
+        })
+        .inner;
+    if drop.on_hover_text(&tip).on_disabled_hover_text(&tip).clicked() {
+        st.run(crate::state::Command::SnapToFloor);
+    }
 }
 
 /// A row of the Snap menu: the step's name, and its value as a number
@@ -1188,10 +1247,10 @@ fn step_row(ui: &mut Ui, k: &Look, st: &mut State, row: usize, step: &Step) {
     }
 }
 
-/// The grid's button among the view options. The grid comes later.
+/// The grid's button among the view options.
 pub fn grid_button(ui: &mut Ui, k: &Look, st: &mut State) {
     if icon_button(ui, k, icon::GRID_FOUR, st.gizmo.grid)
-        .on_hover_text("Show the grid: not available yet")
+        .on_hover_text(st.keys.tip("Show the grid", Action::ToggleGrid))
         .clicked()
     {
         st.gizmo.grid = !st.gizmo.grid;
@@ -1233,6 +1292,7 @@ mod tests {
             tool,
             handle,
             frame,
+            on_grid: false,
             pivot,
             starts: Vec::new(),
             press: Pos2::ZERO,
@@ -1299,14 +1359,45 @@ mod tests {
         let at = |x: f32| view.screen(frame.origin + Vec3::X * x).unwrap();
         let st = State::new(crate::project::Project::none(), Scene::new());
         let mut drag = Drag::begin(MOVE, Handle::Axis(0), frame, Pivot::Origin, &view, at(0.2), &st);
-        drag.follow(&view, at(0.53), None);
+        drag.follow(&view, at(0.53), Snap::default());
         let Amount::Move(delta) = drag.amount else { panic!() };
         assert!((delta - Vec3::X * 0.33).length() < 1e-3);
         // Snapped, it goes to the nearest step.
-        drag.follow(&view, at(0.53), Some(0.1));
+        let by_step = Snap {
+            step: Some(0.1),
+            grid: None,
+        };
+        drag.follow(&view, at(0.53), by_step);
         let Amount::Move(delta) = drag.amount else { panic!() };
         assert!((delta - Vec3::X * 0.3).length() < 1e-4);
         assert_eq!(drag.readout, "0.30 m");
+    }
+
+    #[test]
+    fn a_move_along_the_scenes_axes_lands_on_the_grid() {
+        let view = view();
+        // The pivot stands off the grid's lines.
+        let frame = frame_at(&view, Vec3::new(0.13, 1.0, 0.0));
+        let at = |x: f32| view.screen(frame.origin + Vec3::X * x).unwrap();
+        let st = State::new(crate::project::Project::none(), Scene::new());
+        let to_grid = Snap {
+            step: Some(0.1),
+            grid: Some(0.25),
+        };
+        let mut drag = Drag::begin(MOVE, Handle::Axis(0), frame, Pivot::Origin, &view, at(0.0), &st);
+        drag.follow(&view, at(0.33), to_grid);
+        let Amount::Move(delta) = drag.amount else { panic!() };
+        // 0.13 + 0.33 is nearest to the line at 0.5.
+        assert!((frame.origin.x + delta.x - 0.5).abs() < 1e-4);
+        // Along the object's own axes there is no grid: the step counts.
+        let turned = Frame {
+            axes: [Vec3::NEG_X, Vec3::Y, Vec3::NEG_Z],
+            ..frame
+        };
+        let mut drag = Drag::begin(MOVE, Handle::Axis(0), turned, Pivot::Origin, &view, at(0.0), &st);
+        drag.follow(&view, at(-0.33), to_grid);
+        let Amount::Move(delta) = drag.amount else { panic!() };
+        assert!((delta + Vec3::X * 0.3).length() < 1e-4);
     }
 
     #[test]

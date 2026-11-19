@@ -9,7 +9,7 @@
 use crate::design::Props;
 use crate::kinds::Kind;
 use crate::profile::{self, Profile};
-use crate::scene::Content;
+use crate::scene::{Content, Place};
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
 use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
@@ -77,6 +77,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         .map(str::to_owned);
     let lights = st.doc.scene().key_light().map(|o| o.id) == Some(object.id);
     let holds = st.doc.scene().subtree(object.id).len() - 1;
+    // What the object is attached to: a folder only holds it.
+    let target = before
+        .parent
+        .and_then(|parent| st.doc.scene().get(parent))
+        .filter(|parent| parent.kind() != Kind::Folder)
+        .map(|parent| (parent.id, parent.name.clone(), parent.kind()));
+    let mut detach = false;
+    let mut bone: Option<Option<String>> = None;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         if let (Some(p), 1..) = (shown.as_mut(), page) {
@@ -111,6 +119,35 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 });
             }
             section_end(ui, k);
+        }
+        if let Some((to, name, target_kind)) = &target {
+            if section(ui, k, st, 15, "Attached to") {
+                row(ui, k, "Object", None, |ui, rect| {
+                    let w = widgets::text_width(ui, "Detach", k.font()).ceil() + 18.0;
+                    let field = rect.with_max_x(rect.right() - w - 4.0);
+                    widgets::value_box(ui, k, field, name);
+                    let button = rect.with_min_x(field.right() + 4.0);
+                    let resp = ui.interact(button, id.with("detach"), Sense::click());
+                    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                    ui.painter().rect_filled(button, k.radius(), fill);
+                    ui.painter()
+                        .text(button.center(), Align2::CENTER_CENTER, "Detach", k.font(), k.t.text);
+                    detach = resp.clicked();
+                });
+                if *target_kind == Kind::Character {
+                    row(ui, k, "Bone", None, |ui, rect| {
+                        let shown = before.bone.as_deref().map_or("None", crate::bones::label);
+                        let resp = drop_field(ui, k, rect, id.with("bone"), shown);
+                        egui::Popup::menu(&resp)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                let all = st.live.as_ref().map(|live| live.bone_names(*to)).unwrap_or_default();
+                                bone = crate::bones::menu(ui, k, &mut st.bone_search, &all, before.bone.as_deref());
+                            });
+                    });
+                }
+                section_end(ui, k);
+            }
         }
         match &mut object.content {
             Content::Character {
@@ -519,12 +556,43 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
     }
+    if detach {
+        st.doc.place_many(&[before.id], Place::Into(None));
+    }
+    if let (Some(bone), Some((to, ..))) = (bone, &target) {
+        st.attach(&[before.id], *to, bone.as_deref());
+    }
     if show_cards {
         st.show_folder(0);
     }
     if show_animations {
         st.show_folder(1);
     }
+}
+
+/// A field that opens a list: what is chosen and a caret.
+fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    let p = ui.painter();
+    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+    p.rect_filled(rect, k.radius(), fill);
+    let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+    p.with_clip_rect(rect.with_max_x(rect.right() - 22.0)).text(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        k.font(),
+        color,
+    );
+    glyph(
+        p,
+        k,
+        Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
+        icon::CARET_DOWN,
+        10.0,
+        color,
+    );
+    resp
 }
 
 /// The game's names for a card's seven outfits, in their order; outfits a
