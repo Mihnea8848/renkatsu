@@ -413,8 +413,12 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         bar_text(ui, "Nothing selected", k.font(), k.t.text_dim);
         return;
     };
+    let color = st
+        .doc
+        .selection()
+        .map_or(kind.color(), |o| st.library.color_of(&o.content));
     let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 20.0), Sense::hover());
-    glyph(ui.painter(), k, rect.center(), kind.glyph(), 16.0, kind.color());
+    glyph(ui.painter(), k, rect.center(), kind.glyph(), 16.0, color);
     ui.add_space(4.0);
     bar_text(ui, &name, k.bold(k.d.text), k.t.text_bright);
     ui.add_space(5.0);
@@ -848,9 +852,25 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
+                if LATER_TOOLS.contains(name) {
+                    // Shown, greyed, until they do something.
+                    ui.interact(row, id, Sense::hover()).on_hover_text("Not available yet");
+                    let faint = Theme::glass(k.t.text_dim, 150);
+                    let p = ui.painter();
+                    glyph(p, k, Pos2::new(row.left() + 16.0, row.center().y), g, 16.0, faint);
+                    widgets::label(p, k, Pos2::new(row.left() + 32.0, row.center().y), name, faint);
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 let on = st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
-                if *name == "Clothing" {
+                if *name == "Load card" {
+                    // The same as the selection bar's Load card.
+                    if resp.on_hover_text("Import card").clicked() {
+                        st.ask(Command::ImportCard, ui.ctx());
+                    }
+                } else if *name == "Clothing" {
                     // Opens the clothing of the selected character beside
                     // the palette, rather than becoming the mode's tool.
                     egui::Popup::menu(&resp)
@@ -866,6 +886,9 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         }
     }
 }
+
+/// Tools of the modes that do nothing yet.
+const LATER_TOOLS: [&str; 2] = ["Replace", "Reload"];
 
 /// A rendering pipeline among a mode's tools: the one in use carries a
 /// check mark, and one that does not exist yet is greyed and says so.
@@ -988,10 +1011,10 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
         .cam
         .focus
         .and_then(|f| st.doc.scene().get(f.object))
-        .map(|o| (o.kind(), o.name.clone()));
+        .map(|o| (o.kind(), st.library.color_of(&o.content), o.name.clone()));
     let moved = live.cam.moved();
     let name = match &focus {
-        Some((_, name)) => name.as_str(),
+        Some((_, _, name)) => name.as_str(),
         None => "Free camera",
     };
     // The target, then the object's kind and name; the reset button joins
@@ -1005,7 +1028,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
 
     let can_focus = st.doc.selected.and_then(|id| subject(st, id));
     let tip = match (&focus, can_focus) {
-        (Some((kind, name)), _) => format!("Focused on the {} {name}", kind.label().to_lowercase()),
+        (Some((kind, _, name)), _) => format!("Focused on the {} {name}", kind.label().to_lowercase()),
         (None, Some(_)) => st.keys.tip("Focus on the selection", Action::Focus),
         (None, None) => "Free camera".to_owned(),
     };
@@ -1018,7 +1041,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     }
     let y = cell.center().y;
     match &focus {
-        Some((kind, name)) => {
+        Some((kind, color, name)) => {
             glyph(
                 p,
                 k,
@@ -1027,7 +1050,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
                 16.0,
                 k.t.select_bright,
             );
-            glyph(p, k, Pos2::new(cell.left() + 39.0, y), kind.glyph(), 15.0, kind.color());
+            glyph(p, k, Pos2::new(cell.left() + 39.0, y), kind.glyph(), 15.0, *color);
             widgets::label(p, k, Pos2::new(cell.left() + name_x, y), name, k.t.text_bright);
         }
         None => {
