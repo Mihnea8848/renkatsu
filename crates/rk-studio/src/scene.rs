@@ -281,14 +281,6 @@ impl MapTime {
         }
     }
 
-    pub fn of(time: rk_map::unity::TimeOfDay) -> MapTime {
-        match time {
-            rk_map::unity::TimeOfDay::Day => MapTime::Day,
-            rk_map::unity::TimeOfDay::Evening => MapTime::Evening,
-            rk_map::unity::TimeOfDay::Night => MapTime::Night,
-        }
-    }
-
     pub fn time_of_day(self) -> rk_map::unity::TimeOfDay {
         match self {
             MapTime::Day => rk_map::unity::TimeOfDay::Day,

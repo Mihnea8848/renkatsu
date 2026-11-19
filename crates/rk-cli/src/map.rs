@@ -260,11 +260,77 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// The map named by its number or its level's name.
+/// The map named by its number, its level's name or its own name.
 fn find<'a>(maps: &'a [Entry], which: &str) -> Result<&'a Entry> {
+    let same = |a: &str| a.trim().eq_ignore_ascii_case(which);
     maps.iter()
-        .find(|m| m.number.to_string() == which || m.level.eq_ignore_ascii_case(which))
+        .find(|m| m.number.to_string() == which || same(&m.level))
+        .or_else(|| maps.iter().find(|m| same(&m.name) || same(&rk_map::names::shown(m))))
         .ok_or_else(|| anyhow!("no map {which}"))
+}
+
+/// Writes the map file of a map: every time of day it has, or those of
+/// `times`.
+/// With `check`, each time of day is read back from the file, with the
+/// game's blocks and decoded, and compared with a fresh build.
+pub fn convert(which: &str, times: &[String], out: &std::path::Path, check: bool) -> Result<()> {
+    let game = Game::open_user(&[])?;
+    let maps = list::read(&game, true);
+    let m = find(&maps, which)?;
+    let only = if times.is_empty() {
+        None
+    } else {
+        Some(times.iter().map(|t| time_of_day(t)).collect::<Result<Vec<_>>>()?)
+    };
+    let started = std::time::Instant::now();
+    let length = rk_map::file::convert(
+        &game,
+        m,
+        &rk_map::names::shown(m),
+        only.as_deref(),
+        out,
+        &mut |_| Ok(()),
+    )?;
+    let mut bundles = vec![m.bundle.clone()];
+    bundles.extend(scene::dependencies(&game, &m.bundle)?);
+    let source: u64 = bundles.iter().filter_map(|b| game.assets.bundle_size(b)).sum();
+    println!(
+        "{} {}: {} ({:.1} MB) from {} bundles of {:.1} MB, in {:.1} s",
+        m.number,
+        m.level,
+        out.display(),
+        length as f64 / MB,
+        bundles.len(),
+        source as f64 / MB,
+        started.elapsed().as_secs_f32()
+    );
+    if check {
+        let meta = rk_map::file::meta(out)?;
+        let walls = (!meta.walls.is_empty()).then_some(meta.walls.as_str());
+        for name in &meta.times {
+            let time = time_of_day(name)?;
+            for blocks in [true, false] {
+                let (fresh, _) = rk_map::build::build(&game, &m.bundle, time, blocks, walls)?;
+                let opened = std::time::Instant::now();
+                let read = rk_map::file::read(out, time, blocks)?;
+                let opened = opened.elapsed().as_secs_f32();
+                let same = rk_map::file::digest(&fresh) == rk_map::file::digest(&read);
+                println!(
+                    "  {name}, {}: {}, read in {opened:.3} s",
+                    if blocks { "blocks" } else { "decoded" },
+                    if same {
+                        "the same as a fresh build"
+                    } else {
+                        "DIFFERENT from a fresh build"
+                    }
+                );
+                if !same {
+                    return Err(anyhow!("the file does not hold the map as built"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn time_of_day(time: &str) -> Result<rk_map::unity::TimeOfDay> {
@@ -312,19 +378,45 @@ pub fn render(
 ) -> Result<()> {
     let RenderOptions { fog, sky, capture } = options;
     use glam::Vec3;
-    let game = Game::open_user(&[])?;
-    let maps = list::read(&game, true);
-    let m = find(&maps, which)?;
     let time = time_of_day(time)?;
+    let path = std::path::Path::new(which);
+    let from_file = path
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case(rk_map::file::EXTENSION))
+        && path.is_file();
     let mut renderer = rk_render::Renderer::new()?;
-    let started = std::time::Instant::now();
-    // The walls that hide follow CharaStudio's camera through its physics
-    // triggers. Captures move their cameras without them, and no wall hides
-    // in their pictures, so a capture's view is drawn without the table.
-    let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file).filter(|_| capture.is_none());
-    let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
+    let started;
+    let (label, mut scene, skipped) = if from_file {
+        // A map file needs no game.
+        let meta = rk_map::file::meta(path)?;
+        started = std::time::Instant::now();
+        let mut scene = rk_map::file::read(path, time, renderer.supports_bc())?;
+        // As below: a capture's view is drawn without the walls that hide.
+        if capture.is_some() {
+            scene.vanish.clear();
+            for o in &mut scene.objects {
+                o.vanish.clear();
+            }
+        }
+        (
+            format!("{} {}", meta.number, meta.level),
+            scene,
+            rk_map::build::Skipped::new(),
+        )
+    } else {
+        let game = Game::open_user(&[])?;
+        let maps = list::read(&game, true);
+        let m = find(&maps, which)?;
+        started = std::time::Instant::now();
+        // The walls that hide follow CharaStudio's camera through its
+        // physics triggers. Captures move their cameras without them, and no
+        // wall hides in their pictures, so a capture's view is drawn without
+        // the table.
+        let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file).filter(|_| capture.is_none());
+        let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
+        (format!("{} {}", m.number, m.level), scene, skipped)
+    };
     let built = started.elapsed();
-    let mut scene = scene;
     // CharaStudio's camera draws no Unity skybox: it clears to black and
     // shows the map's own sky dome. The scene's skybox is drawn when asked
     // for.
@@ -445,9 +537,7 @@ pub fn render(
         .filter(|t| matches!(t.as_ref(), rk_render::map::MapImage::Compressed { .. }))
         .count();
     println!(
-        "{} {}: {} objects, {} textures ({compressed} as stored), {:.0} MB on the GPU, built in {:.1} s, drawn in {:.1} s",
-        m.number,
-        m.level,
+        "{label}: {} objects, {} textures ({compressed} as stored), {:.0} MB on the GPU, built in {:.3} s, drawn in {:.3} s",
         scene.objects.len(),
         textures.len(),
         textures.iter().map(|t| t.gpu_bytes()).sum::<u64>() as f64 / MB,

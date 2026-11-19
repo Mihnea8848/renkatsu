@@ -204,7 +204,9 @@ pub fn cube_levels(tex: &Texture2D, raw: &[u8], blocks: bool) -> Result<MapCube>
         name: tex.name.clone(),
         size: tex.width,
         faces,
-        srgb: !keep && tex.color_space != 0,
+        // A GPU drawing BC6H blocks takes no colour space from it; it is
+        // kept for decoding them when the GPU does not.
+        srgb: tex.color_space != 0,
         bc6h: keep,
         mips: levels,
     })

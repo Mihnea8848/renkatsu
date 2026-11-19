@@ -12,3 +12,7 @@ rk-render.workspace = true
 rk-chara.workspace = true
 rk-unityfs.workspace = true
 rk-vfs.workspace = true
+rk-asset.workspace = true
+rayon.workspace = true
+serde.workspace = true
+toml.workspace = true
