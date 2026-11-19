@@ -11,6 +11,69 @@ use egui::{
 };
 use egui_phosphor::regular as icon;
 
+/// A small window drawn like the editor's other windows: a header with the
+/// title at the left and a close cell at the right, a line under it, and
+/// `add` drawing the body, `width` wide. The close cell, Escape or a click
+/// on nothing else set `open` to false. Returns what `add` returns.
+pub fn window<R>(
+    ctx: &egui::Context,
+    k: &Look,
+    title: &str,
+    width: f32,
+    open: &mut bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    const HEAD: f32 = 46.0;
+    const SIDE: i8 = 18;
+    let t = &k.t;
+    let frame = egui::Frame::new()
+        .fill(t.panel)
+        .stroke(Stroke::new(1.0, t.border))
+        .inner_margin(egui::Margin::ZERO);
+    let mut close = false;
+    let shown = egui::Window::new(title)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .frame(frame)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            let full = width + 2.0 * f32::from(SIDE);
+            ui.set_width(full);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let (head, _) = ui.allocate_exact_size(Vec2::new(full, HEAD), Sense::hover());
+            let p = ui.painter();
+            p.text(
+                Pos2::new(head.left() + f32::from(SIDE), head.center().y),
+                Align2::LEFT_CENTER,
+                title,
+                k.bold(15.0),
+                t.text_bright,
+            );
+            hair_h(p, head.left(), head.right(), head.bottom() - 1.0, t.line);
+            let cell = Rect::from_center_size(Pos2::new(head.right() - 24.0, head.center().y), Vec2::splat(28.0));
+            let x = ui.interact(cell, ui.id().with((title, "close")), Sense::click());
+            if x.hovered() {
+                ui.painter().rect_filled(cell, k.radius(), t.control);
+            }
+            let tint = if x.hovered() { t.text_bright } else { t.text_dim };
+            glyph(ui.painter(), k, cell.center(), icon::X, 14.0, tint);
+            close |= x.clicked();
+            ui.spacing_mut().item_spacing.y = 4.0;
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(SIDE, 14))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    add(ui)
+                })
+                .inner
+        });
+    if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !ctx.egui_wants_keyboard_input() {
+        *open = false;
+    }
+    shown.and_then(|r| r.inner)
+}
+
 /// An icon centred on a point.
 pub fn glyph(p: &Painter, k: &Look, center: Pos2, glyph: &str, size: f32, color: Color32) {
     p.text(center, Align2::CENTER_CENTER, glyph, k.icons(size), color);

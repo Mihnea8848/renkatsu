@@ -8,6 +8,7 @@ use std::path::PathBuf;
 mod audit;
 mod bench;
 mod bundle;
+mod capture_check;
 mod card;
 mod compare;
 mod custom_package;
@@ -103,6 +104,10 @@ enum Cmd {
         /// The colour behind the character, as `r,g,b` from 0 to 1.
         #[arg(long)]
         background: Option<String>,
+        /// Smooth the edges of cut-out surfaces (hair strands, lashes, lace)
+        /// with alpha to coverage; the game cuts them hard.
+        #[arg(long)]
+        alpha_to_coverage: bool,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -156,6 +161,9 @@ enum Cmd {
         /// (`<name>.<view>.studio.png`), with the scene's effects on ours.
         #[arg(long)]
         studio: bool,
+        /// Smooth the edges of cut-out surfaces with alpha to coverage.
+        #[arg(long)]
+        alpha_to_coverage: bool,
     },
     /// Build many cards and report failures, warnings and unsupported data.
     Audit {
@@ -184,6 +192,26 @@ enum Cmd {
         /// Compare with the pictures taken with Studio's screen effects on.
         #[arg(long)]
         studio: bool,
+    },
+    /// Compare every case of a capture batch (the plugin's `out/batch`
+    /// folder) with our render of it: one line per case, with the camera,
+    /// light, outfit, clothing states and pose the capture recorded. Cases
+    /// taken in a map are listed with what they recorded.
+    CaptureCheck {
+        /// Folder with the batch's .json files and pictures.
+        dir: PathBuf,
+        /// Where the comparison pictures go.
+        #[arg(long, default_value = "renders/scratch/capture-check")]
+        out: PathBuf,
+        /// Only the cases whose file name contains one of these texts.
+        #[arg(long)]
+        only: Vec<String>,
+        /// Compare with the pictures taken with Studio's screen effects on.
+        #[arg(long)]
+        studio: bool,
+        /// Smooth the edges of cut-out surfaces with alpha to coverage.
+        #[arg(long)]
+        alpha_to_coverage: bool,
     },
     /// Inspect Unity asset bundle files.
     Bundle {
@@ -350,6 +378,7 @@ fn main() -> Result<()> {
             bones,
             no_shadows,
             studio,
+            alpha_to_coverage,
         } => {
             // Captures are made in Studio, which is also the default.
             let mut opts = rk_chara::BuildOptions {
@@ -359,7 +388,16 @@ fn main() -> Result<()> {
             if let Some(frames) = settle_frames {
                 opts.settle_frames = frames;
             }
-            reference::reference(&card, &capture, &out, &opts, &bones, !no_shadows, studio)
+            reference::reference(
+                &card,
+                &capture,
+                &out,
+                &opts,
+                &bones,
+                !no_shadows,
+                studio,
+                alpha_to_coverage,
+            )
         }
         Cmd::Audit { count, threads } => audit::audit(count, threads),
         Cmd::Bench {
@@ -369,6 +407,13 @@ fn main() -> Result<()> {
             show,
             studio,
         } => bench::bench(&list, &captures, &out, &show, studio),
+        Cmd::CaptureCheck {
+            dir,
+            out,
+            only,
+            studio,
+            alpha_to_coverage,
+        } => capture_check::check(&dir, &out, &only, studio, alpha_to_coverage),
         Cmd::Compare {
             cards,
             count,
@@ -395,6 +440,7 @@ fn main() -> Result<()> {
             time,
             studio_look,
             background,
+            alpha_to_coverage,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -415,6 +461,7 @@ fn main() -> Result<()> {
             time,
             studio_look,
             background: background.as_deref(),
+            alpha_to_coverage,
         }),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },

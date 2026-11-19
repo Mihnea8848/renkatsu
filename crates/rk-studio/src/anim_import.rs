@@ -777,9 +777,7 @@ impl Importer {
             let made = (|| -> anyhow::Result<Preview> {
                 use anyhow::Context;
                 let live = st.live.as_ref().context("The preview needs the viewport")?.sibling()?;
-                let content = preview_content(st).context(
-                    "No character to preview with: add one to the scene, or install Starter Content: Characters & Clothing",
-                )?;
+                let content = preview_content(st).context("No character to preview with")?;
                 let mut scene = Scene::new();
                 let character = scene.add("Preview", content, None);
                 Ok(Preview {
@@ -905,31 +903,27 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             if w.entries.is_empty() {
                 let c = body.center();
                 let (title, text) = match (&w.problem, &w.only) {
-                    (Some(problem), _) => ("The animations could not be read", problem.clone()),
-                    (None, Some(_)) => (
-                        "This zipmod lists no animations",
-                        "It may bring other things, such as clothing or items.".to_owned(),
-                    ),
-                    (None, None) => (
-                        "Nothing with animations is installed",
-                        "Starter Content: Animations & Poses brings CharaStudio's, and so does choosing your Koikatsu folder."
-                            .to_owned(),
-                    ),
+                    (Some(problem), _) => ("The animations could not be read", Some(problem.clone())),
+                    (None, Some(_)) => ("This zipmod lists no animations", None),
+                    (None, None) => ("Nothing with animations is installed", None),
                 };
+                let lift = if text.is_some() { 30.0 } else { 14.0 };
                 ui.painter().text(
-                    c - Vec2::new(0.0, 30.0),
+                    c - Vec2::new(0.0, lift),
                     Align2::CENTER_CENTER,
                     title,
                     k.bold(k.d.text),
                     t.text_bright,
                 );
-                ui.painter().text(
-                    c - Vec2::new(0.0, 8.0),
-                    Align2::CENTER_CENTER,
-                    text,
-                    k.font(),
-                    t.text_dim,
-                );
+                if let Some(text) = text {
+                    ui.painter().text(
+                        c - Vec2::new(0.0, 8.0),
+                        Align2::CENTER_CENTER,
+                        text,
+                        k.font(),
+                        t.text_dim,
+                    );
+                }
                 if w.only.is_none() && w.problem.is_none() {
                     let open = Rect::from_center_size(c + Vec2::new(0.0, 28.0), Vec2::new(150.0, 30.0));
                     if crate::selector::button(ui, k, open, "Open Packages", true, true) {
@@ -949,19 +943,18 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                 import |= list_pane(ui, k, &mut w, list, reading, typing);
                 side_pane(ui, k, st, &mut w, side.with_min_x(side.left() + 1.0));
             }
-            // The foot: what is chosen, how it is filed, and the buttons.
+            // The foot: what is chosen, and the buttons.
             let n = if w.chosen.is_empty() {
                 usize::from(w.highlighted.is_some())
             } else {
                 w.chosen.len()
             };
-            let folder = st.animation_folder();
             let text = match (w.chosen.len(), n) {
                 (_, 0) if w.entries.is_empty() => String::new(),
-                (_, 0) => "Tick animations to choose them, or double click one to import it".to_owned(),
-                (0, _) => format!("Import copies the highlighted animation into {folder}"),
-                (1, _) => format!("1 animation chosen. It is copied into {folder}."),
-                (many, _) => format!("{many} animations chosen. They are copied into {folder}."),
+                (_, 0) => "No animation chosen".to_owned(),
+                (0, _) => "1 animation highlighted".to_owned(),
+                (1, _) => "1 animation chosen".to_owned(),
+                (many, _) => format!("{many} animations chosen"),
             };
             ui.painter().text(
                 Pos2::new(foot.left() + 20.0, foot.center().y),
@@ -1352,16 +1345,8 @@ fn side_pane(ui: &mut Ui, k: &Look, st: &mut State, w: &mut Importer, area: Rect
                 ui,
                 Pos2::new(x, caption.top() + 28.0),
                 width,
-                "Click an animation to see it here",
+                "No animation shown",
                 k.font(),
-                t.text_dim,
-            );
-            crate::selector::line(
-                ui,
-                Pos2::new(x, caption.top() + 48.0),
-                width,
-                "The arrow keys go through the list",
-                k.small(),
                 t.text_dim,
             );
         }

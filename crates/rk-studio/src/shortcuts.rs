@@ -29,66 +29,62 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     }
     let mut open = true;
     let mut ask = None;
-    egui::Window::new("Keyboard shortcuts")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.set_width(WIDTH);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let reset = widgets::flat_width(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false);
-                widgets::search(ui, k, &mut st.shortcuts_search, "Search", WIDTH - reset - 6.0);
-                let changed = st.keys != Keymap::default();
-                let button = ui.add_enabled_ui(changed, |ui| {
-                    flat_button(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false, false)
-                });
-                if button.inner.clicked() {
-                    ask = Some(Ask::ResetAll);
-                }
+    // Escape while a key is being taken cancels that, not the window.
+    let capturing = st.key_capture.is_some();
+    widgets::window(ctx, k, "Keyboard shortcuts", WIDTH, &mut open, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let reset = widgets::flat_width(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false);
+            widgets::search(ui, k, &mut st.shortcuts_search, "Search", WIDTH - reset - 6.0);
+            let changed = st.keys != Keymap::default();
+            let button = ui.add_enabled_ui(changed, |ui| {
+                flat_button(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false, false)
             });
-            ui.add_space(4.0);
-            let search = st.shortcuts_search.trim().to_lowercase();
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .max_height(HEIGHT)
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for group in Group::ALL {
-                        let shown: Vec<_> = ACTIONS
-                            .iter()
-                            .filter(|def| def.group == group)
-                            .filter(|def| {
-                                search.is_empty()
-                                    || def.name.to_lowercase().contains(&search)
-                                    || group.name().to_lowercase().contains(&search)
-                                    || st
-                                        .keys
-                                        .chords(def.action)
-                                        .iter()
-                                        .any(|c| c.text().to_lowercase().contains(&search))
-                            })
-                            .collect();
-                        if shown.is_empty() {
-                            continue;
-                        }
-                        let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-                        ui.painter().text(
-                            Pos2::new(head.left() + 6.0, head.center().y + 2.0),
-                            Align2::LEFT_CENTER,
-                            group.name(),
-                            k.small(),
-                            k.t.text_dim,
-                        );
-                        for def in shown {
-                            if let Some(asked) = row(ui, k, st, def.action, def.name) {
-                                ask = Some(asked);
-                            }
+            if button.inner.clicked() {
+                ask = Some(Ask::ResetAll);
+            }
+        });
+        ui.add_space(4.0);
+        let search = st.shortcuts_search.trim().to_lowercase();
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .max_height(HEIGHT)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for group in Group::ALL {
+                    let shown: Vec<_> = ACTIONS
+                        .iter()
+                        .filter(|def| def.group == group)
+                        .filter(|def| {
+                            search.is_empty()
+                                || def.name.to_lowercase().contains(&search)
+                                || group.name().to_lowercase().contains(&search)
+                                || st
+                                    .keys
+                                    .chords(def.action)
+                                    .iter()
+                                    .any(|c| c.text().to_lowercase().contains(&search))
+                        })
+                        .collect();
+                    if shown.is_empty() {
+                        continue;
+                    }
+                    let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+                    ui.painter().text(
+                        Pos2::new(head.left() + 6.0, head.center().y + 2.0),
+                        Align2::LEFT_CENTER,
+                        group.name(),
+                        k.small(),
+                        k.t.text_dim,
+                    );
+                    for def in shown {
+                        if let Some(asked) = row(ui, k, st, def.action, def.name) {
+                            ask = Some(asked);
                         }
                     }
-                });
-        });
+                }
+            });
+    });
     // A click anywhere else gives the waiting up.
     if ask.is_none() && st.key_capture.is_some() && ctx.input(|i| i.pointer.any_click()) {
         st.key_capture = None;
@@ -106,6 +102,9 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     if matches!(ask, Some(Ask::Clear(..) | Ask::Reset(_) | Ask::ResetAll)) {
         st.settings.keys = st.keys.changes();
         st.settings_changed = true;
+    }
+    if capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        open = true;
     }
     if !open {
         st.shortcuts_open = false;

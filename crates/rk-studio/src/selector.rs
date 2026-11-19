@@ -488,7 +488,10 @@ pub(crate) fn icon_button(
 ) -> bool {
     let t = &k.t;
     let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let resp = ui.interact(rect, ui.id().with(("selector button", text)), sense);
+    // Rows of a list carry buttons of the same text, so the place is part
+    // of the id.
+    let place = (rect.min.x.round() as i32, rect.min.y.round() as i32);
+    let resp = ui.interact(rect, ui.id().with(("selector button", text, place)), sense);
     let hot = ui
         .ctx()
         .animate_bool_with_time(resp.id.with("hot"), enabled && resp.hovered(), secs(ui.ctx(), ANSWER));
@@ -688,27 +691,14 @@ fn entry_menu(resp: &egui::Response, entry: &Entry, act: &mut Option<Act>) {
 /// What a list says when it has nothing to show.
 fn nothing(ui: &Ui, k: &Look, sel: &Selector, rect: Rect) {
     let t = &k.t;
-    let (title, hint) = if sel.entries.is_empty() {
-        (
-            "No projects yet".to_owned(),
-            "Make a new project, or open one from disk.",
-        )
+    let title = if sel.entries.is_empty() {
+        "No projects yet".to_owned()
     } else {
-        (
-            format!("No project matches \"{}\"", sel.search.trim()),
-            "The search looks at names and folders.",
-        )
+        format!("No project matches \"{}\"", sel.search.trim())
     };
     let c = Pos2::new(rect.center().x, rect.top() + (rect.height() * 0.4).min(120.0));
-    let p = ui.painter();
-    p.text(c, Align2::CENTER_CENTER, title, k.bold(k.d.text + 1.0), t.text);
-    p.text(
-        c + Vec2::new(0.0, 22.0),
-        Align2::CENTER_CENTER,
-        hint,
-        k.font(),
-        t.text_dim,
-    );
+    ui.painter()
+        .text(c, Align2::CENTER_CENTER, title, k.bold(k.d.text + 1.0), t.text);
 }
 
 /// A scrolling column in `rect`, `height` tall inside. The content gets
@@ -829,7 +819,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     let under = match (&offer.busy, offer.starter) {
         (Some(busy), _) => busy.clone(),
         (None, true) => "Starter Content is installed".to_owned(),
-        (None, false) => "Content for every project".to_owned(),
+        (None, false) => String::new(),
     };
     line(
         ui,
@@ -868,7 +858,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     }
     let (under, color) = match &sel.game {
         Some(dir) => (shown_path(dir), t.text_dim),
-        None => ("Optional, to import Koikatsu cards".to_owned(), t.text_dim),
+        None => ("Optional".to_owned(), t.text_dim),
     };
     line(
         ui,
@@ -1406,13 +1396,8 @@ fn new_part(ui: &mut Ui, k: &Look, sel: &mut Selector, free: bool, body: Rect, f
         Vec2::new(width, 220.0),
     )));
     let about = match sel.form.start {
-        Start::RenkatsuChan => {
-            "The project starts with Renkatsu-Chan, Koikatsu's default character, standing under a key light. \
-             Her card is copied into the project."
-        }
-        Start::Empty => {
-            "The project starts with a key light and nothing else. Characters come in with File, Import card."
-        }
+        Start::RenkatsuChan => "Renkatsu-Chan under a key light.",
+        Start::Empty => "A key light and nothing else.",
     };
     child.label(egui::RichText::new(about).color(t.text_dim));
     let below = Pos2::new(x, top + 44.0 + tile.y + 22.0);
