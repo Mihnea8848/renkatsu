@@ -26,6 +26,7 @@ rk-vfs = { path = "crates/rk-vfs" }
 rk-packages = { path = "crates/rk-packages" }
 rk-chara = { path = "crates/rk-chara" }
 rk-render = { path = "crates/rk-render" }
+rk-map = { path = "crates/rk-map" }
 glam = "0.29"
 
 [profile.dev]

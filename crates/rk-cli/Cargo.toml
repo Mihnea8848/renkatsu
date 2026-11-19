@@ -21,6 +21,7 @@ rk-vfs.workspace = true
 rk-packages.workspace = true
 rk-chara.workspace = true
 rk-render.workspace = true
+rk-map.workspace = true
 glam.workspace = true
 rayon.workspace = true
 indicatif.workspace = true

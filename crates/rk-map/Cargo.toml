@@ -1,0 +1,12 @@
+[package]
+name = "rk-map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+rk-chara.workspace = true
+rk-unityfs.workspace = true
+rk-vfs.workspace = true

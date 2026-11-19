@@ -10,6 +10,7 @@ mod bench;
 mod bundle;
 mod capture_check;
 mod card;
+mod map;
 mod compare;
 mod custom_package;
 mod package;
@@ -213,6 +214,11 @@ enum Cmd {
         #[arg(long)]
         alpha_to_coverage: bool,
     },
+    /// The maps CharaStudio lists and what their scenes hold.
+    Map {
+        #[command(subcommand)]
+        cmd: MapCmd,
+    },
     /// Inspect Unity asset bundle files.
     Bundle {
         #[command(subcommand)]
@@ -311,6 +317,21 @@ enum PackageCmd {
     Verify { id: String },
     /// Remove an installed package.
     Remove { id: String },
+}
+
+#[derive(Subcommand)]
+enum MapCmd {
+    /// List the maps.
+    Ls {
+        /// Also list maps whose bundle is not installed.
+        #[arg(long)]
+        missing: bool,
+        /// Open every map and show what it holds.
+        #[arg(long)]
+        scan: bool,
+    },
+    /// Show what one map holds, by its number or level name.
+    Info { map: String },
 }
 
 #[derive(Subcommand)]
@@ -483,6 +504,12 @@ fn main() -> Result<()> {
         } => pose::export(group, category, number, &out),
         Cmd::Clothes { card, outfit, steps } => pose::clothes(&card, outfit, &steps),
         Cmd::Resolve { path, all } => vfs::resolve(&path, all),
+        Cmd::Map {
+            cmd: MapCmd::Ls { missing, scan },
+        } => map::ls(missing, scan),
+        Cmd::Map {
+            cmd: MapCmd::Info { map },
+        } => map::info(&map),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),
