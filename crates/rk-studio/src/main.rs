@@ -30,6 +30,7 @@ mod kinds;
 mod landing;
 mod library;
 mod live;
+mod map_library;
 mod maps;
 mod modes;
 mod mods;
@@ -242,6 +243,12 @@ struct Cli {
     /// The map's time of day: day, evening or night.
     #[arg(long, hide = true)]
     map_time: Option<String>,
+    /// Start with the Maps library open, to picture it.
+    #[arg(long, hide = true)]
+    map_library: bool,
+    /// Start with the Maps library scrolled down by this many points.
+    #[arg(long, hide = true)]
+    map_scroll: Option<f32>,
     /// Import this card and put it in the scene nine seconds after the
     /// start, to measure adding a character.
     #[arg(long, hide = true)]
@@ -275,7 +282,7 @@ fn add_map(state: &mut state::State, which: &str, time: Option<&str>) -> Result<
                     e.number.to_string() == which || same(&e.level) || same(&e.name) || same(&rk_map::names::shown(e))
                 })
                 .with_context(|| format!("CharaStudio's list has no map {which:?}"))?;
-            state.import_map(entry);
+            state.import_map(entry, true);
         }
     }
     let map = state
@@ -753,6 +760,10 @@ impl Studio {
             }
         }
         state.title_bar = cli.title_bar;
+        if cli.map_library {
+            state.open_map_library();
+        }
+        state.map_scroll = cli.map_scroll;
         if let Some(path) = &cli.viewport_image {
             let (texture, corner) = load_texture(&cc.egui_ctx, path)?;
             state.viewport_image = Some(texture);
@@ -981,6 +992,7 @@ impl eframe::App for Studio {
         shortcuts::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
         card_import::show(ctx, &k, &mut self.state);
+        map_library::show(ctx, &k, &mut self.state);
         anim_import::show(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);

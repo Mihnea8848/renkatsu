@@ -132,6 +132,11 @@ pub enum Command {
     /// Add the character of one of the project's cards, named by its path
     /// relative to the project.
     AddCard(PathBuf),
+    /// Put one of the project's maps in the scene, named by its sidecar
+    /// relative to the project.
+    AddMap(PathBuf),
+    /// Open the Maps library to import a map into the project alone.
+    MapLibrary,
     /// Give the selected character an animation, or take its animation
     /// off.
     Animate(Option<crate::scene::Animation>),
@@ -287,6 +292,10 @@ impl Opening {
 pub struct State {
     /// The window's title bar.
     pub title_bar: TitleBar,
+    /// How far the library's maps start scrolled, for a picture of them.
+    pub map_scroll: Option<f32>,
+    /// The pictures of maps at their times of day, and their sidecars.
+    pub map_pictures: crate::map_library::Pictures,
     /// When the fly speed last changed, in egui's seconds, for the meter
     /// that shows it and fades away.
     pub speed_shown: Option<f64>,
@@ -326,9 +335,8 @@ pub struct State {
     pub picker: Option<Picker>,
     /// Cards waiting to be imported, one after the other.
     pub imports: VecDeque<Import>,
-    /// The maps of the game, the packages and the mods the open map
-    /// chooser offers to import, in its order.
-    pub map_list: Vec<rk_map::list::Entry>,
+    /// The Maps library, while it is open.
+    pub map_library: Option<crate::map_library::Shelf>,
     /// The editor runs from a script: it asks nothing and leaves the
     /// user's settings as they are.
     pub scripted: bool,
@@ -770,6 +778,8 @@ impl State {
     pub fn new(project: Project, scene: Scene) -> Self {
         State {
             title_bar: TitleBar::A,
+            map_scroll: None,
+            map_pictures: crate::map_library::Pictures::default(),
             speed_shown: None,
             library: Library::new(&project),
             project,
@@ -789,7 +799,7 @@ impl State {
             modal: None,
             picker: None,
             imports: VecDeque::new(),
-            map_list: Vec::new(),
+            map_library: None,
             scripted: false,
             update: None,
             quit: false,
@@ -993,7 +1003,7 @@ impl State {
                 }
             }
             Command::Add(Kind::Character) => self.show_folder(0),
-            Command::Add(Kind::Map) => self.choose_map(),
+            Command::Add(Kind::Map) => self.open_map_library(),
             Command::Add(kind) => {
                 if let Some(content) = Content::of_kind(kind) {
                     let name = match kind {
@@ -1008,6 +1018,8 @@ impl State {
                 }
             }
             Command::AddCard(card) => self.add_card(card),
+            Command::AddMap(file) => self.add_map(file),
+            Command::MapLibrary => self.open_map_import(),
             Command::Animate(animation) => {
                 if let Some(mut object) = self.doc.selection().cloned() {
                     if let Content::Character { animation: worn, .. } = &mut object.content {
@@ -1911,71 +1923,20 @@ impl State {
         self.focus_pending = Some(id);
     }
 
-    /// Opens the list of maps to add to the scene: the project's own,
-    /// then the ones it can import.
-    fn choose_map(&mut self) {
-        let owned = crate::maps::in_project(&self.project.root);
-        let mods = self.project.mods_dir();
-        self.map_list = match self.games.get(&mods) {
-            Ok(game) => rk_map::list::read(game, false)
-                .into_iter()
-                .filter(|e| {
-                    !owned
-                        .iter()
-                        .any(|m| rk_vfs::index::norm(m.map.scene_bundle()) == rk_vfs::index::norm(&e.bundle))
-                })
-                .collect(),
-            // Without the game the project's own maps are still there.
-            Err(_) => Vec::new(),
-        };
-        let mut rows: Vec<crate::dialogs::MapRow> = owned
-            .into_iter()
-            .map(|m| crate::dialogs::MapRow {
-                name: m.map.name,
-                source: "Project".to_owned(),
-                owned: Some(m.file),
-                listed: None,
-            })
-            .collect();
-        rows.extend(self.map_list.iter().enumerate().map(|(i, e)| crate::dialogs::MapRow {
-            name: rk_map::names::shown(e),
-            source: e.source.label().to_owned(),
-            owned: None,
-            listed: Some(i),
-        }));
-        self.modal = Some(Modal::AddMap(crate::dialogs::MapChooser {
-            rows,
-            chosen: None,
-            size: None,
-        }));
+    /// Opens the Maps library, to add a map to the scene.
+    pub fn open_map_library(&mut self) {
+        self.map_library = Some(crate::map_library::Shelf::open(self, true));
     }
 
-    /// The size importing a map of the chooser's list copies, as far as
-    /// it is known before the copy: its scene bundle.
-    pub fn map_size(&mut self, listed: usize) -> u64 {
-        let Some(entry) = self.map_list.get(listed) else {
-            return 0;
-        };
-        self.games
-            .get(&self.project.mods_dir())
-            .ok()
-            .and_then(|game| game.assets.bundle_size(&entry.bundle))
-            .unwrap_or(0)
-    }
-
-    /// The user chose a map in the chooser: the project's own goes in
-    /// the scene, another is imported first.
-    pub fn chose_map(&mut self, row: &crate::dialogs::MapRow) {
-        if let Some(file) = &row.owned {
-            self.add_map(PathBuf::from(file));
-        } else if let Some(entry) = row.listed.and_then(|i| self.map_list.get(i)).cloned() {
-            self.import_map(entry);
-        }
+    /// Opens the Maps library, to import a map into the project alone.
+    pub fn open_map_import(&mut self) {
+        self.map_library = Some(crate::map_library::Shelf::open(self, false));
     }
 
     /// Copies a map of the game, a package or a mod into the project, and
-    /// puts it in the scene. The copy is large, so a job does it.
-    pub fn import_map(&mut self, entry: rk_map::list::Entry) {
+    /// with `to_scene` puts it in the scene. The copy is large, so a job
+    /// does it.
+    pub fn import_map(&mut self, entry: rk_map::list::Entry, to_scene: bool) {
         let name = rk_map::names::shown(&entry);
         let game = match self.games.shared(&self.project.mods_dir()) {
             Ok(game) => game,
@@ -1999,7 +1960,9 @@ impl State {
             Ok((file, bytes)) => {
                 st.log
                     .info(format!("Imported {name} as {file}, {}", mods::size_text(bytes)));
-                st.add_map(PathBuf::from(file));
+                if to_scene {
+                    st.add_map(PathBuf::from(file));
+                }
             }
             Err(e) if crate::jobs::was_cancelled(&e) => {
                 st.log.info(format!("The import of {name} was cancelled"));
