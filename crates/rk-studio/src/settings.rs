@@ -124,6 +124,8 @@ pub struct Settings {
     pub recent_projects: Vec<Recent>,
     /// Ask GitHub at start whether a newer Renkatsu is out.
     pub check_updates: bool,
+    /// Show the project's news on the home page.
+    pub show_news: bool,
     /// The keys and mouse buttons pressed show in the viewport's corner.
     pub show_inputs: bool,
     /// Cut-out edges, such as lashes and lace, are smoothed
@@ -147,6 +149,7 @@ impl Default for Settings {
             project_view: ProjectView::default(),
             recent_projects: Vec::new(),
             check_updates: true,
+            show_news: true,
             show_inputs: false,
             smooth_edges: true,
             snap_steps: SNAP_STEPS,
@@ -235,6 +238,7 @@ mod tests {
             project_view: ProjectView::List,
             recent_projects: Vec::new(),
             check_updates: false,
+            show_news: false,
             show_inputs: true,
             smooth_edges: false,
             snap_steps: [0.5, 45.0, 0.25, 2.0],

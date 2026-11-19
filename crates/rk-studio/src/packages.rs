@@ -136,6 +136,11 @@ impl Packages {
         self.job.is_some()
     }
 
+    /// The work that is under way: the package's name and its task.
+    pub fn task(&self) -> Option<(&str, &Arc<Task>)> {
+        self.job.as_ref().map(|job| (job.name.as_str(), &job.task))
+    }
+
     /// What the project selector shows.
     pub fn offer(&self) -> Offer {
         let id = rk_packages::STARTER_CHARACTERS;

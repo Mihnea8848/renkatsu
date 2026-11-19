@@ -263,8 +263,25 @@ pub fn import(
     folder: &str,
     by_category: bool,
 ) -> Imported {
+    import_watched(project, game, picks, folder, by_category, &mut |_, _| true)
+}
+
+/// Imports as [`import`] does and tells `watch` each animation before it
+/// is copied, by its place and its name; the import stops when `watch`
+/// says no, with what is copied so far.
+pub fn import_watched(
+    project: &Project,
+    game: Option<&rk_vfs::Game>,
+    picks: &[Pick],
+    folder: &str,
+    by_category: bool,
+    watch: &mut dyn FnMut(usize, &str) -> bool,
+) -> Imported {
     let mut done = Imported::default();
-    for pick in picks {
+    for (n, pick) in picks.iter().enumerate() {
+        if !watch(n, &pick.name) {
+            break;
+        }
         let written = stored(game, pick).and_then(|stored| {
             let mut dir = folder.to_owned();
             if by_category {

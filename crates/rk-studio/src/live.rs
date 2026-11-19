@@ -7,9 +7,16 @@
 //! `camera.rs`. The scene model says what exists; this follows it, building
 //! a character when one appears, dropping it when it leaves, moving its
 //! root to the object's transform and stepping its physics while it plays.
+//!
+//! A character is built in two halves. Reading its bundles, meshes and
+//! textures is work for another thread, a job; what the job made is taken
+//! in here, in the order the builds were asked for, so the scene draws as
+//! if they had been built one after the other. Its textures then go to
+//! the GPU a few a frame, and the character shows once they are all there.
 
 use crate::camera::{Focus, Orbit, ViewCamera};
 use crate::gizmo_pass::{GizmoPass, Mesh};
+use crate::jobs::{Handle, Jobs, Show};
 use crate::mods::Games;
 use crate::project::Project;
 use crate::scene::{Content, ObjectId, Scene};
@@ -65,7 +72,44 @@ struct Actor {
     animation_problem: Option<String>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
+    /// Its textures are on the GPU: it can be drawn without a wait.
+    warm: bool,
+    /// Seconds the build took.
+    took: f32,
 }
+
+/// A character a job is building.
+struct Pending {
+    id: ObjectId,
+    recipe: Recipe,
+    name: String,
+    handle: Handle<Prepared>,
+}
+
+/// What a build job hands back.
+struct Prepared {
+    actor: Actor,
+    /// The colour table of Studio's first colour filter, when the build
+    /// was asked to look for it.
+    filter: Option<Option<Arc<Image>>>,
+}
+
+/// How far a character of the scene is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Progress {
+    /// Nothing was started for it yet.
+    Waiting,
+    Building,
+    /// Built; its textures are going to the GPU.
+    Uploading,
+    /// Ready to draw, after a build of this many seconds.
+    Ready(f32),
+    Failed,
+}
+
+/// The time a frame may spend on sending a new character's textures to
+/// the GPU.
+const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 /// An animation bound to an actor's bones.
 struct Playing {
@@ -305,6 +349,15 @@ pub struct Live {
     /// Characters that could not be built, with what was tried and why, so
     /// that they are not tried again every frame.
     failed: Vec<(ObjectId, Recipe, String)>,
+    /// The characters being built, in the order they were asked for.
+    pending: Vec<Pending>,
+    /// Wait for every build where it is asked for, as scripted pictures
+    /// and the previews do, and upload as the draw needs it.
+    pub patient: bool,
+    /// How the builds show while they run.
+    pub show_builds: Show,
+    /// Textures of new characters that still wait for the GPU.
+    uploads_left: usize,
     target: Option<Target>,
     pub cam: ViewCamera,
     /// An object is being dragged in the viewport: the camera stays where
@@ -334,9 +387,11 @@ impl Live {
     }
 
     /// Another renderer on the same device with a scene of its own, for a
-    /// preview beside the viewport.
+    /// preview beside the viewport. It waits for its builds.
     pub fn sibling(&self) -> Result<Live> {
-        Live::new(&self.render_state)
+        let mut live = Live::new(&self.render_state)?;
+        live.patient = true;
+        Ok(live)
     }
 
     pub fn new(render_state: &egui_wgpu::RenderState) -> Result<Live> {
@@ -349,6 +404,10 @@ impl Live {
             render_state: render_state.clone(),
             actors: Vec::new(),
             failed: Vec::new(),
+            pending: Vec::new(),
+            patient: false,
+            show_builds: Show::Notice,
+            uploads_left: 0,
             target: None,
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
             hold_camera: false,
@@ -366,6 +425,10 @@ impl Live {
         }
         self.actors.clear();
         self.failed.clear();
+        for pending in self.pending.drain(..) {
+            pending.handle.progress.cancel();
+        }
+        self.uploads_left = 0;
         for focus in [self.cam.focus, self.cam.home_focus()].into_iter().flatten() {
             self.cam.forget(focus.object);
         }
@@ -376,6 +439,26 @@ impl Live {
     /// Whether any character is built.
     pub fn has_characters(&self) -> bool {
         !self.actors.is_empty()
+    }
+
+    /// How far a character of the scene is, as it was last followed.
+    pub fn progress(&self, id: ObjectId) -> Progress {
+        if self.pending.iter().any(|p| p.id == id) {
+            return Progress::Building;
+        }
+        if self.failed.iter().any(|f| f.0 == id) {
+            return Progress::Failed;
+        }
+        match self.actors.iter().find(|a| a.id == id) {
+            Some(actor) if actor.warm => Progress::Ready(actor.took),
+            Some(_) => Progress::Uploading,
+            None => Progress::Waiting,
+        }
+    }
+
+    /// How many textures of new characters still wait for the GPU.
+    pub fn uploads_left(&self) -> usize {
+        self.uploads_left
     }
 
     /// Gives the characters that could not be built another try, after
@@ -414,7 +497,15 @@ impl Live {
     /// their animations and physics on by the clock while the scene plays.
     /// The scene names its cards relative to the project, whose mods
     /// `games` opens the game with.
-    pub fn follow(&mut self, scene: &Scene, project: &Project, games: &mut Games, clock: Clock, log: &mut Log) {
+    pub fn follow(
+        &mut self,
+        scene: &Scene,
+        project: &Project,
+        games: &mut Games,
+        jobs: &mut Jobs,
+        clock: Clock,
+        log: &mut Log,
+    ) {
         let wanted: Vec<(ObjectId, Recipe)> = scene
             .objects()
             .iter()
@@ -436,10 +527,23 @@ impl Live {
             })
             .collect();
 
-        // Characters that left the scene, or whose recipe changed.
+        // Builds nobody waits for any more.
+        self.pending.retain(|p| {
+            let keep = wanted.iter().any(|(id, recipe)| *id == p.id && *recipe == p.recipe);
+            if !keep {
+                p.handle.progress.cancel();
+            }
+            keep
+        });
+        // Characters that left the scene. One whose recipe changed stays
+        // as it is until the new build takes its place.
         let before = self.actors.len();
-        self.actors
-            .retain(|a| wanted.iter().any(|(id, recipe)| *id == a.id && *recipe == a.recipe));
+        let failed = &self.failed;
+        self.actors.retain(|a| {
+            wanted.iter().any(|(id, recipe)| {
+                *id == a.id && (*recipe == a.recipe || !failed.iter().any(|f| f.0 == *id && f.1 == *recipe))
+            })
+        });
         if self.actors.len() != before {
             // The renderer keys what it uploaded by address, and a dropped
             // character's addresses can be handed out again.
@@ -453,24 +557,73 @@ impl Live {
             }
         }
 
+        let mods = project.mods_dir();
         for (id, recipe) in wanted {
             let known = |other: ObjectId, tried: &Recipe| other == id && *tried == recipe;
-            if self.actors.iter().any(|a| known(a.id, &a.recipe)) || self.failed.iter().any(|f| known(f.0, &f.1)) {
+            if self.actors.iter().any(|a| known(a.id, &a.recipe))
+                || self.failed.iter().any(|f| known(f.0, &f.1))
+                || self.pending.iter().any(|p| known(p.id, &p.recipe))
+            {
                 continue;
             }
-            let name = scene.get(id).map_or("", |o| o.name.as_str());
-            let started = std::time::Instant::now();
-            match Self::build(games, &project.mods_dir(), id, &recipe) {
-                Ok(actor) => {
+            let name = scene.get(id).map_or("", |o| o.name.as_str()).to_owned();
+            // The content is opened by a job of its own; until it is in,
+            // the character waits. A patient renderer opens it here.
+            let game = if self.patient {
+                match games.shared(&mods) {
+                    Ok(game) => game,
+                    Err(e) => {
+                        let why = format!("{e:#}");
+                        log.error(format!("{name} could not be built: {why}"));
+                        self.failed.push((id, recipe, why));
+                        continue;
+                    }
+                }
+            } else {
+                match games.ready(&mods) {
+                    Some(game) => game,
+                    None => continue,
+                }
+            };
+            let want_filter = self.filter.is_none();
+            let theirs = recipe.clone();
+            // A build that is waited for shows nowhere.
+            let show = if self.patient { Show::Quiet } else { self.show_builds };
+            let handle = jobs.start(&format!("Loading {name}"), show, true, move |_| {
+                let started = std::time::Instant::now();
+                let mut actor = Self::build(&game, id, &theirs)?;
+                actor.took = started.elapsed().as_secs_f32();
+                let filter = want_filter.then(|| rk_chara::build::color_filter(&game, DEFAULT_COLOR_FILTER));
+                Ok(Prepared { actor, filter })
+            });
+            jobs.name_when_done(&format!("Loaded {name}"));
+            self.pending.push(Pending {
+                id,
+                recipe,
+                name,
+                handle,
+            });
+        }
+
+        // What the jobs built, in the order it was asked for: a build that
+        // is done waits for the ones asked before it.
+        while let Some(first) = self.pending.first() {
+            let result = if self.patient {
+                first.handle.wait()
+            } else {
+                match first.handle.try_take() {
+                    Some(result) => result,
+                    None => break,
+                }
+            };
+            let Pending { id, recipe, name, .. } = self.pending.remove(0);
+            match result {
+                Ok(Prepared { mut actor, filter }) => {
                     if self.filter.is_none() {
-                        let game = games.get(&project.mods_dir()).ok();
-                        self.filter = Some(game.and_then(|g| rk_chara::build::color_filter(g, DEFAULT_COLOR_FILTER)));
+                        self.filter = filter;
                     }
                     let file = recipe.card.file_name().unwrap_or_default().to_string_lossy();
-                    log.info(format!(
-                        "Loaded {name} from {file} in {:.1} s",
-                        started.elapsed().as_secs_f32()
-                    ));
+                    log.info(format!("Loaded {name} from {file} in {:.1} s", actor.took));
                     for warning in &actor.chara.warnings {
                         log.warn(format!("{name}: {warning}"));
                     }
@@ -484,6 +637,13 @@ impl Live {
                         self.cam.rehome(home, Some(subject));
                         self.framed = true;
                     }
+                    // The build it replaces, of another recipe, goes now.
+                    let before = self.actors.len();
+                    self.actors.retain(|a| a.id != id);
+                    if self.actors.len() != before {
+                        self.renderer.clear_textures();
+                    }
+                    actor.warm = self.patient;
                     self.actors.push(actor);
                 }
                 Err(e) => {
@@ -494,7 +654,6 @@ impl Live {
             }
         }
 
-        let mods = project.mods_dir();
         for actor in &mut self.actors {
             let Some(object) = scene.get(actor.id) else { continue };
             let parameters = actor.chara.parameters;
@@ -532,8 +691,9 @@ impl Live {
         }
     }
 
-    fn build(games: &mut Games, mods: &Path, id: ObjectId, recipe: &Recipe) -> Result<Actor> {
-        let game = games.get(mods)?;
+    /// The half of a build that needs no GPU: the card, its bundles,
+    /// meshes and textures. It runs on a job's thread.
+    fn build(game: &rk_vfs::Game, id: ObjectId, recipe: &Recipe) -> Result<Actor> {
         let card = rk_card::Card::load(&recipe.card).with_context(|| format!("loading {}", recipe.card.display()))?;
         let options = rk_chara::BuildOptions {
             outfit: recipe.outfit.min(card.coordinates.len().saturating_sub(1)),
@@ -558,6 +718,8 @@ impl Live {
             playing: None,
             animation_problem: None,
             phase: None,
+            warm: false,
+            took: 0.0,
         })
     }
 
@@ -648,12 +810,20 @@ impl Live {
             };
             self.target = Some(Target { texture, id, size });
         }
+        // A new character's textures go to the GPU a few a frame; it is
+        // drawn from the frame they are all there.
+        self.uploads_left = 0;
+        if let Some(actor) = self.actors.iter_mut().find(|a| !a.warm) {
+            let draws = actor.chara.scene.pose();
+            self.uploads_left = self.renderer.warm(&draws, UPLOAD_BUDGET);
+            actor.warm = self.uploads_left == 0;
+        }
         let target = self.target.as_ref().expect("made above");
         let env = self.environment(scene, background);
         let draws: Vec<_> = self
             .actors
             .iter()
-            .filter(|a| scene.shown(a.id))
+            .filter(|a| a.warm && scene.shown(a.id))
             .flat_map(|a| a.chara.scene.pose())
             .collect();
         self.renderer
