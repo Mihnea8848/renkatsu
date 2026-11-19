@@ -219,8 +219,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             show_cards = true;
                         }
                     });
+                    let no_names = std::collections::BTreeMap::new();
+                    let names = built.as_ref().map_or(&no_names, |b| &b.outfit_names);
                     let outfits: Vec<String> = (0..built.as_ref().map_or(1, |b| b.outfits.max(1)))
-                        .map(outfit_name)
+                        .map(|i| rk_chara::more_outfits::outfit_name(i, names))
                         .collect();
                     let outfits: Vec<&str> = outfits.iter().map(String::as_str).collect();
                     let waiting = built.is_none().then_some("The character is not built");
@@ -593,23 +595,6 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
         color,
     );
     resp
-}
-
-/// The game's names for a card's seven outfits, in their order; outfits a
-/// plugin adds after them are numbered.
-fn outfit_name(index: usize) -> String {
-    const NAMES: [&str; 7] = [
-        "In school",
-        "After school",
-        "Gym",
-        "Swimsuit",
-        "Club",
-        "Casual",
-        "Sleepover",
-    ];
-    NAMES
-        .get(index)
-        .map_or_else(|| format!("Outfit {}", index + 1), |name| (*name).to_owned())
 }
 
 /// The row of pages under a character's header, each a word with a line
