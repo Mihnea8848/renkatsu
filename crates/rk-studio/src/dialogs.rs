@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The questions the editor asks before it goes on: whether to copy a
-//! card's mods into the project, what to do with unsaved changes, and
-//! where a new project goes. One is open at a time, over the dimmed
-//! window. The system's own file dialogs, which pick the cards and
+//! card's mods into the project, what to do with unsaved changes, where a
+//! new project goes. One is open at a time, over the dimmed window. The system's own file dialogs, which pick the cards and
 //! folders, are here too.
 
 use crate::mods::{count_text, size_text, Plan};
@@ -116,6 +115,8 @@ pub enum Pick {
     Package,
     /// An animation file or a zipmod to import animations from.
     Animation,
+    /// A map file to copy into the project.
+    Map,
 }
 
 /// A system file dialog that is open. It runs on a thread of its own, so
@@ -139,6 +140,7 @@ impl Picker {
                 Pick::GameFolder => "Koikatsu folder",
                 Pick::Package => "Install package",
                 Pick::Animation => "Import animations",
+                Pick::Map => "Import map",
             });
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
@@ -155,6 +157,9 @@ impl Picker {
                         "Animations and zipmods",
                         &[rk_chara::animation_file::EXTENSION, "zipmod"],
                     )
+                    .pick_file(),
+                Pick::Map => dialog
+                    .add_filter("Renkatsu maps", &[rk_map::file::EXTENSION])
                     .pick_file(),
                 // A package, or the first part of one that was cut into parts.
                 Pick::Package => dialog

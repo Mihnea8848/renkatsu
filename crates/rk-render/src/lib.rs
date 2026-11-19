@@ -110,8 +110,13 @@ impl Camera {
         ((dist * 0.05).max(0.01), dist * 4.0 + 10.0)
     }
 
+    #[cfg(test)]
     fn view_proj(&self, aspect: f32) -> Mat4 {
         let (near, far) = self.clip_planes();
+        self.view_proj_within(aspect, near, far)
+    }
+
+    fn view_proj_within(&self, aspect: f32, near: f32, far: f32) -> Mat4 {
         let proj = Mat4::perspective_lh(self.fov_y_deg.to_radians(), aspect, near, far);
         proj * Mat4::look_at_lh(self.eye, self.target, Vec3::Y)
     }
@@ -287,8 +292,10 @@ pub struct Renderer {
     effects: Option<effects::Gpu>,
     /// The selection outline's pipeline, once a frame asked for one.
     highlight: Option<highlight::Pass>,
-    /// The map pass's pipelines, once a map was drawn.
+    /// The map pass's pipelines, once a map was set.
     map: Option<map::Pipelines>,
+    /// The map drawn with the characters, uploaded by `set_map`.
+    map_scene: Option<map::MapGpu>,
 }
 
 struct MeshBuffers {
@@ -837,6 +844,7 @@ impl Renderer {
             effects: None,
             highlight: None,
             map: None,
+            map_scene: None,
         })
     }
 
@@ -1183,7 +1191,10 @@ impl Renderer {
         let to_eye = (camera.eye - camera.target).normalize_or_zero();
         // Key light from the camera's upper left, as a viewer expects.
         let right = Vec3::Y.cross(-to_eye).normalize_or_zero();
-        let light = match env.light_dir {
+        // One light for the characters and the map: its sun, when one is
+        // set.
+        let light_dir = self.shown_map().map(|m| m.sun_dir()).or(env.light_dir);
+        let light = match light_dir {
             Some(d) => Vec3::from(d).normalize_or_zero(),
             None => (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize(),
         };
@@ -1194,8 +1205,12 @@ impl Renderer {
         let covered = env.alpha_to_coverage;
         let occlude = env.effects.as_ref().is_some_and(|fx| fx.ao.is_some());
         let depth_wanted = occlude || env.camera_depth;
+        // A map is seen to its far side.
+        let (near, far) = camera.clip_planes();
+        let far = self.shown_map().map_or(far, |m| far.max(m.far(camera)));
+        let view_proj = camera.view_proj_within(aspect, near, far);
         let base = Globals {
-            view_proj: camera.view_proj(aspect).to_cols_array(),
+            view_proj: view_proj.to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
             ambient_shadow: scene_shadow_global(env),
@@ -1652,7 +1667,6 @@ impl Renderer {
             }
 
             // Collect the shadows into the screen-sized mask.
-            let view_proj = camera.view_proj(aspect);
             let uniform = ShadowUniform {
                 inv_view_proj: view_proj.inverse().to_cols_array(),
                 world_to_shadow: std::array::from_fn(|i| {
@@ -1737,7 +1751,6 @@ impl Renderer {
         let hdr_views = fx_gpu
             .as_mut()
             .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT));
-        let (near, far) = camera.clip_planes();
         let fx_frame = env.effects.as_ref().map(|fx| effects::Frame {
             fx,
             width,
@@ -1767,6 +1780,33 @@ impl Renderer {
             Some((msaa, resolved)) => (msaa, resolved),
             None => (&msaa, target_view),
         };
+        // The map's frame, and its sun's shadow before the main pass.
+        let map_target = map::Target {
+            color: if hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
+            depth: DEPTH_FORMAT,
+        };
+        let map_frame = match (self.map.as_mut(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
+            (Some(pipes), Some(gpu)) => {
+                pipes.prepare(&self.device, map_target);
+                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect);
+                gpu.shadow_pass(pipes, &mut encoder, &frame);
+                Some((pipes as &map::Pipelines, gpu, frame))
+            }
+            _ => None,
+        };
+        // Behind a map is its own background, already linear.
+        let clear = match &map_frame {
+            Some((_, gpu, _)) => {
+                let [r, g, b] = gpu.background().map(f64::from);
+                wgpu::Color { r, g, b, a: 1.0 }
+            }
+            None => wgpu::Color {
+                r: srgb_to_linear(background[0]),
+                g: srgb_to_linear(background[1]),
+                b: srgb_to_linear(background[2]),
+                a: background[3],
+            },
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -1775,12 +1815,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: Some(resolve_view),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: srgb_to_linear(background[0]),
-                            g: srgb_to_linear(background[1]),
-                            b: srgb_to_linear(background[2]),
-                            a: background[3],
-                        }),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1803,6 +1838,11 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The map's solid surfaces and its sky come first, its blended
+            // ones after the characters'.
+            if let Some((pipes, gpu, frame)) = &map_frame {
+                gpu.draw_solid(pipes, map_target, &mut pass, frame);
+            }
             pass.set_bind_group(0, &globals_bg, &[]);
             let mut current = None;
             let occlude = |pass: &mut wgpu::RenderPass| {
@@ -1837,6 +1877,9 @@ impl Renderer {
             }
             if solid_steps == steps.len() {
                 occlude(&mut pass);
+            }
+            if let Some((pipes, gpu, frame)) = &map_frame {
+                gpu.draw_blended(pipes, map_target, &mut pass, frame);
             }
         }
         if let (Some(gpu), Some(frame)) = (&fx_gpu, &fx_frame) {

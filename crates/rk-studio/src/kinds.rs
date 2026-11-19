@@ -52,6 +52,10 @@ impl Kind {
         Color32::from_rgb(r, g, b)
     }
 
+    /// A man's character: the character colour's blue twin, as his card
+    /// is another type than a woman's.
+    pub const MALE: Color32 = Color32::from_rgb(0x6c, 0x8e, 0xc8);
+
     pub fn glyph(self) -> &'static str {
         match self {
             Kind::Scene => icon::GLOBE_HEMISPHERE_WEST,

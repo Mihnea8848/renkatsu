@@ -132,6 +132,13 @@ pub enum Command {
     /// Add the character of one of the project's cards, named by its path
     /// relative to the project.
     AddCard(PathBuf),
+    /// Put one of the project's maps in the scene, named by its sidecar
+    /// relative to the project.
+    AddMap(PathBuf),
+    /// Open the Maps library to import a map into the project alone.
+    MapLibrary,
+    /// Pick a map file and copy it into the project.
+    ImportMapFile,
     /// Give the selected character an animation, or take its animation
     /// off.
     Animate(Option<crate::scene::Animation>),
@@ -287,6 +294,10 @@ impl Opening {
 pub struct State {
     /// The window's title bar.
     pub title_bar: TitleBar,
+    /// How far the library's maps start scrolled, for a picture of them.
+    pub map_scroll: Option<f32>,
+    /// The pictures of maps at their times of day, and their sidecars.
+    pub map_pictures: crate::map_library::Pictures,
     /// When the fly speed last changed, in egui's seconds, for the meter
     /// that shows it and fades away.
     pub speed_shown: Option<f64>,
@@ -326,11 +337,15 @@ pub struct State {
     pub picker: Option<Picker>,
     /// Cards waiting to be imported, one after the other.
     pub imports: VecDeque<Import>,
+    /// The Maps library, while it is open.
+    pub map_library: Option<crate::map_library::Shelf>,
     /// The editor runs from a script: it asks nothing and leaves the
     /// user's settings as they are.
     pub scripted: bool,
     /// A newer Renkatsu on GitHub, when the check at start found one.
     pub update: Option<rk_packages::update::Release>,
+    /// Install Update at work, or stopped with why.
+    pub updating: Option<crate::self_update::Updating>,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -767,6 +782,8 @@ impl State {
     pub fn new(project: Project, scene: Scene) -> Self {
         State {
             title_bar: TitleBar::A,
+            map_scroll: None,
+            map_pictures: crate::map_library::Pictures::default(),
             speed_shown: None,
             library: Library::new(&project),
             project,
@@ -786,8 +803,10 @@ impl State {
             modal: None,
             picker: None,
             imports: VecDeque::new(),
+            map_library: None,
             scripted: false,
             update: None,
+            updating: None,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,
@@ -996,14 +1015,14 @@ impl State {
                 }
             }
             Command::Add(Kind::Character) => self.show_folder(0),
+            Command::Add(Kind::Map) => self.open_map_library(),
             Command::Add(kind) => {
                 if let Some(content) = Content::of_kind(kind) {
                     let name = match kind {
                         Kind::Folder => "Folder",
                         Kind::Light => "Light",
                         Kind::Camera => "Camera",
-                        Kind::Item => "Item",
-                        _ => "Map",
+                        _ => "Item",
                     };
                     let id = self.doc.add(name, content);
                     self.unfold_to(id);
@@ -1011,6 +1030,8 @@ impl State {
                 }
             }
             Command::AddCard(card) => self.add_card(card),
+            Command::AddMap(file) => self.add_map(file),
+            Command::MapLibrary => self.open_map_import(),
             Command::Animate(animation) => {
                 if let Some(mut object) = self.doc.selection().cloned() {
                     if let Content::Character { animation: worn, .. } = &mut object.content {
@@ -1030,6 +1051,7 @@ impl State {
             | Command::ImportFromPackage
             | Command::ImportAnimations
             | Command::ImportAnimationFile
+            | Command::ImportMapFile
             | Command::Packages
             | Command::ProjectSelector
             | Command::SetIcon
@@ -1075,6 +1097,7 @@ impl State {
             Command::ImportFromPackage => self.packages.browse(rk_core::Config::load().ok().as_ref()),
             Command::ImportAnimations => self.importer = Some(crate::anim_import::Importer::new(None)),
             Command::ImportAnimationFile => self.pick(Pick::Animation, None, ctx),
+            Command::ImportMapFile => self.pick(Pick::Map, None, ctx),
             Command::Packages => self.packages.open = true,
             other => self.run(other),
         }
@@ -1183,6 +1206,7 @@ impl State {
             }),
             Pick::Project => self.open_or_tell(&path),
             Pick::Animation => self.import_animation_file(&path),
+            Pick::Map => self.import_map_file(&path),
             Pick::Package => self.packages.picked = Some(path),
             Pick::Icon => {
                 let set = match self.selector.as_mut().and_then(|s| s.icon_for.take()) {
@@ -1758,6 +1782,14 @@ impl State {
 
     /// Imports from a file the user picked: an animation file is copied
     /// in, a zipmod opens the import window on the animations it lists.
+    /// Copies a picked map file into the project.
+    pub fn import_map_file(&mut self, path: &Path) {
+        match crate::maps::copy_in(&self.project, path) {
+            Ok((_, name)) => self.log.info(format!("Imported the map {name}")),
+            Err(e) => self.log.error(format!("The map could not be imported: {e:#}")),
+        }
+    }
+
     pub fn import_animation_file(&mut self, path: &Path) {
         let extension = path
             .extension()
@@ -1912,6 +1944,107 @@ impl State {
         self.unfold_to(id);
         // The camera goes to her once she is built.
         self.focus_pending = Some(id);
+    }
+
+    /// Opens the Maps library, to add a map to the scene.
+    pub fn open_map_library(&mut self) {
+        self.map_library = Some(crate::map_library::Shelf::open(self, true));
+    }
+
+    /// Opens the Maps library, to import a map into the project alone.
+    pub fn open_map_import(&mut self) {
+        self.map_library = Some(crate::map_library::Shelf::open(self, false));
+    }
+
+    /// Copies a map of the game, a package or a mod into the project, and
+    /// with `to_scene` puts it in the scene. The copy is large, so a job
+    /// does it.
+    pub fn import_map(&mut self, entry: rk_map::list::Entry, to_scene: bool) {
+        let name = rk_map::names::shown(&entry);
+        let game = match self.games.shared(&self.project.mods_dir()) {
+            Ok(game) => game,
+            Err(e) => {
+                self.log.error(format!("{name} could not be imported: {e:#}"));
+                return;
+            }
+        };
+        let project = self.project.clone();
+        let job = format!("Importing {name}");
+        let work = move |p: &crate::jobs::Progress| -> Result<(String, u64)> {
+            let plan = crate::maps::plan(&game, &entry)?;
+            p.set_bytes(0, plan.bytes());
+            let file = crate::maps::import(&game, &project, &plan, &mut |bytes| {
+                p.add(bytes);
+                p.check()
+            })?;
+            Ok((file, plan.bytes()))
+        };
+        let done = move |st: &mut State, imported: Result<(String, u64)>| match imported {
+            Ok((file, bytes)) => {
+                st.log
+                    .info(format!("Imported {name} as {file}, {}", mods::size_text(bytes)));
+                if to_scene {
+                    st.add_map(PathBuf::from(file));
+                }
+            }
+            Err(e) if crate::jobs::was_cancelled(&e) => {
+                st.log.info(format!("The import of {name} was cancelled"));
+            }
+            Err(e) => st.log.error(format!("{name} could not be imported: {e:#}")),
+        };
+        if self.scripted {
+            let result = work(&crate::jobs::Progress::new(None));
+            done(self, result);
+            return;
+        }
+        self.jobs.spawn(&job, Show::Notice, work, done);
+    }
+
+    /// Puts a map of the project in the scene, named by its sidecar
+    /// relative to the project. A scene has one map: one it has already
+    /// is replaced, where it stands. The first map brings the camera to
+    /// CharaStudio's starting view.
+    pub fn add_map(&mut self, file: PathBuf) {
+        let map = match crate::maps::MapFile::read(&self.project.resolve(&file)) {
+            Ok(map) => map,
+            Err(e) => {
+                self.log.error(format!("The map could not be read: {e:#}"));
+                return;
+            }
+        };
+        let time = map.first_time();
+        let there = self
+            .doc
+            .scene()
+            .objects()
+            .iter()
+            .find(|o| o.kind() == Kind::Map)
+            .cloned();
+        let id = match there {
+            Some(mut object) => {
+                let hide_walls = match object.content {
+                    Content::Map { hide_walls, .. } => hide_walls,
+                    _ => true,
+                };
+                object.name = self.doc.scene().free_name(&map.name);
+                object.content = Content::Map {
+                    map: file,
+                    time,
+                    hide_walls,
+                };
+                let id = object.id;
+                self.doc.edit(object, false);
+                id
+            }
+            None => {
+                let id = self.doc.add(&map.name, Content::map(file, time));
+                if let Some(live) = self.live.as_mut() {
+                    live.studio_camera();
+                }
+                id
+            }
+        };
+        self.unfold_to(id);
     }
 
     /// Opens the folders around an object so that its row shows.

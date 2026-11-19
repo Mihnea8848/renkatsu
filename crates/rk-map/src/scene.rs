@@ -93,6 +93,64 @@ pub fn open(game: &Game, bundle: &str) -> Result<Arc<LoadedBundle>> {
     all.into_iter().next().ok_or_else(|| anyhow!("no bundle {bundle}"))
 }
 
+/// The times of day a map has: those of its `SunLightInfo`, in the
+/// game's order, or the day alone for a map without one.
+pub fn times(game: &Game, bundle: &str) -> Result<Vec<unity::TimeOfDay>> {
+    let loaded = open(game, bundle)?;
+    for file in &loaded.files {
+        for obj in file.sf.objects_of(class::MONO_BEHAVIOUR) {
+            let Ok(o) = file.sf.read(obj) else { continue };
+            let script = o
+                .pptr("m_Script")
+                .and_then(|p| deref(game, &loaded, file, p))
+                .and_then(|r| r.read().ok())
+                .and_then(|s| s.str("m_ClassName").map(str::to_owned))
+                .unwrap_or_default();
+            if script == "SunLightInfo" {
+                let mut times: Vec<unity::TimeOfDay> =
+                    SunLightInfo::read(&o).times.iter().filter_map(|t| t.time).collect();
+                times.sort_by_key(|t| *t as u8);
+                times.dedup();
+                if !times.is_empty() {
+                    return Ok(times);
+                }
+            }
+        }
+    }
+    Ok(vec![unity::TimeOfDay::Day])
+}
+
+/// The other bundles a map's scene reads from, by their paths under
+/// `abdata`: the bundles of the files its own files name, and theirs in
+/// turn. Unity's built-in resources are not bundles and are left out.
+pub fn dependencies(game: &Game, bundle: &str) -> Result<Vec<String>> {
+    let own = rk_vfs::index::norm(bundle);
+    let mut found: Vec<String> = Vec::new();
+    let mut todo = vec![open(game, bundle)?];
+    while let Some(loaded) = todo.pop() {
+        for file in &loaded.files {
+            for external in &file.sf.externals {
+                let cab = external.file_name().to_lowercase();
+                if loaded.files.iter().any(|f| f.cab == cab) {
+                    continue;
+                }
+                let Some(vpath) = game.assets.index.cabs.get(&cab) else {
+                    continue;
+                };
+                if *vpath == own || found.contains(vpath) {
+                    continue;
+                }
+                found.push(vpath.clone());
+                if let Some(next) = game.assets.bundles(vpath).into_iter().next() {
+                    todo.push(next);
+                }
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// Follows a reference from an object of `file`. A file of the map's own
 /// bundle comes first: mods reuse level names, so another bundle may hold
 /// a file of the same name.

@@ -229,6 +229,20 @@ impl Card {
 
     /// The same, from anything that can be read and sought.
     pub fn name_in(file: &mut (impl std::io::Read + std::io::Seek)) -> Result<String> {
+        let parameter = Self::parameter_in(file)?;
+        let part = |key| map_get(&parameter, key).and_then(Value::as_str).unwrap_or("");
+        Ok(format!("{} {}", part("lastname"), part("firstname")).trim().to_string())
+    }
+
+    /// Whether the card is of a man (`sex` 0), read the same light way.
+    pub fn male_of(path: impl AsRef<Path>) -> Result<bool> {
+        let file = &mut std::io::BufReader::new(std::fs::File::open(path)?);
+        let parameter = Self::parameter_in(file)?;
+        Ok(map_get(&parameter, "sex").and_then(Value::as_i64) == Some(0))
+    }
+
+    /// The card's Parameter block alone.
+    fn parameter_in(file: &mut (impl std::io::Read + std::io::Seek)) -> Result<Value> {
         use std::io::SeekFrom;
         // Reads at most this much at once, whatever a damaged file says.
         const MOST: usize = 1 << 24;
@@ -298,9 +312,7 @@ impl Card {
             .find(|b| b.name == "Parameter")
             .ok_or(CardError::MissingBlock("Parameter"))?;
         file.seek(SeekFrom::Current(block.pos.max(0)))?;
-        let parameter = read_value(&take(file, block.size.max(0) as usize, "Parameter")?, "Parameter")?;
-        let part = |key| map_get(&parameter, key).and_then(Value::as_str).unwrap_or("");
-        Ok(format!("{} {}", part("lastname"), part("firstname")).trim().to_string())
+        read_value(&take(file, block.size.max(0) as usize, "Parameter")?, "Parameter")
     }
 
     pub fn param_str(&self, key: &str) -> Option<&str> {

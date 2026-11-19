@@ -30,6 +30,8 @@ mod kinds;
 mod landing;
 mod library;
 mod live;
+mod map_library;
+mod maps;
 mod modes;
 mod mods;
 mod mugshot;
@@ -41,6 +43,7 @@ mod project;
 mod properties;
 mod scene;
 mod selector;
+mod self_update;
 mod settings;
 mod shortcuts;
 mod sources;
@@ -234,10 +237,71 @@ struct Cli {
     /// Close the window after this many seconds.
     #[arg(long, hide = true)]
     quit_after: Option<f32>,
+    /// Import this map of CharaStudio's list into the project, by its
+    /// number or its name, and put it in the scene at the start.
+    #[arg(long, hide = true)]
+    map: Option<String>,
+    /// The map's time of day: day, evening or night.
+    #[arg(long, hide = true)]
+    map_time: Option<String>,
+    /// Start with the Maps library open, to picture it.
+    #[arg(long, hide = true)]
+    map_library: bool,
+    /// Start with the Maps library scrolled down by this many points.
+    #[arg(long, hide = true)]
+    map_scroll: Option<f32>,
     /// Import this card and put it in the scene nine seconds after the
     /// start, to measure adding a character.
     #[arg(long, hide = true)]
     bench_add: Option<PathBuf>,
+}
+
+/// Puts a map of CharaStudio's list in the scene, by its number, its
+/// level or its name: the project's own copy when it has one, else a copy
+/// imported now. `time` is the time of day, by name.
+fn add_map(state: &mut state::State, which: &str, time: Option<&str>) -> Result<()> {
+    let time = match time {
+        None => None,
+        Some(name) => Some(
+            scene::MapTime::ALL
+                .into_iter()
+                .find(|t| t.label().eq_ignore_ascii_case(name))
+                .with_context(|| format!("{name:?} is not day, evening or night"))?,
+        ),
+    };
+    let same = |a: &str| a.trim().eq_ignore_ascii_case(which);
+    let owned = maps::in_project(&state.project.root)
+        .into_iter()
+        .find(|m| m.map.number.to_string() == which || same(&m.map.name) || same(&m.map.level));
+    match owned {
+        Some(m) => state.add_map(PathBuf::from(m.file)),
+        None => {
+            let game = state.games.get(&state.project.mods_dir())?;
+            let entry = rk_map::list::read(game, false)
+                .into_iter()
+                .find(|e| {
+                    e.number.to_string() == which || same(&e.level) || same(&e.name) || same(&rk_map::names::shown(e))
+                })
+                .with_context(|| format!("CharaStudio's list has no map {which:?}"))?;
+            state.import_map(entry, true);
+        }
+    }
+    let map = state
+        .doc
+        .scene()
+        .objects()
+        .iter()
+        .find(|o| o.kind() == kinds::Kind::Map)
+        .cloned()
+        .context("the map could not be put in the scene")?;
+    if let (Some(time), scene::Content::Map { .. }) = (time, &map.content) {
+        let mut edited = map;
+        if let scene::Content::Map { time: worn, .. } = &mut edited.content {
+            *worn = time;
+        }
+        state.doc.edit(edited, false);
+    }
+    Ok(())
 }
 
 /// A scripted click: where, with which button, whether twice, and
@@ -554,6 +618,9 @@ impl Studio {
         while state.scripted && state.modal.is_none() && !state.imports.is_empty() {
             state.next_import();
         }
+        if let Some(which) = &cli.map {
+            add_map(&mut state, which, cli.map_time.as_deref())?;
+        }
         // An import brings the Content panel forward; the start does not.
         state.show_content = false;
         let first = state
@@ -656,7 +723,7 @@ impl Studio {
             state.importer = Some(anim_import::Importer::new(None));
         }
         state.doc.clear_history();
-        if !cli.card.is_empty() && state.scripted {
+        if (!cli.card.is_empty() || cli.map.is_some()) && state.scripted {
             let live = state
                 .live
                 .as_mut()
@@ -694,6 +761,10 @@ impl Studio {
             }
         }
         state.title_bar = cli.title_bar;
+        if cli.map_library {
+            state.open_map_library();
+        }
+        state.map_scroll = cli.map_scroll;
         if let Some(path) = &cli.viewport_image {
             let (texture, corner) = load_texture(&cc.egui_ctx, path)?;
             state.viewport_image = Some(texture);
@@ -922,6 +993,7 @@ impl eframe::App for Studio {
         shortcuts::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
         card_import::show(ctx, &k, &mut self.state);
+        map_library::show(ctx, &k, &mut self.state);
         anim_import::show(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);

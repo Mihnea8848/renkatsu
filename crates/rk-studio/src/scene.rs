@@ -251,7 +251,51 @@ pub enum Content {
         far: f32,
     },
     Item,
-    Map,
+    /// The map the scene stands in. A scene has one at most; its
+    /// transform moves and turns the map's root, as CharaStudio's map
+    /// position and rotation do.
+    Map {
+        /// The project's map, by its file relative to the project; empty
+        /// for none. Scenes of Renkatsu 0.1.8 and older have none.
+        #[serde(default)]
+        map: PathBuf,
+        #[serde(default)]
+        time: MapTime,
+        /// The walls between the camera and the scene hide while the
+        /// camera is outside them, as in CharaStudio.
+        #[serde(default = "yes")]
+        hide_walls: bool,
+    },
+}
+
+/// A map's time of day: its sun, sky and light. A map has some of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapTime {
+    #[default]
+    Day,
+    Evening,
+    Night,
+}
+
+impl MapTime {
+    pub const ALL: [MapTime; 3] = [MapTime::Day, MapTime::Evening, MapTime::Night];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MapTime::Day => "Day",
+            MapTime::Evening => "Evening",
+            MapTime::Night => "Night",
+        }
+    }
+
+    pub fn time_of_day(self) -> rk_map::unity::TimeOfDay {
+        match self {
+            MapTime::Day => rk_map::unity::TimeOfDay::Day,
+            MapTime::Evening => rk_map::unity::TimeOfDay::Evening,
+            MapTime::Night => rk_map::unity::TimeOfDay::Night,
+        }
+    }
 }
 
 impl Content {
@@ -285,6 +329,16 @@ impl Content {
         }
     }
 
+    /// A map of the project, by its file relative to the project, at
+    /// the first time of day it has.
+    pub fn map(map: PathBuf, time: MapTime) -> Content {
+        Content::Map {
+            map,
+            time,
+            hide_walls: true,
+        }
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Content::Folder => Kind::Folder,
@@ -292,19 +346,18 @@ impl Content {
             Content::Light { .. } => Kind::Light,
             Content::Camera { .. } => Kind::Camera,
             Content::Item => Kind::Item,
-            Content::Map => Kind::Map,
+            Content::Map { .. } => Kind::Map,
         }
     }
 
     /// What a new object of a kind starts as, for the kinds that need
-    /// nothing else to exist. A character needs a card.
+    /// nothing else to exist. A character needs a card and a map a map.
     pub fn of_kind(kind: Kind) -> Option<Content> {
         match kind {
             Kind::Folder => Some(Content::Folder),
             Kind::Light => Some(Content::light()),
             Kind::Camera => Some(Content::camera()),
             Kind::Item => Some(Content::Item),
-            Kind::Map => Some(Content::Map),
             _ => None,
         }
     }
@@ -651,6 +704,13 @@ impl Scene {
                     }
                 }
             }
+            if let Content::Map { map, .. } = &mut object.content {
+                let old = map.to_string_lossy().replace('\\', "/");
+                if let Some(new) = to(&old) {
+                    *map = PathBuf::from(new);
+                    changed = true;
+                }
+            }
         }
         changed
     }
@@ -666,6 +726,7 @@ impl Scene {
                     hit(&card.to_string_lossy().replace('\\', "/"))
                         || animation.as_ref().and_then(|a| a.file.as_deref()).is_some_and(hit)
                 }
+                Content::Map { map, .. } => hit(&map.to_string_lossy().replace('\\', "/")),
                 _ => false,
             })
             .count()
@@ -1943,6 +2004,59 @@ speed = 0.5
         let text = toml::to_string(&scene).unwrap();
         assert!(text.contains("[objects.animation]"), "{text}");
         assert!(!text.contains("pose"), "{text}");
+    }
+
+    #[test]
+    fn a_map_is_saved_with_its_place_and_time() {
+        let mut doc = Document::new(Scene::new());
+        let id = doc.add(
+            "Rooftop",
+            Content::map(PathBuf::from("Maps/Rooftop/Rooftop.rkmap"), MapTime::Day),
+        );
+        let mut edited = doc.scene().get(id).unwrap().clone();
+        edited.transform.position = [1.5, 0.0, -2.0];
+        edited.transform.rotation = [0.0, 90.0, 0.0];
+        if let Content::Map { time, hide_walls, .. } = &mut edited.content {
+            *time = MapTime::Evening;
+            *hide_walls = false;
+        }
+        doc.edit(edited, false);
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("kind = \"map\""), "{text}");
+        assert!(text.contains("map = \"Maps/Rooftop/Rooftop.rkmap\""), "{text}");
+        assert!(text.contains("time = \"evening\""), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(&back, doc.scene());
+        assert_eq!(back.uses("Maps/Rooftop"), 1);
+        // A move of the map's folder is followed.
+        let mut scene = back;
+        assert!(scene
+            .retarget(&|old| (old == "Maps/Rooftop/Rooftop.rkmap").then(|| "Maps/School/Rooftop.rkmap".to_owned())));
+        assert_eq!(scene.uses("Maps/School/Rooftop.rkmap"), 1);
+    }
+
+    #[test]
+    fn a_map_saved_before_maps_were_kept_still_loads() {
+        // Scenes of Renkatsu 0.1.8 could hold a map object with nothing in
+        // it.
+        let old = r#"
+name = "Old"
+next_id = 2
+
+[[objects]]
+id = 1
+name = "Map"
+kind = "map"
+"#;
+        let scene: Scene = toml::from_str(old).unwrap();
+        assert_eq!(
+            scene.objects()[0].content,
+            Content::Map {
+                map: PathBuf::new(),
+                time: MapTime::Day,
+                hide_walls: true,
+            }
+        );
     }
 
     #[test]

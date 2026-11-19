@@ -27,6 +27,7 @@ rk-packages = { path = "crates/rk-packages" }
 rk-chara = { path = "crates/rk-chara" }
 rk-render = { path = "crates/rk-render" }
 rk-map = { path = "crates/rk-map" }
+rk-asset = { path = "crates/rk-asset" }
 glam = "0.29"
 
 [profile.dev]
@@ -34,6 +35,13 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# texture2ddecoder's BC6H decoder shifts past the width of its integers on
+# the game's reflection cubemaps, which only a debug build's overflow
+# checks stop at: maps then fail to load in a dev build of the editor,
+# whose GPU device is made without block compression.
+[profile.dev.package.texture2ddecoder]
+overflow-checks = false
 
 # CI: no optimisation and no debug info, to compile as fast as possible.
 [profile.ci]

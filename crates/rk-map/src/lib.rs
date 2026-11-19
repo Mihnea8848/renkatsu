@@ -5,8 +5,11 @@
 //! read from their bundles.
 
 pub mod build;
+pub mod file;
 pub mod list;
+pub mod names;
 pub mod scene;
 pub mod sky;
+pub mod thumbnail;
 pub mod unity;
 pub mod vanish;

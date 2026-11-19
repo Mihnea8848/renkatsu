@@ -118,6 +118,14 @@ enum Cmd {
         /// with alpha to coverage; the game cuts them hard.
         #[arg(long)]
         alpha_to_coverage: bool,
+        /// A map to stand the character in, by its number or name, as `rk
+        /// map list` shows them. The character stands at its origin.
+        #[arg(long)]
+        map: Option<String>,
+        /// The map's time of day: day, evening or night. `--time` is taken
+        /// by the animation.
+        #[arg(long, default_value = "day")]
+        map_time: String,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -341,8 +349,23 @@ enum MapCmd {
     },
     /// Show what one map holds, by its number or level name.
     Info { map: String },
+    /// Write a map's file: the map at each of its times of day, ready to
+    /// open without the game.
+    Convert {
+        /// The map's number, level or name.
+        map: String,
+        /// Only these times of day: day, evening, night.
+        #[arg(long, value_delimiter = ',')]
+        time: Vec<String>,
+        #[arg(short, long)]
+        out: PathBuf,
+        /// Read each time of day back and compare it with a fresh build.
+        #[arg(long)]
+        check: bool,
+    },
     /// Draw a map to a PNG, plainly lit.
     Render {
+        /// The map's number or level, or the path of a map file (.rkmap).
         map: String,
         #[arg(short, long)]
         out: PathBuf,
@@ -500,6 +523,8 @@ fn main() -> Result<()> {
             studio_look,
             background,
             alpha_to_coverage,
+            map,
+            map_time,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -523,6 +548,8 @@ fn main() -> Result<()> {
             studio_look,
             background: background.as_deref(),
             alpha_to_coverage,
+            map: map.as_deref(),
+            map_time: &map_time,
         }),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },
@@ -550,6 +577,9 @@ fn main() -> Result<()> {
         Cmd::Map {
             cmd: MapCmd::Info { map },
         } => map::info(&map),
+        Cmd::Map {
+            cmd: MapCmd::Convert { map, time, out, check },
+        } => map::convert(&map, &time, &out, check),
         Cmd::Map {
             cmd:
                 MapCmd::Render {
