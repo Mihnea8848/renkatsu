@@ -302,12 +302,11 @@ pub fn render(
     let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
     let built = started.elapsed();
     let mut scene = scene;
-    // CharaStudio's camera draws no Unity sky (it clears to a colour);
-    // the map's own sky is drawn when asked for. What outdoor maps show
-    // behind their painted domes in the game is not settled yet: a plain
-    // sky blue stands in.
-    if !sky {
-        scene.light.sky = None;
+    // CharaStudio's camera draws no Unity skybox: it clears to black and
+    // shows the map's own sky dome. The scene's skybox is drawn when asked
+    // for.
+    if sky {
+        scene.light.sky = scene.light.unity_sky.clone();
     }
     if !fog {
         scene.light.fog = None;
@@ -360,7 +359,6 @@ pub fn render(
             if json["camera"]["clear"] == "Color" {
                 let c = &json["camera"]["background"];
                 let channel = |i: usize| c[i].as_f64().unwrap_or(0.0) as f32;
-                scene.light.sky = None;
                 scene.light.background = [channel(0), channel(1), channel(2)].map(rk_map::build::to_linear);
             }
             let views = json["views"].as_array().cloned().unwrap_or_default();

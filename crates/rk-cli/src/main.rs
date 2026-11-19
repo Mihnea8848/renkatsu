@@ -359,8 +359,8 @@ enum MapCmd {
         /// Draw the map's own fog, which CharaStudio leaves off.
         #[arg(long)]
         fog: bool,
-        /// Draw the scene's Unity sky, which CharaStudio's camera leaves
-        /// out (it clears to its background colour).
+        /// Draw the scene's Unity skybox, which CharaStudio's camera leaves
+        /// out; the map's own sky dome is drawn either way.
         #[arg(long)]
         sky: bool,
         /// A CharaStudio capture's JSON: its view named by --view is the

@@ -58,6 +58,7 @@ pub fn build(
         images: HashMap::new(),
         skipped: Skipped::new(),
         compressed,
+        dome: None,
     };
     let mut objects = Vec::new();
     let mut sun: Option<SunLightInfo> = None;
@@ -140,10 +141,12 @@ pub fn build(
                 }
             }
         }
-        // Objects shown only at another time of day stay hidden.
+        // Objects shown only at another time of day stay hidden, and the
+        // current time's are switched on: SunLightInfo sets them active.
         let mut hidden: HashSet<i64> = HashSet::new();
+        let mut now: HashSet<i64> = HashSet::new();
         if let Some(sun) = &sun {
-            let now: HashSet<i64> = sun
+            now = sun
                 .times
                 .iter()
                 .filter(|t| t.time == Some(time))
@@ -170,7 +173,7 @@ pub fn build(
                 continue;
             };
             let go = renderer.game_object.path_id;
-            if !renderer.enabled || !tree.shown(go, &hidden) {
+            if !renderer.enabled || !tree.shown(go, &hidden, &now) {
                 continue;
             }
             let lightmap = match assigned.get(&obj.path_id) {
@@ -193,7 +196,10 @@ pub fn build(
         }
     }
     let mut light = map_light(sun.as_ref(), time, &lights, settings.as_ref());
-    light.sky = sky;
+    // What CharaStudio shows behind the map is the map's own sky dome; the
+    // scene's Unity skybox is kept for drawing on request.
+    light.unity_sky = sky;
+    light.sky = b.dome.take();
     Ok((
         MapScene {
             objects,
@@ -278,9 +284,11 @@ fn map_light(
         sun_color,
         sun_mask: main.map_or(u32::MAX, |(l, _)| l.culling_mask),
         ambient_sh,
-        background: fog.map_or([0.35, 0.5, 0.75], |f| f.color),
+        // CharaStudio's camera clears to its background colour, black.
+        background: [0.0; 3],
         fog,
         sky: None,
+        unity_sky: None,
         cut_above: None,
         // The map's light casts when its shadows are on, as far as
         // Unity's default shadow distance.
@@ -406,11 +414,13 @@ impl Tree<'_> {
 
     /// Whether a game object shows: it and every parent active, and not
     /// one of the objects of another time of day.
-    fn shown(&self, game_object: i64, hidden: &HashSet<i64>) -> bool {
+    /// `on` are switched on whatever they are stored as.
+    fn shown(&self, game_object: i64, hidden: &HashSet<i64>, on: &HashSet<i64>) -> bool {
         let mut go = Some(game_object);
         let mut depth = 0;
         while let Some(id) = go.filter(|_| depth < 256) {
-            if hidden.contains(&id) || self.objects.get(&id).is_some_and(|o| !o.active) {
+            let active = on.contains(&id) || self.objects.get(&id).is_none_or(|o| o.active);
+            if hidden.contains(&id) || !active {
                 return false;
             }
             let father = self
@@ -436,6 +446,9 @@ struct Builder<'a> {
     images: HashMap<(String, i64), Option<Arc<MapImage>>>,
     skipped: Skipped,
     compressed: bool,
+    /// The sky dome's sky, from the first shown renderer with a skybox
+    /// material.
+    dome: Option<Sky>,
 }
 
 impl Builder<'_> {
@@ -473,6 +486,15 @@ impl Builder<'_> {
             return Ok(None);
         };
         if filter.mesh.is_null() {
+            return Ok(None);
+        }
+        // A dome around the map with a skybox material is the map's sky,
+        // the way vanilla maps paint theirs (one per time of day, often on
+        // Unity's built-in sphere): it is drawn as the sky, not as a mesh.
+        if let Some(m) = renderer.materials.iter().find(|m| self.is_sky_material(file, **m)) {
+            if self.dome.is_none() {
+                self.dome = self.sky(file, *m);
+            }
             return Ok(None);
         }
         let Some(mesh) = self.mesh(file, filter.mesh)? else {
@@ -534,12 +556,27 @@ impl Builder<'_> {
         let shader = self.game.assets.shader_name(&r.file, m.shader).unwrap_or_default();
         let lower = shader.to_ascii_lowercase();
         // Drawn later, by passes of their own.
-        if lower.starts_with("particles/") || lower.starts_with("skybox/") || lower.contains("mirrorreflection") {
+        if lower.starts_with("skybox/") || lower.contains("mirrorreflection") {
             *self.skipped.entry(format!("shader {shader}")).or_default() += 1;
             return None;
         }
-        let keywords = m.keywords.to_ascii_uppercase();
-        let blend = if keywords.contains("_ALPHABLEND_ON")
+        // Keywords outlive a shader change, so only Standard's own count.
+        let standard = lower.starts_with("standard") || lower.starts_with("custom/standard");
+        let keywords = if standard {
+            m.keywords.to_ascii_uppercase()
+        } else {
+            String::new()
+        };
+        // Unity's legacy particle shaders: tinted, unlit, blended by alpha
+        // or added; maps paint leaves and grass with them.
+        let particle = lower.starts_with("particles/");
+        let blend = if particle {
+            if lower.contains("additive") {
+                Blend::Additive
+            } else {
+                Blend::Fade
+            }
+        } else if keywords.contains("_ALPHABLEND_ON")
             || keywords.contains("_ALPHAPREMULTIPLY_ON")
             || lower.contains("transparent") && !lower.contains("cutout")
         {
@@ -552,14 +589,18 @@ impl Builder<'_> {
         let default_queue = match blend {
             Blend::Opaque => 2000,
             Blend::Cutout => 2450,
-            Blend::Fade => 3000,
+            Blend::Fade | Blend::Additive => 3000,
         };
         let main = m.texture("_MainTex");
         let albedo = main.and_then(|t| self.image(&r.file, t.texture));
         let st = main.map_or([1.0, 1.0, 0.0, 0.0], |t| {
             [t.scale[0], t.scale[1], t.offset[0], t.offset[1]]
         });
-        let color = m.color("_Color").unwrap_or([1.0; 4]);
+        let color = if particle {
+            m.color("_TintColor").unwrap_or([0.5; 4])
+        } else {
+            m.color("_Color").unwrap_or([1.0; 4])
+        };
         let [cr, cg, cb] = linear3(color);
         let unlit = lower.starts_with("unlit/");
         // Standard's emission, on with its keyword: the colour, which Unity
@@ -571,7 +612,8 @@ impl Builder<'_> {
         } else {
             ([0.0; 3], None)
         };
-        let two_sided = lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
+        let two_sided =
+            particle || lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
         Some(Arc::new(MapMaterial {
             color: [cr, cg, cb, color[3]],
             albedo,
@@ -581,7 +623,8 @@ impl Builder<'_> {
             blend,
             cutoff: m.float("_Cutoff").unwrap_or(0.5),
             two_sided,
-            unlit,
+            unlit: unlit || particle,
+            particle,
             drawn: true,
             queue: if m.render_queue >= 0 {
                 m.render_queue
@@ -589,6 +632,16 @@ impl Builder<'_> {
                 default_queue
             },
         }))
+    }
+
+    /// Whether a material uses one of Unity's skybox shaders.
+    fn is_sky_material(&self, file: &Arc<AssetFile>, p: PPtr) -> bool {
+        self.deref(file, p)
+            .and_then(|r| {
+                let m = Material::read(&r.read().ok()?).ok()?;
+                self.game.assets.shader_name(&r.file, m.shader)
+            })
+            .is_some_and(|name| SkyShader::named(&name).is_some())
     }
 
     /// The scene's sky, when its material uses one of Unity's skybox
@@ -808,6 +861,7 @@ fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
     };
     MapMesh {
         uv2,
+        colors: mesh.colors.clone(),
         bounds: MapMesh::compute_bounds(&positions),
         positions,
         normals,

@@ -30,6 +30,19 @@ pub enum Blend {
     Cutout,
     /// Blended by alpha, drawn after everything opaque, back to front.
     Fade,
+    /// Added onto what is behind, by alpha, drawn with the blended ones.
+    Additive,
+}
+
+impl Blend {
+    /// The pipeline's blending: 0 none, 1 by alpha, 2 added.
+    fn kind(self) -> u8 {
+        match self {
+            Blend::Opaque | Blend::Cutout => 0,
+            Blend::Fade => 1,
+            Blend::Additive => 2,
+        }
+    }
 }
 
 /// A map texture: the game's block-compressed data as it is stored, or
@@ -85,6 +98,9 @@ pub struct MapMaterial {
     pub two_sided: bool,
     /// Lit by nothing: the colour shows as it is.
     pub unlit: bool,
+    /// Unity's legacy particle shaders, which also paint maps' foliage:
+    /// 2 * vertex colour * `color` * texture, alpha included, unlit.
+    pub particle: bool,
     /// False for a material another pass draws, or none does yet: its
     /// submesh is left out.
     pub drawn: bool,
@@ -105,6 +121,7 @@ impl MapMaterial {
             cutoff: 0.5,
             two_sided: false,
             unlit: false,
+            particle: false,
             drawn: false,
             queue: 2000,
         }
@@ -120,6 +137,8 @@ pub struct MapMesh {
     /// Where each vertex reads its object's lightmap, already scaled and
     /// moved into the object's part of it. Empty without a lightmap.
     pub uv2: Vec<[f32; 2]>,
+    /// Vertex colours as stored; empty for white.
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     /// First index and count of each submesh.
     pub submeshes: Vec<(u32, u32)>,
@@ -260,6 +279,9 @@ pub struct MapLight {
     /// with the skybox does. Without one the picture is cleared with
     /// `background`.
     pub sky: Option<crate::sky::Sky>,
+    /// The scene's own Unity skybox (`RenderSettings`), which CharaStudio's
+    /// camera never draws; kept for drawing it on request.
+    pub unity_sky: Option<crate::sky::Sky>,
     /// What shows where nothing is drawn.
     pub background: [f32; 3],
     /// A cutaway: nothing above this height is drawn. For looking into
@@ -325,6 +347,7 @@ struct Vertex {
     normal: [f32; 3],
     uv: [f32; 2],
     uv2: [f32; 2],
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -417,7 +440,7 @@ pub(crate) struct Pipelines {
     casters: HashMap<(bool, bool), wgpu::RenderPipeline>,
     compare: wgpu::Sampler,
     /// By blending and by whether back faces are culled.
-    pipelines: HashMap<(bool, bool), wgpu::RenderPipeline>,
+    pipelines: HashMap<(u8, bool), wgpu::RenderPipeline>,
     repeat: wgpu::Sampler,
     clamp: wgpu::Sampler,
     /// Uploaded block-compressed textures, by the image's address.
@@ -594,9 +617,11 @@ impl Pipelines {
             bind_group_layouts: &[Some(&globals), Some(&material), Some(&lightmap)],
             immediate_size: 0,
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2];
+        let attributes =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4];
         let mut pipelines = HashMap::new();
-        for blended in [false, true] {
+        for blend in [0u8, 1, 2] {
+            let blended = blend > 0;
             for cull in [false, true] {
                 let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("map"),
@@ -617,7 +642,23 @@ impl Pipelines {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: COLOR_FORMAT,
-                            blend: blended.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                            blend: match blend {
+                                0 => None,
+                                1 => Some(wgpu::BlendState::ALPHA_BLENDING),
+                                // Unity's Blend SrcAlpha One.
+                                _ => Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                            },
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -642,7 +683,7 @@ impl Pipelines {
                     multiview_mask: None,
                     cache: None,
                 });
-                pipelines.insert((blended, cull), pipeline);
+                pipelines.insert((blend, cull), pipeline);
             }
         }
         let sampler = |mode| {
@@ -744,7 +785,8 @@ struct Draw {
     first: u32,
     count: u32,
     material: usize,
-    blended: bool,
+    /// 0 opaque, 1 blended by alpha, 2 added.
+    blend: u8,
     cull: bool,
     /// Distance from the eye to the object's middle, for sorting.
     distance: f32,
@@ -1011,8 +1053,15 @@ impl Renderer {
                         emission: [m.emission[0], m.emission[1], m.emission[2], 0.0],
                         params: [
                             if m.blend == Blend::Cutout { m.cutoff } else { -1.0 },
-                            if m.blend == Blend::Fade { 1.0 } else { 0.0 },
-                            if m.unlit { 1.0 } else { 0.0 },
+                            if m.blend.kind() > 0 { 1.0 } else { 0.0 },
+                            // 0 lit, 1 unlit, 2 a particle shader.
+                            if m.particle {
+                                2.0
+                            } else if m.unlit {
+                                1.0
+                            } else {
+                                0.0
+                            },
                             // 1 when shadows fall on it, 2 more when the sun
                             // lights it at all.
                             f32::from(u8::from(receives)) + 2.0 * f32::from(u8::from(sunlit)),
@@ -1097,6 +1146,7 @@ impl Renderer {
                     normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
                     uv: mesh.uv.get(i).copied().unwrap_or([0.0, 0.0]),
                     uv2: mesh.uv2.get(i).copied().unwrap_or([0.0, 0.0]),
+                    color: mesh.colors.get(i).copied().unwrap_or([1.0; 4]),
                 })
                 .collect();
             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1123,7 +1173,7 @@ impl Renderer {
                 let index = bind_material(m, o.receives_shadows && shadowed && sunlit, sunlit);
                 // Blended surfaces dither their shadow nearly away in
                 // Unity's Standard shader; they cast none here.
-                if shadowed && sunlit && o.casts_shadows && m.blend != Blend::Fade {
+                if shadowed && sunlit && o.casts_shadows && m.blend.kind() == 0 && !m.particle {
                     casters.push((vb, first, count, index, m.blend == Blend::Cutout, !m.two_sided));
                 }
                 if seen {
@@ -1133,7 +1183,7 @@ impl Renderer {
                         first,
                         count,
                         material: index,
-                        blended: m.blend == Blend::Fade,
+                        blend: m.blend.kind(),
                         cull: !m.two_sided,
                         distance: middle.distance(camera.eye),
                         queue: m.queue,
@@ -1144,8 +1194,8 @@ impl Renderer {
         pipes.culled.set(culled);
         // Opaque and cut-out first, then blended by queue, far to near.
         draws.sort_by(|a, b| {
-            a.blended.cmp(&b.blended).then_with(|| {
-                if a.blended {
+            (a.blend > 0).cmp(&(b.blend > 0)).then_with(|| {
+                if a.blend > 0 {
                     a.queue.cmp(&b.queue).then(b.distance.total_cmp(&a.distance))
                 } else {
                     a.material.cmp(&b.material)
@@ -1260,10 +1310,10 @@ impl Renderer {
                 }
             };
             for d in &draws {
-                if d.blended {
+                if d.blend > 0 {
                     sky_once(&mut pass);
                 }
-                pass.set_pipeline(&pipes.pipelines[&(d.blended, d.cull)]);
+                pass.set_pipeline(&pipes.pipelines[&(d.blend, d.cull)]);
                 pass.set_bind_group(1, &materials[d.material], &[]);
                 pass.set_bind_group(2, &lightmaps[d.lightmap], &[]);
                 let (vb, ib) = &buffers[d.vb];
