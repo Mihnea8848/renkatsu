@@ -1206,10 +1206,54 @@ pub(crate) struct MapFrame {
     shadows: bool,
 }
 
+/// Where an uploaded map stands and how it shows, which may change every
+/// frame without uploading the map again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapPlacement {
+    /// The map's root: the map's own space to the world. It moves and
+    /// turns the map, with its sun; a scale in it is not taken.
+    pub root: Mat4,
+    /// Walls hide while the camera is inside their volumes.
+    pub hide_walls: bool,
+    /// The map is drawn. While it is not, the characters are lit as if
+    /// there were no map.
+    pub shown: bool,
+}
+
+impl Default for MapPlacement {
+    fn default() -> Self {
+        MapPlacement {
+            root: Mat4::IDENTITY,
+            hide_walls: true,
+            shown: true,
+        }
+    }
+}
+
+impl MapPlacement {
+    /// The root as a turn and a move alone.
+    fn rigid(&self) -> Mat4 {
+        let (_, turn, at) = self.root.to_scale_rotation_translation();
+        Mat4::from_rotation_translation(turn.normalize(), at)
+    }
+
+    /// A camera of the world as the map's own space sees it.
+    fn camera_in_map(&self, camera: &Camera) -> Camera {
+        let back = self.rigid().inverse();
+        Camera {
+            eye: back.transform_point3(camera.eye),
+            target: back.transform_point3(camera.target),
+            fov_y_deg: camera.fov_y_deg,
+        }
+    }
+}
+
 /// A map uploaded to the GPU: its buffers, textures and bind groups, made
 /// once by `Renderer::set_map`. Each frame only writes the camera's
 /// numbers into its uniform buffers and picks what to draw.
 pub(crate) struct MapGpu {
+    /// Where the map stands, set by `Renderer::place_map`.
+    pub(crate) placement: MapPlacement,
     light: MapLight,
     /// The lowest and highest corner of everything drawn.
     bounds: (Vec3, Vec3),
@@ -1552,6 +1596,7 @@ impl MapGpu {
             objects.push(object);
         }
         MapGpu {
+            placement: MapPlacement::default(),
             light: l.clone(),
             bounds: map.bounds(),
             vanish: map.vanish.clone(),
@@ -1569,9 +1614,15 @@ impl MapGpu {
         }
     }
 
-    /// The unit vector towards the map's sun.
+    /// The unit vector towards the map's sun, in the world: the sun
+    /// turns with the map.
     pub(crate) fn sun_dir(&self) -> [f32; 3] {
-        self.light.sun_dir
+        let own = Vec3::from(self.light.sun_dir);
+        self.placement
+            .rigid()
+            .transform_vector3(own)
+            .normalize_or_zero()
+            .to_array()
     }
 
     /// What shows where nothing is drawn, linear.
@@ -1581,6 +1632,7 @@ impl MapGpu {
 
     /// How far the camera must see to take in the whole map.
     pub(crate) fn far(&self, camera: &Camera) -> f32 {
+        let camera = &self.placement.camera_in_map(camera);
         let (min, max) = self.bounds;
         // Near and far from the map's size: rooms and grounds alike.
         ((max - min).length() * 2.0).max(50.0) + camera.eye.distance((min + max) * 0.5)
@@ -1597,6 +1649,12 @@ impl MapGpu {
         view_proj: Mat4,
         aspect: f32,
     ) -> MapFrame {
+        // Everything of the map is worked out in its own space: the
+        // camera is brought into it, and its points are put in the world
+        // by the view.
+        let world_camera = camera;
+        let camera = &self.placement.camera_in_map(world_camera);
+        let view_proj = view_proj * self.placement.rigid();
         let l = &self.light;
         let fog = l.fog.unwrap_or(Fog {
             color: [0.0; 3],
@@ -1661,7 +1719,8 @@ impl MapGpu {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&vp.to_cols_array()));
         }
         if let (Some(sky), Some((buf, _))) = (&l.sky, &self.sky) {
-            let uniform = crate::sky::uniform(sky, l.sun_dir, l.sun_color, camera, aspect);
+            // The sky stays with the world, as Unity's skybox does.
+            let uniform = crate::sky::uniform(sky, self.sun_dir(), l.sun_color, world_camera, aspect);
             queue.write_buffer(buf, 0, bytemuck::bytes_of(&uniform));
         }
 
@@ -1672,7 +1731,8 @@ impl MapGpu {
         let mut ranked = 0;
         let mut culled = 0;
         // The volumes the camera stands in hide what names them.
-        let inside: Vec<bool> = self.vanish.iter().map(|v| v.contains(camera.eye)).collect();
+        let hide = self.placement.hide_walls;
+        let inside: Vec<bool> = self.vanish.iter().map(|v| hide && v.contains(camera.eye)).collect();
         for o in &self.objects {
             if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
                 continue;
@@ -1844,8 +1904,9 @@ impl Renderer {
     /// a frame only writes the camera's numbers and picks what to draw.
     /// While a map is set, the characters are lit from its sun.
     pub fn set_map(&mut self, map: Option<&MapScene>) {
-        // The old map's memory goes before the new one's comes.
-        self.map_scene = None;
+        // The old map's memory goes before the new one's comes; where it
+        // stood stays for the next.
+        let placement = self.map_scene.take().map(|m| m.placement).unwrap_or_default();
         let Some(map) = map else { return };
         if self.map.is_none() {
             self.map = Some(Pipelines::new(&self.device, &self.queue));
@@ -1902,15 +1963,22 @@ impl Renderer {
                 None => pipes.black_cube.clone(),
             })
             .collect();
-        self.map_scene = Some(MapGpu::new(
-            &self.device,
-            pipes,
-            map,
-            &views,
-            &self.white,
-            sky_cube.as_ref(),
-            &cubes,
-        ));
+        let mut gpu = MapGpu::new(&self.device, pipes, map, &views, &self.white, sky_cube.as_ref(), &cubes);
+        gpu.placement = placement;
+        self.map_scene = Some(gpu);
+    }
+
+    /// Puts the map that `set_map` uploaded where it stands in the world,
+    /// and says how it shows. Cheap: nothing is uploaded again.
+    pub fn place_map(&mut self, placement: MapPlacement) {
+        if let Some(map) = self.map_scene.as_mut() {
+            map.placement = placement;
+        }
+    }
+
+    /// The map that is set and shown.
+    pub(crate) fn shown_map(&self) -> Option<&MapGpu> {
+        self.map_scene.as_ref().filter(|m| m.placement.shown)
     }
 
     /// Draws `map` alone from `camera` to an RGBA8 image, top row first.

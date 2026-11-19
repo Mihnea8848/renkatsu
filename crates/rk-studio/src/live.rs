@@ -15,6 +15,11 @@
 //! in here, in the order the builds were asked for, so the scene draws as
 //! if they had been built one after the other. Its textures then go to
 //! the GPU a few a frame, and the character shows once they are all there.
+//!
+//! The scene's map is built the same way, from the project's own copy of
+//! it, by a job, and set on the renderer once whole. Its object moves and
+//! turns it, which costs nothing: the renderer takes the map's root each
+//! frame.
 
 use crate::camera::{Focus, Orbit, ViewCamera};
 use crate::gizmo_pass::{GizmoPass, Mesh};
@@ -22,7 +27,7 @@ use crate::grid_pass::{Grid, GridPass};
 use crate::jobs::{Handle, Jobs, Show};
 use crate::mods::Games;
 use crate::project::Project;
-use crate::scene::{Content, ObjectId, Poses, Scene};
+use crate::scene::{Content, MapTime, ObjectId, Poses, Scene};
 use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
@@ -81,6 +86,38 @@ struct Actor {
     warm: bool,
     /// Seconds the build took.
     took: f32,
+}
+
+/// What a map is built from: a change to any of it builds it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MapRecipe {
+    /// The map's sidecar on disk.
+    sidecar: PathBuf,
+    time: MapTime,
+}
+
+/// A map a job is building.
+struct PendingMap {
+    id: ObjectId,
+    recipe: MapRecipe,
+    name: String,
+    started: std::time::Instant,
+    handle: Handle<rk_render::map::MapScene>,
+}
+
+/// The scene's map, as far as the renderer has it.
+#[derive(Default)]
+struct MapState {
+    /// The map set on the renderer: its object and what it was built from.
+    set: Option<(ObjectId, MapRecipe)>,
+    pending: Option<PendingMap>,
+    /// A map that could not be built, so that it is not tried again every
+    /// frame.
+    failed: Option<(ObjectId, MapRecipe, String)>,
+    /// Seconds the build of the map that is set took.
+    took: f32,
+    /// The map is set and its object shows.
+    shown: bool,
 }
 
 /// A character a job is building.
@@ -395,6 +432,8 @@ pub struct Live {
     /// Where the bones are that objects are attached to, as of the last
     /// frame followed.
     poses: Poses,
+    /// The scene's map.
+    map: MapState,
 }
 
 /// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
@@ -453,6 +492,7 @@ impl Live {
             framed: false,
             filter: None,
             poses: Poses::default(),
+            map: MapState::default(),
         })
     }
 
@@ -473,6 +513,13 @@ impl Live {
         }
         self.framed = false;
         self.filter = None;
+        if let Some(pending) = self.map.pending.take() {
+            pending.handle.progress.cancel();
+        }
+        if self.map.set.is_some() {
+            self.renderer.set_map(None);
+        }
+        self.map = MapState::default();
     }
 
     /// Whether any character is built.
@@ -482,6 +529,15 @@ impl Live {
 
     /// How far a character of the scene is, as it was last followed.
     pub fn progress(&self, id: ObjectId) -> Progress {
+        if self.map.pending.as_ref().is_some_and(|p| p.id == id) {
+            return Progress::Building;
+        }
+        if self.map.failed.as_ref().is_some_and(|f| f.0 == id) {
+            return Progress::Failed;
+        }
+        if self.map.set.as_ref().is_some_and(|m| m.0 == id) {
+            return Progress::Ready(self.map.took);
+        }
         if self.pending.iter().any(|p| p.id == id) {
             return Progress::Building;
         }
@@ -504,6 +560,7 @@ impl Live {
     /// the content they are built from changed.
     pub fn retry(&mut self) {
         self.failed.clear();
+        self.map.failed = None;
     }
 
     /// What the camera can focus on for an object: a built character.
@@ -527,6 +584,9 @@ impl Live {
 
     /// Why a character could not be built, when it could not.
     pub fn failure(&self, id: ObjectId) -> Option<&str> {
+        if let Some((_, _, why)) = self.map.failed.as_ref().filter(|f| f.0 == id) {
+            return Some(why);
+        }
         self.failed
             .iter()
             .find(|(failed, ..)| *failed == id)
@@ -754,6 +814,150 @@ impl Live {
                 }
             }
         }
+        self.follow_map(scene, project, jobs, log);
+    }
+
+    /// Brings the renderer's map in line with the scene's: builds the map
+    /// the scene names when it is not the one set, takes it away when the
+    /// scene has none, and puts it where its object stands. The map that
+    /// is set stays until the one replacing it is built.
+    fn follow_map(&mut self, scene: &Scene, project: &Project, jobs: &mut Jobs, log: &mut Log) {
+        let wanted = scene.objects().iter().find_map(|o| match &o.content {
+            Content::Map { map, time, hide_walls } if !map.as_os_str().is_empty() => Some((
+                o,
+                MapRecipe {
+                    sidecar: project.resolve(map),
+                    time: *time,
+                },
+                *hide_walls,
+            )),
+            _ => None,
+        });
+        let want = wanted.as_ref().map(|(o, recipe, _)| (o.id, recipe.clone()));
+        let state = &mut self.map;
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|p| want.as_ref() != Some(&(p.id, p.recipe.clone())))
+        {
+            if let Some(p) = state.pending.take() {
+                p.handle.progress.cancel();
+            }
+        }
+        if state
+            .failed
+            .as_ref()
+            .is_some_and(|f| want.as_ref() != Some(&(f.0, f.1.clone())))
+        {
+            state.failed = None;
+        }
+        if want.is_none() && state.set.is_some() {
+            self.renderer.set_map(None);
+            state.set = None;
+        }
+        if let Some((id, recipe)) = want.clone() {
+            let known =
+                state.set.as_ref() == Some(&(id, recipe.clone())) || state.pending.is_some() || state.failed.is_some();
+            if !known {
+                let name = scene.get(id).map_or("the map", |o| o.name.as_str()).to_owned();
+                let compressed = self.renderer.supports_bc();
+                let show = if self.patient { Show::Quiet } else { self.show_builds };
+                let (sidecar, time) = (recipe.sidecar.clone(), recipe.time);
+                let handle = jobs.start(&format!("Loading {name}"), show, true, move |_| {
+                    crate::maps::build(&sidecar, time, compressed)
+                });
+                jobs.name_when_done(&format!("Loaded {name}"));
+                state.pending = Some(PendingMap {
+                    id,
+                    recipe,
+                    name,
+                    started: std::time::Instant::now(),
+                    handle,
+                });
+            }
+        }
+        if let Some(pending) = state.pending.as_ref() {
+            let result = if self.patient {
+                Some(pending.handle.wait())
+            } else {
+                pending.handle.try_take()
+            };
+            if let Some(result) = result {
+                let PendingMap {
+                    id,
+                    recipe,
+                    name,
+                    started,
+                    ..
+                } = state.pending.take().expect("looked at above");
+                match result {
+                    Ok(map) => {
+                        self.renderer.set_map(Some(&map));
+                        state.took = started.elapsed().as_secs_f32();
+                        log.info(format!("Loaded {name} in {:.1} s", state.took));
+                        state.set = Some((id, recipe));
+                    }
+                    Err(e) => {
+                        let why = format!("{e:#}");
+                        log.error(format!("{name} could not be built: {why}"));
+                        state.failed = Some((id, recipe, why));
+                    }
+                }
+            }
+        }
+        // Where the map stands, every frame: moving it uploads nothing.
+        let placed = state.set.as_ref().and_then(|(id, _)| {
+            let (object, _, hide_walls) = wanted.as_ref().filter(|w| w.0.id == *id)?;
+            Some(rk_render::map::MapPlacement {
+                root: scene.world_by(object.id, &self.poses),
+                hide_walls: *hide_walls,
+                shown: scene.shown(object.id),
+            })
+        });
+        // A map being replaced by another object's keeps its own place.
+        let placed = placed.or_else(|| {
+            let (id, _) = state.set.as_ref()?;
+            let object = scene.get(*id)?;
+            Some(rk_render::map::MapPlacement {
+                root: scene.world_by(object.id, &self.poses),
+                hide_walls: true,
+                shown: scene.shown(object.id),
+            })
+        });
+        state.shown = placed.is_some_and(|p| p.shown);
+        if let Some(placement) = placed {
+            self.renderer.place_map(placement);
+        }
+    }
+
+    /// Puts the camera at CharaStudio's starting view, which a new map is
+    /// first seen from, and makes it the view to go back to. A character
+    /// built after leaves it there.
+    pub fn studio_camera(&mut self) {
+        self.cam.rehome(Orbit::from_camera(&Self::studio_view()), None);
+        self.framed = true;
+    }
+
+    /// The camera CharaStudio starts a scene with, which a map is first
+    /// seen from: at (0, 2.09, 4.21), turned to face the scene's front and
+    /// looking down a little, with a 23 degree lens
+    /// (`Studio.CameraControl`, as its captures record it).
+    pub fn studio_view() -> Camera {
+        let eye = Vec3::new(0.0, 2.09, 4.21);
+        let turn = glam::Quat::from_xyzw(-1.618_124_7e-8, 0.995_055_6, -0.099_319_79, -1.621_151_3e-7);
+        let forward = turn * Vec3::Z;
+        // The point it looks at is where its view crosses the scene's
+        // middle plane, the one through the origin facing the camera.
+        let reach = if forward.z.abs() > 1e-4 {
+            -eye.z / forward.z
+        } else {
+            4.0
+        };
+        Camera {
+            eye,
+            target: eye + forward * reach.max(0.5),
+            fov_y_deg: 23.0,
+        }
     }
 
     /// Where the bones are that objects are attached to, for the scene.
@@ -842,10 +1046,7 @@ impl Live {
     /// the empty parts keep the plain `background`; a map takes the whole
     /// picture, as in CharaStudio.
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
-        let map = scene
-            .objects()
-            .iter()
-            .any(|o| matches!(o.content, Content::Map) && scene.shown(o.id));
+        let map = self.map.shown;
         let mut effects = StudioEffects::studio(self.filter.clone().flatten());
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {

@@ -726,6 +726,33 @@ impl Index {
         Ok(Self::build(game_dir, trees, zips))
     }
 
+    /// An index of a few loose bundles alone, each answering to the
+    /// virtual path it had in the game: what a project's own copy of a map
+    /// is read from, with no game or package behind it. A file that cannot
+    /// be read is left out.
+    pub fn of_bundles(bundles: &[(String, PathBuf)]) -> Self {
+        let mut idx = Index::default();
+        for (vpath, file) in bundles {
+            let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+                continue;
+            };
+            let Ok(scan) = scan_game_bundle(file, false) else {
+                continue;
+            };
+            let vpath = norm(vpath);
+            for cab in scan.cabs {
+                idx.cabs.entry(cab).or_insert_with(|| vpath.clone());
+            }
+            idx.roots.push(dir.to_owned());
+            idx.bundles.entry(vpath).or_default().push(BundleLoc {
+                mod_idx: None,
+                root: idx.roots.len() as u32 - 1,
+                path: name.to_string_lossy().into_owned(),
+            });
+        }
+        idx
+    }
+
     /// The game's bundles and zipmods, from its cache where they did not
     /// change.
     fn scan_game(cfg: &Config) -> Result<Cache> {

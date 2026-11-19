@@ -26,7 +26,7 @@ pub struct Entry {
 
 /// How thumbnails are filtered: they show much smaller than they are, so
 /// smaller copies smooth their edges instead of skipping pixels.
-const SHRUNK: egui::TextureOptions = egui::TextureOptions {
+pub(crate) const SHRUNK: egui::TextureOptions = egui::TextureOptions {
     mipmap_mode: Some(egui::TextureFilter::Linear),
     ..egui::TextureOptions::LINEAR
 };

@@ -33,7 +33,7 @@ fn folder_kind(top: &str) -> (Kind, &'static str) {
         project::CHARACTERS => (Kind::Character, "This project has no characters yet"),
         project::ANIMATIONS => (Kind::Animation, "This project has no animations yet"),
         project::POSES => (Kind::Pose, "This project has no poses yet"),
-        "Maps" => (Kind::Map, "Not available yet"),
+        crate::maps::MAPS => (Kind::Map, "This project has no maps yet"),
         "Items" => (Kind::Item, "Not available yet"),
         project::SCENES => (Kind::Scene, "This folder is empty"),
         "Renders" => (Kind::Camera, "This project has no renders yet"),
@@ -310,6 +310,23 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
             }
             project::ANIMATIONS => animation_tools(ui, k, st, &mut asks),
+            crate::maps::MAPS => {
+                if flat_button(ui, k, Some(icon::BOOKS), "From library", false, false).clicked() {
+                    asks.commands.push(Command::MapLibrary);
+                }
+                let map = st.asset.clone().filter(|a| is_sidecar(&slashes(a)));
+                let add = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false);
+                let add = if map.is_none() {
+                    add.on_hover_text("No map selected")
+                } else {
+                    add
+                };
+                if add.clicked() {
+                    if let Some(map) = map {
+                        asks.commands.push(Command::AddMap(map));
+                    }
+                }
+            }
             _ => {}
         }
         if icon_button(ui, k, icon::ARROWS_CLOCKWISE, false)
@@ -379,6 +396,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     match top {
         project::CHARACTERS => cards(&mut area, k, st, grid, &open, empty_note, &mut asks),
         project::ANIMATIONS => animations(&mut area, k, st, grid, &open, &mut asks),
+        crate::maps::MAPS => maps(&mut area, k, st, grid, &open, &mut asks),
         _ => files(&mut area, k, st, grid, &open, kind, empty_note, &mut asks),
     }
     ui.allocate_rect(body, Sense::hover());
@@ -473,7 +491,7 @@ fn folder_tree(ui: &mut Ui, k: &Look, st: &mut State, tree: Rect, open: &str, as
             }
             for top in project::FOLDERS {
                 let (kind, _) = folder_kind(top);
-                let below = content::folders(&st.project, top);
+                let below = tree_folders(st, top);
                 folder_row(ui, k, st, top, top, kind, below.first().map(|_| open), asks);
                 // What lies in a folded folder is passed over.
                 let mut folded: Option<String> = st.content_folded.contains(top).then(|| top.to_owned());
@@ -595,9 +613,31 @@ fn folder_row(
 /// Whether a project folder holds nothing at all: no file and no folder.
 /// The folders right inside `open`.
 fn subfolders(st: &State, open: &str) -> Vec<String> {
-    content::folders(&st.project, content::top(open))
+    tree_folders(st, content::top(open))
         .into_iter()
         .filter(|f| content::parent(f) == open)
+        .collect()
+}
+
+/// Whether a file is a map's sidecar.
+fn is_sidecar(rel: &str) -> bool {
+    rel.to_lowercase().ends_with(&format!(".{}", crate::maps::EXTENSION))
+}
+
+/// The folders of a project folder that show as folders: all of them,
+/// but for the maps' own folders, which show as their maps.
+fn tree_folders(st: &State, top: &str) -> Vec<String> {
+    let all = content::folders(&st.project, top);
+    if top != crate::maps::MAPS {
+        return all;
+    }
+    let maps: Vec<String> = all
+        .iter()
+        .filter(|f| content::files(&st.project, f).iter().any(|x| is_sidecar(x)))
+        .cloned()
+        .collect();
+    all.into_iter()
+        .filter(|f| !maps.iter().any(|m| in_open(f, m)))
         .collect()
 }
 
@@ -1038,6 +1078,97 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
             item.kind_text(),
             item.rel
         ));
+    });
+}
+
+/// The project's maps in the open folder, as tiles of their pictures. A
+/// map's own folder shows as the map.
+fn maps(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, asks: &mut Asks) {
+    let t = &k.t;
+    let search = st.content_search.trim().to_lowercase();
+    let searching = !search.is_empty();
+    let inside = if searching { Vec::new() } else { subfolders(st, open) };
+    let maps: Vec<crate::maps::ProjectMap> = crate::maps::in_project(&st.project.root)
+        .into_iter()
+        .filter(|m| shown_in(content::parent(content::parent(&m.file)), open, searching))
+        .filter(|m| !searching || m.map.name.to_lowercase().contains(&search))
+        .collect();
+    if maps.is_empty() && inside.is_empty() {
+        if searching {
+            note(ui, k, grid, "No map matches the search");
+        } else if !bare(st, crate::maps::MAPS) {
+            centred(ui, k, grid, "This folder is empty");
+        } else {
+            let c = grid.center();
+            ui.painter().text(
+                c - Vec2::new(0.0, 22.0),
+                Align2::CENTER_CENTER,
+                "This project has no maps yet",
+                k.bold(k.d.text + 1.0),
+                t.text_bright,
+            );
+            let text = "Import from library";
+            let w = (14.0 + 16.0 + 7.0 + widgets::text_width(ui, text, k.font()) + 14.0).ceil();
+            let button = Rect::from_min_size(Pos2::new((c.x - w / 2.0).round(), c.y), Vec2::new(w, 30.0));
+            if crate::selector::icon_button(ui, k, button, Some(icon::BOOKS), text, true, true) {
+                asks.commands.push(Command::MapLibrary);
+            }
+        }
+        return;
+    }
+    let kind = Kind::Map;
+    let in_scene = st.doc.scene().objects().iter().find_map(|o| match &o.content {
+        crate::scene::Content::Map { map, .. } => Some(slashes(map)),
+        _ => None,
+    });
+    tile_grid(ui, k, "maps", inside.len() + maps.len(), |ui, i, cell| {
+        if let Some(rel) = inside.get(i) {
+            folder_tile(ui, k, st, cell, rel, asks);
+            return;
+        }
+        let map = &maps[i - inside.len()];
+        let rel = map.file.clone();
+        let folder = content::parent(&rel).to_owned();
+        let resp = ui
+            .interact(cell, ui.id().with(("map", &rel)), Sense::click())
+            .on_hover_text(format!("{}\n{folder}", map.map.name));
+        if resp.clicked() || resp.secondary_clicked() {
+            asks.select = Some(rel.clone());
+        }
+        if resp.double_clicked() {
+            asks.commands.push(Command::AddMap(PathBuf::from(&rel)));
+        }
+        let on = st.asset.as_deref() == Some(Path::new(&rel));
+        let picture = map
+            .map
+            .thumbnail
+            .as_ref()
+            .map(|p| st.project.root.join(&folder).join(p));
+        let thumb = match picture.and_then(|p| st.library.thumb(ui.ctx(), &p).cloned()) {
+            Some(tex) => Thumb::Image(tex.id(), square_uv(tex.size())),
+            None => Thumb::Glyph(kind.glyph(), k.t.hover),
+        };
+        let shown = in_scene.as_deref() == Some(rel.as_str());
+        let text = TileText {
+            rel: &folder,
+            name: &map.map.name,
+            caption: if shown { "In the scene" } else { kind.label() },
+            caption_color: shown.then_some(t.accent),
+        };
+        draw_tile(ui, k, st, cell, &resp, on, thumb, kind.color(), text, asks);
+        resp.context_menu(|ui| {
+            if widgets::menu_item(ui, k, icon::PLUS, "Add to scene", "", true) {
+                asks.commands.push(Command::AddMap(PathBuf::from(&rel)));
+            }
+            ui.separator();
+            if widgets::menu_item(ui, k, icon::ARROW_SQUARE_OUT, "Show in file manager", "", true) {
+                asks.file(FileOp::Reveal(folder.clone()));
+            }
+            ui.separator();
+            if widgets::menu_item(ui, k, icon::TRASH, "Delete", "", true) {
+                asks.file(FileOp::Delete(folder.clone()));
+            }
+        });
     });
 }
 

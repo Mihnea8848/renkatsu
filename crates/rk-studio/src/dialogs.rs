@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The questions the editor asks before it goes on: whether to copy a
-//! card's mods into the project, what to do with unsaved changes, and
-//! where a new project goes. One is open at a time, over the dimmed
-//! window. The system's own file dialogs, which pick the cards and
+//! card's mods into the project, what to do with unsaved changes, where a
+//! new project goes. One is open at a time, over the dimmed window. The system's own file dialogs, which pick the cards and
 //! folders, are here too.
 
 use crate::mods::{count_text, size_text, Plan};

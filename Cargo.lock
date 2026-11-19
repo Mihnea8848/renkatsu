@@ -3033,6 +3033,7 @@ dependencies = [
  "rk-card",
  "rk-chara",
  "rk-core",
+ "rk-map",
  "rk-packages",
  "rk-render",
  "rk-unityfs",
