@@ -16,10 +16,11 @@
 //! the scene (`Studio.OICharInfo.siru`, five bytes) and hands them to the
 //! character on load (`AddObjectAssist`), which is where ours live too.
 //!
-//! The game also passes the body's four to the clothes of kinds 0, 1, 2, 3
-//! and 5 (`ChaControl.UpdateClothesSiru`), whose shaders carry the same
-//! properties. Renkatsu's clothes shaders leave the liquid layers out, so
-//! that is not done here.
+//! The game also passes the body's four levels to the clothes
+//! (`ChaControl.UpdateClothesSiru`), whose shaders carry the same
+//! properties, their own liquid mask among them; see [`CLOTHES_KINDS`] for
+//! which kinds take them. `main_opaque` and `main_alpha` read them much as
+//! `main_skin` does, and both are ported.
 
 use crate::scene::Scene;
 
