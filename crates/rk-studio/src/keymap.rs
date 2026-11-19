@@ -75,6 +75,7 @@ pub enum Action {
     Rename,
     Delete,
     ToggleHidden,
+    Attach,
     Unparent,
     NewFolder,
     Preferences,
@@ -124,7 +125,7 @@ const fn def(action: Action, id: &'static str, name: &'static str, group: Group,
 
 /// Every action. Where two actions share a key, the first one listed
 /// gets it. The defaults follow Unity and Unreal, then Blender.
-pub const ACTIONS: [Def; 48] = [
+pub const ACTIONS: [Def; 49] = [
     def(
         Action::NewProject,
         "new-project",
@@ -158,7 +159,8 @@ pub const ACTIONS: [Def; 48] = [
     def(Action::Rename, "rename", "Rename", Group::Edit, &["F2"]),
     def(Action::Delete, "delete", "Delete", Group::Edit, &["Delete"]),
     def(Action::ToggleHidden, "hide", "Hide or show", Group::Edit, &["H"]),
-    def(Action::Unparent, "unparent", "Unparent", Group::Edit, &["Alt+P"]),
+    def(Action::Attach, "attach", "Attach", Group::Edit, &["P"]),
+    def(Action::Unparent, "unparent", "Detach", Group::Edit, &["Alt+P"]),
     def(
         Action::NewFolder,
         "new-folder",
@@ -634,6 +636,7 @@ impl State {
             A::Rename => self.run(Command::Rename),
             A::Delete => self.run(Command::Delete),
             A::ToggleHidden => self.run(Command::ToggleHidden),
+            A::Attach => self.run(Command::AttachToLast),
             A::Unparent => self.run(Command::Unparent),
             A::NewFolder => self.run(Command::AddChildFolder),
             A::Preferences => self.preferences_open = !self.preferences_open,
@@ -658,8 +661,7 @@ impl State {
             }
             A::ToggleSnap => self.snap = !self.snap,
             A::ToggleGrid => self.gizmo.grid = !self.gizmo.grid,
-            // Dropping needs the surfaces of maps and items, which come later.
-            A::DropToSurface => {}
+            A::DropToSurface => self.run(Command::SnapToFloor),
             A::Focus => crate::viewport::focus_selection(self),
             A::ResetView => {
                 if let Some(live) = self.live.as_mut() {

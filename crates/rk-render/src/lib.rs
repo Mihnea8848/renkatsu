@@ -207,6 +207,9 @@ pub struct Environment {
     pub shadows: ShadowSettings,
     /// CharaStudio's screen effects. `None` draws the plain picture.
     pub effects: Option<StudioEffects>,
+    /// Draw the camera's depth texture also when nothing of the picture
+    /// reads it, for whoever asks `Renderer::camera_depth` afterwards.
+    pub camera_depth: bool,
 }
 
 impl Default for Environment {
@@ -229,6 +232,7 @@ impl Default for Environment {
             light_dir: None,
             shadows: ShadowSettings::default(),
             effects: None,
+            camera_depth: false,
         }
     }
 }
@@ -1119,6 +1123,7 @@ impl Renderer {
         // the camera's depth texture.
         let hdr = env.effects.is_some();
         let occlude = env.effects.as_ref().is_some_and(|fx| fx.ao.is_some());
+        let depth_wanted = occlude || env.camera_depth;
         let base = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array(),
             light_dir: [light.x, light.y, light.z, 0.0],
@@ -1336,7 +1341,7 @@ impl Renderer {
                 let bind = binds.len();
                 binds.push(self.material_bind_group(&desc));
                 let role = shadow::role(d.renderer.cast_shadows, desc.shadow, desc.queue);
-                if (cast && role.shadow_map.is_some()) || ((cast || occlude) && role.depth.is_some()) {
+                if (cast && role.shadow_map.is_some()) || ((cast || depth_wanted) && role.depth.is_some()) {
                     casters.push(Caster {
                         batch: batches.len(),
                         first: sm.first_index,
@@ -1467,7 +1472,7 @@ impl Renderer {
                 multiview_mask: None,
             }
         }
-        if !cast && occlude {
+        if !cast && depth_wanted {
             // Without shadows the depth texture is still drawn, as the
             // game's occlusion effect asks the camera for it.
             let group = globals_group(self, base, &self.white);
@@ -1888,6 +1893,15 @@ impl Renderer {
         let encoder = self.encode(&view, draws, camera, env, size.width, size.height, background)?;
         self.queue.submit([encoder.finish()]);
         Ok(())
+    }
+
+    /// The camera's depth texture of the last frame drawn, of the frame's
+    /// size and one sample a pixel: the depth of what the shaders' depth
+    /// passes draw, as the game's camera has it. It holds that frame only
+    /// when the frame cast shadows, had occlusion or asked for it with
+    /// `Environment::camera_depth`.
+    pub fn camera_depth(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|t| &t.depth_texture)
     }
 
     /// The format `render_to` expects its target in.
