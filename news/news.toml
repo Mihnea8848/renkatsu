@@ -6,26 +6,42 @@ date = 2026-11-19
 title = "Posing comes next"
 summary = "I am working on FK and IK posing now. Baked characters come after that."
 body = """
-Characters can play the game's animations already. The next step is posing them by hand, the way CharaStudio does it.
+Characters in Renkatsu can already play the game's animations. With a Koikatsu folder there are 5728 of them, from standing and sitting to dancing, fighting and the H scenes, and Starter Content: Animations & Poses brings 3860 of them without the game. What is missing is the part of CharaStudio most people spend their time in: posing a character by hand. That is what I am working on now.
 
-FK lets you turn each bone yourself: pick the arm, the hand or a finger and rotate it. IK works the other way round: you move a hand or a foot to where it should be, and the arm or the leg follows. Both work on the same skeleton, so you can start from an animation, pause it and fix the pose from there.
+Posing will have its own mode, Pose, next to Character and Light. Selecting a character there shows handles on its bones. There are two ways to pose, and both work on the same skeleton.
 
-Poses you make go into the project's Poses folder, beside the animations, so you can use them again on other characters.
+FK, forward kinematics, means turning bones one by one. You pick the upper arm and rotate it, then the forearm, then the hand, and each bone carries the ones below it along. It is the precise way to pose, and the one to use for the spine, the head, the fingers and anything where the exact angle matters. The rotate gizmo from 0.1.8 does the turning, with the same snapping steps and the same Global and Local axes.
 
-After posing come baked characters. A baked character keeps everything it needs inside the project, so a scene opens the same on a computer without Koikatsu.
+IK, inverse kinematics, works the other way round. You move a hand or a foot to where it should be, and the arm or the leg bends to reach it. This is how you put a hand on a table, a foot on a step or two hands together, without working out the angle of every joint. Feet that stay planted while the hips move are the other big use.
+
+The two mix freely. A common way to work will be to start from one of the game's animations, pause it at a good moment and fix the pose from there: an IK hand moved onto a shoulder, the head turned a little with FK, the fingers closed. Mirror copies one side of the body to the other.
+
+Poses you make are saved into the project's Poses folder, next to its animations, so the same pose can be given to another character or used again in another scene. Hands, the face and the gaze belong to posing too: hand shapes, expressions, and looking at the camera or at another character.
+
+After posing come baked characters. Today a character is built from its card every time a project opens, which needs the game's files, or Starter Content, and every mod the card uses. A baked character keeps everything it is made of inside the project: meshes, textures, materials and bones. A project with baked characters opens the same on a computer without Koikatsu and without the mods.
+
+I will post here again when posing is ready to try.
 """
 
 [[post]]
 date = 2026-11-18
 title = "Starter Content is available"
-summary = "You can use Renkatsu without Koikatsu now. Get Starter Content from the Packages window and you have characters and clothing to work with."
+summary = "You can use Renkatsu without Koikatsu now. Get Starter Content from the Packages window and you have characters, clothing, animations and maps to work with."
 url = "https://github.com/Mihnea8848/renkatsu/releases"
 body = """
-Until now Renkatsu needed a Koikatsu install to build characters. That is no longer the case.
+Until now Renkatsu needed a Koikatsu install to build characters. That is no longer the case. Starter Content is Koikatsu's own vanilla content, put into packages that Renkatsu downloads and installs for you. Install them and you can make scenes without the game.
 
-Starter Content: Characters and Clothing is a package with the bodies, faces, hair and clothing that cards are built from. Install it and the default characters work, and so do cards that only use the game's own content.
+There are three packages, and each can be installed on its own.
 
-To get it, open the Packages window from the project selector and choose Starter Content, or click Get Starter Content when Renkatsu offers it. The download goes on where it stopped if the connection drops.
+Starter Content: Characters & Clothing holds the bodies, faces, hair, clothes and accessories that characters are built from, with the game's updates and add-ons, and the game's default characters as cards. With it, the default characters work, and so does any card that only uses the game's own content. It is 796 MB to download.
 
-If you have Koikatsu, you can still point Renkatsu at your game folder. Then your own cards and their mods are read from there.
+Starter Content: Animations & Poses holds CharaStudio's poses and animations: standing, sitting, talking, walking, dancing, fighting and the H scenes, 3860 in all. They show in the animation importer under the package's name, ready to copy into a project. It is 618 MB to download.
+
+Starter Content: Maps, new in 0.2.1, holds the 42 maps of CharaStudio's list with their pictures: the school's classrooms, hallways and club rooms, the gym, the pool, the park, the church, the train and the rest. They show in the Maps library, at any time of day. It is 1006 MB to download.
+
+To get them, open Packages at the bottom of the project selector's side menu and click Download next to each one. Renkatsu also offers Starter Content: Characters & Clothing on first start. A download that breaks off goes on from where it stopped, and every file is checked against its checksum before it is installed. Verify checks an installed package again, and Remove takes it off. Packages are installed once for your user, and every project can use them.
+
+Starter Content is the vanilla game only. Cards that use mods still need those mods, and mods come with a Koikatsu install. If you have Koikatsu, you can point Renkatsu at your game folder as before, and your own cards and their mods are read from there. Both work together: a project can use the game folder and Starter Content at the same time.
+
+You can also make packages of your own with the rk command line tool that comes with Renkatsu. The packages page in the documentation shows how.
 """

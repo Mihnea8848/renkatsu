@@ -22,13 +22,17 @@ pub const RELEASES: &str = "https://api.github.com/repos/Mihnea8848/renkatsu/rel
 pub const MAX_BYTES: usize = 64 * 1024;
 /// How many pieces of news the page shows at most.
 pub const SHOWN: usize = 8;
-/// Seconds an answer stays good before it is asked for again.
-pub const FRESH: u64 = 6 * 60 * 60;
+/// Seconds an answer stays good before it is asked for again. GitHub
+/// answers an unchanged list with a short "not modified" thanks to the
+/// ETag, so asking often costs little, and a new release shows soon.
+pub const FRESH: u64 = 15 * 60;
 /// What a link must start with to be one: the project's own GitHub.
 const LINKS: &str = "https://github.com/Mihnea8848/";
 const TITLE_CHARS: usize = 80;
 const SUMMARY_CHARS: usize = 200;
-const BODY_CHARS: usize = 4000;
+const BODY_CHARS: usize = 16000;
+/// What starts a paragraph of a post's body that is a heading.
+pub const HEADING: &str = "## ";
 
 /// Where a piece of news comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,13 +263,31 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
             continue;
         };
         let notes = release["body"].as_str().unwrap_or_default();
-        // The notes without their markdown marks, a line each.
-        let lines: Vec<&str> = notes
-            .lines()
-            .map(|l| l.trim_start_matches(['#', '*', '-', ' ']).trim())
-            .collect();
-        // The first line that says something is the summary.
-        let summary = lines.iter().find(|l| !l.is_empty()).copied().unwrap_or_default();
+        // The notes a line each, without their markdown marks but for a
+        // heading's, which the page draws as one, and without the section
+        // of files to download, which the page has no use for.
+        let mut downloads = false;
+        let mut lines: Vec<String> = Vec::new();
+        let mut summary = "";
+        for line in notes.lines() {
+            let heading = line.starts_with('#');
+            let text = line.trim_start_matches(['#', '*', '-', ' ']).trim();
+            if heading {
+                downloads = text.eq_ignore_ascii_case("downloads");
+            }
+            if downloads || text.is_empty() {
+                continue;
+            }
+            // The first line that says something is the summary.
+            if summary.is_empty() {
+                summary = text;
+            }
+            lines.push(if heading {
+                format!("{HEADING}{text}")
+            } else {
+                text.to_owned()
+            });
+        }
         let body = paragraphs(&lines.join("\n\n"), BODY_CHARS);
         posts.push(Post {
             kind: Kind::Release,
@@ -297,6 +319,9 @@ pub fn merge(posts: Vec<Post>, releases: Vec<Post>) -> Vec<Post> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Cache {
+    /// The Renkatsu that wrote it. Another version reads the answers in
+    /// its own way, so it starts from an empty cache and asks again.
+    pub app: String,
     /// When the news file was last asked for, in seconds since 1970, and
     /// the same for the releases.
     pub posts_asked: u64,
@@ -340,20 +365,31 @@ impl Cache {
         base.join("renkatsu").join("news.json")
     }
 
-    /// The cache of a file; an empty one when the file is missing or
-    /// cannot be read.
+    /// The cache of a file; an empty one when the file is missing, cannot
+    /// be read or was written by another version of Renkatsu.
     pub fn load(file: &Path) -> Cache {
         std::fs::read_to_string(file)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
+            .and_then(|text| Self::read(&text))
             .unwrap_or_default()
+    }
+
+    /// The cache in `text`, when this version of Renkatsu wrote it.
+    fn read(text: &str) -> Option<Cache> {
+        serde_json::from_str::<Cache>(text)
+            .ok()
+            .filter(|cache| cache.app == crate::APP_VERSION)
     }
 
     pub fn save(&self, file: &Path) -> Result<()> {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(file, serde_json::to_string(self)?)?;
+        let stamped = Cache {
+            app: crate::APP_VERSION.to_owned(),
+            ..self.clone()
+        };
+        std::fs::write(file, serde_json::to_string(&stamped)?)?;
         Ok(())
     }
 
@@ -486,7 +522,7 @@ mod tests {
         {"tag_name": "starter-characters-1", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/starter-characters-1",
          "published_at": "2026-11-18T10:00:00Z", "body": "Content"},
         {"tag_name": "v0.1.8", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.1.8",
-         "published_at": "2026-11-18T09:00:00Z", "body": "\n## Gizmos, viewport selection and shortcuts\n\nMore text"},
+         "published_at": "2026-11-18T09:00:00Z", "body": "\n## Gizmos, viewport selection and shortcuts\n\nMore text\n\n## Downloads\n\n- Linux: the installer\n\n## After\n\nLast words"},
         {"tag_name": "v0.2.0", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.2.0",
          "published_at": "2026-11-19T09:00:00Z", "body": "", "draft": true},
         {"tag_name": "v0.1.10", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.1.10",
@@ -545,6 +581,11 @@ mod tests {
         let titles: Vec<&str> = posts.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(titles, ["Renkatsu 0.1.8", "Renkatsu 0.1.10"]);
         assert_eq!(posts[0].summary, "Gizmos, viewport selection and shortcuts");
+        // The files to download are left out; what follows them is kept.
+        assert_eq!(
+            posts[0].body,
+            "## Gizmos, viewport selection and shortcuts\n\nMore text\n\n## After\n\nLast words"
+        );
         assert_eq!(posts[0].date, "2026-11-18");
         // The newest by version, not by its place in the list.
         assert_eq!(latest.unwrap().version, "0.1.10");
@@ -572,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_is_fresh_for_six_hours() {
+    fn an_answer_is_fresh_for_a_quarter_of_an_hour() {
         assert!(!fresh(0, 1000));
         assert!(fresh(1000, 1000));
         assert!(fresh(1000, 1000 + FRESH - 1));
@@ -612,6 +653,20 @@ mod tests {
         let text = serde_json::to_string(&cache).unwrap();
         assert_eq!(serde_json::from_str::<Cache>(&text).unwrap(), cache);
         assert_eq!(serde_json::from_str::<Cache>("{}").unwrap(), Cache::default());
+    }
+
+    #[test]
+    fn a_cache_of_another_version_is_not_read() {
+        let mine = Cache {
+            app: crate::APP_VERSION.to_owned(),
+            latest_version: Some("9.9.9".to_owned()),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&mine).unwrap();
+        assert_eq!(Cache::read(&text), Some(mine));
+        // One from before the version was kept, or from another version.
+        assert_eq!(Cache::read(r#"{"latest_version": "0.1.8"}"#), None);
+        assert_eq!(Cache::read(r#"{"app": "0.0.1", "latest_version": "0.1.8"}"#), None);
     }
 
     #[test]

@@ -82,7 +82,12 @@ fn post_ui(ui: &mut Ui, k: &Look, post: &Post, today: &str, n: usize, whole: boo
     let galleys: Vec<_> = post
         .body_in(language)
         .split("\n\n")
-        .map(|paragraph| ui.painter().layout(paragraph.to_owned(), font.clone(), t.text, width))
+        .map(|paragraph| match paragraph.strip_prefix(rk_packages::news::HEADING) {
+            Some(heading) => ui
+                .painter()
+                .layout(heading.to_owned(), k.bold(BODY + 3.0), t.text_bright, width),
+            None => ui.painter().layout(paragraph.to_owned(), font.clone(), t.text, width),
+        })
         .collect();
     let full: f32 = galleys.iter().map(|g| g.size().y).sum::<f32>() + 10.0 * galleys.len().saturating_sub(1) as f32;
     let cut = !whole && full > PREVIEW;
