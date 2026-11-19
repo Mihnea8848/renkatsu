@@ -114,12 +114,12 @@ The latest version is 0.2.0, on the
 - Context menus in Content and the Outliner: rename, duplicate, copy, cut,
   paste, delete, folders, and drag and drop; scenes follow files that are
   renamed or moved
-- Packages: Starter Content brings Koikatsu's vanilla characters, clothing
-  and animations without the game, and `rk package new` and `rk package build`
-  make your own ([docs/packages.md](docs/packages.md))
-- Maps: CharaStudio's maps from a Koikatsu install with lightmaps, sun
-  shadows, sky domes, foliage, reflections, normal maps and walls that hide,
-  in day, evening and night, picked from a library grouped by place. A
+- Packages: Starter Content brings Koikatsu's vanilla characters, clothing,
+  animations and maps without the game, and `rk package new` and
+  `rk package build` make your own ([docs/packages.md](docs/packages.md))
+- Maps: CharaStudio's maps, from a Koikatsu install or Starter Content: Maps,
+  with lightmaps, sun shadows, sky domes, foliage, reflections, normal maps
+  and walls that hide, in day, evening and night, picked from a library grouped by place. A
   project keeps each map as one `.rkmap` file, which can also be imported
   from disk
 - Snap to floor drops objects onto what lies below them, characters or the
