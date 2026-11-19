@@ -71,6 +71,29 @@ pub fn apply(scene: &mut Scene, levels: &Levels) {
     }
 }
 
+/// The clothes kinds the body's four levels reach, as the loop at the end
+/// of `UpdateSiru` reaches them. The array it builds reads
+/// `{ 0, 1, 2, 3, 5 }`, but the loop hands `UpdateClothesSiru` its counter
+/// instead of the array's entry, so the kinds that really take the levels
+/// are the first five — top, bottom, bra, underwear and gloves — and
+/// pantyhose, the one the array names, never take any.
+pub const CLOTHES_KINDS: usize = 5;
+
+/// Lays the body's four levels on clothes renderers, as
+/// `UpdateClothesSiru` lays them on a piece's `rendNormal01` to `03`.
+/// `Renderer.material` is the first of a renderer's materials, so only
+/// that one takes them.
+pub fn dress(scene: &mut Scene, levels: &Levels, renderers: &[usize]) {
+    for &ri in renderers {
+        let Some(m) = scene.renderers.get_mut(ri).and_then(|r| r.materials.first_mut()) else {
+            continue;
+        };
+        for (property, &level) in BODY_LEVELS.iter().zip(&levels[1..]) {
+            m.set_float(property, f32::from(level));
+        }
+    }
+}
+
 /// Whether the body carries the mask the levels are read against, which
 /// is what decides whether any of this shows.
 pub fn masked(scene: &Scene) -> bool {
@@ -106,6 +129,23 @@ mod tests {
         assert_eq!(body.get("_liquidfbot"), Some(&0.0));
         assert_eq!(body.get("_liquidbtop"), Some(&2.0));
         assert_eq!(body.get("_liquidbbot"), Some(&1.0));
+    }
+
+    #[test]
+    fn clothes_take_the_bodys_four_levels_and_not_the_faces() {
+        let mut scene = Scene::default();
+        scene.renderers.push(renderer("o_top_a"));
+        scene.renderers.push(renderer("o_bot_a"));
+        // Only the renderers named take them, and only their first
+        // material, as `Renderer.material` is the first.
+        scene.renderers[0].materials.push(MaterialInst::default());
+        dress(&mut scene, &[2, 1, 0, 2, 1], &[0]);
+        let first = &scene.renderers[0].materials[0].floats;
+        assert_eq!(first.get("_liquidftop"), Some(&1.0));
+        assert_eq!(first.get("_liquidbbot"), Some(&1.0));
+        assert_eq!(first.get(FACE_LEVEL), None);
+        assert!(scene.renderers[0].materials[1].floats.is_empty());
+        assert!(scene.renderers[1].materials[0].floats.is_empty());
     }
 
     #[test]

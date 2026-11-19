@@ -19,9 +19,10 @@ use std::path::Path;
 
 const AXES: [&str; 3] = ["X", "Y", "Z"];
 
-/// The character page that holds what the body shows in an H scene: the
-/// liquid on the skin now, and the rest of the game's H-time state later.
-const H_PAGE: &str = "H State";
+/// The character page that holds what an H scene leaves on a character:
+/// the liquid on the skin and the clothes now, and the rest of the game's
+/// H-time effects later.
+const H_PAGE: &str = "H Effects";
 
 /// How far a number moves per point of drag: positions and scales, then
 /// angles in degrees.
@@ -135,7 +136,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         // What the body shows in an H scene. The levels are the game's
         // `siru`: a page of its own, since none of it is of the card.
         if Some(page) == h_page {
-            let Content::Character { liquid, .. } = &mut object.content else {
+            let Content::Character {
+                liquid, liquid_clothes, ..
+            } = &mut object.content
+            else {
                 return;
             };
             if section(ui, k, st, 10, "Liquid") {
@@ -157,6 +161,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         }
                     });
                 }
+                // The game always lays the body's levels on the clothes
+                // as well; here that can be turned off.
+                row(ui, k, "Clothes", waiting, |ui, rect| {
+                    widgets::checkbox(ui, k, rect, id.with("liquid clothes"), liquid_clothes, "Wet");
+                });
                 section_end(ui, k);
             }
             return;

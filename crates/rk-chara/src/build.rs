@@ -524,6 +524,15 @@ impl<'g> Builder<'g> {
         self.listed_renderers_in(inst, None, field)
     }
 
+    /// The renderers of a clothing piece that take the liquid levels:
+    /// `ChaClothesComponent.rendNormal01`, `02` and `03`.
+    fn liquid_renderers(&mut self, inst: &Instance) -> Vec<usize> {
+        ["rendNormal01", "rendNormal02", "rendNormal03"]
+            .iter()
+            .flat_map(|field| self.listed_renderers(inst, field))
+            .collect()
+    }
+
     /// Class name of a script, from its MonoScript.
     fn script_class(&self, script: &rk_vfs::ObjRef) -> Option<String> {
         let p = script.read().ok()?.get("m_Script")?.as_pptr()?;
@@ -2403,6 +2412,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 // `infoClothes` is set once the piece's object is loaded; a
                 // sailor or jacket top loads an empty object.
                 let kind = item.int("Kind").unwrap_or(0);
+                // `UpdateClothesSiru` lays the liquid levels on the
+                // piece's own renderers, except for a sailor or jacket
+                // top, whose parts take them instead; those are noted
+                // where the parts are loaded.
+                if let Some(inst) = &inst {
+                    if i < crate::siru::CLOTHES_KINDS && !(i == 0 && (kind == 1 || kind == 2)) {
+                        let renderers = b.liquid_renderers(inst);
+                        rig.add_liquid(i, renderers);
+                    }
+                }
                 if inst.is_some() || (i == 0 && (kind == 1 || kind == 2)) {
                     rig.worn.state_type[i] = state;
                 }
@@ -2486,6 +2505,13 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             b.physics_source(&inst, true, true, true);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             rig.add_part(&b.scene, k, &inst);
+                            // A sailor top's liquid goes on its one part,
+                            // a jacket top's on its first two
+                            // (`GetCustomClothesSubComponent`).
+                            if (kind == 1 && k == 0) || (kind == 2 && k < 2) {
+                                let renderers = b.liquid_renderers(&inst);
+                                rig.add_liquid(0, renderers);
+                            }
                             // Sub-parts share the top's colours.
                             let sources = compose::color_sources(Some(k));
                             b.dress(&inst, sub, &cp.color_info, sources, &pattern_prop, overlays::SUB_IDS[k]);
@@ -2777,9 +2803,14 @@ impl Character {
     }
 
     /// Lays the liquid levels on the skin without building again, as
-    /// `ChaControl.UpdateSiru` does.
-    pub fn set_siru(&mut self, levels: &crate::siru::Levels) {
+    /// `ChaControl.UpdateSiru` does, and on the clothes that take them
+    /// where it is asked for. The game always wets the clothes with the
+    /// body; here it is a choice, and `clothes` false leaves them dry.
+    pub fn set_siru(&mut self, levels: &crate::siru::Levels, clothes: bool) {
         crate::siru::apply(&mut self.scene, levels);
+        let worn = if clothes { *levels } else { [0; crate::siru::PARTS] };
+        let renderers = self.clothes.liquid_renderers();
+        crate::siru::dress(&mut self.scene, &worn, &renderers);
     }
 
     /// Whether the body carries the mask that liquid levels are read

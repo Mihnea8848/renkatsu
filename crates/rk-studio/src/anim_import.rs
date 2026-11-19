@@ -739,6 +739,7 @@ fn preview_content(st: &State) -> Option<Content> {
             outdoor_shoes,
             clothes,
             liquid,
+            liquid_clothes,
             ..
         } => Some(Content::Character {
             card: st.project.resolve(card),
@@ -747,6 +748,7 @@ fn preview_content(st: &State) -> Option<Content> {
             simulate: true,
             clothes: *clothes,
             liquid: *liquid,
+            liquid_clothes: *liquid_clothes,
             animation: None,
             profile: None,
         }),

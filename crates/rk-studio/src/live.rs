@@ -73,8 +73,9 @@ struct Actor {
     outfit_names: std::collections::BTreeMap<usize, String>,
     /// The clothes states the character was last brought to.
     clothes: States,
-    /// The liquid levels the skin was last laid with.
-    liquid: rk_chara::siru::Levels,
+    /// The liquid levels the skin was last laid with, and whether the
+    /// clothes were laid with them too.
+    liquid: (rk_chara::siru::Levels, bool),
     /// The animation of the scene the actor last looked for, by its file
     /// in the project, bundle, controller and state.
     pose: Option<[String; 5]>,
@@ -325,6 +326,7 @@ impl Actor {
             simulate,
             clothes,
             liquid,
+            liquid_clothes,
             animation: pose,
             ..
         } = &object.content
@@ -344,9 +346,9 @@ impl Actor {
 
         // The liquid on the skin is material values only: the bones and
         // the pose are untouched by it.
-        if *liquid != self.liquid {
-            self.chara.set_siru(liquid);
-            self.liquid = *liquid;
+        if (*liquid, *liquid_clothes) != self.liquid {
+            self.chara.set_siru(liquid, *liquid_clothes);
+            self.liquid = (*liquid, *liquid_clothes);
         }
 
         // The H animation options pick the clips to blend, so a change
@@ -1136,7 +1138,7 @@ impl Live {
             outfits: card.coordinates.len(),
             outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],
-            liquid: [0; rk_chara::siru::PARTS],
+            liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
             playing: None,
             animation_problem: None,

@@ -384,6 +384,10 @@ pub struct Rig {
     /// (`customMatBody`), the bra (`rendBra`) and the inner layer of the
     /// top's first part (`rendInner`).
     alpha: Vec<usize>,
+    /// Renderers whose first material takes the liquid levels, by kind:
+    /// the `rendNormal01` to `03` of the piece `UpdateClothesSiru` picks
+    /// for that kind.
+    liquid: [Vec<usize>; KINDS],
 }
 
 impl Rig {
@@ -423,6 +427,17 @@ impl Rig {
             PANTYHOSE => self.pantyhose = ["n_panst_a", "n_panst_b"].map(find),
             _ => {}
         }
+    }
+
+    /// Notes the renderers of a piece, or of a top's part, that take the
+    /// liquid levels.
+    pub fn add_liquid(&mut self, kind: usize, renderers: impl IntoIterator<Item = usize>) {
+        self.liquid[kind].extend(renderers);
+    }
+
+    /// Every renderer that takes the liquid levels.
+    pub fn liquid_renderers(&self) -> Vec<usize> {
+        self.liquid.iter().flatten().copied().collect()
     }
 
     /// Notes a part of a sailor or jacket top (`objParts`).

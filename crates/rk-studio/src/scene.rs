@@ -233,6 +233,10 @@ pub enum Content {
         /// back bottom, each 0 to 2.
         #[serde(default)]
         liquid: [u8; rk_chara::siru::PARTS],
+        /// The clothes take the body's levels too, as they do in the
+        /// game.
+        #[serde(default = "yes")]
+        liquid_clothes: bool,
         /// The animation the character plays or the pose it holds; none
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
@@ -312,6 +316,7 @@ impl Content {
             simulate: true,
             clothes: [0; 9],
             liquid: [0; rk_chara::siru::PARTS],
+            liquid_clothes: true,
             animation: None,
             profile: None,
         }

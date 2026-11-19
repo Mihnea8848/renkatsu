@@ -106,6 +106,10 @@ enum Cmd {
         /// bottom, back top and back bottom.
         #[arg(long)]
         liquid: Option<String>,
+        /// Leave the clothes dry. The game always wets them with the
+        /// body.
+        #[arg(long)]
+        dry_clothes: bool,
         /// An animation of CharaStudio's list as `group/category/number`.
         #[arg(long)]
         pose: Option<String>,
@@ -524,6 +528,7 @@ fn main() -> Result<()> {
             no_shadows,
             clothes,
             liquid,
+            dry_clothes,
             pose,
             time,
             studio_look,
@@ -550,6 +555,7 @@ fn main() -> Result<()> {
             shadows: !no_shadows,
             clothes: clothes.as_deref(),
             liquid: liquid.as_deref(),
+            dry_clothes,
             pose: pose.as_deref(),
             time,
             studio_look,

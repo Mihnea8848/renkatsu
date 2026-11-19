@@ -34,6 +34,8 @@ pub struct Args<'a> {
     pub clothes: Option<&'a str>,
     /// The liquid levels, as five digits from 0 to 2.
     pub liquid: Option<&'a str>,
+    /// Keep the clothes dry, which the game never does.
+    pub dry_clothes: bool,
     /// An animation as `group/category/number`.
     pub pose: Option<&'a str>,
     /// Where in the animation, in passes.
@@ -126,7 +128,7 @@ pub fn render(a: Args) -> Result<()> {
     }
     if let Some(spec) = a.liquid {
         let levels = parse_liquid(spec)?;
-        chara.set_siru(&levels);
+        chara.set_siru(&levels, !a.dry_clothes);
         println!("liquid levels {levels:?}");
         if !chara.liquid_mask() {
             println!("this body carries no liquid mask, so none of it shows");
