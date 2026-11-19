@@ -31,6 +31,8 @@ const LINKS: &str = "https://github.com/Mihnea8848/";
 const TITLE_CHARS: usize = 80;
 const SUMMARY_CHARS: usize = 200;
 const BODY_CHARS: usize = 16000;
+/// What starts a paragraph of a post's body that is a heading.
+pub const HEADING: &str = "## ";
 
 /// Where a piece of news comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,20 +263,31 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
             continue;
         };
         let notes = release["body"].as_str().unwrap_or_default();
-        // The notes without their markdown marks, a line each, and without
-        // the section of files to download, which the page has no use for.
+        // The notes a line each, without their markdown marks but for a
+        // heading's, which the page draws as one, and without the section
+        // of files to download, which the page has no use for.
         let mut downloads = false;
-        let mut lines: Vec<&str> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        let mut summary = "";
         for line in notes.lines() {
-            if line.starts_with('#') {
-                downloads = line.trim_start_matches('#').trim().eq_ignore_ascii_case("downloads");
+            let heading = line.starts_with('#');
+            let text = line.trim_start_matches(['#', '*', '-', ' ']).trim();
+            if heading {
+                downloads = text.eq_ignore_ascii_case("downloads");
             }
-            if !downloads {
-                lines.push(line.trim_start_matches(['#', '*', '-', ' ']).trim());
+            if downloads || text.is_empty() {
+                continue;
             }
+            // The first line that says something is the summary.
+            if summary.is_empty() {
+                summary = text;
+            }
+            lines.push(if heading {
+                format!("{HEADING}{text}")
+            } else {
+                text.to_owned()
+            });
         }
-        // The first line that says something is the summary.
-        let summary = lines.iter().find(|l| !l.is_empty()).copied().unwrap_or_default();
         let body = paragraphs(&lines.join("\n\n"), BODY_CHARS);
         posts.push(Post {
             kind: Kind::Release,
@@ -571,7 +584,7 @@ mod tests {
         // The files to download are left out; what follows them is kept.
         assert_eq!(
             posts[0].body,
-            "Gizmos, viewport selection and shortcuts\n\nMore text\n\nAfter\n\nLast words"
+            "## Gizmos, viewport selection and shortcuts\n\nMore text\n\n## After\n\nLast words"
         );
         assert_eq!(posts[0].date, "2026-11-18");
         // The newest by version, not by its place in the list.
