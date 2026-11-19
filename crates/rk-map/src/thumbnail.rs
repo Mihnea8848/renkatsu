@@ -10,6 +10,7 @@
 use crate::unity::TimeOfDay;
 use rk_unityfs::{class, UValue};
 use rk_vfs::Game;
+use std::collections::HashMap;
 
 /// A picture, as RGBA bytes with the top row first.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,10 +20,9 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
-/// Where the game's map list puts the picture of the map whose scene
-/// bundle is `bundle`: the picture's bundle and name.
-pub fn listed(game: &Game, bundle: &str) -> Option<(String, String)> {
-    let want = rk_vfs::index::norm(bundle);
+/// Where the game's map list puts the picture of every map it pictures:
+/// by scene bundle, the picture's bundle and name.
+pub fn table(game: &Game) -> HashMap<String, (String, String)> {
     let mut paths: Vec<&String> = game
         .assets
         .index
@@ -32,7 +32,7 @@ pub fn listed(game: &Game, bundle: &str) -> Option<(String, String)> {
         .collect();
     paths.sort();
     // A later list replaces an earlier one's row, as the game reads them.
-    let mut found = None;
+    let mut found = HashMap::new();
     for path in paths {
         for loaded in game.assets.bundles(path).into_iter().rev() {
             for file in &loaded.files {
@@ -41,12 +41,9 @@ pub fn listed(game: &Game, bundle: &str) -> Option<(String, String)> {
                     for row in o.array("param").unwrap_or_default() {
                         let Some(row) = row.as_object() else { continue };
                         let text = |key: &str| row.get(key).and_then(UValue::as_str).unwrap_or_default().to_owned();
-                        if rk_vfs::index::norm(&text("AssetBundleName")) != want {
-                            continue;
-                        }
                         let (from, name) = (text("ThumbnailBundle"), text("ThumbnailAsset"));
                         if !from.is_empty() && !name.is_empty() {
-                            found = Some((from, name));
+                            found.insert(rk_vfs::index::norm(&text("AssetBundleName")), (from, name));
                         }
                     }
                 }
@@ -54,6 +51,12 @@ pub fn listed(game: &Game, bundle: &str) -> Option<(String, String)> {
         }
     }
     found
+}
+
+/// Where the game's map list puts the picture of the map whose scene
+/// bundle is `bundle`: the picture's bundle and name.
+pub fn listed(game: &Game, bundle: &str) -> Option<(String, String)> {
+    table(game).remove(&rk_vfs::index::norm(bundle))
 }
 
 /// The name of the picture of a time of day: the listed name with its
@@ -76,11 +79,26 @@ pub fn name_at(listed: &str, time: TimeOfDay) -> String {
 /// time of day `time`, or the one its list names when there is none for
 /// that time. `None` for a map the list does not picture.
 pub fn picture(game: &Game, bundle: &str, time: TimeOfDay) -> Option<Picture> {
-    let (from, name) = listed(game, bundle)?;
+    picture_of(game, &listed(game, bundle)?, time)
+}
+
+/// Whether the game has a picture of a listed map at the time of day
+/// `time`, which it has for the times the map has.
+pub fn has_time(game: &Game, listed: &(String, String), time: TimeOfDay) -> bool {
+    let (from, name) = listed;
+    game.assets
+        .find(from, &name_at(name, time), Some(class::TEXTURE2D), None)
+        .is_some()
+}
+
+/// The picture of a listed map, from `table`, at the time of day `time`,
+/// or the one the list names when there is none for that time.
+pub fn picture_of(game: &Game, listed: &(String, String), time: TimeOfDay) -> Option<Picture> {
+    let (from, name) = listed;
     let texture = game
         .assets
-        .find(&from, &name_at(&name, time), Some(class::TEXTURE2D), None)
-        .or_else(|| game.assets.find(&from, &name, Some(class::TEXTURE2D), None))?;
+        .find(from, &name_at(name, time), Some(class::TEXTURE2D), None)
+        .or_else(|| game.assets.find(from, name, Some(class::TEXTURE2D), None))?;
     let (tex, pixels) = game.assets.texture(&texture).ok()?;
     let (width, height) = (tex.width, tex.height);
     let row = width as usize * 4;

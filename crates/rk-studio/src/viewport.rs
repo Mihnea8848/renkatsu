@@ -422,6 +422,10 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     ui.add_space(4.0);
     bar_divider(ui, k);
     ui.add_space(2.0);
+    if kind == crate::kinds::Kind::Map {
+        map_items(ui, k, st);
+        return;
+    }
     for (g, text, menu) in actions(kind) {
         let resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
@@ -443,6 +447,42 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
                 ui.label(egui::RichText::new("Not available yet").color(k.t.text_dim));
             });
         }
+    }
+}
+
+/// What the selection bar offers for the selected map: another map, and
+/// its time of day.
+fn map_items(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::{Content, MapTime};
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let Content::Map { map, time, .. } = &mut object.content else {
+        return;
+    };
+    let file = st.map_pictures.sidecar(&st.project.resolve(map));
+    let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
+    let change = flat_button(ui, k, Some(icon::SWAP), "Change map", false, false).clicked();
+    let resp = flat_button(ui, k, Some(icon::SUN_HORIZON), "Time of day", true, false);
+    egui::Popup::menu(&resp).show(|ui| {
+        for when in MapTime::ALL {
+            let has = times.contains(&when);
+            let clicked = ui
+                .add_enabled_ui(has, |ui| widgets::check_item(ui, k, *time == when, when.label(), ""))
+                .inner
+                .clicked();
+            if clicked {
+                *time = when;
+                ui.close();
+            }
+        }
+    });
+    if object != before {
+        st.doc.edit(object, false);
+    }
+    if change {
+        st.open_map_library();
     }
 }
 

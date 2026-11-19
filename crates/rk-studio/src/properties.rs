@@ -9,11 +9,13 @@
 use crate::design::Props;
 use crate::kinds::Kind;
 use crate::profile::{self, Profile};
+use crate::scene::MapTime;
 use crate::scene::{Content, Place};
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
 use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as icon;
+use std::path::Path;
 
 const AXES: [&str; 3] = ["X", "Y", "Z"];
 
@@ -85,6 +87,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         .map(|parent| (parent.id, parent.name.clone(), parent.kind()));
     let mut detach = false;
     let mut bone: Option<Option<String>> = None;
+    let mut chosen_map: Option<String> = None;
+    let mut show_maps = false;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         if let (Some(p), 1..) = (shown.as_mut(), page) {
@@ -526,7 +530,63 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Folder | Content::Item | Content::Map { .. } => {
+            Content::Map { map, time, hide_walls } => {
+                let sidecar = st.project.resolve(map);
+                let file = st.map_pictures.sidecar(&sidecar);
+                let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
+                if section(ui, k, st, 1, "Map") {
+                    row(ui, k, "Map", None, |ui, rect| {
+                        let side = rect.height();
+                        let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+                        let name = file.as_ref().map_or(before.name.as_str(), |f| f.name.as_str());
+                        let resp = drop_field(ui, k, field, id.with("map"), name);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.set_min_width(field.width() - 10.0);
+                            for owned in crate::maps::in_project(&st.project.root) {
+                                let on = Path::new(&owned.file) == map.as_path();
+                                if widgets::check_item(ui, k, on, &owned.map.name, "").clicked() {
+                                    chosen_map = Some(owned.file.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                        resp.on_hover_text(map.display().to_string());
+                        let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
+                        let resp = ui
+                            .interact(button, id.with("browse maps"), Sense::click())
+                            .on_hover_text("Show in Content");
+                        let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                        ui.painter().rect_filled(button, k.radius(), fill);
+                        glyph(ui.painter(), k, button.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
+                        if resp.clicked() {
+                            show_maps = true;
+                        }
+                    });
+                    let game = st.games.ready(&st.project.mods_dir());
+                    let own = file
+                        .as_ref()
+                        .and_then(|f| Some((f.first_time(), sidecar.parent()?.join(f.thumbnail.as_ref()?))));
+                    let bundle = file.as_ref().map_or("", |f| f.scene_bundle()).to_owned();
+                    let pictures = MapTime::ALL.map(|t| {
+                        if !times.contains(&t) {
+                            return None;
+                        }
+                        let own = own.as_ref().filter(|(first, _)| *first == t).map(|(_, p)| p.as_path());
+                        st.map_pictures
+                            .get(ui.ctx(), game.as_deref(), &bundle, t, own, st.scripted)
+                    });
+                    time_pictures(ui, k, id.with("map time"), time, &times, &pictures);
+                    let none = file
+                        .as_ref()
+                        .is_some_and(|f| f.walls.is_empty())
+                        .then_some("This map has no walls that hide");
+                    row(ui, k, "Hide walls", none, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
+                    });
+                    section_end(ui, k);
+                }
+            }
+            Content::Folder | Content::Item => {
                 if section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
                         widgets::value_box(ui, k, rect, &before.name)
@@ -569,6 +629,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     if show_animations {
         st.show_folder(1);
+    }
+    if show_maps {
+        st.show_folder(3);
+    }
+    if let Some(file) = chosen_map {
+        st.add_map(std::path::PathBuf::from(file));
     }
 }
 
@@ -1088,10 +1154,95 @@ fn section_end(ui: &mut Ui, k: &Look) {
     ui.add_space(gap);
 }
 
+/// A map's times of day as their pictures side by side, under each its
+/// name; a time the map lacks shows an empty frame and cannot be chosen.
+fn time_pictures(
+    ui: &mut Ui,
+    k: &Look,
+    id: Id,
+    time: &mut MapTime,
+    times: &[MapTime],
+    pictures: &[Option<egui::TextureHandle>; 3],
+) {
+    let t = &k.t;
+    const GAP: f32 = 4.0;
+    let width = ui.available_width();
+    // The pictures take the value column; their height follows its width.
+    let (split, right) = value_span(k, width);
+    let w = ((right - split - 2.0 * GAP) / 3.0).floor();
+    let h = (w * 9.0 / 16.0).round();
+    let extra = h + 28.0 - k.field();
+    sized_row(ui, k, "Time of day", None, extra, |ui, rect| {
+        for (i, when) in MapTime::ALL.into_iter().enumerate() {
+            let cell = Rect::from_min_size(
+                Pos2::new(rect.left() + i as f32 * (w + GAP), rect.top() + 4.0),
+                Vec2::new(w, h),
+            );
+            let has = times.contains(&when);
+            let sense = if has { Sense::click() } else { Sense::hover() };
+            let resp = ui.interact(cell.with_max_y(cell.bottom() + 18.0), id.with(i), sense);
+            if resp.clicked() && has {
+                *time = when;
+            }
+            let on = *time == when;
+            let p = ui.painter();
+            p.rect_filled(cell, 0.0, t.input);
+            match &pictures[i] {
+                Some(texture) => {
+                    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                    let tint = if on || resp.hovered() {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(200)
+                    };
+                    p.image(texture.id(), cell, uv, tint);
+                }
+                None => widgets::boxed(p, cell, 0.0, t.input, t.border),
+            }
+            if on {
+                p.rect_stroke(cell, 0.0, egui::Stroke::new(2.0, t.select), egui::StrokeKind::Outside);
+            } else if resp.hovered() && has {
+                p.rect_stroke(cell, 0.0, egui::Stroke::new(1.0, t.hover), egui::StrokeKind::Outside);
+            }
+            let color = if on {
+                t.text_bright
+            } else if !has {
+                t.border
+            } else {
+                t.text_dim
+            };
+            p.text(
+                Pos2::new(cell.center().x, cell.bottom() + 10.0),
+                Align2::CENTER_CENTER,
+                when.label(),
+                k.small(),
+                color,
+            );
+        }
+    });
+}
+
+/// Where the value column of a row as wide as `width` starts and ends,
+/// measured from the row's left.
+fn value_span(k: &Look, width: f32) -> (f32, f32) {
+    let (share, least, from, to) = match k.d.props {
+        Props::Details => (0.38, 108.0, 9.0, 10.0),
+        Props::Inspector => (0.34, 100.0, 0.0, 8.0),
+        Props::Joined => (0.33, 100.0, 0.0, 12.0),
+    };
+    ((width * share).max(least).round() + from, width - to)
+}
+
 /// One property: its name in the left column, and `add` drawing the value
 /// into the rectangle of the right column. `off` greys the value and takes
 /// it out of use, and is what the pointer is told about why.
 fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&mut Ui, Rect)) {
+    sized_row(ui, k, name, off, 0.0, add);
+}
+
+/// A row as `row`, `extra` taller, its name on the first line and its
+/// value growing down from there.
+fn sized_row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
     let t = &k.t;
     let name_color = if off.is_some() { t.text_dim } else { t.text };
     let (h, share, least) = match k.d.props {
@@ -1099,9 +1250,10 @@ fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&m
         Props::Inspector => (k.d.row + 2.0, 0.34, 100.0),
         Props::Joined => (k.d.row + 4.0, 0.33, 100.0),
     };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h + extra), Sense::hover());
     let split = (rect.left() + (rect.width() * share).max(least)).round();
-    let y = rect.center().y;
+    // The name stands on the first line, as in a row of one line.
+    let y = rect.top() + h / 2.0;
     let p = ui.painter();
     let names = p.with_clip_rect(Rect::from_min_max(rect.min, Pos2::new(split - 6.0, rect.bottom())));
     let (from, to) = match k.d.props {
@@ -1132,7 +1284,7 @@ fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&m
     let half = k.field() / 2.0;
     let value = Rect::from_min_max(
         Pos2::new(from, (y - half).round()),
-        Pos2::new(to, (y - half).round() + k.field()),
+        Pos2::new(to, (y - half).round() + k.field() + extra),
     );
     match off {
         None => add(ui, value),
