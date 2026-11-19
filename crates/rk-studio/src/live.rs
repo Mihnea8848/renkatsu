@@ -73,6 +73,9 @@ struct Actor {
     outfit_names: std::collections::BTreeMap<usize, String>,
     /// The clothes states the character was last brought to.
     clothes: States,
+    /// The liquid levels the skin was last laid with, and whether the
+    /// clothes were laid with them too.
+    liquid: (rk_chara::siru::Levels, bool),
     /// The animation of the scene the actor last looked for, by its file
     /// in the project, bundle, controller and state.
     pose: Option<[String; 5]>,
@@ -322,6 +325,8 @@ impl Actor {
         let Content::Character {
             simulate,
             clothes,
+            liquid,
+            liquid_clothes,
             animation: pose,
             ..
         } = &object.content
@@ -337,6 +342,13 @@ impl Actor {
             self.chara.set_clothes(&states);
             self.clothes = states;
             again = true;
+        }
+
+        // The liquid on the skin is material values only: the bones and
+        // the pose are untouched by it.
+        if (*liquid, *liquid_clothes) != self.liquid {
+            self.chara.set_siru(liquid, *liquid_clothes);
+            self.liquid = (*liquid, *liquid_clothes);
         }
 
         // The H animation options pick the clips to blend, so a change
@@ -458,6 +470,9 @@ pub struct Built {
     pub animation_problem: Option<String>,
     /// The body blend the character's own card gives its animations.
     pub parameters: rk_chara::motion::Parameters,
+    /// The body carries the mask liquid levels are read against. The
+    /// game's male body does not, so nothing of them shows on it.
+    pub liquid_mask: bool,
 }
 
 pub struct Live {
@@ -648,6 +663,7 @@ impl Live {
                 .map(|p| (p.is_static(), p.motion.loops(), p.motion.duration())),
             animation_problem: a.animation_problem.clone(),
             parameters: a.chara.parameters,
+            liquid_mask: a.chara.liquid_mask(),
         })
     }
 
@@ -1122,6 +1138,7 @@ impl Live {
             outfits: card.coordinates.len(),
             outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],
+            liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
             playing: None,
             animation_problem: None,

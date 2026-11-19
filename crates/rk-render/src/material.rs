@@ -35,7 +35,7 @@ pub const HAS_PATTERN3: u32 = 1024;
 /// The tenth and eleventh slot, which the KKShadersPlus materials use.
 pub const HAS_OVER5: u32 = 2048;
 pub const HAS_OVER6: u32 = 4096;
-/// The twelfth slot: main_skin's liquid mask.
+/// The twelfth slot: the liquid mask of main_skin and the clothes shaders.
 pub const HAS_OVER7: u32 = 8192;
 
 /// Which of the game's clothes shaders an item follows.
@@ -164,7 +164,7 @@ pub const SLOTS: [(&str, u32); 12] = [
     // The KKShadersPlus materials and main_skin fill these two.
     ("_NormalMap", HAS_OVER5),
     ("_NormalMapDetail", HAS_OVER6),
-    // main_skin alone.
+    // main_skin, main_opaque and main_alpha.
     ("_liquidmask", HAS_OVER7),
 ];
 
@@ -419,6 +419,7 @@ impl MaterialDesc {
         // The animation mask or first pattern mask, then the other two.
         let mut st_extra = [st_main; 3];
         // main_skin: the detail normal map, the liquid layers and their mask.
+        // main_opaque and main_alpha have the liquid layers too.
         let skin = kind == Kind::Skin;
         let mut st_normal_detail = st_main;
         let mut st_liquid = [st_main; 3];
@@ -433,9 +434,13 @@ impl MaterialDesc {
                 // main_skin has no colour mask and no patterns; its two
                 // liquid textures take those slots, its normal maps and
                 // liquid mask the last three.
-                "_ColorMask" if skin => "_Texture2",
-                "_PatternMask3" if skin => "_Texture3",
+                // main_opaque and main_alpha have neither as well, and the
+                // same three liquid textures; their normal map stays in the
+                // first layer slot.
+                "_ColorMask" if skin || cloth => "_Texture2",
+                "_PatternMask3" if skin || cloth => "_Texture3",
                 "_NormalMap" | "_NormalMapDetail" | "_liquidmask" if skin => name,
+                "_liquidmask" if cloth => name,
                 "_overtex1" if mapped => "_NormalMap",
                 "_overtex2" if glasses => "_GlassRamp",
                 "_overtex2" if mapped => "_AnotherRamp",
@@ -733,6 +738,26 @@ impl MaterialDesc {
                     ],
                 ]);
                 ext
+            } else if cloth {
+                // The liquid layers, where main_skin keeps them. The first
+                // two stay empty: the normal map is read unplaced and
+                // there is no detail normal map.
+                let mut ext = [[0.0; 4]; EXT];
+                ext[2..8].copy_from_slice(&[
+                    st_liquid[0],
+                    st_liquid[1],
+                    st_liquid[2],
+                    // A vector: offset, then scale.
+                    mat.colors.get("_LiquidTiling").copied().unwrap_or([0.0, 0.0, 2.0, 2.0]),
+                    [
+                        float("_liquidftop", 0.0),
+                        float("_liquidfbot", 0.0),
+                        float("_liquidbtop", 0.0),
+                        float("_liquidbbot", 0.0),
+                    ],
+                    [float("_liquidface", 0.0), 0.0, 0.0, liquid_wrap as f32],
+                ]);
+                ext
             } else {
                 [[0.0; 4]; EXT]
             },
@@ -943,6 +968,104 @@ mod tests {
         assert_eq!(u.ext[5], [0.1, 0.2, 3.5, 3.5]);
         assert_eq!(u.ext[6], [1.0, 2.0, 0.0, 1.0]);
         assert_eq!(u.ext[7], [2.0, 0.1, 0.4, 2.0]);
+    }
+
+    #[test]
+    fn clothes_carry_their_liquid_layers() {
+        let slot = |scale: f32, repeat: bool| rk_chara::TexSlot {
+            image: Arc::new(Image {
+                name: "t".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                srgb: false,
+                repeat,
+            }),
+            scale: [scale, scale],
+            offset: [0.5, 0.25],
+        };
+        for (shader, base) in [("Shader Forge/main_opaque", 0), ("Shader Forge/main_alpha", BLENDED)] {
+            let mut mat = MaterialInst {
+                shader: shader.into(),
+                ..Default::default()
+            };
+            // Without values: no textures, the shader's tiling, no amounts.
+            let plain = MaterialDesc::new(Some(&mat)).uniform;
+            assert_eq!(plain.info[1], base, "{shader}");
+            assert_eq!(plain.ext[5], [0.0, 0.0, 2.0, 2.0]);
+            assert_eq!((plain.ext[6], plain.ext[7]), ([0.0; 4], [0.0; 4]));
+
+            for (n, name) in ["_Texture2", "_Texture3", "_liquidmask", "_NormalMap"]
+                .into_iter()
+                .enumerate()
+            {
+                // Only the amounts tile here.
+                mat.textures
+                    .insert(name.into(), slot(2.0 + n as f32, name == "_Texture2"));
+            }
+            // Not a property of either shader; the amounts take its slot.
+            mat.textures.insert("_ColorMask".into(), slot(9.0, false));
+            mat.colors.insert("_LiquidTiling".into(), [0.1, 0.2, 3.5, 3.5]);
+            for (name, value) in [
+                ("_liquidftop", 1.0),
+                ("_liquidfbot", 2.0),
+                ("_liquidbtop", 0.0),
+                ("_liquidbbot", 1.0),
+                ("_liquidface", 2.0),
+            ] {
+                mat.floats.insert(name.into(), value);
+            }
+            let d = MaterialDesc::new(Some(&mat));
+            let u = d.uniform;
+            // Amounts, liquid normal map, mask, and the normal map where
+            // clothes keep it.
+            let slots = [1, 8, 11, 5];
+            assert!(slots.iter().all(|&i| d.textures[i].is_some()), "{shader}");
+            assert!(d.textures[9].is_none());
+            assert_eq!(u.info[1], slots.iter().fold(base, |f, &i| f | SLOTS[i].1));
+            assert_eq!(d.textures[1].as_ref().map(|t| t.repeat), Some(true));
+            assert_eq!((u.ext[0], u.ext[1]), ([0.0; 4], [0.0; 4]));
+            for n in 0..3 {
+                let scale = 2.0 + n as f32;
+                assert_eq!(u.ext[2 + n], [scale, scale, 0.5, 0.25]);
+            }
+            assert_eq!(u.ext[5], [0.1, 0.2, 3.5, 3.5]);
+            assert_eq!(u.ext[6], [1.0, 2.0, 0.0, 1.0]);
+            assert_eq!(u.ext[7], [2.0, 0.0, 0.0, 1.0]);
+        }
+        // The other item shaders have no liquid.
+        let mut item = MaterialInst {
+            shader: "Shader Forge/main_item".into(),
+            ..Default::default()
+        };
+        item.textures.insert("_Texture2".into(), slot(1.0, false));
+        item.textures.insert("_liquidmask".into(), slot(1.0, false));
+        item.floats.insert("_liquidftop".into(), 2.0);
+        let d = MaterialDesc::new(Some(&item));
+        assert!(d.textures[1].is_none() && d.textures[11].is_none());
+        assert_eq!(d.uniform.ext[6], [0.0; 4]);
+    }
+
+    /// The amount one level puts down, as `skin_liquid_level` (main_alpha,
+    /// `clamped`) and `item_opaque_liquid_cover` (main_opaque) in
+    /// `toon.wgsl`. `texel`: red and green of the amount texture.
+    fn cloth_liquid_level(level: f32, texel: [f32; 2], clamped: bool) -> f32 {
+        let one = if clamped { level.clamp(0.0, 1.0) } else { level };
+        (texel[0] * one).max(texel[1] * (level - 1.0).clamp(0.0, 1.0))
+    }
+
+    #[test]
+    fn opaque_cloth_counts_red_double_at_level_two() {
+        let texel = [0.25, 0.375];
+        for clamped in [true, false] {
+            assert_eq!(cloth_liquid_level(0.0, texel, clamped), 0.0);
+            assert_eq!(cloth_liquid_level(1.0, texel, clamped), 0.25);
+        }
+        // main_alpha: the larger of red and green. main_opaque: red twice.
+        assert_eq!(cloth_liquid_level(2.0, texel, true), 0.375);
+        assert_eq!(cloth_liquid_level(2.0, texel, false), 0.5);
+        // Green still wins where it is more than twice the red.
+        assert_eq!(cloth_liquid_level(2.0, [0.1, 0.75], false), 0.75);
     }
 
     #[test]

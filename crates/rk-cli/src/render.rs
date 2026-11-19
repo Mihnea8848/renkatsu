@@ -32,6 +32,10 @@ pub struct Args<'a> {
     pub shadows: bool,
     /// The states of the clothes, as `rk clothes` reads them.
     pub clothes: Option<&'a str>,
+    /// The liquid levels, as five digits from 0 to 2.
+    pub liquid: Option<&'a str>,
+    /// Keep the clothes dry, which the game never does.
+    pub dry_clothes: bool,
     /// An animation as `group/category/number`.
     pub pose: Option<&'a str>,
     /// Where in the animation, in passes.
@@ -50,6 +54,26 @@ pub struct Args<'a> {
 
 /// The colour behind the character when none is asked for.
 const BACKGROUND: [f64; 4] = [0.93, 0.93, 0.95, 1.0];
+
+/// The liquid levels written as five digits, one per part of the body in
+/// the game's order.
+fn parse_liquid(text: &str) -> Result<rk_chara::siru::Levels> {
+    use rk_chara::siru::{Levels, MAX, PARTS};
+    let digits: Vec<u8> = text
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .map(|c| c.to_digit(10).map(|d| d as u8))
+        .collect::<Option<_>>()
+        .ok_or_else(|| anyhow::anyhow!("{text}: expected {PARTS} digits"))?;
+    let levels: Levels = digits
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{text}: expected {PARTS} digits"))?;
+    if let Some(level) = levels.iter().find(|&&l| l > MAX) {
+        anyhow::bail!("liquid level {level}: the most a part takes is {MAX}");
+    }
+    Ok(levels)
+}
 
 /// A colour written as `r,g,b`, each from 0 to 1.
 fn colour(text: &str) -> Result<[f64; 4]> {
@@ -101,6 +125,14 @@ pub fn render(a: Args) -> Result<()> {
         states = crate::pose::parse_states(spec, &chara.clothes.worn)?;
         chara.set_clothes(&states);
         println!("clothes states {states:?}");
+    }
+    if let Some(spec) = a.liquid {
+        let levels = parse_liquid(spec)?;
+        chara.set_siru(&levels, !a.dry_clothes);
+        println!("liquid levels {levels:?}");
+        if !chara.liquid_mask() {
+            println!("this body carries no liquid mask, so none of it shows");
+        }
     }
     if let Some(spec) = a.pose {
         use anyhow::Context;
@@ -223,7 +255,17 @@ pub fn render(a: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{colour, point};
+    use super::{colour, parse_liquid, point};
+
+    #[test]
+    fn liquid_levels_are_five_digits_up_to_two() {
+        assert_eq!(parse_liquid("01220").unwrap(), [0, 1, 2, 2, 0]);
+        assert_eq!(parse_liquid("0,1,2,2,0").unwrap(), [0, 1, 2, 2, 0]);
+        assert!(parse_liquid("0122").is_err());
+        assert!(parse_liquid("012203").is_err());
+        assert!(parse_liquid("01223").is_err());
+        assert!(parse_liquid("0122x").is_err());
+    }
 
     #[test]
     fn colours_are_three_numbers_from_0_to_1() {

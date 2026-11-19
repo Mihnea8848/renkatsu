@@ -59,8 +59,8 @@ const HAS_OVER3: u32 = 256u;
 const CASTER_FALLBACK: u32 = 512u;
 // main_item_studio binds its third pattern mask in the ninth slot.
 const HAS_PATTERN3: u32 = 1024u;
-// main_skin: the liquid amounts (_Texture2), the liquid normal map
-// (_Texture3) and the liquid mask.
+// main_skin, main_opaque and main_alpha: the liquid amounts (_Texture2), the
+// liquid normal map (_Texture3) and the liquid mask.
 const HAS_LIQUID: u32 = 2u;
 const HAS_LIQUID_NORMAL: u32 = 1024u;
 const HAS_LIQUID_MASK: u32 = 8192u;
@@ -126,7 +126,7 @@ struct Material {
 // The tenth and eleventh slot, which the KKShadersPlus materials use.
 @group(1) @binding(10) var over5_tex: texture_2d<f32>;
 @group(1) @binding(11) var over6_tex: texture_2d<f32>;
-// The twelfth slot: main_skin's liquid mask.
+// The twelfth slot: the liquid mask of main_skin and the clothes shaders.
 @group(1) @binding(12) var over7_tex: texture_2d<f32>;
 @group(1) @binding(13) var samp: sampler;
 // Always tiles, for textures that repeat on a material whose main one does not.
@@ -817,6 +817,86 @@ fn item_lines(base: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
     return clamp(select(toward_black, toward_white, w > 0.5), vec3<f32>(0.0), vec3<f32>(1.0)) * light;
 }
 
+// main_opaque's liquid cover. As skin_liquid_cover, but level one is not
+// held to one: at level two the red channel counts double.
+fn item_opaque_liquid_cover(body: vec4<f32>, face: f32, texel: vec4<f32>, mask: vec3<f32>) -> f32 {
+    let levels = vec4<f32>(body.yzw, face);
+    let top = max(texel.g * clamp(body.x - 1.0, 0.0, 1.0), texel.r * body.x);
+    let rest = max(texel.g * clamp(levels - 1.0, vec4<f32>(0.0), vec4<f32>(1.0)), texel.r * levels);
+    let pure = mask - max(mask.bbg, mask.grr);
+    let pair = min(mask.gb, mask.rg) * 1.11111104 - 0.111111097;
+    var cover = min(top, pure.x);
+    cover = max(cover, min(pure.y, rest.x));
+    cover = max(min(pure.z, rest.y), cover);
+    cover = max(min(pair.x, rest.z), cover);
+    return clamp(max(min(pair.y, rest.w), cover), 0.0, 1.0);
+}
+
+// The normal of main_opaque and main_alpha: the normal map, turned by the
+// liquid's normal map where liquid lies, and the liquid cover. The liquid
+// textures and their numbers sit where main_skin keeps them (see
+// skin_surface); `sheer` is main_alpha, which holds level one to one as the
+// skin does.
+fn item_surface(i: VsOut, front: bool, sheer: bool) -> SkinSurface {
+    var s: SkinSurface;
+    var t = vec3<f32>(0.0, 0.0, 1.0);
+    if (has(HAS_NORMAL)) {
+        t = skin_unpack(textureSample(over1_tex, samp, i.uv0));
+    }
+    // Without an amount the cover is zero whatever the textures hold, and
+    // the default amount texture and mask are black.
+    s.liquid = 0.0;
+    let wet = max(max(m.ext[6].x, m.ext[6].y), max(max(m.ext[6].z, m.ext[6].w), m.ext[7].x)) > 0.0;
+    if (wet && has(HAS_LIQUID) && has(HAS_LIQUID_MASK)) {
+        let tiles = u32(m.ext[7].w);
+        let luv = i.uv0 * m.ext[5].zw + m.ext[5].xy;
+        let uv2 = luv * m.ext[2].xy + m.ext[2].zw;
+        let uv3 = luv * m.ext[3].xy + m.ext[3].zw;
+        var amount: vec4<f32>;
+        if ((tiles & 1u) != 0u) {
+            amount = textureSample(color_mask_tex, wrap_samp, uv2);
+        } else {
+            amount = textureSample(color_mask_tex, samp, uv2);
+        }
+        var ripple = vec3<f32>(0.0, 0.0, 1.0);
+        if (has(HAS_LIQUID_NORMAL)) {
+            if ((tiles & 2u) != 0u) {
+                ripple = skin_unpack(textureSample(over4_tex, wrap_samp, uv3));
+            } else {
+                ripple = skin_unpack(textureSample(over4_tex, samp, uv3));
+            }
+        }
+        let mask = textureSample(over7_tex, samp, i.uv0 * m.ext[4].xy + m.ext[4].zw).rgb;
+        if (sheer) {
+            s.liquid = skin_liquid_cover(m.ext[6], m.ext[7].x, amount, mask);
+        } else {
+            s.liquid = item_opaque_liquid_cover(m.ext[6], m.ext[7].x, amount, mask);
+        }
+        t = mix(t, skin_turn(t, ripple), s.liquid);
+    }
+    let n = normalize(i.normal) * select(-1.0, 1.0, front);
+    s.n = normalize(t.x * i.tangent + t.y * i.bitangent + t.z * n);
+    return s;
+}
+
+// The liquid's own colour on cloth: paler where lit, with a highlight and a
+// rim of its own. The light amount is not clamped here. main_alpha (`sheer`)
+// and main_opaque differ in the tint, the highlight and where the rim starts.
+fn item_liquid_color(liquid: f32, ndl: f32, ndh: f32, ndv: f32, sheer: bool) -> vec3<f32> {
+    let tone = (ndl + 0.5) * vec3<f32>(0.149999976, 0.199999988, 0.300000012) + vec3<f32>(0.850000024, 0.800000012, 0.699999988);
+    let base = vec3<f32>(0.5, 0.397058904, 0.242647097);
+    let glare = pow(max(ndh, 0.0), 256.0);
+    let fresnel = 1.0 - max(ndv, 0.0);
+    if (sheer) {
+        let tint = liquid * vec3<f32>(0.350000024, 0.45294112, 0.607352912) + base;
+        let rim = clamp(fresnel * 2.0 - 0.600000024, 0.0, 1.0);
+        return clamp(tint * tone + glare * 0.5 + rim, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    let tint = liquid * vec3<f32>(0.300000012, 0.402941108, 0.557352901) + base;
+    let rim = clamp(fresnel * 2.0 - 0.800000012, 0.0, 1.0);
+    return clamp(tint * tone + min(glare, 1.0) + rim, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // The highlight both shaders share: pow(n.h, 256 p) * p.
 fn item_highlight(ndh: f32, power: f32) -> f32 {
     if (power <= 0.0) {
@@ -826,7 +906,7 @@ fn item_highlight(ndh: f32, power: f32) -> f32 {
 }
 
 // See-through cloth, after the game's main_alpha pixel shader (forward base
-// pass; liquid layers left out).
+// pass, program 2). m.ext: the liquid layers, see item_surface.
 fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
     let alpha = min(item_mask(i), main.a);
@@ -834,7 +914,8 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let side = select(1.0 - m.over3.z, 1.0, front);
     let solid = min(side, alpha * 10.0);
     alpha_test(solid, 0.5, solid < 0.5);
-    let n = item_normal(i, front);
+    let surface = item_surface(i, front, true);
+    let n = surface.n;
     let l = normalize(g.light_dir.xyz);
     let view = normalize(g.eye.xyz - i.world);
     let ndl = dot(l, n);
@@ -855,6 +936,9 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let diffuse = clamp(specular * (1.0 - (1.0 - lit) * 0.5) + main.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let factor = item_shadow_factor(main.rgb);
     var rgb = mix(diffuse * factor, diffuse, lit);
+    if (surface.liquid > 0.0) {
+        rgb = mix(rgb, item_liquid_color(surface.liquid, ndl, ndh, ndv, true), surface.liquid);
+    }
 
     // Rim towards the silhouette, tinted by the hue of the scene shadow.
     let fresnel = max(1.0 - max(ndv, 0.0), 1e-6);
@@ -874,18 +958,20 @@ fn item_alpha(i: VsOut, front: bool) -> vec4<f32> {
     return vec4<f32>(out, alpha);
 }
 
-// Solid cloth, after the game's main_opaque pixel shader (forward base pass;
-// liquid layers left out).
+// Solid cloth, after the game's main_opaque pixel shader (forward base pass,
+// program 3). m.ext: the liquid layers, see item_surface.
 fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     let main = item_main(i);
     let solid = min(item_mask(i), main.a);
     alpha_test(solid, 0.5, solid < 0.5);
-    let n = item_normal(i, front);
+    let surface = item_surface(i, front, false);
+    let n = surface.n;
     let l = normalize(g.light_dir.xyz);
     let view = normalize(g.eye.xyz - i.world);
     let ndl = dot(l, n);
     let ndh = dot(n, normalize(view + l));
-    let fresnel = max(1.0 - max(dot(n, view), 0.0), 1e-6);
+    let ndv = dot(n, view);
+    let fresnel = max(1.0 - max(ndv, 0.0), 1e-6);
 
     var dm = vec4<f32>(0.0);
     if (has(HAS_DETAIL)) {
@@ -922,6 +1008,9 @@ fn item_opaque(i: VsOut, front: bool) -> vec4<f32> {
     let without_mask = spec_rgb * ((1.0 - dm.r) * highlight) + main.rgb;
     let diffuse = clamp(mix(with_mask, without_mask, m.over2.w), vec3<f32>(0.0), vec3<f32>(1.0));
     var rgb = mix(diffuse * shade, diffuse, lit);
+    if (surface.liquid > 0.0) {
+        rgb = mix(rgb, item_liquid_color(surface.liquid, ndl, ndh, ndv, false), surface.liquid);
+    }
 
     // Rim in the specular colour, kept off the drawn lines.
     let rim = clamp(((1.0 - dm.b) * 2.77777791 - 1.77777803) * pow(fresnel, m.over3.x * 9.0 + 1.0), 0.0, 0.600000024);

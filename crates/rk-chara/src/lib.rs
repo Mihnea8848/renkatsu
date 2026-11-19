@@ -37,6 +37,7 @@ pub mod pregnancy;
 pub mod pushup;
 pub mod scene;
 pub mod shape;
+pub mod siru;
 pub mod slider_unlocker;
 pub mod stiletto;
 pub mod uncensor_selector;
