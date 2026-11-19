@@ -29,10 +29,11 @@ pub struct BuildOptions {
     /// Wear the outdoor shoes instead of the indoor ones. The game loads
     /// cards without their saved status, so it starts with indoor shoes.
     pub outdoor_shoes: bool,
-    /// Draw the censor the game puts over the body parts it covers, the
-    /// meshes whose material is `Shader Forge/mnpb`. An uncensor mod
-    /// swaps those parts and their materials, and then nothing here is a
-    /// censor any more and this does not apply.
+    /// Draw the game's censor over the body parts it covers, the meshes
+    /// whose material is `Shader Forge/mnpb`. Without it those parts take
+    /// the body's own skin, so a character is uncensored without a mod
+    /// for it. A part an uncensor mod swapped is neither: it keeps the
+    /// material that came with it.
     pub censor: bool,
     /// CharaStudio's Son switch for a male character, which decides
     /// whether `n_dankon` is drawn at all; the clothes states then say
@@ -452,7 +453,13 @@ impl<'g> Builder<'g> {
 
     /// Puts a composed texture on a renderer, swapping in the material the
     /// game draws that surface with when it can be loaded.
-    fn set_skin(&mut self, inst: &Instance, renderer: &str, draw: Option<crate::scene::MaterialInst>, image: Image) {
+    fn set_skin(
+        &mut self,
+        inst: &Instance,
+        renderers: &[&str],
+        draw: Option<crate::scene::MaterialInst>,
+        image: Image,
+    ) {
         let slot = TexSlot {
             image: Arc::new(image),
             scale: [1.0, 1.0],
@@ -460,7 +467,7 @@ impl<'g> Builder<'g> {
         };
         for &ri in &inst.renderers {
             let r = &mut self.scene.renderers[ri];
-            if r.name != renderer {
+            if !renderers.contains(&r.name.as_str()) {
                 continue;
             }
             if r.materials.is_empty() {
@@ -1651,7 +1658,14 @@ impl<'g> Builder<'g> {
     /// `uncensor` is the body the Uncensor Selector plugin put in place:
     /// its bundles and asset names stand in for the game's
     /// (`CreateBodyTexture` and `InitBaseCustomTextureBody` transpilers).
-    fn skin_body(&mut self, card: &Card, inst: &Instance, female: bool, uncensor: Option<&rk_vfs::uncensor::Body>) {
+    fn skin_body(
+        &mut self,
+        card: &Card,
+        inst: &Instance,
+        female: bool,
+        uncensor: Option<&rk_vfs::uncensor::Body>,
+        censor: bool,
+    ) {
         use rk_vfs::uncensor::{defaults, Body};
         let game_body;
         let source = match uncensor {
@@ -1749,7 +1763,24 @@ impl<'g> Builder<'g> {
             m.floats.insert("_nipsize".into(), body.areola_size);
         }
         let image = self.over(kind::BODY_OVER, image);
-        self.set_skin(inst, "o_body_a", draw, image);
+        // The parts the game censors take the body's own skin, so that a
+        // character is uncensored without a mod for it. A part an
+        // uncensor already swapped keeps the material that came with it,
+        // and with `censor` the game's own censor stays as it is.
+        let censored: Vec<&str> = crate::uncensor_selector::BODY_PARTS
+            .iter()
+            .copied()
+            .filter(|name| {
+                !censor
+                    && inst.renderers.iter().any(|&r| {
+                        let r = &self.scene.renderers[r];
+                        r.name == *name && r.materials.first().is_some_and(|m| crate::is_censor(&m.shader))
+                    })
+            })
+            .collect();
+        let mut skinned = vec!["o_body_a"];
+        skinned.extend(censored);
+        self.set_skin(inst, &skinned, draw, image);
         // Body detail: painted lines, the detail normal map and their
         // strength, and the shine sliders.
         let detail = self.skin_detail(
@@ -1906,7 +1937,7 @@ impl<'g> Builder<'g> {
             m.floats.insert("_nip".into(), 0.0);
         }
         let image = self.over(kind::FACE_OVER, image);
-        self.set_skin(inst, "cf_O_face", draw, image);
+        self.set_skin(inst, &["cf_O_face"], draw, image);
         // Face detail: painted lines, the detail normal map and their
         // strength, cheek and lip shine.
         let detail = self.skin_detail(
@@ -2035,22 +2066,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         }
     }
 
-    b.skin_body(card, &body, female, uncensor);
-
-    // The censor over the parts the game covers, left out unless it is
-    // asked for. This is after the uncensor swap above, so a part an
-    // uncensor replaced keeps its own material and is not touched.
-    if !opts.censor {
-        for i in body.renderers.clone() {
-            let keep = b.scene.renderers[i]
-                .materials
-                .first()
-                .is_none_or(|m| !crate::is_censor(&m.shader));
-            if !keep {
-                b.scene.renderers[i].enabled = false;
-            }
-        }
-    }
+    b.skin_body(card, &body, female, uncensor, opts.censor);
 
     // Parts the game only shows in special states. `n_dankon` is not
     // among them: the clothes states decide it, in `clothes_state`.
