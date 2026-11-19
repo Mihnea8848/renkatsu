@@ -12,7 +12,6 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// `unity_ColorSpaceDouble` in a program compiled for linear colour, which
 /// the textured skies multiply by.
@@ -230,10 +229,13 @@ pub(crate) fn uniform(sky: &Sky, sun_dir: [f32; 3], sun_color: [f32; 3], camera:
     u
 }
 
-/// The sky's pipeline and its uploaded cubemaps.
+/// The sky's pipelines and its uploaded cubemaps.
 pub(crate) struct SkyPass {
+    shader: wgpu::ShaderModule,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
+    pipeline_layout: wgpu::PipelineLayout,
+    /// One pipeline per colour and depth format drawn into.
+    pipelines: HashMap<(wgpu::TextureFormat, wgpu::TextureFormat), wgpu::RenderPipeline>,
     /// Unity's grey default for a cubemap slot left empty.
     grey: wgpu::TextureView,
     /// Uploaded cubemaps, by the cube's address; the cube is kept so that
@@ -305,13 +307,7 @@ pub(crate) fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, cube: &Map
 }
 
 impl SkyPass {
-    pub(crate) fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        color: wgpu::TextureFormat,
-        depth: wgpu::TextureFormat,
-        samples: u32,
-    ) -> SkyPass {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> SkyPass {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("map sky"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
@@ -362,17 +358,50 @@ impl SkyPass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
+        let grey = upload_cube(
+            device,
+            queue,
+            &MapCube {
+                name: "grey".into(),
+                size: 1,
+                faces: std::array::from_fn(|_| vec![128; 4]),
+                srgb: false,
+                bc6h: false,
+                mips: Vec::new(),
+            },
+        );
+        SkyPass {
+            shader,
+            layout,
+            pipeline_layout,
+            pipelines: HashMap::new(),
+            grey,
+            cubes: HashMap::new(),
+        }
+    }
+
+    /// Makes the pipeline for drawing into `color` and `depth`, once.
+    pub(crate) fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        samples: u32,
+    ) {
+        if self.pipelines.contains_key(&(color, depth)) {
+            return;
+        }
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("map sky"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -397,24 +426,7 @@ impl SkyPass {
             multiview_mask: None,
             cache: None,
         });
-        let grey = upload_cube(
-            device,
-            queue,
-            &MapCube {
-                name: "grey".into(),
-                size: 1,
-                faces: std::array::from_fn(|_| vec![128; 4]),
-                srgb: false,
-                bc6h: false,
-                mips: Vec::new(),
-            },
-        );
-        SkyPass {
-            layout,
-            pipeline,
-            grey,
-            cubes: HashMap::new(),
-        }
+        self.pipelines.insert((color, depth), pipeline);
     }
 
     /// The view of a cubemap, uploaded the first time it is asked for.
@@ -440,23 +452,18 @@ impl SkyPass {
         view
     }
 
-    /// The bind group of one sky for one frame. `faces` are the views of
-    /// the six sided sky's textures, `cube` the cubemap's.
-    #[allow(clippy::too_many_arguments)]
+    /// The bind group of one sky. `buf` holds its `SkyUniform`, written
+    /// each frame; `faces` are the views of the six sided sky's textures,
+    /// `cube` the cubemap's.
     pub(crate) fn bind(
         &self,
         device: &wgpu::Device,
-        uniform: &SkyUniform,
+        buf: &wgpu::Buffer,
         cube: Option<&wgpu::TextureView>,
         faces: [&wgpu::TextureView; 6],
         clamp: &wgpu::Sampler,
         repeat: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
-        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("map sky"),
-            contents: bytemuck::bytes_of(uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -488,9 +495,16 @@ impl SkyPass {
         })
     }
 
-    /// Draws the sky over what the depth buffer left open.
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, group: &wgpu::BindGroup) {
-        pass.set_pipeline(&self.pipeline);
+    /// Draws the sky over what the depth buffer left open, into a target
+    /// of `color` and `depth` that `prepare` was called for.
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        group: &wgpu::BindGroup,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+    ) {
+        pass.set_pipeline(&self.pipelines[&(color, depth)]);
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
     }

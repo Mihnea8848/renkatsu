@@ -42,6 +42,10 @@ pub struct Args<'a> {
     pub alpha_to_coverage: bool,
     /// The colour behind the character, as `r,g,b` from 0 to 1.
     pub background: Option<&'a str>,
+    /// A map to stand the character in, by number or name.
+    pub map: Option<&'a str>,
+    /// The map's time of day.
+    pub map_time: &'a str,
 }
 
 /// The colour behind the character when none is asked for.
@@ -179,6 +183,10 @@ pub fn render(a: Args) -> Result<()> {
     }
     let background = a.background.map(colour).transpose()?.unwrap_or(BACKGROUND);
     let mut renderer = Renderer::new()?;
+    if let Some(which) = a.map {
+        let scene = crate::map::scene(&game, which, a.map_time, renderer.supports_bc())?;
+        renderer.set_map(Some(&scene));
+    }
     let env = Environment {
         ramp: chara.ramp.clone(),
         effects: a.studio_look.then(|| studio_look(&game, background)),

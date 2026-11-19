@@ -118,6 +118,14 @@ enum Cmd {
         /// with alpha to coverage; the game cuts them hard.
         #[arg(long)]
         alpha_to_coverage: bool,
+        /// A map to stand the character in, by its number or name, as `rk
+        /// map list` shows them. The character stands at its origin.
+        #[arg(long)]
+        map: Option<String>,
+        /// The map's time of day: day, evening or night. `--time` is taken
+        /// by the animation.
+        #[arg(long, default_value = "day")]
+        map_time: String,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -500,6 +508,8 @@ fn main() -> Result<()> {
             studio_look,
             background,
             alpha_to_coverage,
+            map,
+            map_time,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -523,6 +533,8 @@ fn main() -> Result<()> {
             studio_look,
             background: background.as_deref(),
             alpha_to_coverage,
+            map: map.as_deref(),
+            map_time: &map_time,
         }),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },

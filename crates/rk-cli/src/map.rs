@@ -260,6 +260,34 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// The map named by its number or its level's name.
+fn find<'a>(maps: &'a [Entry], which: &str) -> Result<&'a Entry> {
+    maps.iter()
+        .find(|m| m.number.to_string() == which || m.level.eq_ignore_ascii_case(which))
+        .ok_or_else(|| anyhow!("no map {which}"))
+}
+
+fn time_of_day(time: &str) -> Result<rk_map::unity::TimeOfDay> {
+    Ok(match time {
+        "day" => rk_map::unity::TimeOfDay::Day,
+        "evening" => rk_map::unity::TimeOfDay::Evening,
+        "night" => rk_map::unity::TimeOfDay::Night,
+        other => return Err(anyhow!("no time of day {other}: day, evening or night")),
+    })
+}
+
+/// Map `which` at `time`, ready to draw with characters, as CharaStudio
+/// shows it: its own sky dome, no fog, the walls that hide following the
+/// camera.
+pub fn scene(game: &Game, which: &str, time: &str, bc: bool) -> Result<rk_render::map::MapScene> {
+    let maps = list::read(game, true);
+    let m = find(&maps, which)?;
+    let vanish = rk_map::vanish::table(game, &m.vanish_bundle, &m.vanish_file);
+    let (mut scene, _) = rk_map::build::build(game, &m.bundle, time_of_day(time)?, bc, vanish.as_deref())?;
+    scene.light.fog = None;
+    Ok(scene)
+}
+
 /// Switches of `render`.
 pub struct RenderOptions<'a> {
     pub fog: bool,
@@ -286,16 +314,8 @@ pub fn render(
     use glam::Vec3;
     let game = Game::open_user(&[])?;
     let maps = list::read(&game, true);
-    let m = maps
-        .iter()
-        .find(|m| m.number.to_string() == which || m.level.eq_ignore_ascii_case(which))
-        .ok_or_else(|| anyhow!("no map {which}"))?;
-    let time = match time {
-        "day" => rk_map::unity::TimeOfDay::Day,
-        "evening" => rk_map::unity::TimeOfDay::Evening,
-        "night" => rk_map::unity::TimeOfDay::Night,
-        other => return Err(anyhow!("no time of day {other}: day, evening or night")),
-    };
+    let m = find(&maps, which)?;
+    let time = time_of_day(time)?;
     let mut renderer = rk_render::Renderer::new()?;
     let started = std::time::Instant::now();
     // The walls that hide follow CharaStudio's camera through its physics

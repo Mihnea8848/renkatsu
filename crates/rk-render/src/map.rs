@@ -721,7 +721,26 @@ struct MaterialUniform {
     flags: [u32; 4],
 }
 
-/// The map pass's pipelines, made the first time a map is drawn.
+/// The formats of what a map is drawn into: its own picture, or the
+/// character frame's.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct Target {
+    pub color: wgpu::TextureFormat,
+    pub depth: wgpu::TextureFormat,
+}
+
+impl Target {
+    /// The map's own picture, drawn by `Renderer::draw_map`.
+    const OWN: Target = Target {
+        color: COLOR_FORMAT,
+        depth: DEPTH,
+    };
+}
+
+/// The vertex layout of `Vertex`.
+const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32x4, 6 => Float32x2];
+
+/// The map pass's pipelines, made the first time a map is set.
 pub(crate) struct Pipelines {
     globals: wgpu::BindGroupLayout,
     material: wgpu::BindGroupLayout,
@@ -735,8 +754,11 @@ pub(crate) struct Pipelines {
     /// Shadow casters, by cut-out and by culling.
     casters: HashMap<(bool, bool), wgpu::RenderPipeline>,
     compare: wgpu::Sampler,
-    /// By blending and by whether back faces are culled.
-    pipelines: HashMap<(u8, bool), wgpu::RenderPipeline>,
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    /// By target, blending and whether back faces are culled; made for a
+    /// target the first time it is drawn into.
+    pipelines: HashMap<(Target, u8, bool), wgpu::RenderPipeline>,
     repeat: wgpu::Sampler,
     clamp: wgpu::Sampler,
     /// Uploaded block-compressed textures, by the image's address.
@@ -921,76 +943,6 @@ impl Pipelines {
             bind_group_layouts: &[Some(&globals), Some(&material), Some(&lightmap), Some(&reflection)],
             immediate_size: 0,
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32x4, 6 => Float32x2];
-        let mut pipelines = HashMap::new();
-        for blend in [0u8, 1, 2, 3] {
-            let blended = blend > 0;
-            for cull in [false, true] {
-                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("map"),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attributes,
-                        })],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: COLOR_FORMAT,
-                            blend: match blend {
-                                0 => None,
-                                1 => Some(wgpu::BlendState::ALPHA_BLENDING),
-                                // Unity's Blend One OneMinusSrcAlpha.
-                                3 => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                                // Unity's Blend SrcAlpha One.
-                                _ => Some(wgpu::BlendState {
-                                    color: wgpu::BlendComponent {
-                                        src_factor: wgpu::BlendFactor::SrcAlpha,
-                                        dst_factor: wgpu::BlendFactor::One,
-                                        operation: wgpu::BlendOperation::Add,
-                                    },
-                                    alpha: wgpu::BlendComponent {
-                                        src_factor: wgpu::BlendFactor::SrcAlpha,
-                                        dst_factor: wgpu::BlendFactor::One,
-                                        operation: wgpu::BlendOperation::Add,
-                                    },
-                                }),
-                            },
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        // Unity's front faces wind clockwise; the data is
-                        // left-handed and so is the projection.
-                        front_face: wgpu::FrontFace::Cw,
-                        cull_mode: cull.then_some(wgpu::Face::Back),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: DEPTH,
-                        depth_write_enabled: Some(!blended),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: SAMPLES,
-                        ..Default::default()
-                    },
-                    multiview_mask: None,
-                    cache: None,
-                });
-                pipelines.insert((blend, cull), pipeline);
-            }
-        }
         let sampler = |mode| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: mode,
@@ -1026,7 +978,7 @@ impl Pipelines {
                         buffers: &[Some(wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<Vertex>() as u64,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attributes,
+                            attributes: &ATTRIBUTES,
                         })],
                     },
                     fragment: cutout.then(|| wgpu::FragmentState {
@@ -1094,27 +1046,141 @@ impl Pipelines {
             cascade,
             casters,
             compare,
-            pipelines,
+            shader,
+            layout,
+            pipelines: HashMap::new(),
             repeat: sampler(wgpu::AddressMode::Repeat),
             clamp: sampler(wgpu::AddressMode::ClampToEdge),
             compressed: HashMap::new(),
             culled: std::cell::Cell::new(0),
-            sky: crate::sky::SkyPass::new(device, queue, COLOR_FORMAT, DEPTH, SAMPLES),
+            sky: crate::sky::SkyPass::new(device, queue),
+        }
+    }
+    /// Makes the pipelines for drawing into `target`, once. They neither
+    /// test nor write stencil, so the characters' stencil in the same pass
+    /// stays as theirs.
+    pub(crate) fn prepare(&mut self, device: &wgpu::Device, target: Target) {
+        self.sky.prepare(device, target.color, target.depth, SAMPLES);
+        if self.pipelines.contains_key(&(target, 0, false)) {
+            return;
+        }
+        for blend in [0u8, 1, 2, 3] {
+            let blended = blend > 0;
+            for cull in [false, true] {
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("map"),
+                    layout: Some(&self.layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &ATTRIBUTES,
+                        })],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: target.color,
+                            blend: match blend {
+                                0 => None,
+                                1 => Some(wgpu::BlendState::ALPHA_BLENDING),
+                                // Unity's Blend One OneMinusSrcAlpha.
+                                3 => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                                // Unity's Blend SrcAlpha One.
+                                _ => Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                            },
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        // Unity's front faces wind clockwise; the data is
+                        // left-handed and so is the projection.
+                        front_face: wgpu::FrontFace::Cw,
+                        cull_mode: cull.then_some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: target.depth,
+                        depth_write_enabled: Some(!blended),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: SAMPLES,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                });
+                self.pipelines.insert((target, blend, cull), pipeline);
+            }
         }
     }
 }
 
-/// One submesh to draw.
-struct Draw {
-    vb: usize,
+/// One submesh of an uploaded object.
+struct Part {
+    first: u32,
+    count: u32,
+    /// Its bind group in `MapGpu::materials`.
+    material: usize,
+    /// 0 opaque, 1 blended by alpha, 2 added, 3 already faded.
+    blend: u8,
+    cull: bool,
+    queue: i32,
+    /// Casts the sun's shadow, and whether it is cut out there.
+    caster: bool,
+    cutout: bool,
+}
+
+/// An object of an uploaded map, with what each frame decides about it.
+struct ObjectGpu {
+    /// Its vertex and index buffers in `MapGpu::buffers`; `None` for an
+    /// object that is never seen and casts no shadow, which is not
+    /// uploaded.
+    buffers: Option<usize>,
+    bounds: ([f32; 3], [f32; 3]),
+    middle: Vec3,
+    vanish: Vec<usize>,
+    /// On a layer the camera draws, and not shadows only.
+    on_camera: bool,
+    /// Casts the sun's shadow from somewhere.
+    casts: bool,
     /// The lightmap's bind group: 0 for none, then one per lightmap.
     lightmap: usize,
     /// The reflection's bind group: 0 for the scene's, then one per probe.
     reflection: usize,
+    parts: Vec<Part>,
+}
+
+/// One submesh to draw this frame.
+struct Draw {
+    buffers: usize,
+    lightmap: usize,
+    reflection: usize,
     first: u32,
     count: u32,
     material: usize,
-    /// 0 opaque, 1 blended by alpha, 2 added.
+    /// Where the material first came up this frame: opaque surfaces are
+    /// drawn in that order.
+    rank: usize,
     blend: u8,
     cull: bool,
     /// Distance from the eye to the object's middle, for sorting.
@@ -1122,148 +1188,93 @@ struct Draw {
     queue: i32,
 }
 
-impl Renderer {
-    /// How many objects the last map drawn left out as outside the view.
-    pub fn map_culled(&self) -> usize {
-        self.map.as_ref().map_or(0, |p| p.culled.get())
-    }
+/// A submesh casting the sun's shadow this frame.
+struct Caster {
+    buffers: usize,
+    first: u32,
+    count: u32,
+    material: usize,
+    cutout: bool,
+    cull: bool,
+}
 
-    /// Draws a map from `camera` to an RGBA8 image, top row first.
-    pub fn render_map(&mut self, map: &MapScene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>> {
-        if self.map.is_none() {
-            self.map = Some(Pipelines::new(&self.device, &self.queue));
-        }
-        let aspect = width as f32 / height as f32;
-        let (min, max) = map.bounds();
-        // Near and far from the map's size: rooms and grounds alike.
-        let far = ((max - min).length() * 2.0).max(50.0) + camera.eye.distance((min + max) * 0.5);
-        let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, far);
-        let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
+/// What one frame of an uploaded map draws, from `MapGpu::frame`.
+pub(crate) struct MapFrame {
+    draws: Vec<Draw>,
+    casters: Vec<Caster>,
+    /// Whether the sun's shadow atlas is drawn this frame.
+    shadows: bool,
+}
+
+/// A map uploaded to the GPU: its buffers, textures and bind groups, made
+/// once by `Renderer::set_map`. Each frame only writes the camera's
+/// numbers into its uniform buffers and picks what to draw.
+pub(crate) struct MapGpu {
+    light: MapLight,
+    /// The lowest and highest corner of everything drawn.
+    bounds: (Vec3, Vec3),
+    vanish: Vec<VanishVolume>,
+    objects: Vec<ObjectGpu>,
+    buffers: Vec<(wgpu::Buffer, wgpu::Buffer)>,
+    materials: Vec<wgpu::BindGroup>,
+    lightmaps: Vec<wgpu::BindGroup>,
+    reflections: Vec<wgpu::BindGroup>,
+    globals_buf: wgpu::Buffer,
+    shadow_buf: wgpu::Buffer,
+    /// One per cascade of the sun's shadow, with its bind group.
+    cascades: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// The sun's shadow atlas; one texel when the sun casts none.
+    atlas: wgpu::TextureView,
+    globals_group: wgpu::BindGroup,
+    /// The sky's uniform buffer and bind group.
+    sky: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+}
+
+impl MapGpu {
+    /// Uploads `map`. `views` holds the view of each of its images by the
+    /// image's address, `sky_cube` the sky's cubemap and `cubes` the
+    /// reflections' cubemaps, the scene's first.
+    fn new(
+        device: &wgpu::Device,
+        pipes: &Pipelines,
+        map: &MapScene,
+        views: &HashMap<usize, wgpu::TextureView>,
+        white: &wgpu::TextureView,
+        sky_cube: Option<&wgpu::TextureView>,
+        cubes: &[wgpu::TextureView],
+    ) -> MapGpu {
         let l = &map.light;
-        let fog = l.fog.unwrap_or(Fog {
-            color: [0.0; 3],
-            start: 0.0,
-            end: 1.0,
-        });
-        let globals = Globals {
-            view_proj: view_proj.to_cols_array(),
-            eye: [
-                camera.eye.x,
-                camera.eye.y,
-                camera.eye.z,
-                l.cut_above.unwrap_or(f32::MAX),
-            ],
-            sun_dir: [l.sun_dir[0], l.sun_dir[1], l.sun_dir[2], 0.0],
-            sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
-            sh: l.ambient_sh,
-            fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
-            fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
-            indirect_spec: [
-                l.indirect_specular[0],
-                l.indirect_specular[1],
-                l.indirect_specular[2],
-                0.0,
-            ],
-        };
-
-        // Textures first: the caches need the renderer mutably.
-        let mut views: HashMap<usize, wgpu::TextureView> = HashMap::new();
-        let images = map
-            .objects
-            .iter()
-            .flat_map(|o| o.materials.iter().flat_map(|m| m.images()))
-            .chain(
-                map.lightmaps
-                    .iter()
-                    .flat_map(|l| std::iter::once(&l.light).chain(l.direction.as_ref())),
-            )
-            .chain(l.sky.iter().flat_map(|s| s.images()));
-        {
-            for image in images {
-                let key = Arc::as_ptr(image) as usize;
-                if views.contains_key(&key) {
-                    continue;
-                }
-                let view = match image.as_ref() {
-                    MapImage::Decoded(i) => self.texture(i),
-                    MapImage::Compressed { .. } => {
-                        let pipes = self.map.as_mut().expect("made above");
-                        match pipes.compressed.get(&key) {
-                            Some((_, v)) => v.clone(),
-                            None => {
-                                let v = upload_blocks(&self.device, &self.queue, image)
-                                    .unwrap_or_else(|| self.white.clone());
-                                // The image is kept with its texture, so its
-                                // address is not handed out again.
-                                pipes.compressed.insert(key, (image.clone(), v.clone()));
-                                v
-                            }
-                        }
-                    }
-                };
-                views.insert(key, view);
-            }
-        }
         let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
-        let sky_cube = match &l.sky {
-            Some(crate::sky::Sky::Cubemap { cube: Some(cube), .. }) => {
-                let pipes = self.map.as_mut().expect("made above");
-                Some(pipes.sky.cube(&self.device, &self.queue, cube))
-            }
-            _ => None,
-        };
-        // The reflections' cubemaps: the scene's, then each probe's.
-        let cubes: Vec<wgpu::TextureView> = std::iter::once(&l.reflection)
-            .chain(map.probes.iter().map(|p| &p.reflection))
-            .map(|r| {
-                let pipes = self.map.as_mut().expect("made above");
-                match &r.cube {
-                    Some(cube) => pipes.sky.cube(&self.device, &self.queue, cube),
-                    None => pipes.black_cube.clone(),
-                }
+        let uniform_buf = |label, size: usize| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             })
-            .collect();
-        let white = self.white.clone();
-        let device = &self.device;
-        let pipes = self.map.as_ref().expect("made above");
-
-        let globals_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("map globals"),
-            contents: bytemuck::bytes_of(&globals),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        // The sun's shadow: four cascades over slices of the view, in a
-        // square atlas, two by two.
-        let forward = (camera.target - camera.eye).normalize_or_zero();
-        let mut shadow = ShadowUniform::zeroed();
-        let mut cascades: Vec<Mat4> = Vec::new();
-        if let Some(set) = l.shadows {
-            let view = crate::shadow::View {
-                eye: camera.eye,
-                forward,
-                fov_y_deg: camera.fov_y_deg,
-                aspect,
-            };
-            let splits = crate::shadow::ShadowSettings::default().cascade_splits;
-            let ranges = crate::shadow::cascade_ranges(0.03, set.distance, splits);
-            let light = crate::shadow::light_view(Vec3::from(l.sun_dir));
-            for (i, r) in ranges.iter().enumerate() {
-                let slice = view.slice_corners(r.0, r.1);
-                if let Some((vp, texel)) = fit_cascade(&slice, light, (min, max), SHADOW_ATLAS / 2) {
-                    shadow.to_atlas[i] = crate::shadow::world_to_shadow(vp, i).to_cols_array();
-                    shadow.texel_world[i] = texel;
-                    cascades.push(vp);
-                }
-            }
-            if cascades.len() == crate::shadow::CASCADES {
-                shadow.ends = [ranges[0].1, ranges[1].1, ranges[2].1, ranges[3].1];
-                shadow.params = [set.strength, 1.0, 1.0 / SHADOW_ATLAS as f32, 0.0];
-                shadow.forward = [forward.x, forward.y, forward.z, 0.0];
-            } else {
-                cascades.clear();
-            }
-        }
-        let atlas_side = if cascades.is_empty() { 1 } else { SHADOW_ATLAS };
+        };
+        let globals_buf = uniform_buf("map globals", std::mem::size_of::<Globals>());
+        let shadow_buf = uniform_buf("map shadow", std::mem::size_of::<ShadowUniform>());
+        let shadowed = l.shadows.is_some();
+        let cascades = if shadowed {
+            (0..crate::shadow::CASCADES)
+                .map(|_| {
+                    let buf = uniform_buf("map shadow cascade", std::mem::size_of::<[f32; 16]>());
+                    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("map shadow cascade"),
+                        layout: &pipes.cascade,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        }],
+                    });
+                    (buf, group)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let atlas_side = if shadowed { SHADOW_ATLAS } else { 1 };
         let atlas = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("map shadow atlas"),
@@ -1280,29 +1291,6 @@ impl Renderer {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        let shadow_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("map shadow"),
-            contents: bytemuck::bytes_of(&shadow),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let cascade_groups: Vec<wgpu::BindGroup> = cascades
-            .iter()
-            .map(|vp| {
-                let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("map shadow cascade"),
-                    contents: bytemuck::cast_slice(&vp.to_cols_array()),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("map shadow cascade"),
-                    layout: &pipes.cascade,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buf.as_entire_binding(),
-                    }],
-                })
-            })
-            .collect();
         let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("map globals"),
             layout: &pipes.globals,
@@ -1326,22 +1314,23 @@ impl Renderer {
             ],
         });
 
-        // The sky's textures and its numbers for this view.
-        let sky_group = l.sky.as_ref().map(|sky| {
+        // The sky's textures; its numbers follow the camera.
+        let sky = l.sky.as_ref().map(|sky| {
             let face = |i: usize| match sky {
                 crate::sky::Sky::SixSided { faces, .. } => faces[i].image.as_ref().and_then(view_of),
                 _ => None,
             };
             let faces: [Option<wgpu::TextureView>; 6] = std::array::from_fn(face);
-            let uniform = crate::sky::uniform(sky, l.sun_dir, l.sun_color, camera, aspect);
-            pipes.sky.bind(
+            let buf = uniform_buf("map sky", std::mem::size_of::<crate::sky::SkyUniform>());
+            let group = pipes.sky.bind(
                 device,
-                &uniform,
-                sky_cube.as_ref(),
-                std::array::from_fn(|i| faces[i].as_ref().unwrap_or(&white)),
+                &buf,
+                sky_cube,
+                std::array::from_fn(|i| faces[i].as_ref().unwrap_or(white)),
                 &pipes.clamp,
                 &pipes.repeat,
-            )
+            );
+            (buf, group)
         });
 
         // The lightmaps' bind groups: the first for objects without one.
@@ -1374,12 +1363,12 @@ impl Renderer {
                 ],
             })
         };
-        let mut lightmaps = vec![lightmap_group([0.0; 4], &white, &white)];
+        let mut lightmaps = vec![lightmap_group([0.0; 4], white, white)];
         for l in &map.lightmaps {
             let light = view_of(&l.light).unwrap_or_else(|| white.clone());
             let direction = l.direction.as_ref().and_then(view_of);
             let info = [1.0, f32::from(u8::from(direction.is_some())), RGBM_SCALE, RGBM_EXPONENT];
-            lightmaps.push(lightmap_group(info, &light, direction.as_ref().unwrap_or(&white)));
+            lightmaps.push(lightmap_group(info, &light, direction.as_ref().unwrap_or(white)));
         }
 
         // The reflections' bind groups: the scene's default first. A second
@@ -1387,7 +1376,7 @@ impl Renderer {
         // cubemap fills both places.
         let reflections: Vec<wgpu::BindGroup> = std::iter::once(ProbeUniform::plain(&l.reflection))
             .chain(map.probes.iter().map(ProbeUniform::of))
-            .zip(&cubes)
+            .zip(cubes)
             .map(|(probe, cube)| {
                 let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("map reflection"),
@@ -1435,7 +1424,7 @@ impl Renderer {
                     let view = |image: Option<&Arc<MapImage>>| {
                         image
                             .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
-                            .unwrap_or(&white)
+                            .unwrap_or(white)
                     };
                     let sampler = |image: Option<&Arc<MapImage>>| {
                         if image.is_none_or(|i| i.repeat()) {
@@ -1488,31 +1477,33 @@ impl Renderer {
                     materials.len() - 1
                 })
         };
+
+        // Every object that can be seen or casts the sun's shadow, whatever
+        // the camera: which of them a frame draws, it decides itself.
         let mut buffers: Vec<(wgpu::Buffer, wgpu::Buffer)> = Vec::new();
-        let mut draws: Vec<Draw> = Vec::new();
-        // What casts the sun's shadow, seen or not: buffer, first index,
-        // count, material, cut-out, culled.
-        let mut casters: Vec<(usize, u32, u32, usize, bool, bool)> = Vec::new();
-        let shadowed = l.shadows.is_some();
-        let mut culled = 0;
-        // The volumes the camera stands in hide what names them.
-        let inside: Vec<bool> = map.vanish.iter().map(|v| v.contains(camera.eye)).collect();
+        let mut objects = Vec::new();
         for o in &map.objects {
             let mesh = &o.mesh;
             if mesh.positions.is_empty() || mesh.indices.is_empty() {
                 continue;
             }
-            if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
-                continue;
-            }
             let on_camera = !o.shadows_only && o.layer < 32 && map.camera_mask & (1 << o.layer) != 0;
-            let seen = on_camera && in_view(&view_proj, mesh.bounds);
             let sunlit = o.layer < 32 && l.sun_mask & (1 << o.layer) != 0;
-            if !seen {
-                culled += 1;
-                if !(shadowed && sunlit && o.casts_shadows) {
-                    continue;
-                }
+            let casts = shadowed && sunlit && o.casts_shadows;
+            let mut object = ObjectGpu {
+                buffers: None,
+                bounds: mesh.bounds,
+                middle: (Vec3::from(mesh.bounds.0) + Vec3::from(mesh.bounds.1)) * 0.5,
+                vanish: o.vanish.clone(),
+                on_camera,
+                casts,
+                lightmap: o.lightmap.filter(|i| *i < map.lightmaps.len()).map_or(0, |i| i + 1),
+                reflection: o.probe.filter(|i| *i < map.probes.len()).map_or(0, |i| i + 1),
+                parts: Vec::new(),
+            };
+            if !on_camera && !casts {
+                objects.push(object);
+                continue;
             }
             let verts: Vec<Vertex> = (0..mesh.positions.len())
                 .map(|i| Vertex {
@@ -1536,8 +1527,7 @@ impl Renderer {
                 usage: wgpu::BufferUsages::INDEX,
             });
             buffers.push((vb, ib));
-            let vb = buffers.len() - 1;
-            let middle = (Vec3::from(mesh.bounds.0) + Vec3::from(mesh.bounds.1)) * 0.5;
+            object.buffers = Some(buffers.len() - 1);
             for (s, &(first, count)) in mesh.submeshes.iter().enumerate() {
                 // Unity draws extra submeshes with the last material.
                 let Some(m) = o.materials.get(s).or(o.materials.last()) else {
@@ -1546,24 +1536,184 @@ impl Renderer {
                 if !m.drawn || count == 0 {
                     continue;
                 }
-                let index = bind_material(m, o.receives_shadows && shadowed && sunlit, sunlit);
-                // Blended surfaces dither their shadow nearly away in
-                // Unity's Standard shader; they cast none here.
-                if shadowed && sunlit && o.casts_shadows && m.blend.kind() == 0 && !m.particle {
-                    casters.push((vb, first, count, index, m.blend == Blend::Cutout, !m.two_sided));
+                object.parts.push(Part {
+                    first,
+                    count,
+                    material: bind_material(m, o.receives_shadows && shadowed && sunlit, sunlit),
+                    blend: m.blend.kind(),
+                    cull: !m.two_sided,
+                    queue: m.queue,
+                    // Blended surfaces dither their shadow nearly away in
+                    // Unity's Standard shader; they cast none here.
+                    caster: casts && m.blend.kind() == 0 && !m.particle,
+                    cutout: m.blend == Blend::Cutout,
+                });
+            }
+            objects.push(object);
+        }
+        MapGpu {
+            light: l.clone(),
+            bounds: map.bounds(),
+            vanish: map.vanish.clone(),
+            objects,
+            buffers,
+            materials,
+            lightmaps,
+            reflections,
+            globals_buf,
+            shadow_buf,
+            cascades,
+            atlas,
+            globals_group,
+            sky,
+        }
+    }
+
+    /// The unit vector towards the map's sun.
+    pub(crate) fn sun_dir(&self) -> [f32; 3] {
+        self.light.sun_dir
+    }
+
+    /// What shows where nothing is drawn, linear.
+    pub(crate) fn background(&self) -> [f32; 3] {
+        self.light.background
+    }
+
+    /// How far the camera must see to take in the whole map.
+    pub(crate) fn far(&self, camera: &Camera) -> f32 {
+        let (min, max) = self.bounds;
+        // Near and far from the map's size: rooms and grounds alike.
+        ((max - min).length() * 2.0).max(50.0) + camera.eye.distance((min + max) * 0.5)
+    }
+
+    /// Writes the camera's numbers for a frame seen through `view_proj`
+    /// and picks what it draws: the walls that hide, the camera's layers,
+    /// the view's bounds, blended surfaces sorted far to near.
+    pub(crate) fn frame(
+        &self,
+        queue: &wgpu::Queue,
+        pipes: &Pipelines,
+        camera: &Camera,
+        view_proj: Mat4,
+        aspect: f32,
+    ) -> MapFrame {
+        let l = &self.light;
+        let fog = l.fog.unwrap_or(Fog {
+            color: [0.0; 3],
+            start: 0.0,
+            end: 1.0,
+        });
+        let globals = Globals {
+            view_proj: view_proj.to_cols_array(),
+            eye: [
+                camera.eye.x,
+                camera.eye.y,
+                camera.eye.z,
+                l.cut_above.unwrap_or(f32::MAX),
+            ],
+            sun_dir: [l.sun_dir[0], l.sun_dir[1], l.sun_dir[2], 0.0],
+            sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
+            sh: l.ambient_sh,
+            fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
+            fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
+            indirect_spec: [
+                l.indirect_specular[0],
+                l.indirect_specular[1],
+                l.indirect_specular[2],
+                0.0,
+            ],
+        };
+        queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        // The sun's shadow: four cascades over slices of the view, in a
+        // square atlas, two by two.
+        let forward = (camera.target - camera.eye).normalize_or_zero();
+        let mut shadow = ShadowUniform::zeroed();
+        let mut cascades: Vec<Mat4> = Vec::new();
+        if let Some(set) = l.shadows {
+            let view = crate::shadow::View {
+                eye: camera.eye,
+                forward,
+                fov_y_deg: camera.fov_y_deg,
+                aspect,
+            };
+            let splits = crate::shadow::ShadowSettings::default().cascade_splits;
+            let ranges = crate::shadow::cascade_ranges(0.03, set.distance, splits);
+            let light = crate::shadow::light_view(Vec3::from(l.sun_dir));
+            for (i, r) in ranges.iter().enumerate() {
+                let slice = view.slice_corners(r.0, r.1);
+                if let Some((vp, texel)) = fit_cascade(&slice, light, self.bounds, SHADOW_ATLAS / 2) {
+                    shadow.to_atlas[i] = crate::shadow::world_to_shadow(vp, i).to_cols_array();
+                    shadow.texel_world[i] = texel;
+                    cascades.push(vp);
+                }
+            }
+            if cascades.len() == crate::shadow::CASCADES {
+                shadow.ends = [ranges[0].1, ranges[1].1, ranges[2].1, ranges[3].1];
+                shadow.params = [set.strength, 1.0, 1.0 / SHADOW_ATLAS as f32, 0.0];
+                shadow.forward = [forward.x, forward.y, forward.z, 0.0];
+            } else {
+                cascades.clear();
+            }
+        }
+        queue.write_buffer(&self.shadow_buf, 0, bytemuck::bytes_of(&shadow));
+        for (vp, (buf, _)) in cascades.iter().zip(&self.cascades) {
+            queue.write_buffer(buf, 0, bytemuck::cast_slice(&vp.to_cols_array()));
+        }
+        if let (Some(sky), Some((buf, _))) = (&l.sky, &self.sky) {
+            let uniform = crate::sky::uniform(sky, l.sun_dir, l.sun_color, camera, aspect);
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(&uniform));
+        }
+
+        let mut draws: Vec<Draw> = Vec::new();
+        let mut casters: Vec<Caster> = Vec::new();
+        // Where each material first came up, in the order of the objects.
+        let mut rank = vec![usize::MAX; self.materials.len()];
+        let mut ranked = 0;
+        let mut culled = 0;
+        // The volumes the camera stands in hide what names them.
+        let inside: Vec<bool> = self.vanish.iter().map(|v| v.contains(camera.eye)).collect();
+        for o in &self.objects {
+            if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
+                continue;
+            }
+            let seen = o.on_camera && in_view(&view_proj, o.bounds);
+            if !seen {
+                culled += 1;
+                if !o.casts {
+                    continue;
+                }
+            }
+            let Some(buffers) = o.buffers else { continue };
+            let distance = o.middle.distance(camera.eye);
+            for p in &o.parts {
+                if rank[p.material] == usize::MAX {
+                    rank[p.material] = ranked;
+                    ranked += 1;
+                }
+                if p.caster {
+                    casters.push(Caster {
+                        buffers,
+                        first: p.first,
+                        count: p.count,
+                        material: p.material,
+                        cutout: p.cutout,
+                        cull: p.cull,
+                    });
                 }
                 if seen {
                     draws.push(Draw {
-                        vb,
-                        lightmap: o.lightmap.filter(|i| *i < map.lightmaps.len()).map_or(0, |i| i + 1),
-                        reflection: o.probe.filter(|i| *i < map.probes.len()).map_or(0, |i| i + 1),
-                        first,
-                        count,
-                        material: index,
-                        blend: m.blend.kind(),
-                        cull: !m.two_sided,
-                        distance: middle.distance(camera.eye),
-                        queue: m.queue,
+                        buffers,
+                        lightmap: o.lightmap,
+                        reflection: o.reflection,
+                        first: p.first,
+                        count: p.count,
+                        material: p.material,
+                        rank: rank[p.material],
+                        blend: p.blend,
+                        cull: p.cull,
+                        distance,
+                        queue: p.queue,
                     });
                 }
             }
@@ -1575,10 +1725,216 @@ impl Renderer {
                 if a.blend > 0 {
                     a.queue.cmp(&b.queue).then(b.distance.total_cmp(&a.distance))
                 } else {
-                    a.material.cmp(&b.material)
+                    a.rank.cmp(&b.rank)
                 }
             })
         });
+        MapFrame {
+            draws,
+            casters,
+            shadows: !cascades.is_empty(),
+        }
+    }
+
+    /// Draws the sun's shadow atlas of `frame`, before the pass that reads
+    /// it.
+    pub(crate) fn shadow_pass(&self, pipes: &Pipelines, encoder: &mut wgpu::CommandEncoder, frame: &MapFrame) {
+        if !frame.shadows {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("map shadow"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.atlas,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let tile = (SHADOW_ATLAS / 2) as f32;
+        for (i, (_, group)) in self.cascades.iter().enumerate() {
+            let [ox, oy] = crate::shadow::atlas_origin(i);
+            let (x, y) = (ox * SHADOW_ATLAS as f32, oy * SHADOW_ATLAS as f32);
+            pass.set_viewport(x, y, tile, tile, 0.0, 1.0);
+            pass.set_scissor_rect(x as u32, y as u32, tile as u32, tile as u32);
+            pass.set_bind_group(0, group, &[]);
+            for c in &frame.casters {
+                pass.set_pipeline(&pipes.casters[&(c.cutout, c.cull)]);
+                pass.set_bind_group(1, &self.materials[c.material], &[]);
+                let (v, i) = &self.buffers[c.buffers];
+                pass.set_vertex_buffer(0, v.slice(..));
+                pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+            }
+        }
+    }
+
+    /// Draws the opaque and cut-out surfaces of `frame`, then the sky where
+    /// the depth buffer is still open, as Unity orders a frame. Leaves the
+    /// map's globals in bind group 0.
+    pub(crate) fn draw_solid(
+        &self,
+        pipes: &Pipelines,
+        target: Target,
+        pass: &mut wgpu::RenderPass<'_>,
+        frame: &MapFrame,
+    ) {
+        pass.set_bind_group(0, &self.globals_group, &[]);
+        let solid = frame.draws.iter().take_while(|d| d.blend == 0);
+        self.draw_list(pipes, target, pass, solid);
+        if let Some((_, group)) = &self.sky {
+            pipes.sky.draw(pass, group, target.color, target.depth);
+            pass.set_bind_group(0, &self.globals_group, &[]);
+        }
+    }
+
+    /// Draws the blended surfaces of `frame`, far to near.
+    pub(crate) fn draw_blended(
+        &self,
+        pipes: &Pipelines,
+        target: Target,
+        pass: &mut wgpu::RenderPass<'_>,
+        frame: &MapFrame,
+    ) {
+        pass.set_bind_group(0, &self.globals_group, &[]);
+        let blended = frame.draws.iter().skip_while(|d| d.blend == 0);
+        self.draw_list(pipes, target, pass, blended);
+    }
+
+    fn draw_list<'a>(
+        &self,
+        pipes: &Pipelines,
+        target: Target,
+        pass: &mut wgpu::RenderPass<'_>,
+        draws: impl Iterator<Item = &'a Draw>,
+    ) {
+        for d in draws {
+            pass.set_pipeline(&pipes.pipelines[&(target, d.blend, d.cull)]);
+            pass.set_bind_group(1, &self.materials[d.material], &[]);
+            pass.set_bind_group(2, &self.lightmaps[d.lightmap], &[]);
+            pass.set_bind_group(3, &self.reflections[d.reflection], &[]);
+            let (vb, ib) = &self.buffers[d.buffers];
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
+        }
+    }
+}
+
+impl Renderer {
+    /// How many objects the last map frame left out as outside the view.
+    pub fn map_culled(&self) -> usize {
+        self.map.as_ref().map_or(0, |p| p.culled.get())
+    }
+
+    /// Whether a map is set to draw with the characters.
+    pub fn has_map(&self) -> bool {
+        self.map_scene.is_some()
+    }
+
+    /// Uploads `map` to the GPU to be drawn behind and around the
+    /// characters of every frame from now on, or takes the map away with
+    /// `None`. Its buffers, textures and bind groups are made here once;
+    /// a frame only writes the camera's numbers and picks what to draw.
+    /// While a map is set, the characters are lit from its sun.
+    pub fn set_map(&mut self, map: Option<&MapScene>) {
+        // The old map's memory goes before the new one's comes.
+        self.map_scene = None;
+        let Some(map) = map else { return };
+        if self.map.is_none() {
+            self.map = Some(Pipelines::new(&self.device, &self.queue));
+        }
+        let l = &map.light;
+        // Textures first: the caches need the renderer mutably.
+        let mut views: HashMap<usize, wgpu::TextureView> = HashMap::new();
+        let images = map
+            .objects
+            .iter()
+            .flat_map(|o| o.materials.iter().flat_map(|m| m.images()))
+            .chain(
+                map.lightmaps
+                    .iter()
+                    .flat_map(|l| std::iter::once(&l.light).chain(l.direction.as_ref())),
+            )
+            .chain(l.sky.iter().flat_map(|s| s.images()));
+        for image in images {
+            let key = Arc::as_ptr(image) as usize;
+            if views.contains_key(&key) {
+                continue;
+            }
+            let view = match image.as_ref() {
+                MapImage::Decoded(i) => self.texture(i),
+                MapImage::Compressed { .. } => {
+                    let pipes = self.map.as_mut().expect("made above");
+                    match pipes.compressed.get(&key) {
+                        Some((_, v)) => v.clone(),
+                        None => {
+                            let v =
+                                upload_blocks(&self.device, &self.queue, image).unwrap_or_else(|| self.white.clone());
+                            // The image is kept with its texture, so its
+                            // address is not handed out again.
+                            pipes.compressed.insert(key, (image.clone(), v.clone()));
+                            v
+                        }
+                    }
+                }
+            };
+            views.insert(key, view);
+        }
+        let pipes = self.map.as_mut().expect("made above");
+        let sky_cube = match &l.sky {
+            Some(crate::sky::Sky::Cubemap { cube: Some(cube), .. }) => {
+                Some(pipes.sky.cube(&self.device, &self.queue, cube))
+            }
+            _ => None,
+        };
+        // The reflections' cubemaps: the scene's, then each probe's.
+        let cubes: Vec<wgpu::TextureView> = std::iter::once(&l.reflection)
+            .chain(map.probes.iter().map(|p| &p.reflection))
+            .map(|r| match &r.cube {
+                Some(cube) => pipes.sky.cube(&self.device, &self.queue, cube),
+                None => pipes.black_cube.clone(),
+            })
+            .collect();
+        self.map_scene = Some(MapGpu::new(
+            &self.device,
+            pipes,
+            map,
+            &views,
+            &self.white,
+            sky_cube.as_ref(),
+            &cubes,
+        ));
+    }
+
+    /// Draws `map` alone from `camera` to an RGBA8 image, top row first.
+    /// The map stays set afterwards, as `set_map` leaves it.
+    pub fn render_map(&mut self, map: &MapScene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>> {
+        self.set_map(Some(map));
+        self.draw_map(camera, width, height)
+    }
+
+    /// Draws the map `set_map` uploaded, alone, from `camera` to an RGBA8
+    /// image, top row first.
+    pub fn draw_map(&mut self, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>> {
+        let device = &self.device;
+        let pipes = self.map.as_mut().ok_or_else(|| anyhow::anyhow!("no map is set"))?;
+        let gpu = self
+            .map_scene
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no map is set"))?;
+        pipes.prepare(device, Target::OWN);
+        let pipes = &*pipes;
+        let aspect = width as f32 / height as f32;
+        let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, gpu.far(camera));
+        let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
+        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect);
 
         let size = wgpu::Extent3d {
             width,
@@ -1613,41 +1969,9 @@ impl Renderer {
         let msaa = make(COLOR_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let depth = make(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let mut encoder = device.create_command_encoder(&Default::default());
-        if !cascades.is_empty() {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("map shadow"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &atlas,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let tile = (SHADOW_ATLAS / 2) as f32;
-            for (i, group) in cascade_groups.iter().enumerate() {
-                let [ox, oy] = crate::shadow::atlas_origin(i);
-                let (x, y) = (ox * SHADOW_ATLAS as f32, oy * SHADOW_ATLAS as f32);
-                pass.set_viewport(x, y, tile, tile, 0.0, 1.0);
-                pass.set_scissor_rect(x as u32, y as u32, tile as u32, tile as u32);
-                pass.set_bind_group(0, group, &[]);
-                for &(vb, first, count, material, cutout, cull) in &casters {
-                    pass.set_pipeline(&pipes.casters[&(cutout, cull)]);
-                    pass.set_bind_group(1, &materials[material], &[]);
-                    let (v, i) = &buffers[vb];
-                    pass.set_vertex_buffer(0, v.slice(..));
-                    pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(first..first + count, 0, 0..1);
-                }
-            }
-        }
+        gpu.shadow_pass(pipes, &mut encoder, &frame);
         {
-            let bg = l.background;
+            let bg = gpu.background();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("map"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1676,30 +2000,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &globals_group, &[]);
-            // As Unity orders a frame: the sky after everything opaque,
-            // where the depth buffer is still open, and before what blends.
-            let mut sky_group = sky_group.as_ref();
-            let mut sky_once = |pass: &mut wgpu::RenderPass<'_>| {
-                if let Some(group) = sky_group.take() {
-                    pipes.sky.draw(pass, group);
-                    pass.set_bind_group(0, &globals_group, &[]);
-                }
-            };
-            for d in &draws {
-                if d.blend > 0 {
-                    sky_once(&mut pass);
-                }
-                pass.set_pipeline(&pipes.pipelines[&(d.blend, d.cull)]);
-                pass.set_bind_group(1, &materials[d.material], &[]);
-                pass.set_bind_group(2, &lightmaps[d.lightmap], &[]);
-                pass.set_bind_group(3, &reflections[d.reflection], &[]);
-                let (vb, ib) = &buffers[d.vb];
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
-            }
-            sky_once(&mut pass);
+            gpu.draw_solid(pipes, Target::OWN, &mut pass, &frame);
+            gpu.draw_blended(pipes, Target::OWN, &mut pass, &frame);
         }
         // Read back, honouring the row alignment wgpu requires.
         let row = width * 4;
