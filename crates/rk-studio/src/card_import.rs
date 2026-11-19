@@ -599,7 +599,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                     Vec2::new(260.0, k.field()),
                 );
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(search));
-                widgets::search(&mut child, k, &mut w.search, "Search characters", 260.0);
+                widgets::search(&mut child, k, &mut w.search, "Search", 260.0);
                 let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + sources::COLUMN, body.bottom()));
                 let grid = Rect::from_min_max(tree.right_top(), body.max);
                 ui.painter().rect_filled(tree, 0.0, t.well);

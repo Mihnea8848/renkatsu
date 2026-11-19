@@ -1055,7 +1055,7 @@ fn recent_part(
         Vec2::new(230.0, k.field()),
     );
     let mut child = ui.new_child(UiBuilder::new().max_rect(search));
-    widgets::search(&mut child, k, &mut sel.search, "Search projects", search.width());
+    widgets::search(&mut child, k, &mut sel.search, "Search", search.width());
 
     let shown = sel.shown();
     let area = body.shrink2(Vec2::new(20.0, 0.0));

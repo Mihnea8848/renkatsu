@@ -61,7 +61,7 @@ pub fn menu(
     }
     if !all.is_empty() {
         ui.separator();
-        widgets::search(ui, k, search, "Search bones", 200.0);
+        widgets::search(ui, k, search, "Search", 200.0);
         let wanted = search.trim().to_lowercase();
         let matches = |name: &&String| {
             wanted.is_empty() || name.to_lowercase().contains(&wanted) || label(name).to_lowercase().contains(&wanted)

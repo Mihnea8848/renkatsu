@@ -216,7 +216,7 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
         let _ = ui.button("Save layout");
     });
     let w = (right.available_width() - 8.0).clamp(120.0, 260.0);
-    widgets::search(&mut right, k, &mut st.command_search, "Search commands", w);
+    widgets::search(&mut right, k, &mut st.command_search, "Search", w);
 }
 
 /// Minimise, maximise or restore, and close, at the title bar's right end,
@@ -525,7 +525,7 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     }
     let tips = [
         st.keys.tip("Play", Action::PlayPause),
-        st.keys.tip("Pause the scene", Action::PlayPause),
+        st.keys.tip("Pause", Action::PlayPause),
         st.keys.tip("Stop", Action::Stop),
         "Simulation options".to_owned(),
     ];

@@ -561,6 +561,12 @@ pub struct MapScene {
 pub const STUDIO_CAMERA_MASK: u32 = 536_874_000;
 
 impl MapScene {
+    /// Whether the camera sees `object`: it is on one of the camera's
+    /// layers and not a shadow alone.
+    pub fn seen(&self, object: &MapObject) -> bool {
+        !object.shadows_only && object.layer < 32 && self.camera_mask & (1 << object.layer) != 0
+    }
+
     /// The lowest and highest corner of everything drawn.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut min = Vec3::splat(f32::MAX);
@@ -1234,7 +1240,7 @@ impl Default for MapPlacement {
 
 impl MapPlacement {
     /// The root as a turn and a move alone.
-    fn rigid(&self) -> Mat4 {
+    pub fn rigid(&self) -> Mat4 {
         let (_, turn, at) = self.root.to_scale_rotation_translation();
         Mat4::from_rotation_translation(turn.normalize(), at)
     }
@@ -1533,7 +1539,7 @@ impl MapGpu {
             if mesh.positions.is_empty() || mesh.indices.is_empty() {
                 continue;
             }
-            let on_camera = !o.shadows_only && o.layer < 32 && map.camera_mask & (1 << o.layer) != 0;
+            let on_camera = map.seen(o);
             let sunlit = o.layer < 32 && l.sun_mask & (1 << o.layer) != 0;
             let casts = shadowed && sunlit && o.casts_shadows;
             let mut object = ObjectGpu {

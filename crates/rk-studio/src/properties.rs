@@ -1071,7 +1071,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, nam
         );
         child.spacing_mut().item_spacing.x = 4.0;
         let w = child.available_width() - k.field() - 4.0;
-        widgets::search(&mut child, k, &mut st.property_search, "Search properties", w);
+        widgets::search(&mut child, k, &mut st.property_search, "Search", w);
         let _ = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
     }
 }
