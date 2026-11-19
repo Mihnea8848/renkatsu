@@ -58,9 +58,13 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         p
     });
     let shown_before = shown.clone();
+    // A character's pages: the scene's own values, then what it plays,
+    // then who it is. A card whose profile could not be read still has
+    // the first two.
     let pages: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Profile"],
-        Some(_) => &["Scene", "Profile", "Likes", "H Traits"],
+        Some(p) if p.male => &["Scene", "Animation", "Profile"],
+        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits"],
+        None if kind == Kind::Character => &["Scene", "Animation"],
         None => &[],
     };
     if pages.is_empty() {
@@ -88,17 +92,217 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         .map(|parent| (parent.id, parent.name.clone(), parent.kind()));
     let mut detach = false;
     let mut bone: Option<Option<String>> = None;
+    // Who the character could be snapped onto: every other character of
+    // the scene it may sit inside, with whether that one plays the other
+    // half of the H animation this one plays. A pair playing the two
+    // halves is what snapping is for, so those come first.
+    let mut partners: Vec<(crate::scene::ObjectId, String, bool)> = Vec::new();
+    if kind == Kind::Character {
+        let scene = st.doc.scene();
+        let mine = animation_meta(st, before.id);
+        partners = scene
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == Kind::Character && o.id != before.id)
+            .filter(|o| scene.can_place(before.id, Place::Into(Some(o.id))))
+            .map(|o| {
+                let pair = mine
+                    .zip(animation_meta(st, o.id))
+                    .is_some_and(|(a, b)| crate::animations::same_h_animation(a, b));
+                (o.id, o.name.clone(), pair)
+            })
+            .collect();
+        partners.sort_by_key(|(_, name, pair)| (!*pair, name.to_lowercase()));
+    }
+    // The character this one is snapped onto, or none; a character that
+    // follows a bone of another is attached, not snapped.
+    let snapped = before
+        .parent
+        .filter(|_| before.bone.is_none())
+        .filter(|parent| partners.iter().any(|(id, ..)| id == parent));
+    let mut snap: Option<Option<crate::scene::ObjectId>> = None;
     let mut chosen_map: Option<String> = None;
     let mut show_maps = false;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        if let (Some(p), 1..) = (shown.as_mut(), page) {
+        if let (Some(p), 2..) = (shown.as_mut(), page) {
             if let Some(card) = &card_profile {
-                profile_page(ui, k, st, p, card, page);
+                profile_page(ui, k, st, p, card, page - 1);
             }
             return;
         }
         let id = ui.id();
+        // The Animation page: what the character plays, and the pair it
+        // is snapped into.
+        if page == 1 {
+            let Content::Character { animation, .. } = &mut object.content else {
+                return;
+            };
+            if section(ui, k, st, 6, "Animation") {
+                let playing = built.as_ref().and_then(|b| b.animation);
+                row(ui, k, "Animation", None, |ui, rect| {
+                    let side = rect.height();
+                    let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+                    // A dropdown of the project's animations, by the
+                    // folders the user keeps them in, and none.
+                    let resp = ui.interact(field, id.with("animation"), Sense::click());
+                    let p = ui.painter();
+                    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                    p.rect_filled(field, k.radius(), fill);
+                    let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+                    let name = animation.as_ref().map_or("T-pose", |a| a.name.as_str());
+                    p.with_clip_rect(field.with_max_x(field.right() - 22.0)).text(
+                        Pos2::new(field.left() + 8.0, field.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        k.font(),
+                        color,
+                    );
+                    glyph(
+                        p,
+                        k,
+                        Pos2::new(field.right() - 12.0, field.center().y + 1.0),
+                        icon::CARET_DOWN,
+                        10.0,
+                        color,
+                    );
+                    egui::Popup::menu(&resp).show(|ui| {
+                        ui.set_min_width(field.width() - 10.0);
+                        if let Some(chosen) = crate::panels::animation_items(ui, k, st, Some(before.id)) {
+                            *animation = chosen.map(Box::new);
+                        }
+                    });
+                    if let Some(a) = animation.as_ref() {
+                        let from = match &a.file {
+                            Some(file) => file.clone(),
+                            None => format!("{} of {} in {}", a.state, a.controller, a.bundle),
+                        };
+                        resp.on_hover_text(from);
+                    }
+                    let at = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
+                    let browse = ui
+                        .interact(at, id.with("browse animations"), Sense::click())
+                        .on_hover_text("Show in Content");
+                    let fill = if browse.hovered() { k.t.hover } else { k.t.control };
+                    ui.painter().rect_filled(at, k.radius(), fill);
+                    glyph(ui.painter(), k, at.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
+                    if browse.clicked() {
+                        show_animations = true;
+                    }
+                });
+                if let Some(why) = built.as_ref().and_then(|b| b.animation_problem.clone()) {
+                    row(ui, k, "Problem", None, |ui, rect| {
+                        ui.interact(rect, id.with("animation problem"), Sense::hover())
+                            .on_hover_text(&why);
+                        let text = format!("Could not be read: {why}");
+                        label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
+                    });
+                }
+                if let Some(p) = animation.as_mut() {
+                    let fixed = playing.is_some_and(|(fixed, ..)| fixed);
+                    row(ui, k, "Kind", None, |ui, rect| {
+                        let text = match playing {
+                            None => "Not read".to_owned(),
+                            Some((true, ..)) => "Static".to_owned(),
+                            Some((_, true, seconds)) => format!("Moving: loops every {seconds:.1} s"),
+                            Some((_, false, seconds)) => format!("Moving: plays {seconds:.1} s once"),
+                        };
+                        label(
+                            &ui.painter().with_clip_rect(rect),
+                            k,
+                            rect.left_center(),
+                            &text,
+                            t.text_dim,
+                        );
+                    });
+                    let still = fixed.then_some("A static animation does not move");
+                    row(ui, k, "Speed", still, |ui, rect| {
+                        widgets::number(
+                            ui,
+                            k,
+                            rect,
+                            id.with("animation speed"),
+                            &mut p.speed,
+                            Marker::None,
+                            true,
+                            FINE,
+                        );
+                        p.speed = p.speed.clamp(0.0, 4.0);
+                    });
+                    row(ui, k, "Start", still, |ui, rect| {
+                        widgets::number(
+                            ui,
+                            k,
+                            rect,
+                            id.with("animation start"),
+                            &mut p.start,
+                            Marker::None,
+                            true,
+                            FINE,
+                        );
+                        p.start = p.start.clamp(0.0, 1.0);
+                    });
+                    let loops = playing.is_some_and(|(_, loops, _)| loops);
+                    let why = still.or(loops.then_some("The animation loops by itself"));
+                    row(ui, k, "At the end", why, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("animation loop"), &mut p.force_loop, "Start over");
+                    });
+                }
+                section_end(ui, k);
+            }
+            if section(ui, k, st, 4, "Pair") {
+                let alone = partners.is_empty().then_some("The scene has one character");
+                row(ui, k, "Snap to", alone, |ui, rect| {
+                    let shown = snapped
+                        .and_then(|id| partners.iter().find(|(other, ..)| *other == id))
+                        .map_or("None", |(_, name, _)| name.as_str());
+                    let resp = drop_field(ui, k, rect, id.with("snap"), shown);
+                    egui::Popup::menu(&resp).show(|ui| {
+                        ui.set_min_width(rect.width() - 10.0);
+                        if widgets::check_item(ui, k, snapped.is_none(), "None", "").clicked() {
+                            snap = Some(None);
+                            ui.close();
+                        }
+                        for (other, name, pair) in &partners {
+                            let note = if *pair { "Same H animation" } else { "" };
+                            if widgets::check_item(ui, k, snapped == Some(*other), name, note).clicked() {
+                                snap = Some(Some(*other));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                // The H scenes' animations are blended by body, and
+                // CharaStudio's two animation options
+                // (`Studio.OICharInfo.animeOptionParam`) set the blend the
+                // clips play at instead of the character's own. A snapped
+                // pair holding different ones drifts apart.
+                let h = animation
+                    .as_deref()
+                    .and_then(|a| st.animations.of(a))
+                    .and_then(|item| item.meta.as_ref())
+                    .is_some_and(|meta| meta.h);
+                let own = built
+                    .as_ref()
+                    .map_or([0.5; 2], |b| [b.parameters.height, b.parameters.breast]);
+                let flat = (!h).then_some("The animation is not one of the H scenes'");
+                let mut values = animation.as_ref().and_then(|a| a.options).unwrap_or(own);
+                for (i, name) in ["Height", "Breasts"].into_iter().enumerate() {
+                    row(ui, k, name, flat, |ui, rect| {
+                        let at = id.with(("animation option", i));
+                        widgets::number(ui, k, rect, at, &mut values[i], Marker::None, true, FINE);
+                        values[i] = values[i].clamp(0.0, 1.0);
+                    });
+                }
+                if let Some(a) = animation.as_mut().filter(|_| h) {
+                    if a.options.is_some() || values != own {
+                        a.options = Some(values);
+                    }
+                }
+                section_end(ui, k);
+            }
+            return;
+        }
         if kind != Kind::Folder && section(ui, k, st, 0, "Transform") {
             // What each of position, rotation and scale waits for, when it
             // does nothing yet for this kind of object.
@@ -163,7 +367,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 outdoor_shoes,
                 simulate,
                 clothes,
-                animation,
                 ..
             } => {
                 if section(ui, k, st, 1, "Character") {
@@ -341,118 +544,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                     section_end(ui, k);
                 }
-                if section(ui, k, st, 6, "Animation") {
-                    let playing = built.as_ref().and_then(|b| b.animation);
-                    row(ui, k, "Animation", None, |ui, rect| {
-                        let side = rect.height();
-                        let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
-                        // A dropdown of the project's animations, by the
-                        // folders the user keeps them in, and none.
-                        let resp = ui.interact(field, id.with("animation"), Sense::click());
-                        let p = ui.painter();
-                        let fill = if resp.hovered() { k.t.hover } else { k.t.control };
-                        p.rect_filled(field, k.radius(), fill);
-                        let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
-                        let name = animation.as_ref().map_or("T-pose", |a| a.name.as_str());
-                        p.with_clip_rect(field.with_max_x(field.right() - 22.0)).text(
-                            Pos2::new(field.left() + 8.0, field.center().y),
-                            Align2::LEFT_CENTER,
-                            name,
-                            k.font(),
-                            color,
-                        );
-                        glyph(
-                            p,
-                            k,
-                            Pos2::new(field.right() - 12.0, field.center().y + 1.0),
-                            icon::CARET_DOWN,
-                            10.0,
-                            color,
-                        );
-                        egui::Popup::menu(&resp).show(|ui| {
-                            ui.set_min_width(field.width() - 10.0);
-                            if let Some(chosen) = crate::panels::animation_items(ui, k, st, Some(before.id)) {
-                                *animation = chosen.map(Box::new);
-                            }
-                        });
-                        if let Some(a) = animation.as_ref() {
-                            let from = match &a.file {
-                                Some(file) => file.clone(),
-                                None => format!("{} of {} in {}", a.state, a.controller, a.bundle),
-                            };
-                            resp.on_hover_text(from);
-                        }
-                        let at = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
-                        let browse = ui
-                            .interact(at, id.with("browse animations"), Sense::click())
-                            .on_hover_text("Show in Content");
-                        let fill = if browse.hovered() { k.t.hover } else { k.t.control };
-                        ui.painter().rect_filled(at, k.radius(), fill);
-                        glyph(ui.painter(), k, at.center(), icon::FOLDER_OPEN, 14.0, k.t.text);
-                        if browse.clicked() {
-                            show_animations = true;
-                        }
-                    });
-                    if let Some(why) = built.as_ref().and_then(|b| b.animation_problem.clone()) {
-                        row(ui, k, "Problem", None, |ui, rect| {
-                            ui.interact(rect, id.with("animation problem"), Sense::hover())
-                                .on_hover_text(&why);
-                            let text = format!("Could not be read: {why}");
-                            label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), &text, t.stop);
-                        });
-                    }
-                    if let Some(p) = animation.as_mut() {
-                        let fixed = playing.is_some_and(|(fixed, ..)| fixed);
-                        row(ui, k, "Kind", None, |ui, rect| {
-                            let text = match playing {
-                                None => "Not read".to_owned(),
-                                Some((true, ..)) => "Static".to_owned(),
-                                Some((_, true, seconds)) => format!("Moving: loops every {seconds:.1} s"),
-                                Some((_, false, seconds)) => format!("Moving: plays {seconds:.1} s once"),
-                            };
-                            label(
-                                &ui.painter().with_clip_rect(rect),
-                                k,
-                                rect.left_center(),
-                                &text,
-                                t.text_dim,
-                            );
-                        });
-                        let still = fixed.then_some("A static animation does not move");
-                        row(ui, k, "Speed", still, |ui, rect| {
-                            widgets::number(
-                                ui,
-                                k,
-                                rect,
-                                id.with("animation speed"),
-                                &mut p.speed,
-                                Marker::None,
-                                true,
-                                FINE,
-                            );
-                            p.speed = p.speed.clamp(0.0, 4.0);
-                        });
-                        row(ui, k, "Start", still, |ui, rect| {
-                            widgets::number(
-                                ui,
-                                k,
-                                rect,
-                                id.with("animation start"),
-                                &mut p.start,
-                                Marker::None,
-                                true,
-                                FINE,
-                            );
-                            p.start = p.start.clamp(0.0, 1.0);
-                        });
-                        let loops = playing.is_some_and(|(_, loops, _)| loops);
-                        let why = still.or(loops.then_some("The animation loops by itself"));
-                        row(ui, k, "At the end", why, |ui, rect| {
-                            widgets::checkbox(ui, k, rect, id.with("animation loop"), &mut p.force_loop, "Start over");
-                        });
-                    }
-                    section_end(ui, k);
-                }
                 if section(ui, k, st, 2, "Expression") {
                     let later = Some("Not available yet");
                     for name in ["Eyes", "Mouth"] {
@@ -621,8 +712,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
     }
-    if detach {
+    if detach || snap == Some(None) {
         st.doc.place_many(&[before.id], Place::Into(None));
+    }
+    if let Some(Some(to)) = snap {
+        st.snap(before.id, to);
     }
     if let (Some(bone), Some((to, ..))) = (bone, &target) {
         st.attach(&[before.id], *to, bone.as_deref());
@@ -639,6 +733,16 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     if let Some(file) = chosen_map {
         st.add_map(std::path::PathBuf::from(file));
     }
+}
+
+/// What the project's file says about the animation a character plays;
+/// none for a character playing nothing, or an animation the project
+/// does not own.
+fn animation_meta(st: &State, id: crate::scene::ObjectId) -> Option<&rk_chara::animation_file::Meta> {
+    let Content::Character { animation, .. } = &st.doc.scene().get(id)?.content else {
+        return None;
+    };
+    st.animations.of(animation.as_ref()?)?.meta.as_ref()
 }
 
 /// A field that opens a list: what is chosen and a caret.

@@ -888,6 +888,13 @@ impl State {
         }
     }
 
+    /// Snaps a character onto another, as an H animation wants the pair.
+    pub fn snap(&mut self, id: ObjectId, to: ObjectId) {
+        if self.doc.snap(id, to) {
+            self.folded.remove(&to);
+        }
+    }
+
     /// Drops each selected object straight down onto the first surface
     /// below its lowest point: a character lands by its feet. One step
     /// of the history.

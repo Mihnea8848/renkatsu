@@ -498,6 +498,7 @@ impl Library {
     pub const TIMING_BODY: crate::motion::Parameters = crate::motion::Parameters {
         height: 0.5,
         breast: 0.5,
+        options: None,
     };
 
     /// The categories that have animations, in the game's order.
