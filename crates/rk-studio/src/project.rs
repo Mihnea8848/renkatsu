@@ -48,7 +48,7 @@ pub const ANIMATIONS: &str = "Animations";
 /// made by hand will go.
 pub const POSES: &str = "Poses";
 pub const SCENES: &str = "Scenes";
-const MODS: &str = "Mods";
+pub(crate) const MODS: &str = "Mods";
 /// The extension of a link to an animation as Renkatsu 0.1.4 saved it.
 pub const OLD_LINK: &str = "rkpose";
 /// Folders every project has, as the Content browser shows them: the ones

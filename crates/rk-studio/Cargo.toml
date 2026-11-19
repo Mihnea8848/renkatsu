@@ -29,3 +29,6 @@ rk-packages.workspace = true
 rk-chara.workspace = true
 rk-render.workspace = true
 rk-map.workspace = true
+
+[dev-dependencies]
+rk-asset.workspace = true

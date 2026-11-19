@@ -1,12 +1,20 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! The maps a project owns. Importing a map copies its scene bundle out of
-//! the game, with any other bundle it reads from, into a folder of its own
-//! under `Maps`, together with the game's picture of it and a small text
-//! file beside them, the map's sidecar. The sidecar says what the map is
-//! and holds what would otherwise be read from the game, such as the table
-//! of walls that hide, so the project draws its maps without Koikatsu.
+//! The maps a project owns. Importing a map builds it from the game at
+//! each of its times of day and writes it to one map file under `Maps`
+//! (see `rk_map::file`), with what it is and the game's picture of it
+//! inside, so the project draws its maps without Koikatsu and opens them
+//! without building them again.
+//!
+//! ```text
+//! Maps/
+//!   Rooftop.rkmap       the map, its description and its picture
+//! ```
+//!
+//! Projects made with Renkatsu 0.1.8 kept a copy of the map's bundles in a
+//! folder of their own, with a small text file beside them, the sidecar,
+//! named like a map file. Those still open, built from the copies.
 //!
 //! ```text
 //! Maps/
@@ -16,24 +24,23 @@
 //!     thumbnail.png     the game's picture of the map
 //! ```
 //!
-//! Scenes name a map by its sidecar, relative to the project folder.
+//! Scenes name a map by its file (or sidecar), relative to the project
+//! folder.
 
 use crate::project::{file_name, files_below, relative_to, Project};
 use crate::scene::MapTime;
 use anyhow::{bail, Context, Result};
 use rk_vfs::Game;
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// The project folder maps go in.
 pub const MAPS: &str = "Maps";
-/// The extension of a map's sidecar.
-pub const EXTENSION: &str = "rkmap";
-/// The version of the sidecar this build writes.
-pub const FORMAT: u32 = 1;
-/// The picture of a map, beside its sidecar.
-const THUMBNAIL: &str = "thumbnail.png";
+/// The extension of a map file, and of an older map's sidecar.
+pub const EXTENSION: &str = rk_map::file::EXTENSION;
+/// The version of the description this build writes: 1 was the text
+/// sidecar, 2 is the description inside a map file.
+pub const FORMAT: u32 = rk_map::file::META_FORMAT;
 
 /// A bundle of a map, as copied into the project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +48,9 @@ pub struct Bundle {
     /// Where the game keeps it, under `abdata`, which is where the map
     /// looks for it.
     pub path: String,
-    /// The copy, beside the sidecar.
+    /// The copy, beside the sidecar; empty in a map file, which holds
+    /// no bundle.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file: String,
 }
 
@@ -62,7 +71,8 @@ pub struct MapFile {
     pub source: String,
     /// The times of day it has, in order.
     pub times: Vec<MapTime>,
-    /// The game's picture of it, beside the sidecar.
+    /// The game's picture of it, beside the sidecar; for a map file, the
+    /// file itself, which holds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<String>,
     /// The text of its table of walls that hide, as the game stores it;
@@ -74,9 +84,19 @@ pub struct MapFile {
 }
 
 impl MapFile {
+    /// Reads what a map file says of its map, or an older sidecar.
     pub fn read(path: &Path) -> Result<MapFile> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let file: MapFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        let packed = rk_map::file::is_map_file(path);
+        let text = if packed {
+            rk_map::file::meta_text(path)?
+        } else {
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
+        };
+        let mut file: MapFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        // A map file holds its picture: the picture is the file itself.
+        if packed {
+            file.thumbnail = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        }
         if file.format > FORMAT {
             bail!(
                 "{} was saved by a newer Renkatsu (format {})",
@@ -90,6 +110,8 @@ impl MapFile {
         Ok(file)
     }
 
+    /// Writes an older map's text sidecar, for tests of reading one.
+    #[cfg(test)]
     pub fn write(&self, path: &Path) -> Result<()> {
         std::fs::write(path, toml::to_string(self)?).with_context(|| format!("writing {}", path.display()))
     }
@@ -116,6 +138,21 @@ impl MapFile {
 pub struct ProjectMap {
     pub file: String,
     pub map: MapFile,
+    /// Whether it is a map file, which sits in any folder; an older map
+    /// is a sidecar in a folder of its own, beside its bundle copy.
+    pub packed: bool,
+}
+
+impl ProjectMap {
+    /// The Content folder the map shows in.
+    pub fn folder(&self) -> &str {
+        let parent = crate::content::parent(&self.file);
+        if self.packed {
+            parent
+        } else {
+            crate::content::parent(parent)
+        }
+    }
 }
 
 /// The maps a project folder owns, by name: every sidecar below its maps
@@ -130,6 +167,7 @@ pub fn in_project(root: &Path) -> Vec<ProjectMap> {
             Some(ProjectMap {
                 file: relative_to(root, p)?,
                 map: MapFile::read(p).ok()?,
+                packed: rk_map::file::is_map_file(p),
             })
         })
         .collect();
@@ -145,7 +183,7 @@ pub fn owned(root: &Path, bundle: &str) -> Option<ProjectMap> {
         .find(|m| rk_vfs::index::norm(m.map.scene_bundle()) == bundle)
 }
 
-/// A map of the game on its way into the project: what is copied.
+/// A map of the game on its way into the project.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub entry: rk_map::list::Entry,
@@ -156,13 +194,14 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The size of everything that will be copied.
+    /// The size of the bundles the map is made from, which import counts
+    /// its progress in.
     pub fn bytes(&self) -> u64 {
         self.bundles.iter().map(|b| b.1).sum()
     }
 }
 
-/// Works out what importing a map of the game copies.
+/// Works out what importing a map of the game reads.
 pub fn plan(game: &Game, entry: &rk_map::list::Entry) -> Result<Plan> {
     let mut paths = vec![entry.bundle.clone()];
     paths.extend(rk_map::scene::dependencies(game, &entry.bundle)?);
@@ -180,28 +219,10 @@ pub fn plan(game: &Game, entry: &rk_map::list::Entry) -> Result<Plan> {
     })
 }
 
-/// A file name for a bundle's copy: the bundle's own file name, made
-/// different from the ones taken.
-fn copy_name(path: &str, taken: &[Bundle]) -> String {
-    let base = file_name(path.rsplit(['/', '\\']).next().unwrap_or(path));
-    let (stem, ext) = base.rsplit_once('.').map_or((base.as_str(), ""), |(s, e)| (s, e));
-    let mut name = base.clone();
-    let mut n = 1;
-    while name == THUMBNAIL || taken.iter().any(|b| b.file.eq_ignore_ascii_case(&name)) {
-        n += 1;
-        name = if ext.is_empty() {
-            format!("{stem} {n}")
-        } else {
-            format!("{stem} {n}.{ext}")
-        };
-    }
-    name
-}
-
-/// Copies a map of the game into the project: its bundles, its picture
-/// and its sidecar, in a folder of its own named after it. `counted` hears
-/// of every piece copied, in bytes, and stops the copy with an error. A
-/// map the project has already is not copied again. Returns the sidecar,
+/// Imports a map of the game into the project: writes its map file,
+/// named after it, in the maps folder. `counted` hears of the progress, in
+/// bytes of the map's bundles, and stops the import with an error. A map
+/// the project has already is not imported again. Returns the map file,
 /// relative to the project.
 pub fn import(
     game: &Game,
@@ -212,97 +233,68 @@ pub fn import(
     if let Some(there) = owned(&project.root, &plan.entry.bundle) {
         return Ok(there.file);
     }
+    let path = free_path(project, &plan.name)?;
+    let total = plan.bytes();
+    let mut told = 0;
+    rk_map::file::convert(game, &plan.entry, &plan.name, None, &path, &mut |done| {
+        let now = ((total as f64 * f64::from(done)) as u64).max(told);
+        let step = now - told;
+        told = now;
+        counted(step)
+    })?;
+    relative_to(&project.root, &path).context("the map is outside the project")
+}
+
+/// A path in the Maps folder for a new map file named after `name`, with a
+/// number added when the name is taken.
+fn free_path(project: &Project, name: &str) -> Result<PathBuf> {
     let maps = project.root.join(MAPS);
-    let base = file_name(&plan.name);
-    let mut folder = maps.join(&base);
+    std::fs::create_dir_all(&maps).with_context(|| format!("creating {}", maps.display()))?;
+    let base = file_name(name);
+    let mut name = base.clone();
     let mut n = 1;
-    while folder.exists() {
+    // A folder of the same name is an older map's.
+    while maps.join(&name).exists() || maps.join(format!("{name}.{EXTENSION}")).exists() {
         n += 1;
-        folder = maps.join(format!("{base} {n}"));
+        name = format!("{base} {n}");
     }
-    std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
-    let copied = copy_in(game, plan, &folder, counted);
-    let sidecar = match copied {
-        Ok(sidecar) => sidecar,
-        Err(e) => {
-            // Half a map is no map.
-            let _ = std::fs::remove_dir_all(&folder);
-            return Err(e);
-        }
-    };
-    relative_to(&project.root, &sidecar).context("the map is outside the project")
+    Ok(maps.join(format!("{name}.{EXTENSION}")))
 }
 
-/// Copies what `import` copies into `folder` and writes the sidecar there.
-fn copy_in(game: &Game, plan: &Plan, folder: &Path, counted: &mut dyn FnMut(u64) -> Result<()>) -> Result<PathBuf> {
-    let entry = &plan.entry;
-    let mut bundles: Vec<Bundle> = Vec::new();
-    for (path, _) in &plan.bundles {
-        let file = copy_name(path, &bundles);
-        let (mut from, _) = game.assets.bundle_file(path)?;
-        let target = folder.join(&file);
-        let mut to = std::fs::File::create(&target).with_context(|| format!("writing {}", target.display()))?;
-        let mut buffer = vec![0u8; 1 << 20];
-        loop {
-            let n = from.read(&mut buffer).with_context(|| format!("reading {path}"))?;
-            if n == 0 {
-                break;
-            }
-            to.write_all(&buffer[..n])
-                .with_context(|| format!("writing {}", target.display()))?;
-            counted(n as u64)?;
-        }
-        bundles.push(Bundle {
-            path: rk_vfs::index::norm(path),
-            file,
-        });
+/// Copies a map file into the project, from another project or anywhere
+/// else. A map the project has already is not copied again. Returns the
+/// map file, relative to the project, and its name.
+pub fn copy_in(project: &Project, file: &Path) -> Result<(String, String)> {
+    anyhow::ensure!(
+        rk_map::file::is_map_file(file),
+        "{} is not a Renkatsu map file (.{EXTENSION})",
+        file.display()
+    );
+    let map = MapFile::read(file)?;
+    if let Some(there) = owned(&project.root, map.scene_bundle()) {
+        return Ok((there.file, there.map.name));
     }
-    let times: Vec<MapTime> = rk_map::scene::times(game, &entry.bundle)?
-        .into_iter()
-        .map(MapTime::of)
-        .collect();
-    let first = if times.contains(&MapTime::Day) {
-        MapTime::Day
-    } else {
-        times.first().copied().unwrap_or_default()
-    };
-    let thumbnail = rk_map::thumbnail::picture(game, &entry.bundle, first.time_of_day())
-        .and_then(|picture| write_png(&folder.join(THUMBNAIL), &picture).ok())
-        .map(|()| THUMBNAIL.to_owned());
-    let walls = rk_map::vanish::table(game, &entry.vanish_bundle, &entry.vanish_file).unwrap_or_default();
-    let map = MapFile {
-        format: FORMAT,
-        name: plan.name.clone(),
-        listed_name: entry.name.trim().to_owned(),
-        number: entry.number,
-        level: entry.level.clone(),
-        source: entry.source.label().to_owned(),
-        times,
-        thumbnail,
-        walls,
-        bundles,
-    };
-    let sidecar = folder.join(format!(
-        "{}.{EXTENSION}",
-        folder.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    map.write(&sidecar)?;
-    Ok(sidecar)
+    let path = free_path(project, &map.name)?;
+    std::fs::copy(file, &path).with_context(|| format!("copying {} into the project", file.display()))?;
+    let rel = relative_to(&project.root, &path).context("the map is outside the project")?;
+    Ok((rel, map.name))
 }
 
-fn write_png(path: &Path, picture: &rk_map::thumbnail::Picture) -> Result<()> {
-    let file = std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), picture.width, picture.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header()?.write_image_data(&picture.rgba)?;
-    Ok(())
-}
-
-/// Builds a map of the project from its own copy of the bundles, at a
-/// time of day, ready to upload. With `compressed`, the textures stay as
-/// the game stores them, for a GPU that draws them so.
-pub fn build(sidecar: &Path, time: MapTime, compressed: bool) -> Result<rk_render::map::MapScene> {
+/// Opens a map of the project at a time of day, ready to upload: read
+/// from its map file, or built from an older map's copy of its bundles.
+/// With `compressed`, the textures stay as the game stores them, for a GPU
+/// that draws them so.
+pub fn build(file: &Path, time: MapTime, compressed: bool) -> Result<rk_render::map::MapScene> {
+    if rk_map::file::is_map_file(file) {
+        if rk_map::file::is_older(file) {
+            remake(file);
+        }
+        let mut scene = rk_map::file::read(file, time.time_of_day(), compressed)?;
+        // CharaStudio leaves the map's fog off unless its fog switch is on.
+        scene.light.fog = None;
+        return Ok(scene);
+    }
+    let sidecar = file;
     let map = MapFile::read(sidecar)?;
     let folder = sidecar.parent().unwrap_or(Path::new("."));
     let files: Vec<(String, PathBuf)> = map
@@ -327,6 +319,32 @@ pub fn build(sidecar: &Path, time: MapTime, compressed: bool) -> Result<rk_rende
     Ok(scene)
 }
 
+/// Makes a map file an older Renkatsu wrote again, when the game (or the
+/// mod, in the game or the project's mods) still has the map, so that it
+/// draws as this build draws it. Without them the file is kept and used
+/// as it is.
+fn remake(file: &Path) {
+    let Ok(meta) = rk_map::file::meta(file) else { return };
+    let Some(scene) = meta.bundles.first() else { return };
+    // The project is the folder that holds its maps folder.
+    let mods: Vec<PathBuf> = file
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == MAPS))
+        .and_then(Path::parent)
+        .map(|root| vec![root.join(crate::project::MODS)])
+        .unwrap_or_default();
+    let Ok(game) = Game::open_user(&mods) else { return };
+    let want = rk_vfs::index::norm(&scene.path);
+    let Some(entry) = rk_map::list::read(&game, false)
+        .into_iter()
+        .find(|e| rk_vfs::index::norm(&e.bundle) == want)
+    else {
+        return;
+    };
+    // Written beside it and moved over it only once whole.
+    let _ = rk_map::file::convert(&game, &entry, &meta.name, None, file, &mut |_| Ok(()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,7 +358,7 @@ mod tests {
             level: "Rooftop".into(),
             source: "Koikatsu".into(),
             times: vec![MapTime::Day, MapTime::Evening, MapTime::Night],
-            thumbnail: Some(THUMBNAIL.into()),
+            thumbnail: Some("thumbnail.png".into()),
             walls: "wall00_d\twall00\r\nten00_d\tten00\tlamp\r\n".into(),
             bundles: vec![Bundle {
                 path: "map/scene/rooftop.unity3d".into(),
@@ -392,6 +410,74 @@ mod tests {
     }
 
     #[test]
+    fn a_map_file_is_copied_in_once() {
+        let home = scratch("copyin");
+        let project = Project::create(&home.join("P"), "P").unwrap();
+        let outside = home.join("Rooftop.rkmap");
+        let map = MapFile {
+            format: FORMAT,
+            thumbnail: None,
+            ..sample()
+        };
+        let mut w = rk_asset::Writer::create(&outside, rk_map::file::KIND, rk_map::file::VERSION).unwrap();
+        w.add("meta", toml::to_string(&map).unwrap().as_bytes(), rk_asset::Pack::Raw)
+            .unwrap();
+        w.finish().unwrap();
+        let (rel, name) = copy_in(&project, &outside).unwrap();
+        assert_eq!(name, map.name);
+        assert!(project.root.join(&rel).is_file());
+        // The same map again is the one already there.
+        assert_eq!(copy_in(&project, &outside).unwrap().0, rel);
+        assert_eq!(in_project(&project.root).len(), 1);
+        // A file that is no map is refused.
+        std::fs::write(home.join("Notes.rkmap"), "format = 2").unwrap();
+        assert!(copy_in(&project, &home.join("Notes.rkmap")).is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_map_file_is_listed_by_its_description() {
+        let home = scratch("mapfile");
+        let project = Project::create(&home.join("P"), "P").unwrap();
+        let maps = project.root.join(MAPS);
+        std::fs::create_dir_all(&maps).unwrap();
+        let path = maps.join("Rooftop.rkmap");
+        let map = MapFile {
+            format: FORMAT,
+            thumbnail: None,
+            bundles: vec![Bundle {
+                path: "map/scene/rooftop.unity3d".into(),
+                file: String::new(),
+            }],
+            ..sample()
+        };
+        let text = toml::to_string(&map).unwrap();
+        assert!(!text.contains("file ="), "{text}");
+        let mut w = rk_asset::Writer::create(&path, rk_map::file::KIND, rk_map::file::VERSION).unwrap();
+        w.add("meta", text.as_bytes(), rk_asset::Pack::Raw).unwrap();
+        w.finish().unwrap();
+        // Its picture is inside it.
+        let read = MapFile::read(&path).unwrap();
+        assert_eq!(read.thumbnail.as_deref(), Some("Rooftop.rkmap"));
+        assert_eq!(
+            MapFile {
+                thumbnail: None,
+                ..read
+            },
+            map
+        );
+        let listed = in_project(&project.root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].file, "Maps/Rooftop.rkmap");
+        assert_eq!(listed[0].folder(), "Maps", "a map file shows in the folder it is in");
+        assert_eq!(
+            owned(&project.root, "map/scene/Rooftop.unity3d").map(|m| m.file),
+            Some("Maps/Rooftop.rkmap".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn the_project_lists_its_maps_by_sidecar() {
         let home = scratch("listed");
         let project = Project::create(&home.join("P"), "P").unwrap();
@@ -409,15 +495,5 @@ mod tests {
         );
         assert!(owned(&project.root, "map/scene/myroom.unity3d").is_none());
         let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn copies_get_names_of_their_own() {
-        let taken = vec![Bundle {
-            path: "a/rooftop.unity3d".into(),
-            file: "rooftop.unity3d".into(),
-        }];
-        assert_eq!(copy_name("b/rooftop.unity3d", &taken), "rooftop 2.unity3d");
-        assert_eq!(copy_name("map/scene/park.unity3d", &taken), "park.unity3d");
     }
 }

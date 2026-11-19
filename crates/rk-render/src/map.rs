@@ -761,8 +761,10 @@ pub(crate) struct Pipelines {
     pipelines: HashMap<(Target, u8, bool), wgpu::RenderPipeline>,
     repeat: wgpu::Sampler,
     clamp: wgpu::Sampler,
-    /// Uploaded block-compressed textures, by the image's address.
-    compressed: HashMap<usize, (Arc<MapImage>, wgpu::TextureView)>,
+    /// The textures of the map uploaded last, by the image's address. Each
+    /// keeps its image, so that the address is not handed to another image
+    /// while the texture is cached under it.
+    images: HashMap<usize, (Arc<MapImage>, wgpu::TextureView)>,
     /// How many objects the last frame left out as outside the view.
     culled: std::cell::Cell<usize>,
     sky: crate::sky::SkyPass,
@@ -1051,7 +1053,7 @@ impl Pipelines {
             pipelines: HashMap::new(),
             repeat: sampler(wgpu::AddressMode::Repeat),
             clamp: sampler(wgpu::AddressMode::ClampToEdge),
-            compressed: HashMap::new(),
+            images: HashMap::new(),
             culled: std::cell::Cell::new(0),
             sky: crate::sky::SkyPass::new(device, queue),
         }
@@ -1912,7 +1914,10 @@ impl Renderer {
             self.map = Some(Pipelines::new(&self.device, &self.queue));
         }
         let l = &map.light;
-        // Textures first: the caches need the renderer mutably.
+        // Textures first. Those the last map shares with this one are kept,
+        // the rest are let go once this map has its own.
+        let pipes = self.map.as_mut().expect("made above");
+        let mut old = std::mem::take(&mut pipes.images);
         let mut views: HashMap<usize, wgpu::TextureView> = HashMap::new();
         let images = map
             .objects
@@ -1929,26 +1934,26 @@ impl Renderer {
             if views.contains_key(&key) {
                 continue;
             }
-            let view = match image.as_ref() {
-                MapImage::Decoded(i) => self.texture(i),
-                MapImage::Compressed { .. } => {
-                    let pipes = self.map.as_mut().expect("made above");
-                    match pipes.compressed.get(&key) {
-                        Some((_, v)) => v.clone(),
-                        None => {
-                            let v =
-                                upload_blocks(&self.device, &self.queue, image).unwrap_or_else(|| self.white.clone());
-                            // The image is kept with its texture, so its
-                            // address is not handed out again.
-                            pipes.compressed.insert(key, (image.clone(), v.clone()));
-                            v
+            let entry = old.remove(&key).unwrap_or_else(|| {
+                let view = match image.as_ref() {
+                    MapImage::Decoded(i) => {
+                        let max = self.device.limits().max_texture_dimension_2d;
+                        if i.width == 0 || i.height == 0 || i.width > max || i.height > max {
+                            self.white.clone()
+                        } else {
+                            Renderer::upload(&self.device, &self.queue, i.width, i.height, &i.rgba, i.srgb)
                         }
                     }
-                }
-            };
-            views.insert(key, view);
+                    MapImage::Compressed { .. } => {
+                        upload_blocks(&self.device, &self.queue, image).unwrap_or_else(|| self.white.clone())
+                    }
+                };
+                (image.clone(), view)
+            });
+            views.insert(key, entry.1.clone());
+            pipes.images.insert(key, entry);
         }
-        let pipes = self.map.as_mut().expect("made above");
+        drop(old);
         let sky_cube = match &l.sky {
             Some(crate::sky::Sky::Cubemap { cube: Some(cube), .. }) => {
                 Some(pipes.sky.cube(&self.device, &self.queue, cube))
@@ -1963,6 +1968,20 @@ impl Renderer {
                 None => pipes.black_cube.clone(),
             })
             .collect();
+        // The cubemaps of the last map that this one does not use go.
+        let kept: Vec<usize> = match &l.sky {
+            Some(crate::sky::Sky::Cubemap { cube: Some(cube), .. }) => Some(cube),
+            _ => None,
+        }
+        .into_iter()
+        .chain(
+            std::iter::once(&l.reflection)
+                .chain(map.probes.iter().map(|p| &p.reflection))
+                .filter_map(|r| r.cube.as_ref()),
+        )
+        .map(|c| Arc::as_ptr(c) as usize)
+        .collect();
+        pipes.sky.keep_cubes(&kept);
         let mut gpu = MapGpu::new(&self.device, pipes, map, &views, &self.white, sky_cube.as_ref(), &cubes);
         gpu.placement = placement;
         self.map_scene = Some(gpu);

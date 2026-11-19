@@ -53,8 +53,22 @@ pub fn build(
     compressed: bool,
     vanish: Option<&str>,
 ) -> Result<(MapScene, Skipped)> {
+    build_times(game, bundle, &[time], compressed, vanish)?
+        .pop()
+        .context("no time of day was built")
+}
+
+/// The map at each of `times`, as `build` makes it, with the bundle opened
+/// once: what the times share (meshes, materials, textures, cubemaps) is
+/// read once and is the same `Arc` in each scene.
+pub fn build_times(
+    game: &Game,
+    bundle: &str,
+    times: &[TimeOfDay],
+    compressed: bool,
+    vanish: Option<&str>,
+) -> Result<Vec<(MapScene, Skipped)>> {
     let rows = vanish.map(crate::vanish::parse).unwrap_or_default();
-    let mut volumes: Vec<rk_render::map::VanishVolume> = Vec::new();
     let loaded = open(game, bundle)?;
     let mut b = Builder {
         game,
@@ -67,6 +81,19 @@ pub fn build(
         compressed,
         dome: None,
     };
+    let mut out = Vec::new();
+    for &time in times {
+        b.dome = None;
+        let scene = build_time(&mut b, &rows, time)?;
+        out.push((scene, std::mem::take(&mut b.skipped)));
+    }
+    Ok(out)
+}
+
+/// The map at one time of day, with the caches of `b`.
+fn build_time(b: &mut Builder, rows: &[crate::vanish::Row], time: TimeOfDay) -> Result<MapScene> {
+    let loaded = b.loaded;
+    let mut volumes: Vec<rk_render::map::VanishVolume> = Vec::new();
     let mut objects = Vec::new();
     let mut sun: Option<SunLightInfo> = None;
     let mut lights: Vec<(Light, Mat4)> = Vec::new();
@@ -103,7 +130,7 @@ pub fn build(
         // The walls that hide: each row's volume, and the game objects it
         // hides with all under them.
         let mut hidden_by: HashMap<i64, Vec<usize>> = HashMap::new();
-        for row in &rows {
+        for row in rows {
             // The camera only reacts to colliders on the Map layer
             // (`CameraControl.mapLayer`); maps keep same-named twins on
             // other layers, which never trigger.
@@ -113,7 +140,7 @@ pub fn build(
                 .into_iter()
                 .filter(|id| tree.layer(*id) == MAP_LAYER)
             {
-                if let Some(volume) = volume_of(sf, &tree, collider, &mut b) {
+                if let Some(volume) = volume_of(sf, &tree, collider, b) {
                     volumes.push(volume);
                     indices.push(volumes.len() - 1);
                 }
@@ -264,17 +291,14 @@ pub fn build(
     for (o, bounds) in objects.iter_mut().zip(&probe_bounds) {
         o.probe = bounds.and_then(|bounds| pick_probe(bounds, &probes));
     }
-    Ok((
-        MapScene {
-            objects,
-            lightmaps,
-            light,
-            probes,
-            camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
-            vanish: volumes,
-        },
-        b.skipped,
-    ))
+    Ok(MapScene {
+        objects,
+        lightmaps,
+        light,
+        probes,
+        camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
+        vanish: volumes,
+    })
 }
 
 /// The sun, ambient light and fog of a time of day.

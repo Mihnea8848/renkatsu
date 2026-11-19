@@ -452,6 +452,11 @@ impl SkyPass {
         view
     }
 
+    /// Lets go of the cubemaps that are not among `kept`, by address.
+    pub(crate) fn keep_cubes(&mut self, kept: &[usize]) {
+        self.cubes.retain(|key, _| kept.contains(key));
+    }
+
     /// The bind group of one sky. `buf` holds its `SkyUniform`, written
     /// each frame; `faces` are the views of the six sided sky's textures,
     /// `cube` the cubemap's.

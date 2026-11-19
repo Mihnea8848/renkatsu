@@ -137,6 +137,8 @@ pub enum Command {
     AddMap(PathBuf),
     /// Open the Maps library to import a map into the project alone.
     MapLibrary,
+    /// Pick a map file and copy it into the project.
+    ImportMapFile,
     /// Give the selected character an animation, or take its animation
     /// off.
     Animate(Option<crate::scene::Animation>),
@@ -1042,6 +1044,7 @@ impl State {
             | Command::ImportFromPackage
             | Command::ImportAnimations
             | Command::ImportAnimationFile
+            | Command::ImportMapFile
             | Command::Packages
             | Command::ProjectSelector
             | Command::SetIcon
@@ -1087,6 +1090,7 @@ impl State {
             Command::ImportFromPackage => self.packages.browse(rk_core::Config::load().ok().as_ref()),
             Command::ImportAnimations => self.importer = Some(crate::anim_import::Importer::new(None)),
             Command::ImportAnimationFile => self.pick(Pick::Animation, None, ctx),
+            Command::ImportMapFile => self.pick(Pick::Map, None, ctx),
             Command::Packages => self.packages.open = true,
             other => self.run(other),
         }
@@ -1195,6 +1199,7 @@ impl State {
             }),
             Pick::Project => self.open_or_tell(&path),
             Pick::Animation => self.import_animation_file(&path),
+            Pick::Map => self.import_map_file(&path),
             Pick::Package => self.packages.picked = Some(path),
             Pick::Icon => {
                 let set = match self.selector.as_mut().and_then(|s| s.icon_for.take()) {
@@ -1770,6 +1775,14 @@ impl State {
 
     /// Imports from a file the user picked: an animation file is copied
     /// in, a zipmod opens the import window on the animations it lists.
+    /// Copies a picked map file into the project.
+    pub fn import_map_file(&mut self, path: &Path) {
+        match crate::maps::copy_in(&self.project, path) {
+            Ok((_, name)) => self.log.info(format!("Imported the map {name}")),
+            Err(e) => self.log.error(format!("The map could not be imported: {e:#}")),
+        }
+    }
+
     pub fn import_animation_file(&mut self, path: &Path) {
         let extension = path
             .extension()
