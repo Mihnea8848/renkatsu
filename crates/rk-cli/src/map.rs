@@ -416,7 +416,7 @@ pub fn render(
         .objects
         .iter()
         .flat_map(|o| &o.materials)
-        .filter_map(|m| m.albedo.as_ref())
+        .flat_map(|m| m.images())
         .collect();
     textures.sort_by_key(|t| std::sync::Arc::as_ptr(t) as usize);
     textures.dedup_by_key(|t| std::sync::Arc::as_ptr(t) as usize);
@@ -451,6 +451,32 @@ pub fn render(
             compiled(look)
         ),
         None => println!("  sky: none, cleared with a colour"),
+    }
+    let cube = |r: &rk_render::map::Reflection| match &r.cube {
+        Some(c) => format!(
+            "{} ({} px, {} levels) x {:.2}",
+            c.name,
+            c.size,
+            c.whole_levels(),
+            r.hdr[0]
+        ),
+        None => "black".to_owned(),
+    };
+    println!(
+        "  reflections: {} of {} objects in a probe; elsewhere {}",
+        scene.objects.iter().filter(|o| o.probe.is_some()).count(),
+        scene.objects.len(),
+        cube(&scene.light.reflection)
+    );
+    for p in &scene.probes {
+        println!(
+            "    probe at {:.1?}, box {:.1?}, importance {}{}: {}",
+            p.centre,
+            p.half.map(|h| h * 2.0),
+            p.importance,
+            if p.box_projection { ", projected on its box" } else { "" },
+            cube(&p.reflection)
+        );
     }
     let mut skipped: Vec<_> = skipped.into_iter().collect();
     skipped.sort_by_key(|(_, n)| std::cmp::Reverse(*n));

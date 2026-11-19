@@ -163,6 +163,8 @@ pub struct RenderSettings {
     /// The cubemap Unity baked from the sky.
     pub sky_reflection: PPtr,
     pub reflection_intensity: f32,
+    /// What Unity hands to shaders as `unity_IndirectSpecColor`, as stored.
+    pub indirect_specular: [f32; 4],
 }
 
 impl RenderSettings {
@@ -199,6 +201,7 @@ impl RenderSettings {
             custom_reflection: o.pptr("m_CustomReflection").unwrap_or_default(),
             sky_reflection: o.pptr("m_GeneratedSkyboxReflection").unwrap_or_default(),
             reflection_intensity: o.f32("m_ReflectionIntensity").unwrap_or(1.0),
+            indirect_specular: color(o.get("m_IndirectSpecularColor")).unwrap_or([0.0, 0.0, 0.0, 1.0]),
         }
     }
 }
@@ -244,6 +247,7 @@ impl LightmapSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReflectionProbe {
     pub game_object: PPtr,
+    pub enabled: bool,
     /// 0 baked, 1 real-time, 2 custom.
     pub mode: i32,
     pub size: [f32; 3],
@@ -259,6 +263,7 @@ impl ReflectionProbe {
     pub fn read(o: &UObject) -> ReflectionProbe {
         ReflectionProbe {
             game_object: o.pptr("m_GameObject").unwrap_or_default(),
+            enabled: o.i64("m_Enabled").unwrap_or(1) != 0,
             mode: o.i64("m_Mode").unwrap_or(0) as i32,
             size: vec3(o.get("m_BoxSize")).unwrap_or([10.0; 3]),
             offset: vec3(o.get("m_BoxOffset")).unwrap_or([0.0; 3]),

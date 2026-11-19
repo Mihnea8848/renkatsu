@@ -65,14 +65,45 @@ pub struct SkyTexture {
     pub hdr: [f32; 4],
 }
 
-/// A cubemap's top level: six square RGBA8 faces in Direct3D's order (+X,
-/// -X, +Y, -Y, +Z, -Z), rows as Unity stores them.
+/// A cubemap: six square faces in Direct3D's order (+X, -X, +Y, -Y, +Z,
+/// -Z), rows as Unity stores them. RGBA8, or BC6H blocks (unsigned, the
+/// game's high range reflections) kept as stored for a GPU that draws them.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MapCube {
     pub name: String,
     pub size: u32,
+    /// The top level of each face.
     pub faces: [Vec<u8>; 6],
     pub srgb: bool,
+    /// The faces hold BC6H blocks, not RGBA8.
+    pub bc6h: bool,
+    /// The smaller levels, each half the one before: what a reflection
+    /// reads for rough surfaces. Empty for a cubemap kept at its top level.
+    pub mips: Vec<[Vec<u8>; 6]>,
+}
+
+impl MapCube {
+    /// The bytes one face takes at `level`.
+    pub fn face_bytes(&self, level: u32) -> usize {
+        let side = (self.size >> level).max(1) as usize;
+        if self.bc6h {
+            side.div_ceil(4) * side.div_ceil(4) * 16
+        } else {
+            side * side * 4
+        }
+    }
+
+    /// The levels that are whole, the top one first: every face of each
+    /// holds the bytes its size asks for.
+    pub fn whole_levels(&self) -> u32 {
+        let levels = std::iter::once(&self.faces).chain(&self.mips);
+        levels
+            .enumerate()
+            .take_while(|(i, faces)| {
+                (self.size >> i) > 0 && faces.iter().all(|f| f.len() == self.face_bytes(*i as u32))
+            })
+            .count() as u32
+    }
 }
 
 /// The faces of `Skybox/6 Sided` in the order they are kept here.
@@ -210,7 +241,8 @@ pub(crate) struct SkyPass {
     cubes: HashMap<usize, (Arc<MapCube>, wgpu::TextureView)>,
 }
 
-fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, cube: &MapCube) -> wgpu::TextureView {
+pub(crate) fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, cube: &MapCube) -> wgpu::TextureView {
+    let levels = cube.whole_levels().max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(&cube.name),
         size: wgpu::Extent3d {
@@ -218,41 +250,53 @@ fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, cube: &MapCube) -> wg
             height: cube.size,
             depth_or_array_layers: 6,
         },
-        mip_level_count: 1,
+        mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: if cube.srgb {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
+        format: match (cube.bc6h, cube.srgb) {
+            (true, _) => wgpu::TextureFormat::Bc6hRgbUfloat,
+            (false, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (false, false) => wgpu::TextureFormat::Rgba8Unorm,
         },
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (layer, face) in cube.faces.iter().enumerate() {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer as u32,
+    let all = std::iter::once(&cube.faces).chain(&cube.mips);
+    for (level, faces) in all.take(levels as usize).enumerate() {
+        let side = (cube.size >> level).max(1);
+        // Blocks are four texels wide; a level smaller than a block still
+        // takes a whole one.
+        let (row, rows, extent) = if cube.bc6h {
+            let blocks = side.div_ceil(4);
+            (blocks * 16, blocks, blocks * 4)
+        } else {
+            (side * 4, side, side)
+        };
+        for (layer, face) in faces.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
                 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            face,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(cube.size * 4),
-                rows_per_image: Some(cube.size),
-            },
-            wgpu::Extent3d {
-                width: cube.size,
-                height: cube.size,
-                depth_or_array_layers: 1,
-            },
-        );
+                face,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(rows),
+                },
+                wgpu::Extent3d {
+                    width: extent,
+                    height: extent,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::Cube),
@@ -361,6 +405,8 @@ impl SkyPass {
                 size: 1,
                 faces: std::array::from_fn(|_| vec![128; 4]),
                 srgb: false,
+                bc6h: false,
+                mips: Vec::new(),
             },
         );
         SkyPass {
@@ -383,10 +429,8 @@ impl SkyPass {
             return view.clone();
         }
         let max = device.limits().max_texture_dimension_2d;
-        let whole = cube
-            .faces
-            .iter()
-            .all(|f| f.len() == (cube.size * cube.size * 4) as usize);
+        let blocks = device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        let whole = cube.whole_levels() > 0 && (blocks || !cube.bc6h);
         let view = if cube.size == 0 || cube.size > max || !whole {
             self.grey.clone()
         } else {
@@ -474,6 +518,39 @@ mod tests {
         )
         .validate(&module)
         .expect("validates");
+    }
+
+    #[test]
+    fn a_cubemap_counts_its_whole_levels() {
+        let level = |side: usize| std::array::from_fn(|_| vec![0u8; side * side * 4]);
+        let mut cube = MapCube {
+            name: "c".into(),
+            size: 4,
+            faces: level(4),
+            srgb: false,
+            bc6h: false,
+            mips: vec![level(2), level(1)],
+        };
+        assert_eq!(cube.whole_levels(), 3);
+        // A level cut short ends the chain, and so does one too many.
+        cube.mips[0][3].pop();
+        assert_eq!(cube.whole_levels(), 1);
+        cube.mips = vec![level(2), level(1), level(1)];
+        assert_eq!(cube.whole_levels(), 3);
+        // Blocks of four by four texels, sixteen bytes each.
+        let blocks = MapCube {
+            name: "b".into(),
+            size: 8,
+            faces: std::array::from_fn(|_| vec![0u8; 64]),
+            srgb: false,
+            bc6h: true,
+            mips: vec![
+                std::array::from_fn(|_| vec![0u8; 16]),
+                std::array::from_fn(|_| vec![0u8; 16]),
+            ],
+        };
+        assert_eq!(blocks.face_bytes(0), 64);
+        assert_eq!(blocks.whole_levels(), 3);
     }
 
     #[test]
