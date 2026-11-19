@@ -384,7 +384,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::search(ui, k, &mut st.content_search, "Search this folder", 240.0);
+            widgets::search(ui, k, &mut st.content_search, "Search", 240.0);
         });
     });
     hair_h(ui.painter(), bar.left(), bar.right(), bar.bottom() - 1.0, t.line);

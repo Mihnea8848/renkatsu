@@ -365,7 +365,7 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
             egui::Popup::menu(&resp).show(|ui| add_items(ui, k, st));
         }
         let w = ui.available_width() - k.field() - 4.0;
-        widgets::search(ui, k, &mut st.scene_search, "Search the scene", w);
+        widgets::search(ui, k, &mut st.scene_search, "Search", w);
         let resp = icon_button(ui, k, icon::FOLDER_SIMPLE_PLUS, false).on_hover_text("Add a folder");
         if resp.clicked() {
             st.run(Command::Add(Kind::Folder));
@@ -968,7 +968,7 @@ fn console(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::search(ui, k, &mut st.console_search, "Search the log", 240.0);
+            widgets::search(ui, k, &mut st.console_search, "Search", 240.0);
         });
     });
     let body = ui.available_rect_before_wrap();

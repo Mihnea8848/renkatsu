@@ -500,7 +500,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                 Vec2::new(260.0, k.field()),
             );
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(search));
-            widgets::search(&mut child, k, &mut shelf.search, "Search maps", 260.0);
+            widgets::search(&mut child, k, &mut shelf.search, "Search", 260.0);
             let tree = Rect::from_min_max(body.min, Pos2::new(body.left() + sources::COLUMN, body.bottom()));
             ui.painter().rect_filled(tree, 0.0, t.well);
             hair_v(ui.painter(), tree.right(), tree.top(), tree.bottom(), t.line);
