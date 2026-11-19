@@ -558,3 +558,55 @@ fn shader_properties_come_with_their_defaults() {
     // A shader without the list declares nothing.
     assert!(shader_props(&root(vec![])).is_empty());
 }
+
+#[test]
+fn a_shader_gives_its_direct3d_11_programs() {
+    let ints = |v: &[i64]| UValue::Array(v.iter().map(|i| UValue::Int(*i)).collect());
+    // Two LZ4 blocks of literals alone: Direct3D 9's, then Direct3D 11's.
+    let mut blob = vec![0x30, b'd', b'x', b'9'];
+    blob.extend([0x80]);
+    blob.extend(b"DXBC1234");
+    let shader = root(vec![
+        ("platforms", ints(&[1, 4])),
+        ("offsets", ints(&[0, 4])),
+        ("compressedLengths", ints(&[4, 9])),
+        ("decompressedLengths", ints(&[3, 8])),
+        ("compressedBlob", UValue::Bytes(blob.clone())),
+    ]);
+    assert_eq!(
+        rk_unityfs::objects::shader_d3d11_programs(&shader).as_deref(),
+        Some(&b"DXBC1234"[..])
+    );
+    // Without a Direct3D 11 platform, or with lengths past the blob.
+    let other = root(vec![
+        ("platforms", ints(&[1])),
+        ("offsets", ints(&[0])),
+        ("compressedLengths", ints(&[4])),
+        ("decompressedLengths", ints(&[3])),
+        ("compressedBlob", UValue::Bytes(blob.clone())),
+    ]);
+    assert_eq!(rk_unityfs::objects::shader_d3d11_programs(&other), None);
+    let short = root(vec![
+        ("platforms", ints(&[4])),
+        ("offsets", ints(&[10])),
+        ("compressedLengths", ints(&[9])),
+        ("decompressedLengths", ints(&[8])),
+        ("compressedBlob", UValue::Bytes(blob)),
+    ]);
+    assert_eq!(rk_unityfs::objects::shader_d3d11_programs(&short), None);
+}
+
+#[test]
+fn a_texture_reads_its_usage() {
+    let plain = texture(4, 1, 1);
+    assert_eq!(plain.lightmap_format, 0);
+    let rgbm = Texture2D::read(&root(vec![
+        ("m_Name", UValue::Str("t".into())),
+        ("m_Width", UValue::Int(1)),
+        ("m_Height", UValue::Int(1)),
+        ("m_TextureFormat", UValue::Int(12)),
+        ("m_LightmapFormat", UValue::Int(2)),
+    ]))
+    .unwrap();
+    assert_eq!(rgbm.lightmap_format, 2);
+}

@@ -260,11 +260,19 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// Switches of `render`.
+pub struct RenderOptions<'a> {
+    pub fog: bool,
+    pub sky: bool,
+    pub capture: Option<&'a std::path::Path>,
+}
+
 /// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
 /// height looking across the map, or `above`, from a high corner with
 /// everything above head height cut away.
 /// With `fog`, the map's own fog is drawn; CharaStudio leaves it off unless
-/// its fog switch is on. With `capture`, the camera is the view named
+/// its fog switch is on. The scene's sky is drawn behind the map, unless a
+/// capture's camera cleared with a colour. With `capture`, the camera is the view named
 /// `view` of a CharaStudio capture's JSON, at the capture's picture size.
 pub fn render(
     which: &str,
@@ -272,9 +280,9 @@ pub fn render(
     view: &str,
     out: &std::path::Path,
     size: (u32, u32),
-    fog: bool,
-    capture: Option<&std::path::Path>,
+    options: RenderOptions<'_>,
 ) -> Result<()> {
+    let RenderOptions { fog, sky, capture } = options;
     use glam::Vec3;
     let game = Game::open_user(&[])?;
     let maps = list::read(&game, true);
@@ -290,9 +298,19 @@ pub fn render(
     };
     let mut renderer = rk_render::Renderer::new()?;
     let started = std::time::Instant::now();
-    let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc())?;
+    // The walls that hide follow CharaStudio's camera through its physics
+    // triggers. Captures move their cameras without them, and no wall hides
+    // in their pictures, so a capture's view is drawn without the table.
+    let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file).filter(|_| capture.is_none());
+    let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
     let built = started.elapsed();
     let mut scene = scene;
+    // CharaStudio's camera draws no Unity skybox: it clears to black and
+    // shows the map's own sky dome. The scene's skybox is drawn when asked
+    // for.
+    if sky {
+        scene.light.sky = scene.light.unity_sky.clone();
+    }
     if !fog {
         scene.light.fog = None;
     }
@@ -335,6 +353,16 @@ pub fn render(
             let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
             if let Some([w, h]) = json["size"].as_array().map(|a| [a[0].as_u64(), a[1].as_u64()]) {
                 size = (w.unwrap_or(900) as u32, h.unwrap_or(1400) as u32);
+            }
+            // A camera that clears with a colour draws no sky: CharaStudio's
+            // does, with the background colour of its settings.
+            if let Some(mask) = json["camera"]["culling_mask"].as_u64() {
+                scene.camera_mask = mask as u32;
+            }
+            if json["camera"]["clear"] == "Color" {
+                let c = &json["camera"]["background"];
+                let channel = |i: usize| c[i].as_f64().unwrap_or(0.0) as f32;
+                scene.light.background = [channel(0), channel(1), channel(2)].map(rk_map::build::to_linear);
             }
             let views = json["views"].as_array().cloned().unwrap_or_default();
             let v = views
@@ -407,6 +435,23 @@ pub fn render(
         (started.elapsed() - built).as_secs_f32()
     );
     println!("  {} objects outside the view", renderer.map_culled());
+    let compiled = |look: &rk_render::sky::SkyLook| {
+        if look.exponent {
+            ""
+        } else {
+            ", compiled for gamma colour"
+        }
+    };
+    match &scene.light.sky {
+        Some(rk_render::sky::Sky::Procedural(p)) => println!("  sky: Skybox/Procedural, sun disk {:?}", p.sun_disk),
+        Some(rk_render::sky::Sky::SixSided { look, .. }) => println!("  sky: Skybox/6 Sided{}", compiled(look)),
+        Some(rk_render::sky::Sky::Cubemap { cube, look, .. }) => println!(
+            "  sky: Skybox/Cubemap{}{}",
+            if cube.is_some() { "" } else { ", no cubemap" },
+            compiled(look)
+        ),
+        None => println!("  sky: none, cleared with a colour"),
+    }
     let mut skipped: Vec<_> = skipped.into_iter().collect();
     skipped.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (why, n) in skipped {

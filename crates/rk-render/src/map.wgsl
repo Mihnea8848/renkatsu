@@ -104,6 +104,7 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) uv2: vec2<f32>,
+    @location(4) color: vec4<f32>,
 }
 
 struct VsOut {
@@ -112,6 +113,7 @@ struct VsOut {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) uv2: vec2<f32>,
+    @location(4) color: vec4<f32>,
 }
 
 @vertex
@@ -122,6 +124,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.normal = v.normal;
     out.uv = v.uv;
     out.uv2 = v.uv2;
+    out.color = v.color;
     return out;
 }
 
@@ -137,7 +140,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // Sampled before anything is discarded, where control flow is uniform.
     let baked_rgbm = textureSample(lightmap, lightmap_sampler, in.uv2);
     let baked_dir = textureSample(lightmap_dir, lightmap_sampler, in.uv2);
-    let base = texel * m.color;
+    // Unity's legacy particle shaders (params.z 2), which paint foliage:
+    // 2 * vertex colour * tint * texture, alpha too, as their plain
+    // variant computes it.
+    let particle = m.params.z > 1.5;
+    let base = select(texel * m.color, 2.0 * in.color * m.color * texel, particle);
     if m.params.x >= 0.0 && base.a < m.params.x {
         discard;
     }

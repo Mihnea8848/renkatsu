@@ -508,6 +508,28 @@ pub fn shader_name(o: &UObject) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The compiled Direct3D 11 programs of a Shader object, decompressed: the
+/// DXBC programs one after the other, each followed by its bindings. A
+/// bundle carries its own copy of every shader it uses, compiled with the
+/// settings of the project that built it.
+pub fn shader_d3d11_programs(o: &UObject) -> Option<Vec<u8>> {
+    /// Unity's `ShaderCompilerPlatform` number of Direct3D 11.
+    const D3D11: i64 = 4;
+    let ints = |name: &str| -> Vec<i64> {
+        o.array(name)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(UValue::as_i64)
+            .collect()
+    };
+    let at = ints("platforms").iter().position(|p| *p == D3D11)?;
+    let offset = *ints("offsets").get(at)? as usize;
+    let packed = *ints("compressedLengths").get(at)? as usize;
+    let size = *ints("decompressedLengths").get(at)? as usize;
+    let blob = o.bytes("compressedBlob")?.get(offset..offset.checked_add(packed)?)?;
+    lz4_flex::block::decompress(blob, size).ok()
+}
+
 /// Render state of one shader pass, as far as Renkatsu uses it. Values are
 /// Unity's enum numbers.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -694,6 +716,9 @@ pub struct Texture2D {
     pub filter_mode: i32,
     /// 1 for colour (sRGB) textures, 0 for data textures.
     pub color_space: i32,
+    /// Unity's usage of the texture (`m_LightmapFormat`): 0 for a plain
+    /// one, otherwise an encoding such as RGBM.
+    pub lightmap_format: i32,
     /// Pixel data when embedded in the object.
     pub data: Vec<u8>,
     /// Location of the pixel data when it lives in a `.resS` node.
@@ -736,6 +761,7 @@ impl Texture2D {
                 .unwrap_or(0) as i32,
             filter_mode: settings.and_then(|s| s.i64("m_FilterMode")).unwrap_or(1) as i32,
             color_space: o.i64("m_ColorSpace").unwrap_or(0) as i32,
+            lightmap_format: o.i64("m_LightmapFormat").unwrap_or(0) as i32,
             data: o.bytes("image data").unwrap_or_default().to_vec(),
             stream,
         })

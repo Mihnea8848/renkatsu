@@ -359,6 +359,10 @@ enum MapCmd {
         /// Draw the map's own fog, which CharaStudio leaves off.
         #[arg(long)]
         fog: bool,
+        /// Draw the scene's Unity skybox, which CharaStudio's camera leaves
+        /// out; the map's own sky dome is drawn either way.
+        #[arg(long)]
+        sky: bool,
         /// A CharaStudio capture's JSON: its view named by --view is the
         /// camera, at the capture's size.
         #[arg(long)]
@@ -556,9 +560,21 @@ fn main() -> Result<()> {
                     width,
                     height,
                     fog,
+                    sky,
                     capture,
                 },
-        } => map::render(&map, &time, &view, &out, (width, height), fog, capture.as_deref()),
+        } => map::render(
+            &map,
+            &time,
+            &view,
+            &out,
+            (width, height),
+            map::RenderOptions {
+                fog,
+                sky,
+                capture: capture.as_deref(),
+            },
+        ),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),

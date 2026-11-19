@@ -6,11 +6,13 @@
 //! time of day.
 
 use crate::scene::open;
+use crate::sky::{self, Compile, SkyShader};
 use crate::unity::{self, Light, LightmapSettings, RenderSettings, SunLightInfo, TimeOfDay};
 use anyhow::{Context, Result};
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use rk_chara::scene::Image;
 use rk_render::map::{Blend, Fog, Lightmap, MapImage, MapLight, MapMaterial, MapMesh, MapObject, MapScene};
+use rk_render::sky::{Sky, SkyTexture, HDR_PLAIN};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
 use rk_unityfs::{class, PPtr};
 use rk_vfs::assets::{AssetFile, LoadedBundle, ObjRef};
@@ -22,7 +24,7 @@ use std::sync::Arc;
 pub type Skipped = HashMap<String, usize>;
 
 /// Unity's gamma to linear conversion of one channel.
-fn to_linear(c: f32) -> f32 {
+pub fn to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -36,8 +38,17 @@ fn linear3(c: [f32; 4]) -> [f32; 3] {
 
 /// A map's objects and light, for the time of day `time`. With
 /// `compressed`, the game's BC textures are kept as stored, for a GPU that
-/// draws them.
-pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Result<(MapScene, Skipped)> {
+/// draws them. `vanish` is the text of the map's table of walls that hide
+/// (see `vanish::table`).
+pub fn build(
+    game: &Game,
+    bundle: &str,
+    time: TimeOfDay,
+    compressed: bool,
+    vanish: Option<&str>,
+) -> Result<(MapScene, Skipped)> {
+    let rows = vanish.map(crate::vanish::parse).unwrap_or_default();
+    let mut volumes: Vec<rk_render::map::VanishVolume> = Vec::new();
     let loaded = open(game, bundle)?;
     let mut b = Builder {
         game,
@@ -47,11 +58,13 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
         images: HashMap::new(),
         skipped: Skipped::new(),
         compressed,
+        dome: None,
     };
     let mut objects = Vec::new();
     let mut sun: Option<SunLightInfo> = None;
     let mut lights: Vec<(Light, Mat4)> = Vec::new();
     let mut settings: Option<RenderSettings> = None;
+    let mut sky: Option<Sky> = None;
     let mut lightmaps: Vec<Lightmap> = Vec::new();
     for file in &loaded.files {
         let sf = &file.sf;
@@ -75,6 +88,35 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             transform_of: &transform_of,
             objects: &objects_by_id,
         };
+        // The walls that hide: each row's volume, and the game objects it
+        // hides with all under them.
+        let mut hidden_by: HashMap<i64, Vec<usize>> = HashMap::new();
+        for row in &rows {
+            // The camera only reacts to colliders on the Map layer
+            // (`CameraControl.mapLayer`); maps keep same-named twins on
+            // other layers, which never trigger.
+            let mut indices = Vec::new();
+            for collider in tree
+                .find_all(&row.collider)
+                .into_iter()
+                .filter(|id| tree.layer(*id) == MAP_LAYER)
+            {
+                if let Some(volume) = volume_of(sf, &tree, collider, &mut b) {
+                    volumes.push(volume);
+                    indices.push(volumes.len() - 1);
+                }
+            }
+            if indices.is_empty() {
+                continue;
+            }
+            for name in &row.hides {
+                if let Some(go) = tree.find(name) {
+                    for id in tree.with_descendants(go) {
+                        hidden_by.entry(id).or_default().extend(&indices);
+                    }
+                }
+            }
+        }
         // Which renderer reads which lightmap: LightmapPrefab puts it back
         // on them when the scene starts, over what the renderers say.
         let mut assigned: HashMap<i64, (i32, [f32; 4])> = HashMap::new();
@@ -108,10 +150,12 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
                 }
             }
         }
-        // Objects shown only at another time of day stay hidden.
+        // Objects shown only at another time of day stay hidden, and the
+        // current time's are switched on: SunLightInfo sets them active.
         let mut hidden: HashSet<i64> = HashSet::new();
+        let mut now: HashSet<i64> = HashSet::new();
         if let Some(sun) = &sun {
-            let now: HashSet<i64> = sun
+            now = sun
                 .times
                 .iter()
                 .filter(|t| t.time == Some(time))
@@ -129,14 +173,16 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             }
         }
         if let Some(obj) = sf.objects_of(unity::class::RENDER_SETTINGS).next() {
-            settings = Some(RenderSettings::read(&sf.read(obj)?));
+            let read = RenderSettings::read(&sf.read(obj)?);
+            sky = b.sky(file, read.skybox);
+            settings = Some(read);
         }
         for obj in sf.objects_of(class::MESH_RENDERER) {
             let Ok(renderer) = sf.read(obj).and_then(|o| Renderer::read(&o)) else {
                 continue;
             };
             let go = renderer.game_object.path_id;
-            if !renderer.enabled || !tree.shown(go, &hidden) {
+            if !renderer.enabled || !tree.shown(go, &hidden, &now) {
                 continue;
             }
             let lightmap = match assigned.get(&obj.path_id) {
@@ -145,7 +191,10 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
                     .then_some((renderer.lightmap_index as usize, renderer.lightmap_scale_offset)),
             };
             match b.object(file, &tree, &renderer, lightmap) {
-                Ok(Some(o)) => objects.push(o),
+                Ok(Some(mut o)) => {
+                    o.vanish = hidden_by.get(&go).cloned().unwrap_or_default();
+                    objects.push(o)
+                }
                 Ok(None) => {}
                 Err(e) => *b.skipped.entry(format!("{e:#}")).or_default() += 1,
             }
@@ -155,12 +204,18 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             *b.skipped.entry("skinned renderer".to_owned()).or_default() += skinned;
         }
     }
-    let light = map_light(sun.as_ref(), time, &lights, settings.as_ref());
+    let mut light = map_light(sun.as_ref(), time, &lights, settings.as_ref());
+    // What CharaStudio shows behind the map is the map's own sky dome; the
+    // scene's Unity skybox is kept for drawing on request.
+    light.unity_sky = sky;
+    light.sky = b.dome.take();
     Ok((
         MapScene {
             objects,
             lightmaps,
             light,
+            camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
+            vanish: volumes,
         },
         b.skipped,
     ))
@@ -238,8 +293,11 @@ fn map_light(
         sun_color,
         sun_mask: main.map_or(u32::MAX, |(l, _)| l.culling_mask),
         ambient_sh,
-        background: fog.map_or([0.35, 0.5, 0.75], |f| f.color),
+        // CharaStudio's camera clears to its background colour, black.
+        background: [0.0; 3],
         fog,
+        sky: None,
+        unity_sky: None,
         cut_above: None,
         // The map's light casts when its shadows are on, as far as
         // Unity's default shadow distance.
@@ -259,7 +317,111 @@ struct Tree<'a> {
     objects: &'a HashMap<i64, GameObject>,
 }
 
+/// The volume of the collider on a game object, in the world: a box
+/// collider as its box, a sphere as its sphere, a mesh collider as the box
+/// around its mesh.
+fn volume_of(
+    sf: &rk_unityfs::SerializedFile,
+    tree: &Tree,
+    game_object: i64,
+    b: &mut Builder,
+) -> Option<rk_render::map::VanishVolume> {
+    let go = tree.objects.get(&game_object)?;
+    let world = tree.world_of(game_object);
+    let file = b.loaded.files.iter().find(|f| std::ptr::eq(&f.sf, sf))?.clone();
+    for c in &go.components {
+        if c.file_id != 0 {
+            continue;
+        }
+        let Some(info) = sf.object(c.path_id) else { continue };
+        let Ok(o) = sf.read(info) else { continue };
+        let v3 = |name: &str| unity::vec3(o.get(name)).map(Vec3::from);
+        match info.class_id {
+            // BoxCollider
+            65 => {
+                return Some(rk_render::map::VanishVolume::Box {
+                    to_local: world.inverse(),
+                    centre: v3("m_Center").unwrap_or(Vec3::ZERO),
+                    half: v3("m_Size").unwrap_or(Vec3::ONE) * 0.5,
+                });
+            }
+            // SphereCollider
+            135 => {
+                let (scale, ..) = world.to_scale_rotation_translation();
+                let centre = world.transform_point3(v3("m_Center").unwrap_or(Vec3::ZERO));
+                let radius = o.f32("m_Radius").unwrap_or(0.5) * scale.abs().max_element();
+                return Some(rk_render::map::VanishVolume::Sphere { centre, radius });
+            }
+            // MeshCollider
+            64 => {
+                let mesh = o.pptr("m_Mesh").and_then(|p| b.mesh(&file, p).ok().flatten())?;
+                let (centre, half) = mesh.local_aabb?;
+                return Some(rk_render::map::VanishVolume::Box {
+                    to_local: world.inverse(),
+                    centre: Vec3::from(centre),
+                    half: Vec3::from(half),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Unity's "Map" layer, which maps' objects and CharaStudio's camera
+/// triggers use.
+const MAP_LAYER: i32 = 11;
+
 impl Tree<'_> {
+    /// Every active game object of this name, in the file's order.
+    fn find_all(&self, name: &str) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.name == name && o.active)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn layer(&self, game_object: i64) -> i32 {
+        self.objects.get(&game_object).map_or(0, |o| o.layer)
+    }
+
+    /// The first game object of this name, in the file's order.
+    fn find(&self, name: &str) -> Option<i64> {
+        let mut ids: Vec<&i64> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.name == name)
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        ids.first().map(|id| **id)
+    }
+
+    /// A game object and every one under it.
+    fn with_descendants(&self, game_object: i64) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut stack = vec![game_object];
+        while let Some(id) = stack.pop() {
+            if out.contains(&id) || out.len() > 100_000 {
+                continue;
+            }
+            out.push(id);
+            let Some(t) = self.transform_of.get(&id).and_then(|t| self.transforms.get(t)) else {
+                continue;
+            };
+            for child in t.children.iter().filter(|c| c.file_id == 0) {
+                if let Some(ct) = self.transforms.get(&child.path_id) {
+                    stack.push(ct.game_object.path_id);
+                }
+            }
+        }
+        out
+    }
+
     /// The world matrix of a game object, through its parents.
     fn world_of(&self, game_object: i64) -> Mat4 {
         let mut m = Mat4::IDENTITY;
@@ -281,11 +443,13 @@ impl Tree<'_> {
 
     /// Whether a game object shows: it and every parent active, and not
     /// one of the objects of another time of day.
-    fn shown(&self, game_object: i64, hidden: &HashSet<i64>) -> bool {
+    /// `on` are switched on whatever they are stored as.
+    fn shown(&self, game_object: i64, hidden: &HashSet<i64>, on: &HashSet<i64>) -> bool {
         let mut go = Some(game_object);
         let mut depth = 0;
         while let Some(id) = go.filter(|_| depth < 256) {
-            if hidden.contains(&id) || self.objects.get(&id).is_some_and(|o| !o.active) {
+            let active = on.contains(&id) || self.objects.get(&id).is_none_or(|o| o.active);
+            if hidden.contains(&id) || !active {
                 return false;
             }
             let father = self
@@ -311,6 +475,9 @@ struct Builder<'a> {
     images: HashMap<(String, i64), Option<Arc<MapImage>>>,
     skipped: Skipped,
     compressed: bool,
+    /// The sky dome's sky, from the first shown renderer with a skybox
+    /// material.
+    dome: Option<Sky>,
 }
 
 impl Builder<'_> {
@@ -350,6 +517,15 @@ impl Builder<'_> {
         if filter.mesh.is_null() {
             return Ok(None);
         }
+        // A dome around the map with a skybox material is the map's sky,
+        // the way vanilla maps paint theirs (one per time of day, often on
+        // Unity's built-in sphere): it is drawn as the sky, not as a mesh.
+        if let Some(m) = renderer.materials.iter().find(|m| self.is_sky_material(file, **m)) {
+            if self.dome.is_none() {
+                self.dome = self.sky(file, *m);
+            }
+            return Ok(None);
+        }
         let Some(mesh) = self.mesh(file, filter.mesh)? else {
             *self.skipped.entry("built-in mesh".to_owned()).or_default() += 1;
             return Ok(None);
@@ -374,7 +550,9 @@ impl Builder<'_> {
             // 0 is off; on, two-sided and shadows only all cast.
             casts_shadows: renderer.cast_shadows != 0,
             receives_shadows: renderer.receive_shadows,
+            shadows_only: renderer.cast_shadows == 3,
             layer: tree.objects.get(&go).map_or(0, |o| o.layer.max(0) as u32),
+            vanish: Vec::new(),
         }))
     }
 
@@ -407,12 +585,27 @@ impl Builder<'_> {
         let shader = self.game.assets.shader_name(&r.file, m.shader).unwrap_or_default();
         let lower = shader.to_ascii_lowercase();
         // Drawn later, by passes of their own.
-        if lower.starts_with("particles/") || lower.starts_with("skybox/") || lower.contains("mirrorreflection") {
+        if lower.starts_with("skybox/") || lower.contains("mirrorreflection") {
             *self.skipped.entry(format!("shader {shader}")).or_default() += 1;
             return None;
         }
-        let keywords = m.keywords.to_ascii_uppercase();
-        let blend = if keywords.contains("_ALPHABLEND_ON")
+        // Keywords outlive a shader change, so only Standard's own count.
+        let standard = lower.starts_with("standard") || lower.starts_with("custom/standard");
+        let keywords = if standard {
+            m.keywords.to_ascii_uppercase()
+        } else {
+            String::new()
+        };
+        // Unity's legacy particle shaders: tinted, unlit, blended by alpha
+        // or added; maps paint leaves and grass with them.
+        let particle = lower.starts_with("particles/");
+        let blend = if particle {
+            if lower.contains("additive") {
+                Blend::Additive
+            } else {
+                Blend::Fade
+            }
+        } else if keywords.contains("_ALPHABLEND_ON")
             || keywords.contains("_ALPHAPREMULTIPLY_ON")
             || lower.contains("transparent") && !lower.contains("cutout")
         {
@@ -425,14 +618,18 @@ impl Builder<'_> {
         let default_queue = match blend {
             Blend::Opaque => 2000,
             Blend::Cutout => 2450,
-            Blend::Fade => 3000,
+            Blend::Fade | Blend::Additive => 3000,
         };
         let main = m.texture("_MainTex");
         let albedo = main.and_then(|t| self.image(&r.file, t.texture));
         let st = main.map_or([1.0, 1.0, 0.0, 0.0], |t| {
             [t.scale[0], t.scale[1], t.offset[0], t.offset[1]]
         });
-        let color = m.color("_Color").unwrap_or([1.0; 4]);
+        let color = if particle {
+            m.color("_TintColor").unwrap_or([0.5; 4])
+        } else {
+            m.color("_Color").unwrap_or([1.0; 4])
+        };
         let [cr, cg, cb] = linear3(color);
         let unlit = lower.starts_with("unlit/");
         // Standard's emission, on with its keyword: the colour, which Unity
@@ -444,7 +641,8 @@ impl Builder<'_> {
         } else {
             ([0.0; 3], None)
         };
-        let two_sided = lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
+        let two_sided =
+            particle || lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
         Some(Arc::new(MapMaterial {
             color: [cr, cg, cb, color[3]],
             albedo,
@@ -454,7 +652,8 @@ impl Builder<'_> {
             blend,
             cutoff: m.float("_Cutoff").unwrap_or(0.5),
             two_sided,
-            unlit,
+            unlit: unlit || particle,
+            particle,
             drawn: true,
             queue: if m.render_queue >= 0 {
                 m.render_queue
@@ -462,6 +661,101 @@ impl Builder<'_> {
                 default_queue
             },
         }))
+    }
+
+    /// Whether a material uses one of Unity's skybox shaders.
+    fn is_sky_material(&self, file: &Arc<AssetFile>, p: PPtr) -> bool {
+        self.deref(file, p)
+            .and_then(|r| {
+                let m = Material::read(&r.read().ok()?).ok()?;
+                self.game.assets.shader_name(&r.file, m.shader)
+            })
+            .is_some_and(|name| SkyShader::named(&name).is_some())
+    }
+
+    /// The scene's sky, when its material uses one of Unity's skybox
+    /// shaders.
+    fn sky(&mut self, file: &Arc<AssetFile>, p: PPtr) -> Option<Sky> {
+        let r = self.deref(file, p)?;
+        let m = Material::read(&r.read().ok()?).ok()?;
+        let name = self.game.assets.shader_name(&r.file, m.shader).unwrap_or_default();
+        let Some(shader) = SkyShader::named(&name) else {
+            *self.skipped.entry(format!("sky shader {name}")).or_default() += 1;
+            return None;
+        };
+        // The bundle's own copy of the shader says how it was compiled; the
+        // game's maps are linear.
+        let compile = self
+            .deref(&r.file, m.shader)
+            .and_then(|s| s.read().ok())
+            .and_then(|o| rk_unityfs::objects::shader_d3d11_programs(&o))
+            .map_or(Compile::Linear, |programs| sky::compile_of(shader, &programs));
+        let note = |skipped: &mut Skipped, what: String| *skipped.entry(what).or_default() += 1;
+        match shader {
+            SkyShader::Procedural => {
+                if compile == Compile::Gamma {
+                    note(
+                        &mut self.skipped,
+                        "sky: Skybox/Procedural compiled for gamma colour, drawn as the linear one".to_owned(),
+                    );
+                }
+                Some(Sky::Procedural(sky::procedural(&m)))
+            }
+            SkyShader::SixSided => {
+                const FACES: [&str; 6] = ["_FrontTex", "_BackTex", "_LeftTex", "_RightTex", "_UpTex", "_DownTex"];
+                let mut faces: [SkyTexture; 6] = Default::default();
+                for (face, property) in faces.iter_mut().zip(FACES) {
+                    let texture = m.texture(property).map(|t| t.texture).unwrap_or_default();
+                    let usage = self.texture_usage(&r.file, texture);
+                    face.hdr = sky::hdr_of(usage).unwrap_or_else(|| {
+                        note(&mut self.skipped, format!("sky texture usage {usage}: read as plain"));
+                        HDR_PLAIN
+                    });
+                    face.image = self.image(&r.file, texture).or_else(|| Some(grey()));
+                }
+                Some(Sky::SixSided {
+                    faces,
+                    look: sky::look(&m, compile),
+                })
+            }
+            SkyShader::Cubemap => {
+                let texture = m.texture("_Tex").map(|t| t.texture).unwrap_or_default();
+                let mut hdr = HDR_PLAIN;
+                let cube = self.deref(&r.file, texture).and_then(|c| {
+                    let made = self
+                        .game
+                        .assets
+                        .texture_raw(&c)
+                        .and_then(|(tex, raw)| Ok((sky::cube(&tex, &raw)?, tex.lightmap_format)));
+                    match made {
+                        Ok((cube, usage)) => {
+                            hdr = sky::hdr_of(usage).unwrap_or_else(|| {
+                                note(&mut self.skipped, format!("sky texture usage {usage}: read as plain"));
+                                HDR_PLAIN
+                            });
+                            Some(Arc::new(cube))
+                        }
+                        Err(e) => {
+                            note(&mut self.skipped, format!("sky cubemap: {e:#}"));
+                            None
+                        }
+                    }
+                });
+                Some(Sky::Cubemap {
+                    cube,
+                    hdr,
+                    look: sky::look(&m, compile),
+                })
+            }
+        }
+    }
+
+    /// A texture's `m_LightmapFormat`, 0 when there is none to read.
+    fn texture_usage(&self, file: &Arc<AssetFile>, p: PPtr) -> i32 {
+        self.deref(file, p)
+            .and_then(|r| r.file.sf.read_until(&r.info, "m_LightmapFormat").ok())
+            .and_then(|o| o.i64("m_LightmapFormat"))
+            .unwrap_or(0) as i32
     }
 
     fn image(&mut self, file: &Arc<AssetFile>, p: PPtr) -> Option<Arc<MapImage>> {
@@ -521,6 +815,19 @@ impl Builder<'_> {
             repeat: tex.wrap_mode == 0,
         })))
     }
+}
+
+/// Unity's built-in "grey" texture, which the skybox shaders name as the
+/// default of their textures: half grey, half transparent.
+fn grey() -> Arc<MapImage> {
+    Arc::new(MapImage::Decoded(Arc::new(Image {
+        name: "default_grey".into(),
+        width: 1,
+        height: 1,
+        rgba: vec![128; 4],
+        srgb: false,
+        repeat: true,
+    })))
 }
 
 /// The MeshFilter among a game object's components.
@@ -583,6 +890,7 @@ fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
     };
     MapMesh {
         uv2,
+        colors: mesh.colors.clone(),
         bounds: MapMesh::compute_bounds(&positions),
         positions,
         normals,
