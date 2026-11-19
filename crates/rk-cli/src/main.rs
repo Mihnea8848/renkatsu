@@ -356,6 +356,13 @@ enum MapCmd {
         width: u32,
         #[arg(long, default_value_t = 720)]
         height: u32,
+        /// Draw the map's own fog, which CharaStudio leaves off.
+        #[arg(long)]
+        fog: bool,
+        /// A CharaStudio capture's JSON: its view named by --view is the
+        /// camera, at the capture's size.
+        #[arg(long)]
+        capture: Option<PathBuf>,
     },
 }
 
@@ -548,8 +555,10 @@ fn main() -> Result<()> {
                     view,
                     width,
                     height,
+                    fog,
+                    capture,
                 },
-        } => map::render(&map, &time, &view, &out, (width, height)),
+        } => map::render(&map, &time, &view, &out, (width, height), fog, capture.as_deref()),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),
