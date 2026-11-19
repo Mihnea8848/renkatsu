@@ -101,6 +101,11 @@ enum Cmd {
         /// changes such as `top=1,bottom=3` or `all=3` made in turn.
         #[arg(long)]
         clothes: Option<String>,
+        /// How much liquid lies on the skin: five digits from 0 to 2 in
+        /// the game's order, the face then the body's front top, front
+        /// bottom, back top and back bottom.
+        #[arg(long)]
+        liquid: Option<String>,
         /// An animation of CharaStudio's list as `group/category/number`.
         #[arg(long)]
         pose: Option<String>,
@@ -518,6 +523,7 @@ fn main() -> Result<()> {
             list,
             no_shadows,
             clothes,
+            liquid,
             pose,
             time,
             studio_look,
@@ -543,6 +549,7 @@ fn main() -> Result<()> {
             list,
             shadows: !no_shadows,
             clothes: clothes.as_deref(),
+            liquid: liquid.as_deref(),
             pose: pose.as_deref(),
             time,
             studio_look,

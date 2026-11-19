@@ -19,6 +19,10 @@ use std::path::Path;
 
 const AXES: [&str; 3] = ["X", "Y", "Z"];
 
+/// The character page that holds what the body shows in an H scene: the
+/// liquid on the skin now, and the rest of the game's H-time state later.
+const H_PAGE: &str = "H State";
+
 /// How far a number moves per point of drag: positions and scales, then
 /// angles in degrees.
 const FINE: f32 = 0.005;
@@ -62,11 +66,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // then who it is. A card whose profile could not be read still has
     // the first two.
     let pages: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Animation", "Profile"],
-        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits"],
-        None if kind == Kind::Character => &["Scene", "Animation"],
+        Some(p) if p.male => &["Scene", "Animation", "Profile", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits", H_PAGE],
+        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
         None => &[],
     };
+    // The page that holds what the body shows in an H scene, which is of
+    // the scene and not of the card, so every character has it.
+    let h_page = pages.iter().position(|&p| p == H_PAGE);
     if pages.is_empty() {
         st.property_tab = 0;
     } else {
@@ -125,6 +132,35 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut show_maps = false;
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        // What the body shows in an H scene. The levels are the game's
+        // `siru`: a page of its own, since none of it is of the card.
+        if Some(page) == h_page {
+            let Content::Character { liquid, .. } = &mut object.content else {
+                return;
+            };
+            if section(ui, k, st, 10, "Liquid") {
+                use rk_chara::siru;
+                let waiting = match built.as_ref() {
+                    None => Some("The character is not built"),
+                    // The game's male body carries no liquid mask.
+                    Some(b) if !b.liquid_mask => Some("This body carries no liquid mask"),
+                    Some(_) => None,
+                };
+                let id = ui.id();
+                for (part, name) in siru::NAMES.iter().enumerate() {
+                    row(ui, k, name, waiting, |ui, rect| {
+                        let options = [("None", true), ("Light", true), ("Heavy", true)];
+                        let chosen = usize::from(liquid[part].min(siru::MAX));
+                        let clicked = choices(ui, k, rect, id.with(("liquid", part)), Some(chosen), &options);
+                        if let Some(i) = clicked {
+                            liquid[part] = i as u8;
+                        }
+                    });
+                }
+                section_end(ui, k);
+            }
+            return;
+        }
         if let (Some(p), 2..) = (shown.as_mut(), page) {
             if let Some(card) = &card_profile {
                 profile_page(ui, k, st, p, card, page - 1);
@@ -774,12 +810,37 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
 /// under the open one.
 fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     let t = &k.t;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 4.0), Sense::hover());
+    let line_height = k.d.row + 4.0;
+    let widths: Vec<f32> = pages
+        .iter()
+        .map(|name| widgets::text_width(ui, name, k.font()).ceil() + 18.0)
+        .collect();
+    // Tabs that do not fit on one line go on the next, rather than off
+    // the edge of the panel.
+    let room = ui.available_width() - 8.0;
+    let mut lines = 1;
+    let mut used = 0.0;
+    for w in &widths {
+        if used + w > room && used > 0.0 {
+            lines += 1;
+            used = 0.0;
+        }
+        used += w;
+    }
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), line_height * lines as f32),
+        Sense::hover(),
+    );
     hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
     let mut x = rect.left() + 8.0;
+    let mut top = rect.top();
     for (i, name) in pages.iter().enumerate() {
-        let w = widgets::text_width(ui, name, k.font()).ceil() + 18.0;
-        let tab = Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x + w, rect.bottom()));
+        let w = widths[i];
+        if x + w > rect.left() + 8.0 + room && x > rect.left() + 8.0 {
+            x = rect.left() + 8.0;
+            top += line_height;
+        }
+        let tab = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + w, top + line_height));
         let resp = ui.interact(tab, ui.id().with(("property page", i)), Sense::click());
         if resp.clicked() {
             *chosen = i;

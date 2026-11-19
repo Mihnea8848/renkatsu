@@ -280,6 +280,16 @@ impl MaterialInst {
         self.colors.insert(name.to_string(), value);
     }
 
+    /// `Material.SetFloat`. As with a colour, a value on a property the
+    /// material does not store reads back but does not survive a shader
+    /// switch.
+    pub fn set_float(&mut self, name: &str, value: f32) {
+        if !self.stores(name) {
+            self.unsaved.insert(name.to_string());
+        }
+        self.floats.insert(name.to_string(), value);
+    }
+
     /// `Material.SetTexture`. `GetTexture` reads the stored list, so a
     /// texture on a property the material does not store reads back as none,
     /// and no shader of the material samples it.

@@ -228,6 +228,11 @@ pub enum Content {
         /// outdoor shoes): 0 on, 1 and 2 half off, 3 off.
         #[serde(default)]
         clothes: [u8; 9],
+        /// How much liquid lies on the skin, in the game's order: the
+        /// face, then the body's front top, front bottom, back top and
+        /// back bottom, each 0 to 2.
+        #[serde(default)]
+        liquid: [u8; rk_chara::siru::PARTS],
         /// The animation the character plays or the pose it holds; none
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
@@ -306,6 +311,7 @@ impl Content {
             outdoor_shoes: false,
             simulate: true,
             clothes: [0; 9],
+            liquid: [0; rk_chara::siru::PARTS],
             animation: None,
             profile: None,
         }

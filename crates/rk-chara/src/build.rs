@@ -2776,6 +2776,18 @@ impl Character {
         self.wear_heels(states);
     }
 
+    /// Lays the liquid levels on the skin without building again, as
+    /// `ChaControl.UpdateSiru` does.
+    pub fn set_siru(&mut self, levels: &crate::siru::Levels) {
+        crate::siru::apply(&mut self.scene, levels);
+    }
+
+    /// Whether the body carries the mask that liquid levels are read
+    /// against; without it nothing of them shows.
+    pub fn liquid_mask(&self) -> bool {
+        crate::siru::masked(&self.scene)
+    }
+
     /// Takes the heels off and, when the shoes are on, puts them on again
     /// on top of the bones as they are now.
     pub fn refresh_heels(&mut self, states: &crate::clothes_state::States) {
