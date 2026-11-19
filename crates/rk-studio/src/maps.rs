@@ -233,17 +233,7 @@ pub fn import(
     if let Some(there) = owned(&project.root, &plan.entry.bundle) {
         return Ok(there.file);
     }
-    let maps = project.root.join(MAPS);
-    std::fs::create_dir_all(&maps).with_context(|| format!("creating {}", maps.display()))?;
-    let base = file_name(&plan.name);
-    let mut name = base.clone();
-    let mut n = 1;
-    // A folder of the same name is an older map's.
-    while maps.join(&name).exists() || maps.join(format!("{name}.{EXTENSION}")).exists() {
-        n += 1;
-        name = format!("{base} {n}");
-    }
-    let path = maps.join(format!("{name}.{EXTENSION}"));
+    let path = free_path(project, &plan.name)?;
     let total = plan.bytes();
     let mut told = 0;
     rk_map::file::convert(game, &plan.entry, &plan.name, None, &path, &mut |done| {
@@ -253,6 +243,41 @@ pub fn import(
         counted(step)
     })?;
     relative_to(&project.root, &path).context("the map is outside the project")
+}
+
+/// A path in the Maps folder for a new map file named after `name`, with a
+/// number added when the name is taken.
+fn free_path(project: &Project, name: &str) -> Result<PathBuf> {
+    let maps = project.root.join(MAPS);
+    std::fs::create_dir_all(&maps).with_context(|| format!("creating {}", maps.display()))?;
+    let base = file_name(name);
+    let mut name = base.clone();
+    let mut n = 1;
+    // A folder of the same name is an older map's.
+    while maps.join(&name).exists() || maps.join(format!("{name}.{EXTENSION}")).exists() {
+        n += 1;
+        name = format!("{base} {n}");
+    }
+    Ok(maps.join(format!("{name}.{EXTENSION}")))
+}
+
+/// Copies a map file into the project, from another project or anywhere
+/// else. A map the project has already is not copied again. Returns the
+/// map file, relative to the project, and its name.
+pub fn copy_in(project: &Project, file: &Path) -> Result<(String, String)> {
+    anyhow::ensure!(
+        rk_map::file::is_map_file(file),
+        "{} is not a Renkatsu map file (.{EXTENSION})",
+        file.display()
+    );
+    let map = MapFile::read(file)?;
+    if let Some(there) = owned(&project.root, map.scene_bundle()) {
+        return Ok((there.file, there.map.name));
+    }
+    let path = free_path(project, &map.name)?;
+    std::fs::copy(file, &path).with_context(|| format!("copying {} into the project", file.display()))?;
+    let rel = relative_to(&project.root, &path).context("the map is outside the project")?;
+    Ok((rel, map.name))
 }
 
 /// Opens a map of the project at a time of day, ready to upload: read
@@ -382,6 +407,32 @@ mod tests {
         assert_eq!(read, map);
         assert_eq!(read.first_time(), MapTime::Night);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_map_file_is_copied_in_once() {
+        let home = scratch("copyin");
+        let project = Project::create(&home.join("P"), "P").unwrap();
+        let outside = home.join("Rooftop.rkmap");
+        let map = MapFile {
+            format: FORMAT,
+            thumbnail: None,
+            ..sample()
+        };
+        let mut w = rk_asset::Writer::create(&outside, rk_map::file::KIND, rk_map::file::VERSION).unwrap();
+        w.add("meta", toml::to_string(&map).unwrap().as_bytes(), rk_asset::Pack::Raw)
+            .unwrap();
+        w.finish().unwrap();
+        let (rel, name) = copy_in(&project, &outside).unwrap();
+        assert_eq!(name, map.name);
+        assert!(project.root.join(&rel).is_file());
+        // The same map again is the one already there.
+        assert_eq!(copy_in(&project, &outside).unwrap().0, rel);
+        assert_eq!(in_project(&project.root).len(), 1);
+        // A file that is no map is refused.
+        std::fs::write(home.join("Notes.rkmap"), "format = 2").unwrap();
+        assert!(copy_in(&project, &home.join("Notes.rkmap")).is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

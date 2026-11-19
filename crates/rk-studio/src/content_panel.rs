@@ -92,6 +92,15 @@ fn import_items(ui: &mut Ui, k: &Look, top: &str, asks: &mut Asks) {
             }
             ui.separator();
         }
+        crate::maps::MAPS => {
+            if widgets::menu_item(ui, k, icon::FILE, "Import from file", "", true) {
+                asks.commands.push(Command::ImportMapFile);
+            }
+            if widgets::menu_item(ui, k, icon::BOOKS, "Import from library", "", true) {
+                asks.commands.push(Command::MapLibrary);
+            }
+            ui.separator();
+        }
         _ => {}
     }
 }
@@ -311,7 +320,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             project::ANIMATIONS => animation_tools(ui, k, st, &mut asks),
             crate::maps::MAPS => {
-                if flat_button(ui, k, Some(icon::BOOKS), "From library", false, false).clicked() {
+                if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false).clicked() {
+                    asks.commands.push(Command::ImportMapFile);
+                }
+                if flat_button(ui, k, Some(icon::BOOKS), "Import from library", false, false).clicked() {
                     asks.commands.push(Command::MapLibrary);
                 }
                 let map = st.asset.clone().filter(|a| is_sidecar(&slashes(a)));
@@ -1098,20 +1110,15 @@ fn maps(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, asks: &mu
         } else if !bare(st, crate::maps::MAPS) {
             centred(ui, k, grid, "This folder is empty");
         } else {
-            let c = grid.center();
-            ui.painter().text(
-                c - Vec2::new(0.0, 22.0),
-                Align2::CENTER_CENTER,
+            empty_state(
+                ui,
+                k,
+                grid,
                 "This project has no maps yet",
-                k.bold(k.d.text + 1.0),
-                t.text_bright,
+                "Maps can be imported from a file or the library.",
+                [Command::ImportMapFile, Command::MapLibrary],
+                asks,
             );
-            let text = "Import from library";
-            let w = (14.0 + 16.0 + 7.0 + widgets::text_width(ui, text, k.font()) + 14.0).ceil();
-            let button = Rect::from_min_size(Pos2::new((c.x - w / 2.0).round(), c.y), Vec2::new(w, 30.0));
-            if crate::selector::icon_button(ui, k, button, Some(icon::BOOKS), text, true, true) {
-                asks.commands.push(Command::MapLibrary);
-            }
         }
         return;
     }
