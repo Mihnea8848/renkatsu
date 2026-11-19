@@ -16,7 +16,7 @@ use rk_vfs::Game;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The side of a face shot, in pixels: a few times the tile it shows in, so
 /// that shrinking it smooths the edges.
@@ -58,11 +58,41 @@ struct Job {
     backdrop: [u8; 3],
 }
 
+/// Lets the thread draw only while the editor is open. The process must not
+/// end while another thread is inside the graphics driver: the driver's
+/// exit handlers free what that thread is using and it crashes there.
+#[derive(Default)]
+struct Gate {
+    /// Whether the editor is closing. Held for as long as a shot is drawn.
+    closed: Mutex<bool>,
+}
+
+impl Gate {
+    /// Runs `work` unless the gate is closed; closing waits for it to end.
+    fn pass<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        let closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
+        (!*closed).then(work)
+    }
+
+    /// Closes the gate, once the work passing it has ended.
+    fn close(&self) {
+        *self.closed.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+}
+
 /// The thread that takes face shots, and what it was asked and finished.
 pub struct Mugshots {
     jobs: Sender<Job>,
     done: Receiver<PathBuf>,
     asked: HashSet<PathBuf>,
+    gate: Arc<Gate>,
+}
+
+impl Drop for Mugshots {
+    /// Waits for the shot being drawn, and lets no other start.
+    fn drop(&mut self) {
+        self.gate.close();
+    }
 }
 
 impl Mugshots {
@@ -71,25 +101,32 @@ impl Mugshots {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, ctx: eframe::egui::Context) -> Mugshots {
         let (jobs, inbox) = channel::<Job>();
         let (outbox, done) = channel();
+        let gate = Arc::new(Gate::default());
+        let open = gate.clone();
         std::thread::Builder::new()
             .name("face shots".into())
             .spawn(move || {
                 let mut renderer = None;
                 for job in inbox {
-                    match shoot(&mut renderer, &device, &queue, &job) {
-                        Ok(()) => {
+                    match shoot(&mut renderer, &device, &queue, &open, &job) {
+                        Ok(true) => {
                             let _ = outbox.send(job.card);
                             ctx.request_repaint();
                         }
+                        Ok(false) => break,
                         Err(e) => eprintln!("no face shot of {}: {e:#}", job.card.display()),
                     }
                 }
+                // The editor is closing. The renderer and the device are
+                // left as they are: freeing them is work in the driver too.
+                std::mem::forget((renderer, device, queue));
             })
             .expect("a thread for face shots");
         Mugshots {
             jobs,
             done,
             asked: HashSet::new(),
+            gate,
         }
     }
 
@@ -118,8 +155,14 @@ impl Mugshots {
 }
 
 /// Builds the character of a card, stands it as the maker does, draws its face from
-/// the front and saves the picture.
-fn shoot(renderer: &mut Option<Renderer>, device: &wgpu::Device, queue: &wgpu::Queue, job: &Job) -> Result<()> {
+/// the front and saves the picture. `false` when the editor closed first.
+fn shoot(
+    renderer: &mut Option<Renderer>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    gate: &Gate,
+    job: &Job,
+) -> Result<bool> {
     let game = &*job.game;
     let card = rk_card::Card::load(&job.card).with_context(|| format!("loading {}", job.card.display()))?;
     let mut chara = rk_chara::build(game, &card, &rk_chara::BuildOptions::default())?;
@@ -155,16 +198,27 @@ fn shoot(renderer: &mut Option<Renderer>, device: &wgpu::Device, queue: &wgpu::Q
         alpha_to_coverage: true,
         ..Default::default()
     };
-    if renderer.is_none() {
-        *renderer = Some(Renderer::with_device(device.clone(), queue.clone())?);
-    }
-    let renderer = renderer.as_mut().expect("made above");
-    let mut rgba = renderer.render(&draws, &camera, &env, SIZE, SIZE, backdrop)?;
+    // Drawn and saved in one pass of the gate, so closing the editor cuts
+    // neither the drawing nor the file.
+    gate.pass(|| {
+        if renderer.is_none() {
+            *renderer = Some(Renderer::with_device(device.clone(), queue.clone())?);
+        }
+        let renderer = renderer.as_mut().expect("made above");
+        let rgba = renderer.render(&draws, &camera, &env, SIZE, SIZE, backdrop)?;
+        save(&job.shot, rgba)
+    })
+    .transpose()
+    .map(|done| done.is_some())
+}
+
+/// Dims a drawn face and writes it as the PNG `shot`.
+fn save(shot: &Path, mut rgba: Vec<u8>) -> Result<()> {
     dim(&mut rgba, BRIGHTNESS);
-    if let Some(dir) = job.shot.parent() {
+    if let Some(dir) = shot.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = std::fs::File::create(&job.shot).with_context(|| format!("writing {}", job.shot.display()))?;
+    let file = std::fs::File::create(shot).with_context(|| format!("writing {}", shot.display()))?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), SIZE, SIZE);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
@@ -208,6 +262,35 @@ mod tests {
             shot_path(root, "Characters/Cast/Anna.png"),
             Path::new("/p/.renkatsu/faces/Characters__Cast__Anna.png.png")
         );
+    }
+
+    #[test]
+    fn a_closed_gate_lets_no_work_pass() {
+        let gate = Gate::default();
+        assert_eq!(gate.pass(|| 7), Some(7));
+        gate.close();
+        assert_eq!(gate.pass(|| 7), None);
+    }
+
+    #[test]
+    fn closing_the_gate_waits_for_the_work_passing_it() {
+        let gate = Arc::new(Gate::default());
+        let (started, wait) = channel();
+        let ended = Arc::new(Mutex::new(false));
+        let worker = {
+            let (gate, ended) = (gate.clone(), ended.clone());
+            std::thread::spawn(move || {
+                gate.pass(|| {
+                    started.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    *ended.lock().unwrap() = true;
+                })
+            })
+        };
+        wait.recv().unwrap();
+        gate.close();
+        assert!(*ended.lock().unwrap(), "the work ended before the gate closed");
+        assert_eq!(worker.join().unwrap(), Some(()));
     }
 
     #[test]
