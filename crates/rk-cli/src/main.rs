@@ -341,6 +341,22 @@ enum MapCmd {
     },
     /// Show what one map holds, by its number or level name.
     Info { map: String },
+    /// Draw a map to a PNG, plainly lit.
+    Render {
+        map: String,
+        #[arg(short, long)]
+        out: PathBuf,
+        /// day, evening or night.
+        #[arg(long, default_value = "day")]
+        time: String,
+        /// inside (eye height, looking across) or above (cut away).
+        #[arg(long, default_value = "inside")]
+        view: String,
+        #[arg(long, default_value_t = 1280)]
+        width: u32,
+        #[arg(long, default_value_t = 720)]
+        height: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -523,6 +539,17 @@ fn main() -> Result<()> {
         Cmd::Map {
             cmd: MapCmd::Info { map },
         } => map::info(&map),
+        Cmd::Map {
+            cmd:
+                MapCmd::Render {
+                    map,
+                    out,
+                    time,
+                    view,
+                    width,
+                    height,
+                },
+        } => map::render(&map, &time, &view, &out, (width, height)),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),

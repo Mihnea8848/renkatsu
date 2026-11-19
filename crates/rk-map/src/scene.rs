@@ -96,7 +96,7 @@ pub fn open(game: &Game, bundle: &str) -> Result<Arc<LoadedBundle>> {
 /// Follows a reference from an object of `file`. A file of the map's own
 /// bundle comes first: mods reuse level names, so another bundle may hold
 /// a file of the same name.
-fn deref(game: &Game, loaded: &LoadedBundle, file: &Arc<AssetFile>, p: PPtr) -> Option<ObjRef> {
+pub(crate) fn deref(game: &Game, loaded: &LoadedBundle, file: &Arc<AssetFile>, p: PPtr) -> Option<ObjRef> {
     if p.file_id > 0 && !p.is_null() {
         let ext = file.sf.externals.get(p.file_id as usize - 1)?.file_name().to_owned();
         if let Some(own) = loaded.files.iter().find(|f| f.cab.eq_ignore_ascii_case(&ext)) {

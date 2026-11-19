@@ -6,6 +6,7 @@
 
 pub mod effects;
 pub mod highlight;
+pub mod map;
 pub mod material;
 pub mod modshader;
 pub mod shadow;
@@ -285,6 +286,8 @@ pub struct Renderer {
     effects: Option<effects::Gpu>,
     /// The selection outline's pipeline, once a frame asked for one.
     highlight: Option<highlight::Pass>,
+    /// The map pass's pipelines, once a map was drawn.
+    map: Option<map::Pipelines>,
 }
 
 struct MeshBuffers {
@@ -642,7 +645,9 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("renkatsu"),
-                required_features: wgpu::Features::empty(),
+                // The game's block-compressed textures are drawn as they are
+                // stored, where the card can.
+                required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
                 required_limits: wgpu::Limits {
                     max_texture_dimension_2d: 8192,
                     ..Default::default()
@@ -830,6 +835,7 @@ impl Renderer {
             frame: 0,
             effects: None,
             highlight: None,
+            map: None,
         })
     }
 
@@ -2012,6 +2018,11 @@ impl Renderer {
     /// `Environment::camera_depth`.
     pub fn camera_depth(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.depth_texture)
+    }
+
+    /// Whether the device draws block-compressed (BC1 to BC7) textures.
+    pub fn supports_bc(&self) -> bool {
+        self.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
     }
 
     /// The format `render_to` expects its target in.

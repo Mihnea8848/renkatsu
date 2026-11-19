@@ -4,6 +4,7 @@
 //! Koikatsu's maps: the list CharaStudio offers, and the scenes they are,
 //! read from their bundles.
 
+pub mod build;
 pub mod list;
 pub mod scene;
 pub mod unity;

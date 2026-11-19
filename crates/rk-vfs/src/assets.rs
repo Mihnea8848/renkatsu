@@ -331,6 +331,24 @@ impl Assets {
         Some(ObjRef { file, info })
     }
 
+    /// Reads a Texture2D and its pixel data as stored, every mip level
+    /// after the other, without decoding it.
+    pub fn texture_raw(&self, obj: &ObjRef) -> Result<(Texture2D, Vec<u8>)> {
+        let mut tex = Texture2D::read(&obj.read()?)?;
+        let raw = match &tex.stream {
+            None => std::mem::take(&mut tex.data),
+            Some(s) => {
+                let node = obj
+                    .file
+                    .container
+                    .node(s.file_name())
+                    .ok_or_else(|| anyhow!("texture {}: stream {} not in bundle", tex.name, s.path))?;
+                obj.file.container.read_range(node.offset + s.offset, s.size)?
+            }
+        };
+        Ok((tex, raw))
+    }
+
     /// Reads a Texture2D and decodes it to RGBA8 (rows bottom-up).
     pub fn texture(&self, obj: &ObjRef) -> Result<(Texture2D, Vec<u8>)> {
         let tex = Texture2D::read(&obj.read()?)?;
