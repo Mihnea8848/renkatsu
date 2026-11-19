@@ -67,6 +67,8 @@ pub enum ItemShader {
     OpaqueLow = 11,
     /// main_color: one flat colour.
     Color = 12,
+    /// mnpb: the censor, a pattern made from where the pixel is.
+    Mosaic = 13,
 }
 
 /// Clothes shader from a Unity shader name. The KKShadersPlus shaders
@@ -87,6 +89,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
         "main_texture" => ItemShader::Texture,
         "main_opaque_low" => ItemShader::OpaqueLow,
         "main_color" => ItemShader::Color,
+        "mnpb" => ItemShader::Mosaic,
         // xukmi's Studio variants are not ported; they extend these game
         // shaders, which are the closest stand-ins.
         n if n.starts_with("mainitemstudioalphaplus") => ItemShader::StudioAlpha,
@@ -98,7 +101,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
 /// Shaders whose pixel program is ported from the game's own disassembly.
 /// Everything else goes through an approximation; `rk audit` reports how
 /// many materials that leaves.
-pub const PORTED: [&str; 43] = [
+pub const PORTED: [&str; 44] = [
     "Shader Forge/main_skin",
     "Shader Forge/main_hair",
     "Shader Forge/main_hair_front",
@@ -118,6 +121,7 @@ pub const PORTED: [&str; 43] = [
     "Shader Forge/main_texture",
     "Shader Forge/main_opaque_low",
     "Shader Forge/main_color",
+    "Shader Forge/mnpb",
     // KKShadersPlus, ported from the programs of Vanilla Plus 1.7.2.
     "xukmi/MainOpaquePlus",
     "xukmi/MainOpaquePlusTess",
@@ -382,6 +386,7 @@ impl MaterialDesc {
         let patterned = item == ItemShader::Studio;
         let accessory = matches!(item, ItemShader::Main | ItemShader::Texture) || emission || patterned;
         let low = item == ItemShader::OpaqueLow;
+        let mosaic = item == ItemShader::Mosaic;
         let blend = match state.blend {
             Blend::Premultiplied if !glasses && !accessory => Blend::Off,
             other => other,
@@ -662,7 +667,14 @@ impl MaterialDesc {
             } else {
                 color("_LineColor", [0.5, 0.5, 0.5, 1.0])
             },
-            ext: if emission || patterned {
+            ext: if mosaic {
+                // x of the first: _WhiteOff. The second takes the object's
+                // own place in the world, which the renderer fills per
+                // draw.
+                let mut ext = [[0.0; 4]; EXT];
+                ext[0] = [float("_WhiteOff", 1.0), 0.0, 0.0, 0.0];
+                ext
+            } else if emission || patterned {
                 // Vectors and floats as stored; the colours linearised.
                 let vector = |name: &str| mat.colors.get(name).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
                 let second = [0.392_156_9, 0.392_156_9, 0.392_156_9, 1.0];
