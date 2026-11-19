@@ -1046,7 +1046,9 @@ mod tests {
             |state, result| state.push(format!("{:#}", result.unwrap_err())),
         );
         settle(&mut jobs, &mut state, 1.0);
-        assert_eq!(state, ["panics: the file is odd", "no such file"]);
+        // The two finish in whichever order their threads do.
+        state.sort();
+        assert_eq!(state, ["no such file", "panics: the file is odd"]);
         // The notice of the failed job stays until it is closed, however
         // long; the quiet one is gone.
         jobs.poll(1000.0);
