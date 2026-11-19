@@ -999,6 +999,34 @@ impl Renderer {
         self.materials.clear();
     }
 
+    /// Uploads the textures `draws` are drawn with that the GPU does not
+    /// hold yet, for about as long as `budget`, and returns how many are
+    /// still to come. Drawing uploads what is missing anyway; this spreads
+    /// the uploads of a new character over several frames.
+    pub fn warm(&mut self, draws: &[DrawMesh], budget: std::time::Duration) -> usize {
+        let started = std::time::Instant::now();
+        let mut seen = std::collections::HashSet::new();
+        let mut left = 0;
+        for d in draws {
+            for material in d.renderer.materials.iter().filter(|m| !m.absent) {
+                let desc = MaterialDesc::new(Some(material));
+                for image in desc.textures.iter().flatten() {
+                    let key = Arc::as_ptr(image) as usize;
+                    if self.textures.contains_key(&key) || !seen.insert(key) {
+                        continue;
+                    }
+                    // At least one a call, so that it always gets on.
+                    if left == 0 && (seen.len() == 1 || started.elapsed() < budget) {
+                        self.texture(image);
+                    } else {
+                        left += 1;
+                    }
+                }
+            }
+        }
+        left
+    }
+
     fn texture(&mut self, image: &Arc<Image>) -> wgpu::TextureView {
         let key = Arc::as_ptr(image) as usize;
         if let Some(v) = self.textures.get(&key) {

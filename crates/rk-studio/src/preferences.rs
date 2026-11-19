@@ -64,6 +64,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                         .color(t.text_dim),
                 );
             });
+            ui.checkbox(&mut st.settings.show_news, "Show news on the home page");
             ui.add_space(8.0);
             ui.label(RichText::new("Viewport").font(k.bold(k.d.text)).color(t.text_bright));
             ui.add_space(4.0);
@@ -77,6 +78,10 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             if st.settings.frame_rate.vsync() != st.vsync_at_start {
                 ui.add_space(4.0);
                 ui.label(RichText::new("Waiting for the display changes after a restart.").color(t.accent));
+            }
+            let asks = |s: &crate::settings::Settings| (s.check_updates, s.show_news);
+            if asks(&st.settings) != asks(&before) {
+                st.fetch_feed();
             }
             if st.settings != before && !st.scripted {
                 if let Err(e) = st.settings.save() {

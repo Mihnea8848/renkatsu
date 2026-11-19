@@ -620,6 +620,9 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
         small(x + 31.0, Align2::LEFT_CENTER, text, t.text);
     }
 
+    // The work in the background, in the middle of the bar.
+    crate::jobs::status_line(ui, k, &st.jobs, rect);
+
     let mut x = rect.right() - 12.0;
     // A newer Renkatsu, as the check at start found: a click opens its page.
     if let Some(release) = &st.update {

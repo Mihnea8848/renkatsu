@@ -25,6 +25,9 @@ pub struct Import {
     pub ask: bool,
     /// The name it goes by in the project; the card's own when `None`.
     pub name: Option<String>,
+    /// The character a new project starts with: once it is in, the
+    /// project is saved as where it starts.
+    pub first: bool,
 }
 
 /// An import that waits for the user's word on its mods.

@@ -11,6 +11,7 @@
 
 mod anim_import;
 mod animations;
+mod brand;
 mod camera;
 mod card_import;
 mod chrome;
@@ -62,6 +63,18 @@ enum Bottom {
     Timeline,
 }
 
+/// The ways of showing work that scripted pictures can ask for, on
+/// sample jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Picture {
+    /// The splash of the start.
+    Startup,
+    /// A project halfway open, in the selector's window.
+    Opening,
+    /// Notices in the editor's corner and the status bar's line.
+    Notices,
+}
+
 #[derive(Parser)]
 #[command(name = "renkatsu", version, about = "Renkatsu Studio")]
 struct Cli {
@@ -96,13 +109,13 @@ struct Cli {
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
     project_selector: bool,
-    /// Show the project selector with a landing page of this layout, to
-    /// picture it.
-    #[arg(long, hide = true, value_enum)]
-    landing: Option<landing::Layout>,
     /// Show work in progress in this way, on sample jobs, to picture it.
     #[arg(long, hide = true, value_enum)]
-    loading: Option<jobs::Picture>,
+    loading: Option<Picture>,
+    /// Show these news on the home page, to picture it: a news file and,
+    /// after a comma, GitHub's list of releases as a JSON file.
+    #[arg(long, hide = true)]
+    pretend_news: Option<String>,
     /// Show a newer Renkatsu as found, to picture the notice.
     #[arg(long, hide = true)]
     pretend_update: Option<String>,
@@ -210,6 +223,17 @@ struct Cli {
     /// Start with the Keyboard shortcuts window open, to picture it.
     #[arg(long, hide = true)]
     shortcuts: bool,
+    /// Print the frames that took longer than a tenth of a second when
+    /// the window closes, to measure freezes.
+    #[arg(long, hide = true)]
+    frame_report: bool,
+    /// Close the window after this many seconds.
+    #[arg(long, hide = true)]
+    quit_after: Option<f32>,
+    /// Import this card and put it in the scene nine seconds after the
+    /// start, to measure adding a character.
+    #[arg(long, hide = true)]
+    bench_add: Option<PathBuf>,
 }
 
 /// A scripted click: where, with which button, whether twice, and
@@ -283,12 +307,62 @@ struct Studio {
     /// Seconds since a project opened from the selector, while the editor
     /// still fades in.
     entering: Option<f32>,
-    /// The way of showing work that is being pictured.
-    loading: Option<jobs::Picture>,
+    /// When the splash of the start began to show, in the window's
+    /// seconds; `None` once it is gone.
+    splash: Option<f64>,
+    /// The splash stays, for a picture of it.
+    hold_splash: bool,
+    /// The frames of the run, when they are measured.
+    report: Option<FrameReport>,
+    quit_after: Option<f32>,
+    bench_add: Option<PathBuf>,
+}
+
+/// How long the frames of a run took, to measure freezes.
+struct FrameReport {
+    start: std::time::Instant,
+    last: std::time::Instant,
+    /// When each long frame started, in seconds, and how long it took.
+    long: Vec<(f32, f32)>,
+}
+
+impl FrameReport {
+    fn new() -> FrameReport {
+        let now = std::time::Instant::now();
+        FrameReport {
+            start: now,
+            last: now,
+            long: Vec::new(),
+        }
+    }
+
+    fn frame(&mut self) {
+        let now = std::time::Instant::now();
+        let gap = (now - self.last).as_secs_f32();
+        if gap > 0.1 {
+            self.long.push(((self.last - self.start).as_secs_f32(), gap));
+        }
+        self.last = now;
+    }
+
+    fn print(&self) {
+        for (at, gap) in &self.long {
+            println!("frame at {at:.2} s took {gap:.2} s");
+        }
+        let longest = self.long.iter().map(|l| l.1).fold(0.0, f32::max);
+        let sum: f32 = self.long.iter().map(|l| l.1).sum();
+        println!(
+            "long frames: {}, longest {longest:.2} s, together {sum:.2} s",
+            self.long.len()
+        );
+    }
 }
 
 impl Drop for Studio {
     fn drop(&mut self) {
+        if let Some(report) = &self.report {
+            report.print();
+        }
         if let Some(dir) = &self.temporary {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -389,8 +463,22 @@ impl Studio {
         state.settings.show_inputs |= cli.show_inputs;
         state.shortcuts_open = cli.shortcuts;
         state.scripted = cli.screenshot.is_some();
-        if !state.scripted && state.settings.check_updates {
-            state.check_for_update(&cc.egui_ctx);
+        state.jobs.wake = Some(cc.egui_ctx.clone());
+        state.fetch_feed();
+        if let Some(files) = &cli.pretend_news {
+            let (posts, releases) = files.split_once(',').unwrap_or((files, ""));
+            let read = |file: &str| std::fs::read_to_string(file).with_context(|| format!("reading {file}"));
+            let now = settings::now();
+            let posts = rk_packages::news::parse_posts(
+                &read(posts)?,
+                env!("CARGO_PKG_VERSION"),
+                &rk_packages::news::today(now),
+            )?;
+            let releases = match releases {
+                "" => Vec::new(),
+                file => rk_packages::news::parse_releases(&read(file)?)?.0,
+            };
+            state.news = rk_packages::news::merge(posts, releases);
         }
         if let Some(version) = &cli.pretend_update {
             state.update = Some(rk_packages::update::Release {
@@ -401,12 +489,6 @@ impl Studio {
         let selecting = state.project.is_none();
         if selecting {
             state.show_selector();
-            if let Some(selector) = &mut state.selector {
-                selector.landing = cli.landing;
-                if cli.landing == Some(landing::Layout::Home) {
-                    selector.tab = selector::Tab::Home;
-                }
-            }
         }
         state.mode = modes::MODES
             .iter()
@@ -431,15 +513,16 @@ impl Studio {
             ));
             let mut live = live::Live::new(render_state)?;
             if state.scripted {
-                // A picture must not catch the camera on its way.
+                // A picture must not catch the camera on its way, nor a
+                // character halfway built.
                 live.cam.glide_time = 0.0;
+                live.patient = true;
             }
             state.live = Some(live);
         }
         if fresh {
-            // A project that is still being opened shows no character yet.
-            let waiting = matches!(cli.loading, Some(jobs::Picture::Modal | jobs::Picture::ModalList));
-            state.start_fresh(cli.card.is_empty() && !waiting);
+            // A project that is pictured as still opening has no character yet.
+            state.start_fresh(cli.card.is_empty() && cli.loading != Some(Picture::Opening));
         }
         state.remember();
         for card in &cli.card {
@@ -450,6 +533,7 @@ impl Studio {
                 // A scripted run has no one to answer.
                 ask: !state.scripted,
                 name: None,
+                first: false,
             });
         }
         for card in &cli.import {
@@ -458,9 +542,12 @@ impl Studio {
                 place: false,
                 ask: true,
                 name: None,
+                first: false,
             });
         }
-        while state.modal.is_none() && !state.imports.is_empty() {
+        // A scripted run imports at once; else the imports wait for the
+        // content, which a job opens.
+        while state.scripted && state.modal.is_none() && !state.imports.is_empty() {
             state.next_import();
         }
         // An import brings the Content panel forward; the start does not.
@@ -531,7 +618,13 @@ impl Studio {
                         }),
                 );
             }
+            let t0 = std::time::Instant::now();
             state.import_animations(&picks, false);
+            println!(
+                "frame import of {} animations took {:.2} s",
+                picks.len(),
+                t0.elapsed().as_secs_f32()
+            );
             state.show_content = false;
         }
         if let Some(spec) = &cli.animation {
@@ -559,7 +652,7 @@ impl Studio {
             state.importer = Some(anim_import::Importer::new(None));
         }
         state.doc.clear_history();
-        if !cli.card.is_empty() {
+        if !cli.card.is_empty() && state.scripted {
             let live = state
                 .live
                 .as_mut()
@@ -570,6 +663,7 @@ impl Studio {
                 state.doc.scene(),
                 &state.project,
                 &mut state.games,
+                &mut state.jobs,
                 live::Clock {
                     time: state.clock,
                     ..live::Clock::stopped()
@@ -601,11 +695,40 @@ impl Studio {
             state.viewport_image = Some(texture);
             state.backdrop = corner;
         }
+        // A project opens behind its splash, in the selector's window.
+        if !selecting {
+            state.begin_opening();
+        }
+        match cli.loading {
+            Some(Picture::Opening) => state.opening = Some(state::Opening::sample()),
+            Some(Picture::Notices) => {
+                use jobs::{Outcome, Show};
+                let jobs = &mut state.jobs;
+                jobs.pictured("Loaded Honma Yukie", Show::Notice, "", 0, 0, Outcome::Done);
+                jobs.pictured("Loading Maria Kujou", Show::Notice, "", 0, 0, Outcome::Running);
+                jobs.pictured(
+                    "Importing animations",
+                    Show::Notice,
+                    "Dance 09",
+                    9,
+                    24,
+                    Outcome::Running,
+                );
+            }
+            _ => {}
+        }
+        let splash = match cli.loading {
+            Some(Picture::Startup) => true,
+            Some(_) => false,
+            // The splash of an opening project is the splash of the start.
+            None => !state.scripted && state.opening.is_none(),
+        };
         let bottom = match cli.bottom {
             Bottom::Content => Panel::Content,
             Bottom::Console => Panel::Console,
             Bottom::Timeline => Panel::Timeline,
         };
+        let state_opening = state.opening.is_some();
         Ok(Studio {
             look,
             state,
@@ -627,9 +750,13 @@ impl Studio {
             closing: false,
             temporary,
             editor_size: editor_size(cli)?,
-            small: selecting && cli.size.is_none(),
+            small: (selecting || state_opening) && cli.size.is_none(),
             entering: None,
-            loading: cli.loading,
+            splash: splash.then_some(f64::NAN),
+            hold_splash: cli.loading == Some(Picture::Startup),
+            report: cli.frame_report.then(FrameReport::new),
+            quit_after: cli.quit_after,
+            bench_add: cli.bench_add.clone(),
         })
     }
 }
@@ -709,6 +836,25 @@ impl eframe::App for Studio {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         let k = self.look;
+        if let Some(report) = &mut self.report {
+            report.frame();
+            ctx.request_repaint();
+        }
+        let seconds = ctx.input(|i| i.time) as f32;
+        if self.quit_after.is_some_and(|after| seconds > after) {
+            self.state.quit = true;
+        }
+        if seconds > 9.0 && self.state.selector.is_none() {
+            if let Some(path) = self.bench_add.take() {
+                self.state.imports.push_back(dialogs::Import {
+                    path,
+                    place: true,
+                    ask: false,
+                    name: None,
+                    first: false,
+                });
+            }
+        }
         // A drag that changes a value is one step of the history; it ends
         // when the pointer is let go.
         if !ctx.input(|i| i.pointer.any_down()) {
@@ -716,25 +862,31 @@ impl eframe::App for Studio {
         }
         self.state.poll_picker();
         self.state.next_import();
+        // What the jobs finished is taken in, and what a project that is
+        // opening still waits for is moved on.
+        self.state.tick(ctx.input(|i| i.time));
         let selecting = self.state.selector.is_some();
-        // The project selector has a smaller window of its own. The desktop
-        // resizes it in one step, so the editor's content fades in instead.
-        if selecting != self.small {
-            self.small = selecting;
+        let opening = self.state.opening.is_some();
+        // The project selector has a smaller window of its own, which a
+        // project that opens keeps for its splash. The desktop resizes it
+        // in one step, so the editor's content fades in instead.
+        let compact = selecting || opening;
+        if compact != self.small {
+            self.small = compact;
             // A project opens in a maximized window; scripted pictures keep
             // their asked size. The selector goes back to its own size.
-            let maximize = !selecting && self.screenshot.is_none();
+            let maximize = !compact && self.screenshot.is_none();
             if !maximize {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             }
-            let size = if selecting { selector::WINDOW } else { self.editor_size };
+            let size = if compact { selector::WINDOW } else { self.editor_size };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             if maximize {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
-            self.entering = (!selecting).then_some(0.0);
+            self.entering = (!compact).then_some(0.0);
         }
-        if !selecting {
+        if !compact {
             keymap::handle(ctx, &mut self.state);
         }
         let t = k.t;
@@ -746,7 +898,13 @@ impl eframe::App for Studio {
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(t.input))
             .show(ui, |ui| chrome::title_bar(ui, &k, &self.state));
-        if selecting {
+        if opening {
+            // The splash of the project that opens takes the window.
+            chrome::window_edges(ui.ctx(), &k);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.input))
+                .show(ui, |ui| opening_page(ui, &k, &self.state));
+        } else if selecting {
             // The selector takes the window; the editor is not drawn.
             chrome::window_edges(ui.ctx(), &k);
             egui::CentralPanel::default()
@@ -763,8 +921,14 @@ impl eframe::App for Studio {
         anim_import::show(ctx, &k, &mut self.state);
         self.enter(ctx, &k);
         dialogs::show(ctx, &k, &mut self.state);
-        if let Some(which) = self.loading {
-            jobs::picture(ui, &k, which);
+        if !compact {
+            jobs::notices(ctx, &k, &mut self.state.jobs);
+            jobs::wait_window(ctx, &k, &mut self.state.jobs);
+        }
+        self.startup_splash(ctx, &k);
+        if self.state.jobs.busy() || opening {
+            // The bars move also where frames come only on input.
+            ctx.request_repaint();
         }
         self.window(ctx);
 
@@ -780,7 +944,6 @@ impl eframe::App for Studio {
 
         // Frames come as often as the display shows them unless the user
         // chose to save power, when egui draws only on input.
-        self.state.poll_update();
         // Changed settings are written once the pointer lets go, so that a
         // value being dragged is written once.
         if self.state.settings_changed && !ctx.input(|i| i.pointer.any_down()) {
@@ -885,6 +1048,53 @@ impl Studio {
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);
             });
+    }
+
+    /// The splash of the start: the art and the name over the whole
+    /// window for a moment, then it fades. A click sends it away.
+    fn startup_splash(&mut self, ctx: &egui::Context, k: &Look) {
+        const SHOWN: f64 = 1.1;
+        const FADE: f64 = 0.3;
+        let Some(since) = self.splash else { return };
+        let now = ctx.input(|i| i.time);
+        if since.is_nan() {
+            self.splash = Some(now);
+        }
+        let age = if since.is_nan() { 0.0 } else { now - since };
+        let opacity = if self.hold_splash {
+            1.0
+        } else {
+            (1.0 - (age - SHOWN) / FADE).clamp(0.0, 1.0) as f32
+        };
+        if opacity <= 0.0 {
+            self.splash = None;
+            return;
+        }
+        let full = ctx.content_rect();
+        let sub = format!("Version {}", env!("CARGO_PKG_VERSION"));
+        let clicked = egui::Area::new(egui::Id::new("startup splash"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(full.min)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(full, egui::Sense::click());
+                let what = jobs::Splash {
+                    title: "Renkatsu Studio",
+                    sub: &sub,
+                    step: "",
+                    count: "",
+                    fraction: None,
+                    items: &[],
+                    cancel: false,
+                    opacity,
+                };
+                jobs::splash(ui, k, full, &what);
+                resp.clicked()
+            })
+            .inner;
+        if clicked && !self.hold_splash {
+            self.splash = None;
+        }
+        ctx.request_repaint();
     }
 
     /// Fades the editor in after a project opened from the selector: a
@@ -1030,6 +1240,29 @@ impl Studio {
     }
 }
 
+/// The splash of a project that opens: its name, what loads and how far
+/// it is.
+fn opening_page(ui: &mut egui::Ui, k: &Look, st: &State) {
+    let Some(opening) = &st.opening else { return };
+    let progress = &opening.progress;
+    let (items, step, count) = (progress.items(), progress.step_text(), progress.count());
+    let sub = format!("Renkatsu Studio {}", env!("CARGO_PKG_VERSION"));
+    let what = jobs::Splash {
+        title: &opening.name,
+        sub: &sub,
+        step: &step,
+        count: &count,
+        fraction: Some(progress.fraction()),
+        items: &items,
+        cancel: true,
+        opacity: 1.0,
+    };
+    let full = ui.max_rect();
+    if jobs::splash(ui, k, full, &what) {
+        progress.cancel();
+    }
+}
+
 /// Loads a PNG as a texture and returns it with the colour of its top
 /// left corner.
 fn load_texture(ctx: &egui::Context, path: &std::path::Path) -> Result<(egui::TextureHandle, egui::Color32)> {
@@ -1084,12 +1317,14 @@ fn run() -> Result<()> {
     let settings = settings::Settings::load();
     let mut size = editor_size(&cli)?;
     let selecting = starts_on_selector(&cli, &settings);
-    if selecting && cli.size.is_none() {
+    // The selector has a window of its own size, and so has the splash
+    // of the project a start goes straight into. The editor's window
+    // comes, maximized, when the project is open. A scripted picture
+    // starts in the editor's size.
+    if cli.size.is_none() && (selecting || cli.screenshot.is_none()) {
         size = selector::WINDOW;
     }
-    // Straight into a project, the window starts maximized, unless a size
-    // or a scripted picture was asked for.
-    let maximized = !selecting && cli.size.is_none() && cli.screenshot.is_none();
+    let maximized = false;
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()

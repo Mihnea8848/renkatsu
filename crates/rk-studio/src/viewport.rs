@@ -1123,6 +1123,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         st.doc.scene(),
         &st.project,
         &mut st.games,
+        &mut st.jobs,
         crate::live::Clock {
             was: st.last_playback,
             now: st.playback,

@@ -1,0 +1,13 @@
+# The news on the home page of Renkatsu Studio. Newest first.
+# The format is described in README.md, beside this file.
+
+[[post]]
+date = 2026-11-19
+title = "Posing comes next"
+summary = "I am working on FK and IK posing now. Baked characters come after that."
+
+[[post]]
+date = 2026-11-18
+title = "Starter Content is available"
+summary = "You can use Renkatsu without Koikatsu now. Get Starter Content from the Packages window and you have characters and clothing to work with."
+url = "https://github.com/Mihnea8848/renkatsu/releases"

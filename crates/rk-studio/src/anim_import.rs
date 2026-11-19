@@ -821,6 +821,7 @@ impl Importer {
             &preview.scene,
             project,
             games,
+            &mut st.jobs,
             Clock {
                 was: Playback::Playing,
                 now: Playback::Playing,

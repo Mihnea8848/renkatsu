@@ -205,10 +205,17 @@ pub fn plan(needed: &[ModFile], have: &[ModFile]) -> Plan {
 /// older versions they replace. A file name in use by another mod gets a
 /// number.
 pub fn copy(plan: &Plan, dir: &Path) -> Result<()> {
+    copy_counted(plan, dir, &mut |_| Ok(()))
+}
+
+/// Copies as [`copy`] does and tells `counted` the bytes of every piece
+/// written; an error from it stops the copy. The copies are written
+/// beside their places and moved there at the end, so a copy that stops
+/// or fails leaves the folder as it was.
+pub fn copy_counted(plan: &Plan, dir: &Path, counted: &mut dyn FnMut(u64) -> Result<()>) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    for old in &plan.replace {
-        std::fs::remove_file(old).with_context(|| format!("removing {}", old.display()))?;
-    }
+    // Where each copy goes, as if the replaced files were gone already.
+    let mut targets: Vec<PathBuf> = Vec::new();
     for m in &plan.copy {
         let stem = m.path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let ext = m.path.extension().unwrap_or_default().to_string_lossy().into_owned();
@@ -217,9 +224,49 @@ pub fn copy(plan: &Plan, dir: &Path) -> Result<()> {
                 1 => dir.join(format!("{stem}.{ext}")),
                 n => dir.join(format!("{stem} {n}.{ext}")),
             })
-            .find(|p| !p.exists())
+            .find(|p| !targets.contains(p) && (!p.exists() || plan.replace.contains(p)))
             .expect("some number is free");
-        std::fs::copy(&m.path, &target).with_context(|| format!("copying {}", m.path.display()))?;
+        targets.push(target);
+    }
+    let part = |target: &Path| {
+        let mut name = target.file_name().unwrap_or_default().to_owned();
+        name.push(".part");
+        target.with_file_name(name)
+    };
+    let written = (|| -> Result<()> {
+        for (m, target) in plan.copy.iter().zip(&targets) {
+            copy_file(&m.path, &part(target), counted).with_context(|| format!("copying {}", m.path.display()))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        for target in &targets {
+            let _ = std::fs::remove_file(part(target));
+        }
+        return Err(e);
+    }
+    for old in &plan.replace {
+        std::fs::remove_file(old).with_context(|| format!("removing {}", old.display()))?;
+    }
+    for target in &targets {
+        std::fs::rename(part(target), target).with_context(|| format!("writing {}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Copies a file piece by piece, counting the bytes.
+fn copy_file(from: &Path, to: &Path, counted: &mut dyn FnMut(u64) -> Result<()>) -> Result<()> {
+    use std::io::{Read, Write};
+    let mut source = std::fs::File::open(from)?;
+    let mut target = std::fs::File::create(to)?;
+    let mut piece = vec![0; 1 << 20];
+    loop {
+        let n = source.read(&mut piece)?;
+        if n == 0 {
+            break;
+        }
+        target.write_all(&piece[..n])?;
+        counted(n as u64)?;
     }
     Ok(())
 }
@@ -277,6 +324,17 @@ impl Games {
             self.mods = mods_dir.to_owned();
         }
         Ok(self.game.as_ref().expect("opened above"))
+    }
+
+    /// The content with the zipmods of `mods_dir`, when it is open.
+    pub fn ready(&self, mods_dir: &Path) -> Option<std::sync::Arc<Game>> {
+        self.game.clone().filter(|_| self.mods == mods_dir)
+    }
+
+    /// Takes in content that was opened on another thread.
+    pub fn install(&mut self, mods_dir: &Path, game: std::sync::Arc<Game>) {
+        self.game = Some(game);
+        self.mods = mods_dir.to_owned();
     }
 
     /// Forgets what is open, after the Koikatsu folder or the installed
@@ -377,6 +435,44 @@ mod tests {
         assert_eq!(std::fs::read(project.join("hair 2.zipmod")).unwrap(), b"hair");
         // Files that are no zipmods are not taken for mods.
         assert!(in_folder(&project).is_empty());
+
+        // A copy that is stopped leaves the folder as it was, the file it
+        // would have replaced too.
+        std::fs::write(game.join("big.zipmod"), vec![7; 3 << 20]).unwrap();
+        std::fs::write(project.join("big old.zipmod"), b"old big").unwrap();
+        let plan = Plan {
+            copy: vec![
+                file("ears", "1", &game.join("hair.zipmod").to_string_lossy(), 4),
+                file("big", "2", &game.join("big.zipmod").to_string_lossy(), 3 << 20),
+            ],
+            replace: vec![project.join("big old.zipmod")],
+            present: 0,
+        };
+        let mut seen = 0;
+        let stopped = copy_counted(&plan, &project, &mut |bytes| {
+            seen += bytes;
+            if seen > (1 << 20) {
+                anyhow::bail!("cancelled");
+            }
+            Ok(())
+        });
+        assert!(stopped.is_err());
+        let mut left: Vec<String> = std::fs::read_dir(&project)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["big old.zipmod", "hair 2.zipmod", "hair.zipmod", "top.zipmod"]);
+        // Carried through, it counts every byte.
+        let mut seen = 0;
+        copy_counted(&plan, &project, &mut |bytes| {
+            seen += bytes;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, 4 + (3 << 20));
+        assert!(project.join("big.zipmod").is_file() && project.join("hair 3.zipmod").is_file());
+        assert!(!project.join("big old.zipmod").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
