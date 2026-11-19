@@ -2237,7 +2237,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     if let Lookup::Found(item) = b.game.items.lookup(&b.infos, &prop, cat::CLOTHES[i], cp.id) {
                         let loads = |key: &str| item.get(key).is_some_and(|v| v != "0" && v != "p_dummy");
                         if loads("MainAB") && loads("MainData") {
-                            rig.worn.state_type[i] = item.int("StateType");
+                            rig.worn.state_type[i] = state_type(item);
                         }
                     }
                     continue;
@@ -2282,7 +2282,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 let has_top = inst
                     .as_ref()
                     .is_some_and(|inst| inst.nodes.iter().any(|&n| b.scene.nodes[n].name == "n_top_a"));
-                let state = item.int("StateType");
+                let state = state_type(item);
                 // `infoClothes` is set once the piece's object is loaded; a
                 // sailor or jacket top loads an empty object.
                 let kind = item.int("Kind").unwrap_or(0);
@@ -2698,6 +2698,16 @@ impl Character {
         }
         motion.apply(&mut self.scene, phase);
         self.wear_heels(states);
+    }
+}
+
+/// A clothing item's `StateType`, as `ChaControl` reads it: a list without
+/// the column gives "0" (`ListInfoBase.GetInfo`), so the piece has the
+/// usual on, half off and off states.
+fn state_type(item: &Item) -> Option<i32> {
+    match item.get("StateType") {
+        None => Some(0),
+        Some(_) => item.int("StateType"),
     }
 }
 
