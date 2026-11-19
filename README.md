@@ -47,7 +47,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.2.0, on the
+The latest version is 0.2.1, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -86,6 +86,8 @@ The latest version is 0.2.0, on the
   or the map below them, attach to each other and to a character's bones,
   and snap to a grid. Loading runs in the background, and a home page shows
   the news.
+- 0.2.1 offers Starter Content: Maps, so the 42 maps of CharaStudio's list
+  work without Koikatsu.
 - Next: posing by hand (FK and IK), then baked characters.
 
 ## Renkatsu Studio
