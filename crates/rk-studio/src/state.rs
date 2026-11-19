@@ -331,6 +331,8 @@ pub struct State {
     pub scripted: bool,
     /// A newer Renkatsu on GitHub, when the check at start found one.
     pub update: Option<rk_packages::update::Release>,
+    /// Install Update at work, or stopped with why.
+    pub updating: Option<crate::self_update::Updating>,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -788,6 +790,7 @@ impl State {
             imports: VecDeque::new(),
             scripted: false,
             update: None,
+            updating: None,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,

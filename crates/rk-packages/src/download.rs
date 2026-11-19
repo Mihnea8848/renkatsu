@@ -54,7 +54,7 @@ fn open(url: &str, from: u64) -> Result<(Box<dyn Read>, bool)> {
 
 /// Downloads one part to `file`, going on from what is there already,
 /// and checks it against its hash.
-fn part(part: &Part, file: &Path, task: &Task) -> Result<()> {
+pub(crate) fn part(part: &Part, file: &Path, task: &Task) -> Result<()> {
     let partial = PathBuf::from(format!("{}.part", file.display()));
     let mut hasher = Hasher::new();
     let mut have = 0u64;

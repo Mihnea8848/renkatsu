@@ -6,12 +6,11 @@
 //! on the way, in the editor's look.
 
 mod install;
-mod payload;
 
 use anyhow::Result;
 use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use install::{Layout, Options};
-use rk_packages::{size_text, Stage, Store, Task};
+use rk_packages::{payload, size_text, Stage, Store, Task};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 

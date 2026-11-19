@@ -39,7 +39,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // one step of the history.
     let mut object = before.clone();
     let kind = object.kind();
-    header(ui, k, st, kind, &object.name);
+    let color = st.library.color_of(&object.content);
+    header(ui, k, st, kind, color, &object.name);
     // Who a character is: the card's profile, or the one the character
     // has in this scene. Its pages sit beside the scene's settings.
     let card_profile = match &object.content {
@@ -951,7 +952,7 @@ fn choices(
 }
 
 /// The selected object at the top of the panel, then the property search.
-fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
+fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, name: &str) {
     let t = &k.t;
     let h = k.d.row + 14.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
@@ -965,7 +966,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
                 Pos2::new(rect.left() + 34.0, y - k.field() / 2.0),
                 Pos2::new(rect.right() - kind_w - 18.0, y + k.field() / 2.0),
             );
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 17.0, kind.color());
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 17.0, color);
             widgets::field_box(p, k, field, false, false);
             p.text(
                 Pos2::new(field.left() + 7.0, y),
@@ -977,7 +978,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
             label(p, k, Pos2::new(field.right() + 8.0, y), kind.label(), t.text_dim);
         }
         _ => {
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 18.0, kind.color());
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 18.0, color);
             let x = p
                 .text(
                     Pos2::new(rect.left() + 34.0, y),
