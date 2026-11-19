@@ -29,3 +29,16 @@ installed_size = 898152965
 url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-poses-1.1.0.rkpkg"
 size = 648192573
 sha256 = "1b6b522069cba3bb8913d45e586e3603c85ebb3f7b28e39f0636a3c3458fc61e"
+
+# `rk package starter-maps --out DIR` builds this one.
+[[package]]
+id = "starter-maps"
+name = "Starter Content: Maps"
+version = "1.0.0"
+description = "CharaStudio's maps, from the school's classrooms to the park, the church and the train, with their pictures. Maps are added to scenes without a Koikatsu install."
+installed_size = 1203414677
+
+[[package.part]]
+url = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1/starter-maps-1.0.0.rkpkg"
+size = 1054781915
+sha256 = "a99d0bb0d953a4cfa064c2d3a5c3f5e145ba41036cb85291179d35ff71741bd2"

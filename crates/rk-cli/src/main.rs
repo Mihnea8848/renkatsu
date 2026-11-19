@@ -324,6 +324,19 @@ enum PackageCmd {
         #[arg(long)]
         part_size: Option<u64>,
     },
+    /// Build Starter Content: Maps from the Koikatsu install: CharaStudio's
+    /// maps with their pictures, without mods.
+    StarterMaps {
+        /// The folder the package file is written to.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only say what the package would hold.
+        #[arg(long)]
+        list: bool,
+        /// Cut the package into parts of at most this many megabytes.
+        #[arg(long)]
+        part_size: Option<u64>,
+    },
     /// Install a package from its file.
     Install { file: PathBuf },
     /// Download a package Renkatsu knows about and install it.
@@ -442,6 +455,9 @@ fn main() -> Result<()> {
             PackageCmd::Build { dir, out } => custom_package::build(&dir, &out),
             PackageCmd::StarterPoses { out, list, part_size } => {
                 package::starter_poses(&out, list, part_size.map(|mb| mb * 1024 * 1024))
+            }
+            PackageCmd::StarterMaps { out, list, part_size } => {
+                package::starter_maps(&out, list, part_size.map(|mb| mb * 1024 * 1024))
             }
             PackageCmd::Install { file } => package::install(&file),
             PackageCmd::Download { id } => package::download(&id),

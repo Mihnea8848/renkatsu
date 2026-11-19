@@ -44,6 +44,8 @@ pub const STARTER_CHARACTERS: &str = "starter-characters";
 /// Its id dates from when Renkatsu called them poses and stays, since an
 /// id names the package on disk for every version of it.
 pub const STARTER_POSES: &str = "starter-poses";
+/// The package that holds CharaStudio's maps.
+pub const STARTER_MAPS: &str = "starter-maps";
 
 /// What a long piece of work is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

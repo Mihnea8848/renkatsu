@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 const STARTER_VERSION: &str = "1.1.0";
 /// The version of Starter Content: Animations & Poses this build makes.
 const POSES_VERSION: &str = "1.1.0";
+/// The version of Starter Content: Maps this build makes.
+const MAPS_VERSION: &str = "1.0.0";
 /// The release the packages are uploaded to, apart from the app's own.
 const RELEASE: &str = "https://github.com/Mihnea8848/renkatsu/releases/download/starter-content-1";
 /// GitHub takes release files under 2 GB; parts stay well below.
@@ -89,6 +91,19 @@ pub fn character_part(path: &str) -> bool {
 /// rule here names: the build takes those by what the sheets point at.
 pub fn pose_part(path: &str) -> bool {
     path.starts_with("studio/anime/") || path.starts_with("studio/info/") || path == MAKER_POSES
+}
+
+/// What Starter Content: Maps is made of: the maps' scenes (`map/scene`
+/// and CharaStudio's own in `studio/map`), the sheets in `studio/info`
+/// that list them, the tables of walls that hide in `h/list`, and the
+/// map list that names each map's picture with the pictures themselves.
+pub fn map_part(path: &str) -> bool {
+    path.starts_with("map/scene/")
+        || path.starts_with("studio/map/")
+        || path.starts_with("studio/info/")
+        || path.starts_with("h/list/")
+        || path.starts_with("map/list/mapinfo/")
+        || path.starts_with("map/thumbnail/")
 }
 
 /// The poses of the character maker. CharaStudio's own lists do not name
@@ -333,6 +348,29 @@ pub fn starter_poses(out: &Path, list_only: bool, part_size: Option<u64>) -> Res
     )
 }
 
+/// Builds Starter Content: Maps from the configured Koikatsu install into
+/// `out`, or only says what it would hold.
+pub fn starter_maps(out: &Path, list_only: bool, part_size: Option<u64>) -> Result<()> {
+    starter(
+        &Starter {
+            id: rk_packages::STARTER_MAPS,
+            name: "Starter Content: Maps",
+            version: MAPS_VERSION,
+            description:
+                "CharaStudio's maps, from the school's classrooms to the park, the church and the train, with their \
+                          pictures.",
+            gives: "Maps are added to scenes without a Koikatsu install.",
+            part: "a map",
+            want: map_part,
+            cards: false,
+            poses: false,
+        },
+        out,
+        list_only,
+        part_size,
+    )
+}
+
 /// The animations CharaStudio's sheets list in the chosen bundles, as the
 /// editor will list them, and how many of the chosen animation bundles no
 /// sheet names.
@@ -469,6 +507,11 @@ fn starter(spec: &Starter, out: &Path, list_only: bool, part_size: Option<u64>) 
         .contents
         .insert("bundles".to_owned(), selection.take.len() as u64);
     let mut holds = format!("{} bundles", selection.take.len());
+    if spec.id == rk_packages::STARTER_MAPS {
+        let scenes = selection.take.iter().filter(|p| p.starts_with("map/scene/")).count();
+        manifest.contents.insert("maps".to_owned(), scenes as u64);
+        holds += &format!(" with {scenes} map scenes");
+    }
     if spec.cards {
         manifest.contents.insert("cards".to_owned(), cards);
         holds += &format!(" and {cards} cards");
@@ -777,6 +820,17 @@ mod tests {
 
         assert!(!pose_part("h/anim/female/00_00_00.unity3d"));
         assert!(!pose_part("studio/item/00.unity3d"));
+    }
+
+    #[test]
+    fn a_map_comes_with_its_list_its_walls_and_its_picture() {
+        assert!(map_part("map/scene/myroom.unity3d"));
+        assert!(map_part("studio/info/00.unity3d"));
+        assert!(map_part("h/list/00.unity3d"));
+        assert!(map_part("map/list/mapinfo/00.unity3d"));
+        assert!(map_part("map/thumbnail/00.unity3d"));
+        assert!(!map_part("map/sound/00.unity3d"));
+        assert!(!map_part("chara/00.unity3d"));
     }
 
     #[test]
