@@ -68,7 +68,7 @@ struct Actor {
     clothes: States,
     /// The animation of the scene the actor last looked for, by its file
     /// in the project, bundle, controller and state.
-    pose: Option<[String; 4]>,
+    pose: Option<[String; 5]>,
     /// That animation, when it could be read.
     playing: Option<Playing>,
     /// Why it could not be read.
@@ -237,12 +237,15 @@ impl Actor {
             again = true;
         }
 
+        // The H animation options pick the clips to blend, so a change
+        // to them reads the motion again like a change of animation.
         let key = pose.as_ref().map(|p| {
             [
                 p.file.clone().unwrap_or_default(),
                 p.bundle.clone(),
                 p.controller.clone(),
                 p.state.clone(),
+                p.options.map(|[a, b]| format!("{a} {b}")).unwrap_or_default(),
             ]
         });
         if key != self.pose {
@@ -349,6 +352,8 @@ pub struct Built {
     pub animation: Option<(bool, bool, f32)>,
     /// Why the character's animation could not be read.
     pub animation_problem: Option<String>,
+    /// The body blend the character's own card gives its animations.
+    pub parameters: rk_chara::motion::Parameters,
 }
 
 pub struct Live {
@@ -517,6 +522,7 @@ impl Live {
                 .as_ref()
                 .map(|p| (p.is_static(), p.motion.loops(), p.motion.duration())),
             animation_problem: a.animation_problem.clone(),
+            parameters: a.chara.parameters,
         })
     }
 
@@ -702,7 +708,11 @@ impl Live {
         for at in order {
             let actor = &mut self.actors[at];
             let Some(object) = scene.get(actor.id) else { continue };
-            let parameters = actor.chara.parameters;
+            let options = match &object.content {
+                Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
+                _ => None,
+            };
+            let parameters = actor.chara.parameters.with_options(options);
             let mut read = || -> Result<Motion> {
                 let Content::Character {
                     animation: Some(animation),

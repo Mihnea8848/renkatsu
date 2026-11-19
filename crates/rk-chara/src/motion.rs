@@ -294,7 +294,18 @@ fn width(target: Target) -> usize {
 pub struct Parameters {
     pub height: f32,
     pub breast: f32,
+    /// The two values CharaStudio's animation options hold for an H
+    /// animation (`Studio.OICharInfo.animeOptionParam`), which take the
+    /// place of `height` and `Breast`; none plays at the body's own.
+    pub options: Option<[f32; 2]>,
 }
+
+/// The parameters the H scenes' two animation options drive, in order,
+/// as `Studio.OCIChar.LoadAnime` picks them: `height1` and `Breast1`
+/// where the controller declares them, else `height` and `Breast`. The
+/// game's own H controllers declare neither, so the options stand in for
+/// the body there.
+pub const OPTION_PARAMETERS: [[&str; 2]; 2] = [["height1", "height"], ["Breast1", "Breast"]];
 
 impl Parameters {
     /// From a card's body sliders (`ChaFileBody.shapeValueBody`).
@@ -302,10 +313,27 @@ impl Parameters {
         Parameters {
             height: shape_value_body.first().copied().unwrap_or(0.5),
             breast: shape_value_body.get(4).copied().unwrap_or(0.5),
+            options: None,
         }
     }
 
-    fn get(&self, name: &str) -> Option<f32> {
+    /// The same parameters with the H animation options set or cleared.
+    pub fn with_options(self, options: Option<[f32; 2]>) -> Parameters {
+        Parameters { options, ..self }
+    }
+
+    /// Which parameter each option drives, for a controller that
+    /// declares the names `has` says it does.
+    fn option_names(has: &dyn Fn(&str) -> bool) -> [&'static str; 2] {
+        OPTION_PARAMETERS.map(|[first, second]| if has(first) { first } else { second })
+    }
+
+    fn get(&self, name: &str, options: &[&str; 2]) -> Option<f32> {
+        if let Some(values) = self.options {
+            if let Some(at) = options.iter().position(|driven| *driven == name) {
+                return Some(values[at]);
+            }
+        }
         match name {
             "height" => Some(self.height),
             "Breast" => Some(self.breast),
@@ -325,12 +353,14 @@ pub fn resolve(
     let found = controller
         .state(state)
         .with_context(|| format!("controller {} has no state {state}", controller.name))?;
+    let has = |name: &str| controller.parameters.iter().any(|p| p.name == name);
+    let options = Parameters::option_names(&has);
     let value = |id: u32| {
         controller
             .parameters
             .iter()
             .find(|p| p.id == id)
-            .map_or(0.0, |p| parameters.get(&p.name).unwrap_or(p.default))
+            .map_or(0.0, |p| parameters.get(&p.name, &options).unwrap_or(p.default))
     };
     let mut clips = Vec::new();
     for (index, weight) in found.weights(&value) {
@@ -563,5 +593,30 @@ mod tests {
         let weights: Vec<f32> = motion.clips.iter().map(|c| c.1).collect();
         assert_eq!(weights, [0.75, 0.25]);
         assert!(resolve(&controller, "sit", &parameters, &mut |_| unreachable!()).is_err());
+
+        // The H scenes' first animation option takes the place of the
+        // body's height, the parameter the game's H controllers name,
+        // since none of them declares `height1`.
+        let with = parameters.with_options(Some([0.75, 0.5]));
+        let motion = resolve(&controller, "stand", &with, &mut |i| {
+            Ok(Arc::new(still(i as f32, 1.0, false)))
+        })
+        .unwrap();
+        let weights: Vec<f32> = motion.clips.iter().map(|c| c.1).collect();
+        assert_eq!(weights, [0.25, 0.75]);
+        // A controller that does declare `height1` keeps the body's
+        // height on `height` and gives the option its own parameter.
+        let mut named = controller.clone();
+        named.parameters[0].name = "height1".into();
+        let motion = resolve(&controller, "stand", &with.with_options(None), &mut |i| {
+            Ok(Arc::new(still(i as f32, 1.0, false)))
+        })
+        .unwrap();
+        assert_eq!(motion.clips.iter().map(|c| c.1).collect::<Vec<f32>>(), [0.75, 0.25]);
+        let motion = resolve(&named, "stand", &with, &mut |i| {
+            Ok(Arc::new(still(i as f32, 1.0, false)))
+        })
+        .unwrap();
+        assert_eq!(motion.clips.iter().map(|c| c.1).collect::<Vec<f32>>(), [0.25, 0.75]);
     }
 }

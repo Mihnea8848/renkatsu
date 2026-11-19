@@ -76,6 +76,7 @@ impl Item {
             speed: self.link.as_ref().map_or(1.0, |l| l.speed),
             start: self.link.as_ref().map_or(0.0, |l| l.start),
             force_loop: self.link.as_ref().is_some_and(|l| l.force_loop),
+            options: None,
         }
     }
 
@@ -96,6 +97,28 @@ impl Item {
             (None, None) => "Cannot be read".to_owned(),
         }
     }
+}
+
+/// Whether two of the project's animations are the two halves of one of
+/// the H scenes' animations, the one a female character plays and the
+/// one a male character plays.
+///
+/// CharaStudio keeps the H scenes' animations in its one list, keyed by
+/// group, category and number, and lists each of them once per sex: the
+/// female and the male list sit in groups of their own and hold the same
+/// categories under the same numbers, each entry under the same name,
+/// with only the controller differing (`khs_f_base` against
+/// `khs_m_base`). So the two halves of one animation are the entries
+/// that share a category and a name and differ in their group.
+///
+/// Checked against the installed lists: Female and Male H service hold
+/// the same 363 category, number and name triples, Female and Male H
+/// insertion the same 864, and no name is used twice inside a category.
+/// The groups whose halves sit in categories of their own instead, the
+/// threesome and darkness lists, are not paired this way; there the
+/// character is picked by hand.
+pub fn same_h_animation(a: &Meta, b: &Meta) -> bool {
+    a.h && b.h && a.group != b.group && a.category == b.category && a.name == b.name
 }
 
 /// How an animation of some length reads in a list.
@@ -368,6 +391,36 @@ mod tests {
         dir
     }
 
+    /// One entry of CharaStudio's list, as its file records it.
+    fn listed(group: &str, category: &str, name: &str, h: bool) -> Meta {
+        Meta {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            category: category.to_owned(),
+            h,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_two_halves_of_an_h_animation_share_a_category_and_a_name() {
+        let female = listed("Female H insertion", "Missionary", "Insertion", true);
+        let male = listed("Male H insertion", "Missionary", "Insertion", true);
+        assert!(same_h_animation(&female, &male));
+        assert!(same_h_animation(&male, &female));
+        // The same half twice is one character, not a pair.
+        assert!(!same_h_animation(&female, &female));
+        // Another number of the same category, and another category.
+        let other = listed("Male H insertion", "Missionary", "Weak loop", true);
+        assert!(!same_h_animation(&female, &other));
+        let elsewhere = listed("Male H insertion", "Cowgirl", "Insertion", true);
+        assert!(!same_h_animation(&female, &elsewhere));
+        // CharaStudio's own animations are never a pair, whatever they
+        // are called.
+        let studio = listed("Character", "Basic", "Stand", false);
+        assert!(!same_h_animation(&studio, &listed("Studio", "Basic", "Stand", false)));
+    }
+
     /// A package's animation file on disk, to import.
     fn file(home: &Path, name: &str, seconds: f32, loops: bool) -> Pick {
         let path = home.join(format!("{name}.rkanim"));
@@ -415,6 +468,7 @@ mod tests {
         let parameters = rk_chara::motion::Parameters {
             height: 0.5,
             breast: 0.5,
+            options: None,
         };
         assert_eq!(stored.motion(&parameters).unwrap().duration(), 3.0);
         let _ = std::fs::remove_dir_all(&home);

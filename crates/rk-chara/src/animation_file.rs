@@ -182,6 +182,7 @@ impl Stored {
         let middling = Parameters {
             height: 0.5,
             breast: 0.5,
+            options: None,
         };
         if let Ok(motion) = stored.motion(&middling) {
             stored.meta.seconds = motion.duration();
@@ -428,7 +429,11 @@ mod tests {
         assert_eq!(back.meta, first.meta);
         // Every body gets its own blend out of the file.
         for (height, seconds) in [(0.0, 1.0), (0.5, 1.5), (1.0, 2.0)] {
-            let parameters = Parameters { height, breast: 0.5 };
+            let parameters = Parameters {
+                height,
+                breast: 0.5,
+                options: None,
+            };
             let (a, b) = (first.motion(&parameters).unwrap(), back.motion(&parameters).unwrap());
             assert_eq!(a.duration(), seconds);
             assert_eq!(b.duration(), seconds);

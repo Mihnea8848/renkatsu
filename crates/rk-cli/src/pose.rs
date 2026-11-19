@@ -25,6 +25,7 @@ pub fn list(details: bool) -> Result<()> {
     let parameters = Parameters {
         height: 0.5,
         breast: 0.5,
+        options: None,
     };
     for category in library.categories() {
         println!(

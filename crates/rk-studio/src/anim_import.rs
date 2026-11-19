@@ -130,6 +130,7 @@ impl Entry {
             speed: 1.0,
             start: 0.0,
             force_loop: false,
+            options: None,
         }
     }
 }

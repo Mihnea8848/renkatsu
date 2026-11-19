@@ -146,6 +146,12 @@ pub struct Animation {
     /// holding its last frame (CharaStudio's option of that name).
     #[serde(default)]
     pub force_loop: bool,
+    /// The two values CharaStudio's animation options hold while an H
+    /// animation plays (`Studio.OICharInfo.animeOptionParam`): the body
+    /// blend the clips are played at, in place of the character's own.
+    /// None plays at the character's own, as every other animation does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<[f32; 2]>,
 }
 
 impl Animation {
@@ -164,6 +170,7 @@ impl Animation {
             speed: 1.0,
             start: 0.0,
             force_loop: false,
+            options: None,
         }
     }
 
@@ -193,6 +200,7 @@ impl Animation {
             speed: 1.0,
             start: 0.0,
             force_loop: false,
+            options: None,
         }
     }
 
@@ -972,6 +980,66 @@ impl Document {
         movable.len()
     }
 
+    /// Snaps a character onto another so that an H animation lines the
+    /// pair up, and returns whether it did.
+    ///
+    /// The game gives every character of an H scene the same world
+    /// position and rotation (`HSceneProc.SetCharacterPositon`): there is
+    /// no per-pair offset and no per-animation placement, because the
+    /// relative placement is baked into the clips, which are authored in
+    /// one space whose origin is the H point. So a pair is snapped by
+    /// putting both characters at one transform. Renkatsu does that
+    /// through the scene's own parent chain rather than by copying world
+    /// matrices, so the pair then moves, turns and is posed as a unit.
+    ///
+    /// The H animation options go along: they are the body blend the
+    /// clips are played at, so a pair holding different ones drifts
+    /// apart. The character takes the one it is snapped onto.
+    ///
+    /// What the game runs on top of this is partner IK (`MotionIK`, a
+    /// full-body biped solver whose hand and foot targets are worked out
+    /// against the partner for every animation state). Renkatsu has
+    /// none, so two bodies of different sizes line up but do not touch.
+    pub fn snap(&mut self, id: ObjectId, to: ObjectId) -> bool {
+        let character = |scene: &Scene, id: ObjectId| scene.get(id).is_some_and(|o| o.kind() == Kind::Character);
+        let place = Place::Into(Some(to));
+        if !character(&self.scene, id) || !character(&self.scene, to) || !self.scene.can_place(id, place) {
+            return false;
+        }
+        let options = match self.scene.get(to).map(|o| &o.content) {
+            Some(Content::Character { animation, .. }) => animation.as_ref().and_then(|a| a.options),
+            _ => None,
+        };
+        // A pair that is snapped already is left alone, so that asking
+        // for it again is no step of the history.
+        let snapped = |o: &Object| {
+            o.parent == Some(to)
+                && o.bone.is_none()
+                && o.transform == Transform::default()
+                && match &o.content {
+                    Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options) == options,
+                    _ => false,
+                }
+        };
+        if self.scene.get(id).is_some_and(snapped) {
+            return false;
+        }
+        self.checkpoint();
+        self.scene.place(id, place);
+        let Some(object) = self.scene.get_mut(id) else {
+            return false;
+        };
+        object.transform = Transform::default();
+        if let Content::Character {
+            animation: Some(animation),
+            ..
+        } = &mut object.content
+        {
+            animation.options = options;
+        }
+        true
+    }
+
     /// Takes the bones from the built characters. No step of the history.
     pub fn set_poses(&mut self, poses: Poses) {
         self.scene.set_poses(poses);
@@ -1223,6 +1291,68 @@ mod tests {
         doc.selected = None;
         let camera = doc.add("Camera", Content::camera());
         (doc, [folder, anna, bea, light, camera])
+    }
+
+    /// Gives a character an H animation holding the given options.
+    fn with_options(doc: &mut Document, id: ObjectId, options: Option<[f32; 2]>) {
+        let mut edited = doc.scene().get(id).unwrap().clone();
+        if let Content::Character { animation, .. } = &mut edited.content {
+            *animation = Some(Box::new(Animation {
+                name: "Missionary".into(),
+                options,
+                ..Animation::maker_pose()
+            }));
+        }
+        doc.edit(edited, false);
+    }
+
+    #[test]
+    fn snapping_puts_a_pair_at_one_transform_through_the_parent_chain() {
+        let (mut doc, [_, anna, bea, ..]) = cast();
+        // The two stand apart, as new characters do.
+        assert_ne!(
+            doc.scene().get(anna).unwrap().transform.position,
+            doc.scene().get(bea).unwrap().transform.position
+        );
+        assert!(doc.snap(bea, anna));
+        let snapped = doc.scene().get(bea).unwrap();
+        assert_eq!(snapped.parent, Some(anna), "it follows the one it is snapped onto");
+        assert_eq!(snapped.bone, None, "the whole character, not a bone");
+        assert_eq!(snapped.transform, Transform::default(), "at that one's origin");
+        assert_eq!(doc.scene().world(bea), doc.scene().world(anna), "one transform");
+        // Moving the pair moves both, because it goes through the chain.
+        let mut moved = doc.scene().get(anna).unwrap().clone();
+        moved.transform.position = [2.0, 0.0, 1.0];
+        doc.edit(moved, false);
+        assert_eq!(doc.scene().world(bea), doc.scene().world(anna));
+    }
+
+    #[test]
+    fn snapping_takes_the_other_character_s_animation_options_and_is_undone() {
+        let (mut doc, [_, anna, bea, ..]) = cast();
+        with_options(&mut doc, anna, Some([0.25, 0.75]));
+        with_options(&mut doc, bea, Some([1.0, 1.0]));
+        let was = doc.scene().get(bea).unwrap().clone();
+        assert!(doc.snap(bea, anna));
+        let Content::Character { animation, .. } = &doc.scene().get(bea).unwrap().content else {
+            panic!("a character");
+        };
+        assert_eq!(animation.as_ref().unwrap().options, Some([0.25, 0.75]));
+        // Asking again changes nothing and leaves no step of the history.
+        assert!(!doc.snap(bea, anna));
+        assert!(doc.undo());
+        assert_eq!(doc.scene().get(bea).unwrap(), &was);
+    }
+
+    #[test]
+    fn a_character_is_snapped_only_onto_another_character_outside_itself() {
+        let (mut doc, [folder, anna, bea, light, _]) = cast();
+        assert!(!doc.snap(anna, anna), "not onto itself");
+        assert!(!doc.snap(anna, light), "not onto a light");
+        assert!(!doc.snap(light, anna), "a light is not snapped");
+        assert!(!doc.snap(anna, folder), "a folder is not a character");
+        assert!(doc.snap(bea, anna));
+        assert!(!doc.snap(anna, bea), "not inside what already follows it");
     }
 
     #[test]
@@ -1665,11 +1795,18 @@ mod tests {
         let mut edited = doc.scene().get(anna).unwrap().clone();
         edited.transform.rotation = [0.0, 45.0, 0.0];
         edited.visible = false;
+        if let Content::Character { animation, .. } = &mut edited.content {
+            *animation = Some(Box::new(Animation {
+                options: Some([0.25, 0.75]),
+                ..Animation::maker_pose()
+            }));
+        }
         doc.edit(edited, false);
         let text = toml::to_string(doc.scene()).unwrap();
         assert!(text.contains("name = \"Anna\""), "{text}");
         assert!(text.contains("kind = \"character\""), "{text}");
         assert!(text.contains("card = \"/cards/anna.png\""), "{text}");
+        assert!(text.contains("options = [0.25, 0.75]"), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(&back, doc.scene());
     }
@@ -1721,6 +1858,7 @@ mod tests {
             override_controller: String::new(),
             speed: 0.5,
             start: 0.25,
+            options: None,
             force_loop: true,
         };
         let mut edited = doc.scene().get(anna).unwrap().clone();
@@ -1823,6 +1961,7 @@ speed = 0.5
                 override_controller: String::new(),
                 speed: 1.0,
                 start: 0.0,
+                options: None,
                 force_loop: false,
             }));
         }
