@@ -10,6 +10,7 @@ pub mod map;
 pub mod material;
 pub mod modshader;
 pub mod shadow;
+pub mod sky;
 pub mod xukmi;
 mod xukmi_defaults;
 

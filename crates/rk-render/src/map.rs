@@ -179,9 +179,44 @@ pub struct MapObject {
     /// Whether it casts the sun's shadow, and whether shadows fall on it.
     pub casts_shadows: bool,
     pub receives_shadows: bool,
+    /// Casts its shadow without being seen (Unity's "shadows only").
+    pub shadows_only: bool,
     /// Its Unity layer: the sun lights, and takes shadows from, only the
     /// layers of its culling mask.
     pub layer: u32,
+    /// The volumes of `MapScene::vanish` that hide it while the camera is
+    /// inside one.
+    pub vanish: Vec<usize>,
+}
+
+/// A volume of a map's table of walls that hide (CharaStudio's vanish):
+/// while the camera is inside it, the objects naming it are not drawn and
+/// cast no shadow, so that a room shows from outside its walls.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VanishVolume {
+    /// A box: world to the box's own space, where it spans `centre` plus
+    /// and minus `half`.
+    Box {
+        to_local: Mat4,
+        centre: Vec3,
+        half: Vec3,
+    },
+    Sphere {
+        centre: Vec3,
+        radius: f32,
+    },
+}
+
+impl VanishVolume {
+    pub fn contains(&self, p: Vec3) -> bool {
+        match self {
+            VanishVolume::Box { to_local, centre, half } => {
+                let d = (to_local.transform_point3(p) - *centre).abs();
+                d.x <= half.x && d.y <= half.y && d.z <= half.z
+            }
+            VanishVolume::Sphere { centre, radius } => p.distance(*centre) <= *radius,
+        }
+    }
 }
 
 /// A baked lightmap: the light, stored as RGBM, and, for directional
@@ -221,6 +256,10 @@ pub struct MapLight {
     /// lightmap.
     pub ambient_sh: [[f32; 4]; 7],
     pub fog: Option<Fog>,
+    /// The scene's sky, drawn behind everything as a camera that clears
+    /// with the skybox does. Without one the picture is cleared with
+    /// `background`.
+    pub sky: Option<crate::sky::Sky>,
     /// What shows where nothing is drawn.
     pub background: [f32; 3],
     /// A cutaway: nothing above this height is drawn. For looking into
@@ -245,7 +284,17 @@ pub struct MapScene {
     pub objects: Vec<MapObject>,
     pub lightmaps: Vec<Lightmap>,
     pub light: MapLight,
+    /// The volumes of the walls that hide.
+    pub vanish: Vec<VanishVolume>,
+    /// The layers the camera draws, a bit each. Objects on other layers
+    /// are not seen, though they still cast the sun's shadow when they are
+    /// on its layers, as in Unity.
+    pub camera_mask: u32,
 }
+
+/// The layers CharaStudio's camera draws: Water (4), Chara (10), Map (11)
+/// and 29 (Studio/Camera), as its captures record it.
+pub const STUDIO_CAMERA_MASK: u32 = 536_874_000;
 
 impl MapScene {
     /// The lowest and highest corner of everything drawn.
@@ -375,6 +424,7 @@ pub(crate) struct Pipelines {
     compressed: HashMap<usize, (Arc<MapImage>, wgpu::TextureView)>,
     /// How many objects the last frame left out as outside the view.
     culled: std::cell::Cell<usize>,
+    sky: crate::sky::SkyPass,
 }
 
 /// Uploads BC blocks with their mip levels.
@@ -440,7 +490,7 @@ fn upload_blocks(device: &wgpu::Device, queue: &wgpu::Queue, image: &MapImage) -
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device) -> Pipelines {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Pipelines {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("map"),
             source: wgpu::ShaderSource::Wgsl(include_str!("map.wgsl").into()),
@@ -681,6 +731,7 @@ impl Pipelines {
             clamp: sampler(wgpu::AddressMode::ClampToEdge),
             compressed: HashMap::new(),
             culled: std::cell::Cell::new(0),
+            sky: crate::sky::SkyPass::new(device, queue, COLOR_FORMAT, DEPTH, SAMPLES),
         }
     }
 }
@@ -709,7 +760,7 @@ impl Renderer {
     /// Draws a map from `camera` to an RGBA8 image, top row first.
     pub fn render_map(&mut self, map: &MapScene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>> {
         if self.map.is_none() {
-            self.map = Some(Pipelines::new(&self.device));
+            self.map = Some(Pipelines::new(&self.device, &self.queue));
         }
         let aspect = width as f32 / height as f32;
         let (min, max) = map.bounds();
@@ -752,7 +803,8 @@ impl Renderer {
                 map.lightmaps
                     .iter()
                     .flat_map(|l| std::iter::once(&l.light).chain(l.direction.as_ref())),
-            );
+            )
+            .chain(l.sky.iter().flat_map(|s| s.images()));
         {
             for image in images {
                 let key = Arc::as_ptr(image) as usize;
@@ -780,6 +832,13 @@ impl Renderer {
             }
         }
         let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
+        let sky_cube = match &l.sky {
+            Some(crate::sky::Sky::Cubemap { cube: Some(cube), .. }) => {
+                let pipes = self.map.as_mut().expect("made above");
+                Some(pipes.sky.cube(&self.device, &self.queue, cube))
+            }
+            _ => None,
+        };
         let white = self.white.clone();
         let device = &self.device;
         let pipes = self.map.as_ref().expect("made above");
@@ -881,6 +940,24 @@ impl Renderer {
                     resource: wgpu::BindingResource::Sampler(&pipes.compare),
                 },
             ],
+        });
+
+        // The sky's textures and its numbers for this view.
+        let sky_group = l.sky.as_ref().map(|sky| {
+            let face = |i: usize| match sky {
+                crate::sky::Sky::SixSided { faces, .. } => faces[i].image.as_ref().and_then(view_of),
+                _ => None,
+            };
+            let faces: [Option<wgpu::TextureView>; 6] = std::array::from_fn(face);
+            let uniform = crate::sky::uniform(sky, l.sun_dir, l.sun_color, camera, aspect);
+            pipes.sky.bind(
+                device,
+                &uniform,
+                sky_cube.as_ref(),
+                std::array::from_fn(|i| faces[i].as_ref().unwrap_or(&white)),
+                &pipes.clamp,
+                &pipes.repeat,
+            )
         });
 
         // The lightmaps' bind groups: the first for objects without one.
@@ -995,12 +1072,18 @@ impl Renderer {
         let mut casters: Vec<(usize, u32, u32, usize, bool, bool)> = Vec::new();
         let shadowed = l.shadows.is_some();
         let mut culled = 0;
+        // The volumes the camera stands in hide what names them.
+        let inside: Vec<bool> = map.vanish.iter().map(|v| v.contains(camera.eye)).collect();
         for o in &map.objects {
             let mesh = &o.mesh;
             if mesh.positions.is_empty() || mesh.indices.is_empty() {
                 continue;
             }
-            let seen = in_view(&view_proj, mesh.bounds);
+            if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
+                continue;
+            }
+            let on_camera = !o.shadows_only && o.layer < 32 && map.camera_mask & (1 << o.layer) != 0;
+            let seen = on_camera && in_view(&view_proj, mesh.bounds);
             let sunlit = o.layer < 32 && l.sun_mask & (1 << o.layer) != 0;
             if !seen {
                 culled += 1;
@@ -1167,7 +1250,19 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &globals_group, &[]);
+            // As Unity orders a frame: the sky after everything opaque,
+            // where the depth buffer is still open, and before what blends.
+            let mut sky_group = sky_group.as_ref();
+            let mut sky_once = |pass: &mut wgpu::RenderPass<'_>| {
+                if let Some(group) = sky_group.take() {
+                    pipes.sky.draw(pass, group);
+                    pass.set_bind_group(0, &globals_group, &[]);
+                }
+            };
             for d in &draws {
+                if d.blended {
+                    sky_once(&mut pass);
+                }
                 pass.set_pipeline(&pipes.pipelines[&(d.blended, d.cull)]);
                 pass.set_bind_group(1, &materials[d.material], &[]);
                 pass.set_bind_group(2, &lightmaps[d.lightmap], &[]);
@@ -1176,6 +1271,7 @@ impl Renderer {
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
             }
+            sky_once(&mut pass);
         }
         // Read back, honouring the row alignment wgpu requires.
         let row = width * 4;
