@@ -575,7 +575,12 @@ impl Live {
         self.failed
             .retain(|(id, recipe, _)| wanted.iter().any(|w| w.0 == *id && w.1 == *recipe));
         for focus in [self.cam.focus, self.cam.home_focus()].into_iter().flatten() {
-            if !wanted.iter().any(|(id, _)| *id == focus.object) {
+            // Other objects than characters keep the focus while they are
+            // in the scene.
+            let gone = scene.get(focus.object).is_none_or(|o| {
+                o.kind() == crate::kinds::Kind::Character && !wanted.iter().any(|(id, _)| *id == focus.object)
+            });
+            if gone {
                 self.cam.forget(focus.object);
             }
         }
