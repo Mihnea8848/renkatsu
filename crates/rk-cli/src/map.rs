@@ -298,7 +298,10 @@ pub fn render(
     };
     let mut renderer = rk_render::Renderer::new()?;
     let started = std::time::Instant::now();
-    let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file);
+    // The walls that hide follow CharaStudio's camera through its physics
+    // triggers. Captures move their cameras without them, and no wall hides
+    // in their pictures, so a capture's view is drawn without the table.
+    let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file).filter(|_| capture.is_none());
     let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
     let built = started.elapsed();
     let mut scene = scene;

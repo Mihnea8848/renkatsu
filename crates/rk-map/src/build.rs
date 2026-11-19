@@ -92,18 +92,27 @@ pub fn build(
         // hides with all under them.
         let mut hidden_by: HashMap<i64, Vec<usize>> = HashMap::new();
         for row in &rows {
-            let Some(collider) = tree.find(&row.collider) else {
+            // The camera only reacts to colliders on the Map layer
+            // (`CameraControl.mapLayer`); maps keep same-named twins on
+            // other layers, which never trigger.
+            let mut indices = Vec::new();
+            for collider in tree
+                .find_all(&row.collider)
+                .into_iter()
+                .filter(|id| tree.layer(*id) == MAP_LAYER)
+            {
+                if let Some(volume) = volume_of(sf, &tree, collider, &mut b) {
+                    volumes.push(volume);
+                    indices.push(volumes.len() - 1);
+                }
+            }
+            if indices.is_empty() {
                 continue;
-            };
-            let Some(volume) = volume_of(sf, &tree, collider, &mut b) else {
-                continue;
-            };
-            volumes.push(volume);
-            let index = volumes.len() - 1;
+            }
             for name in &row.hides {
                 if let Some(go) = tree.find(name) {
                     for id in tree.with_descendants(go) {
-                        hidden_by.entry(id).or_default().push(index);
+                        hidden_by.entry(id).or_default().extend(&indices);
                     }
                 }
             }
@@ -359,7 +368,27 @@ fn volume_of(
     None
 }
 
+/// Unity's "Map" layer, which maps' objects and CharaStudio's camera
+/// triggers use.
+const MAP_LAYER: i32 = 11;
+
 impl Tree<'_> {
+    /// Every active game object of this name, in the file's order.
+    fn find_all(&self, name: &str) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.name == name && o.active)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn layer(&self, game_object: i64) -> i32 {
+        self.objects.get(&game_object).map_or(0, |o| o.layer)
+    }
+
     /// The first game object of this name, in the file's order.
     fn find(&self, name: &str) -> Option<i64> {
         let mut ids: Vec<&i64> = self
