@@ -5,14 +5,40 @@
 //! A click on a key waits for new keys; an action that shares a key with
 //! another says so.
 
+use crate::keycaps::{self, Cap, Mouse};
 use crate::keymap::{Action, Group, Keymap, ACTIONS, SLOTS};
 use crate::state::{Look, State};
 use crate::widgets::{self, field_box, flat_button, glyph, label, text_width};
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
 use egui_phosphor::regular as icon;
 
-const WIDTH: f32 = 460.0;
-const HEIGHT: f32 = 440.0;
+const WIDTH: f32 = 640.0;
+const HEIGHT: f32 = 600.0;
+
+/// What the mouse does in the viewport. These are not remapped.
+fn mouse_rows() -> Vec<(&'static str, Vec<Vec<Cap>>)> {
+    use Cap::{Drag, Mouse as M};
+    let key = |t: &str| Cap::Key(t.into());
+    vec![
+        ("Select", vec![vec![M(Mouse::Left)]]),
+        ("Add or remove from selection", vec![vec![key("Ctrl"), M(Mouse::Left)]]),
+        ("Box select", vec![vec![M(Mouse::Left), Drag]]),
+        (
+            "Orbit",
+            vec![vec![M(Mouse::Right), Drag], vec![key("Alt"), M(Mouse::Left), Drag]],
+        ),
+        ("Pan", vec![vec![M(Mouse::Middle), Drag]]),
+        (
+            "Zoom",
+            vec![vec![M(Mouse::Wheel)], vec![key("Alt"), M(Mouse::Right), Drag]],
+        ),
+        (
+            "Fly faster",
+            vec![vec![M(Mouse::Right), Cap::Symbol(icon::ARROW_FAT_UP, "Shift")]],
+        ),
+        ("Fly speed", vec![vec![M(Mouse::Right), M(Mouse::Wheel)]]),
+    ]
+}
 
 /// What a frame of the window asks for.
 enum Ask {
@@ -46,9 +72,12 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         });
         ui.add_space(4.0);
         let search = st.shortcuts_search.trim().to_lowercase();
+        // As tall as the window allows, up to `HEIGHT`.
+        let height = HEIGHT.min(ui.ctx().content_rect().height() - 200.0).max(200.0);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
-            .max_height(HEIGHT)
+            .min_scrolled_height(height)
+            .max_height(height)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for group in Group::ALL {
@@ -69,18 +98,23 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
                     if shown.is_empty() {
                         continue;
                     }
-                    let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-                    ui.painter().text(
-                        Pos2::new(head.left() + 6.0, head.center().y + 2.0),
-                        Align2::LEFT_CENTER,
-                        group.name(),
-                        k.small(),
-                        k.t.text_dim,
-                    );
+                    group_head(ui, k, group.name());
                     for def in shown {
                         if let Some(asked) = row(ui, k, st, def.action, def.name) {
                             ask = Some(asked);
                         }
+                    }
+                }
+                let mice: Vec<_> = mouse_rows()
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        search.is_empty() || name.to_lowercase().contains(&search) || "mouse".contains(&search)
+                    })
+                    .collect();
+                if !mice.is_empty() {
+                    group_head(ui, k, "Mouse");
+                    for (name, ways) in mice {
+                        mouse_row(ui, k, name, &ways);
                     }
                 }
             });
@@ -112,12 +146,56 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     }
 }
 
+/// The height of a row.
+fn row_height(k: &Look) -> f32 {
+    k.d.row + 8.0
+}
+
+/// The name of a group above its rows.
+fn group_head(ui: &mut egui::Ui, k: &Look, name: &str) {
+    let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+    ui.painter().text(
+        Pos2::new(head.left() + 6.0, head.center().y + 3.0),
+        Align2::LEFT_CENTER,
+        name,
+        k.small(),
+        k.t.text_dim,
+    );
+}
+
+/// A mouse control: its name and each way of doing it.
+fn mouse_row(ui: &mut egui::Ui, k: &Look, name: &str, ways: &[Vec<Cap>]) {
+    let t = &k.t;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height(k)), Sense::hover());
+    if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(rect, k.radius(), t.row_hover);
+    }
+    let y = rect.center().y;
+    label(ui.painter(), k, Pos2::new(rect.left() + 14.0, y), name, t.text);
+    // Lined up with the keys above, which leave room for the reset button.
+    let mut right = rect.right() - 6.0 - k.field() - 4.0 - 6.0;
+    for (i, caps) in ways.iter().enumerate().rev() {
+        let drawn = keycaps::draw(ui, k, caps, right, y, t.text_bright);
+        right = drawn.left() - 6.0;
+        if i > 0 {
+            ui.painter().text(
+                Pos2::new(right - 4.0, y),
+                Align2::CENTER_CENTER,
+                "or",
+                k.small(),
+                t.text_dim,
+            );
+            right -= 8.0 + text_width(ui, "or", k.small());
+        }
+    }
+}
+
 /// One action: its name, a warning when it shares a key, its keys, and at
 /// the right end the button that puts its default keys back.
 fn row(ui: &mut egui::Ui, k: &Look, st: &State, action: Action, name: &str) -> Option<Ask> {
     let t = &k.t;
     let mut ask = None;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 2.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height(k)), Sense::hover());
     if ui.rect_contains_pointer(rect) {
         ui.painter().rect_filled(rect, k.radius(), t.row_hover);
     }
@@ -161,34 +239,38 @@ fn row(ui: &mut egui::Ui, k: &Look, st: &State, action: Action, name: &str) -> O
     let places = (chords.len() + 1).min(SLOTS);
     for slot in (0..places).rev() {
         let listening = waiting == Some(slot);
-        let text = match (listening, chords.get(slot)) {
-            (true, _) => "Press keys".to_owned(),
-            (false, Some(chord)) => chord.text(),
-            (false, None) => String::new(),
-        };
-        let w = if text.is_empty() {
-            side
-        } else {
-            (text_width(ui, &text, k.font()) + 16.0).ceil().max(side)
+        let caps = chords.get(slot).map(|c| keycaps::of_chord(*c));
+        let w = match (listening, &caps) {
+            (true, _) => (text_width(ui, "Press keys", k.font()) + 16.0).ceil(),
+            (false, Some(caps)) => keycaps::width(ui, k, caps) + 8.0,
+            (false, None) => side,
         };
         let chip = cell(right, w);
-        right = chip.left() - 4.0;
+        right = chip.left() - 6.0;
         let resp = ui.interact(chip, ui.id().with(("key", name, slot)), Sense::click());
         if resp.clicked() {
             ask = Some(Ask::Capture(action, slot));
         }
         let p = ui.painter();
-        if text.is_empty() {
-            // The place for another key.
-            let color = if resp.hovered() { t.text_bright } else { t.text_dim };
-            if resp.hovered() {
-                p.rect_filled(chip, k.radius(), t.control);
+        match (listening, caps) {
+            (true, _) => {
+                field_box(p, k, chip, resp.hovered(), true);
+                p.text(chip.center(), Align2::CENTER_CENTER, "Press keys", k.font(), t.text_dim);
             }
-            glyph(p, k, chip.center(), icon::PLUS, 12.0, color);
-        } else {
-            field_box(p, k, chip, resp.hovered(), listening);
-            let color = if listening { t.text_dim } else { t.text_bright };
-            p.text(chip.center(), Align2::CENTER_CENTER, text, k.font(), color);
+            (false, Some(caps)) => {
+                if resp.hovered() {
+                    p.rect_filled(chip.expand(2.0), k.radius(), t.control);
+                }
+                keycaps::draw(ui, k, &caps, chip.right() - 4.0, chip.center().y, t.text_bright);
+            }
+            (false, None) => {
+                // The place for another key.
+                let color = if resp.hovered() { t.text_bright } else { t.text_dim };
+                if resp.hovered() {
+                    p.rect_filled(chip, k.radius(), t.control);
+                }
+                glyph(p, k, chip.center(), icon::PLUS, 12.0, color);
+            }
         }
     }
     ask

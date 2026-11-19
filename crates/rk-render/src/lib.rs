@@ -5,6 +5,7 @@
 //! conventions: left-handed, Y up, clockwise front faces.
 
 pub mod effects;
+pub mod highlight;
 pub mod material;
 pub mod modshader;
 pub mod shadow;
@@ -214,6 +215,8 @@ pub struct Environment {
     /// over the samples of each pixel instead of cutting whole pixels. Not
     /// the game's look, which cuts them hard.
     pub alpha_to_coverage: bool,
+    /// An outline around some of the meshes, for an editor's selection.
+    pub highlight: Option<highlight::Highlight>,
 }
 
 impl Default for Environment {
@@ -238,6 +241,7 @@ impl Default for Environment {
             effects: None,
             camera_depth: false,
             alpha_to_coverage: false,
+            highlight: None,
         }
     }
 }
@@ -277,6 +281,8 @@ pub struct Renderer {
     frame: u64,
     /// The screen effects' pipelines and targets, once a frame used them.
     effects: Option<effects::Gpu>,
+    /// The selection outline's pipeline, once a frame asked for one.
+    highlight: Option<highlight::Pass>,
 }
 
 struct MeshBuffers {
@@ -387,6 +393,8 @@ struct Targets {
     depth_only: wgpu::TextureView,
     depth_texture: wgpu::TextureView,
     mask: wgpu::TextureView,
+    /// The depth of the highlighted meshes alone.
+    highlight: wgpu::TextureView,
 }
 
 /// Box-filtered mip chain for an RGBA8 image.
@@ -819,6 +827,7 @@ impl Renderer {
             shadow_map: None,
             frame: 0,
             effects: None,
+            highlight: None,
         })
     }
 
@@ -1235,6 +1244,8 @@ impl Renderer {
         }
         /// A submesh drawn with its shader's shadow caster pass.
         struct Caster {
+            /// The mesh's place in `draws`.
+            draw: usize,
             batch: usize,
             first: u32,
             count: u32,
@@ -1263,7 +1274,8 @@ impl Renderer {
         let mut seen: HashMap<usize, u32> = HashMap::new();
         // The skinning pass of each mesh: its bind group and vertex count.
         let mut skins = Vec::new();
-        for d in draws {
+        let outlined = |i: usize| env.highlight.as_ref().is_some_and(|h| h.draws.contains(&i));
+        for (draw_index, d) in draws.iter().enumerate() {
             let mesh = &d.renderer.mesh;
             let uv = |set: usize, i: usize| mesh.uv[set].get(i).copied().unwrap_or([0.0, 0.0]);
             let count = d.base_positions.len();
@@ -1393,8 +1405,12 @@ impl Renderer {
                 let bind = binds.len();
                 binds.push(self.material_bind_group(&desc));
                 let role = shadow::role(d.renderer.cast_shadows, desc.shadow, desc.queue);
-                if (cast && role.shadow_map.is_some()) || ((cast || depth_wanted) && role.depth.is_some()) {
+                if (cast && role.shadow_map.is_some())
+                    || ((cast || depth_wanted) && role.depth.is_some())
+                    || outlined(draw_index)
+                {
                     casters.push(Caster {
+                        draw: draw_index,
                         batch: batches.len(),
                         first: sm.first_index,
                         count: sm.index_count,
@@ -1806,6 +1822,34 @@ impl Renderer {
         if let (Some(gpu), Some(frame)) = (&fx_gpu, &fx_frame) {
             gpu.finish(&self.device, &mut encoder, frame, COLOR_FORMAT, target_view);
         }
+        // The selection's outline, over the finished picture: the outlined
+        // meshes' depth alone, then the pixels around it. A mesh without a
+        // depth pass of its own is drawn as solid, culled at the back.
+        if let Some(h) = env.highlight.as_ref().filter(|h| !h.draws.is_empty()) {
+            let targets = self.targets.as_ref().expect("made above");
+            {
+                let group = globals_group(self, base, &self.white);
+                let mut pass = encoder.begin_render_pass(&depth_pass(&targets.highlight));
+                pass.set_bind_group(0, &group, &[]);
+                for c in casters.iter().filter(|c| h.draws.contains(&c.draw)) {
+                    let key = CasterKey {
+                        depth_texture: true,
+                        cull_back: c.role.depth.unwrap_or(true),
+                    };
+                    pass.set_pipeline(&self.caster_pipelines[&key]);
+                    let b: &Batch = &batches[c.batch];
+                    pass.set_vertex_buffer(0, b.vb.slice(..));
+                    pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_bind_group(1, &binds[c.bind], &[]);
+                    pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                }
+            }
+            let outline = self
+                .highlight
+                .get_or_insert_with(|| highlight::Pass::new(&self.device, COLOR_FORMAT));
+            let targets = self.targets.as_ref().expect("made above");
+            outline.paint(&self.device, &mut encoder, &targets.highlight, target_view, h);
+        }
         drop(occlusion);
         if fx_gpu.is_some() {
             self.effects = fx_gpu;
@@ -1858,6 +1902,7 @@ impl Renderer {
             }),
             depth_texture: make(DEPTH_TEXTURE_FORMAT, 1, attachment),
             mask: make(MASK_FORMAT, 1, attachment),
+            highlight: make(DEPTH_TEXTURE_FORMAT, 1, attachment),
         }
     }
 

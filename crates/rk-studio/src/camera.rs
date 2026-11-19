@@ -276,6 +276,16 @@ impl ViewCamera {
         self.glide_to(to);
     }
 
+    /// Frames a ball around `center` that fits from `distance`, keeping the
+    /// direction of view and focusing on nothing.
+    pub fn frame(&mut self, center: Vec3, distance: f32) {
+        self.focus = None;
+        let mut to = self.destination();
+        to.target = center;
+        to.distance = distance;
+        self.glide_to(to);
+    }
+
     /// Looks at a point from the distance and the direction the view has,
     /// without focusing on anything.
     pub fn look_at(&mut self, point: Vec3) {

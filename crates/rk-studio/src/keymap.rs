@@ -24,19 +24,22 @@ pub enum Group {
     Tools,
     Transform,
     View,
+    /// The keys that fly the camera while the right button is held.
+    Fly,
     Modes,
     Scene,
     Window,
 }
 
 impl Group {
-    pub const ALL: [Group; 9] = [
+    pub const ALL: [Group; 10] = [
         Group::File,
         Group::Edit,
         Group::Select,
         Group::Tools,
         Group::Transform,
         Group::View,
+        Group::Fly,
         Group::Modes,
         Group::Scene,
         Group::Window,
@@ -50,6 +53,7 @@ impl Group {
             Group::Tools => "Tools",
             Group::Transform => "Transform",
             Group::View => "View",
+            Group::Fly => "Fly",
             Group::Modes => "Modes",
             Group::Scene => "Scene",
             Group::Window => "Window",
@@ -89,12 +93,17 @@ pub enum Action {
     ToggleSnap,
     ToggleGrid,
     DropToSurface,
+    /// Gives up the gizmo drag under way.
+    CancelDrag,
     Focus,
+    FrameAll,
     ResetView,
     Maximise,
     ViewportTools,
     ModeTools,
     ShowInputs,
+    /// A direction to fly in, as `FLY` lists them.
+    Fly(u8),
     /// A mode of the rail, by its place.
     Mode(u8),
     PlayPause,
@@ -125,7 +134,7 @@ const fn def(action: Action, id: &'static str, name: &'static str, group: Group,
 
 /// Every action. Where two actions share a key, the first one listed
 /// gets it. The defaults follow Unity and Unreal, then Blender.
-pub const ACTIONS: [Def; 49] = [
+pub const ACTIONS: [Def; 57] = [
     def(
         Action::NewProject,
         "new-project",
@@ -219,7 +228,15 @@ pub const ACTIONS: [Def; 49] = [
         Group::Transform,
         &["End"],
     ),
+    def(
+        Action::CancelDrag,
+        "cancel-drag",
+        "Cancel drag",
+        Group::Transform,
+        &["Escape"],
+    ),
     def(Action::Focus, "focus", "Focus", Group::View, &["F"]),
+    def(Action::FrameAll, "frame-all", "Frame all", Group::View, &["Shift+F"]),
     def(Action::ResetView, "reset-view", "Reset view", Group::View, &["Home"]),
     def(
         Action::Maximise,
@@ -237,6 +254,12 @@ pub const ACTIONS: [Def; 49] = [
     ),
     def(Action::ModeTools, "mode-tools", "Mode tools", Group::View, &["N"]),
     def(Action::ShowInputs, "show-inputs", "Show inputs", Group::View, &["F8"]),
+    def(Action::Fly(0), "fly-forward", "Forward", Group::Fly, &["W"]),
+    def(Action::Fly(1), "fly-back", "Back", Group::Fly, &["S"]),
+    def(Action::Fly(2), "fly-left", "Left", Group::Fly, &["A"]),
+    def(Action::Fly(3), "fly-right", "Right", Group::Fly, &["D"]),
+    def(Action::Fly(4), "fly-down", "Down", Group::Fly, &["Q"]),
+    def(Action::Fly(5), "fly-up", "Up", Group::Fly, &["E"]),
     def(Action::Mode(0), "mode-select", "Select", Group::Modes, &["1"]),
     def(Action::Mode(1), "mode-character", "Character", Group::Modes, &["2"]),
     def(Action::Mode(2), "mode-pose", "Pose", Group::Modes, &["3"]),
@@ -369,6 +392,15 @@ fn defaults(def: &Def) -> Vec<Chord> {
     def.keys.iter().filter_map(|k| Chord::parse(k)).collect()
 }
 
+fn group_of(action: Action) -> Group {
+    ACTIONS[index(action)].group
+}
+
+/// Whether a key of `action` is held, whatever the modifiers.
+pub fn held(keys: &Keymap, action: Action, input: &egui::InputState) -> bool {
+    keys.chords(action).iter().any(|c| input.key_down(c.key))
+}
+
 fn index(action: Action) -> usize {
     ACTIONS.iter().position(|d| d.action == action).unwrap_or(0)
 }
@@ -430,6 +462,9 @@ impl Keymap {
             .iter()
             .zip(&self.bound)
             .filter(|(def, chords)| def.action != action && chords.iter().any(|c| mine.contains(c)))
+            // The fly keys work only while the right button is held, when
+            // no other key does.
+            .filter(|(def, _)| (def.group == Group::Fly) == (group_of(action) == Group::Fly))
             .map(|(def, _)| def.name)
             .collect()
     }
@@ -591,8 +626,12 @@ pub fn handle(ctx: &egui::Context, st: &mut State) {
         let def = st.keys.find(chord).filter(|def| {
             // Typing keeps every key but those of the File menu; a held
             // key repeats only undo and redo; and while the right button
-            // flies the camera, plain keys steer it.
+            // flies the camera, plain keys steer it. The fly keys and
+            // cancelling a drag are read where they act, and stay unread.
             let plain = !chord.ctrl && !chord.alt;
+            if def.group == Group::Fly || def.action == Action::CancelDrag {
+                return false;
+            }
             (!typing || def.group == Group::File)
                 && (!repeat || matches!(def.action, Action::Undo | Action::Redo))
                 && !(flying && plain)
@@ -663,6 +702,7 @@ impl State {
             A::ToggleGrid => self.gizmo.grid = !self.gizmo.grid,
             A::DropToSurface => self.run(Command::SnapToFloor),
             A::Focus => crate::viewport::focus_selection(self),
+            A::FrameAll => crate::viewport::frame_all(self),
             A::ResetView => {
                 if let Some(live) = self.live.as_mut() {
                     live.cam.reset();
@@ -686,6 +726,8 @@ impl State {
             A::Stop => self.playback = Playback::Stopped,
             A::Shortcuts => self.shortcuts_open = !self.shortcuts_open,
             A::Packages => self.ask(Command::Packages, ctx),
+            // Read where they act, while the right button or a drag is held.
+            A::Fly(_) | A::CancelDrag => {}
         }
     }
 }
@@ -799,5 +841,16 @@ mod tests {
         map.reset(Action::Focus);
         assert!(map.is_default(Action::Focus));
         assert!(!map.is_default(Action::Rename));
+    }
+
+    #[test]
+    fn fly_keys_do_not_clash_with_the_tools() {
+        let map = Keymap::default();
+        // W moves the camera only while the right button is held.
+        assert!(map.clashes(Action::Fly(0)).is_empty());
+        assert!(map.clashes(Action::Tool(2)).is_empty());
+        let mut map = Keymap::default();
+        map.set(Action::Fly(1), 0, Chord::parse("W").expect("a key"));
+        assert_eq!(map.clashes(Action::Fly(1)), ["Forward"]);
     }
 }

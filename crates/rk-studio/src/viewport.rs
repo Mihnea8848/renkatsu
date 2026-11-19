@@ -22,7 +22,7 @@ use crate::scene::ObjectId;
 use crate::state::{Command, Look, Rail, State};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, icon_cell};
-use egui::{Align, Align2, Color32, Key, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
+use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as icon;
 use glam::Vec3;
 
@@ -37,8 +37,16 @@ pub enum RailShape {
 /// part of the viewport's tab row, which some designs use for the selection
 /// bar; without it that bar is drawn over the picture's top edge.
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
+    let selected = st.doc.selected_all();
+    let ppp = ui.ctx().pixels_per_point();
     if let Some(live) = st.live.as_mut() {
         live.smooth_edges = st.settings.smooth_edges;
+        // The selected characters get an outline in the selection colour.
+        live.outline = (!selected.is_empty()).then(|| crate::live::Outline {
+            objects: selected,
+            color: egui::Rgba::from(k.t.select_bright).to_array(),
+            width: 2.0 * ppp,
+        });
     }
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, st.backdrop);
@@ -189,7 +197,8 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
         palette(ui, k, st, pal);
         left = pal.right();
     }
-    tool_strip(ui, k, st, Pos2::new(left + 8.0, bar.bottom() + 8.0), true);
+    let strip = tool_strip(ui, k, st, Pos2::new(left + 8.0, bar.bottom() + 8.0), true);
+    let _ = options_block(ui, k, st, strip, full.right() - 8.0);
 }
 
 /// Separate blocks floating over the picture, as Unity 6's overlays: the
@@ -213,6 +222,32 @@ fn blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect
         }
     }
     floating_blocks(ui, k, st, area, false);
+}
+
+/// The transform options, in a block right of the tool `strip` and up to
+/// `limit`, while a transform tool is the active one. Gives back the
+/// block when it shows.
+fn options_block(ui: &mut Ui, k: &Look, st: &mut State, strip: Rect, limit: f32) -> Option<Rect> {
+    if !crate::gizmo::has_options(st) {
+        return None;
+    }
+    let m = 8.0;
+    let (top, h) = (strip.top(), k.d.row + 6.0);
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let area = Rect::from_min_max(Pos2::new(strip.right() + m + 4.0, top), Pos2::new(limit, top + h));
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(area)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = 2.0;
+    crate::gizmo::options(&mut row, k, st);
+    let options = Rect::from_min_max(
+        Pos2::new(strip.right() + m, top),
+        Pos2::new(row.min_rect().right() + 4.0, top + h),
+    );
+    set_block(ui, k, slot, options);
+    Some(options)
 }
 
 /// The blocks over `full`. `selection` adds the selection bar as a block
@@ -242,37 +277,22 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     );
     set_block(ui, k, slot, view);
 
-    // The transform options, in a block beside the strip while a
-    // transform tool is the active one.
-    if crate::gizmo::has_options(st) {
-        let slot = ui.painter().add(egui::Shape::Noop);
-        let area = Rect::from_min_max(
-            Pos2::new(strip.right() + m + 4.0, top),
-            Pos2::new(view.left() - m, top + h),
-        );
-        let mut row = ui.new_child(
-            UiBuilder::new()
-                .max_rect(area)
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        row.spacing_mut().item_spacing.x = 2.0;
-        crate::gizmo::options(&mut row, k, st);
-        let options = Rect::from_min_max(
-            Pos2::new(strip.right() + m, top),
-            Pos2::new(row.min_rect().right() + 4.0, top + h),
-        );
-        set_block(ui, k, slot, options);
-    }
+    let options = options_block(ui, k, st, strip, view.left() - m);
 
     // The selection bar, centred when there is room for it.
     if selection && st.selection().is_some() {
         let id = ui.id().with("context-width");
         let known: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(420.0);
         let w = known + 16.0;
-        let lo = strip.right() + m;
-        let hi = (view.left() - m - w).max(lo);
-        let x = (full.center().x - w / 2.0).clamp(lo, hi).round();
-        let rect = Rect::from_min_size(Pos2::new(x, top), Vec2::new(w, h));
+        let lo = options.map_or(strip.right(), |o| o.right()) + m;
+        let hi = view.left() - m - w;
+        // Without room in the top row, it takes a row of its own below.
+        let rect = if hi >= lo {
+            let x = (full.center().x - w / 2.0).clamp(lo, hi).round();
+            Rect::from_min_size(Pos2::new(x, top), Vec2::new(w, h))
+        } else {
+            Rect::from_min_size(Pos2::new(strip.right() + m, top + h + m), Vec2::new(w, h))
+        };
         block(ui, k, rect);
         let mut row = ui.new_child(
             UiBuilder::new()
@@ -329,7 +349,8 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
         palette(ui, k, st, pal);
         left = pal.right();
     }
-    tool_strip(ui, k, st, Pos2::new(left + 8.0, top + 8.0), true);
+    let strip = tool_strip(ui, k, st, Pos2::new(left + 8.0, top + 8.0), true);
+    let _ = options_block(ui, k, st, strip, full.right() - 8.0);
 }
 
 /// Runs `add` in a child whose clip reaches the header row above the
@@ -874,6 +895,27 @@ pub fn focus_selection(st: &mut State) {
     }
 }
 
+/// Frames everything in the scene but maps, focusing on nothing.
+pub fn frame_all(st: &mut State) {
+    let scene = st.doc.scene();
+    let all: Vec<Focus> = scene
+        .objects()
+        .iter()
+        .filter(|o| scene.shown(o.id))
+        .filter(|o| {
+            !matches!(
+                o.kind(),
+                Kind::Map | Kind::Folder | Kind::Scene | Kind::Animation | Kind::Pose
+            )
+        })
+        .filter_map(|o| subject(st, o.id))
+        .collect();
+    let Some(live) = st.live.as_mut() else { return };
+    if let Some(group) = enclose(&all, live.cam.orbit.fov_y_deg) {
+        live.cam.frame(group.center, group.distance);
+    }
+}
+
 /// How far from an object with no picture of its own (an item, a light,
 /// a camera) the camera stands to frame it, at scale 1.
 const PLAIN_DISTANCE: f32 = 1.5;
@@ -1306,6 +1348,7 @@ impl Nav {
 /// button orbits, the middle button pans, Alt with the right button zooms.
 fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     use egui::PointerButton::{Middle, Primary, Secondary};
+    let keys = st.keys.clone();
     let Some(live) = st.live.as_mut() else { return };
     let cam = &mut live.cam;
     let (alt, shift, right_down) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.pointer.secondary_down()));
@@ -1317,18 +1360,14 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
         Some(Nav::Zoom)
     } else if right {
         let typing = ui.ctx().egui_wants_keyboard_input();
-        let held = |key: Key| {
-            if !typing && ui.input(|i| i.key_down(key)) {
+        let held = |fly: u8| {
+            if !typing && ui.input(|i| crate::keymap::held(&keys, Action::Fly(fly), i)) {
                 1.0
             } else {
                 0.0
             }
         };
-        let along = glam::Vec3::new(
-            held(Key::D) - held(Key::A),
-            held(Key::E) - held(Key::Q),
-            held(Key::W) - held(Key::S),
-        );
+        let along = glam::Vec3::new(held(3) - held(2), held(5) - held(4), held(0) - held(1));
         let dt = ui.input(|i| i.stable_dt).min(1.0 / 20.0);
         // Keep drawing while the button is held, so flying is smooth.
         ui.ctx().request_repaint();

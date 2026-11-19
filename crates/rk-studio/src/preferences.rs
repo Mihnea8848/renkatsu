@@ -14,7 +14,7 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     }
     let t = &k.t;
     let mut open = true;
-    crate::widgets::window(ctx, k, "Preferences", 360.0, &mut open, |ui| {
+    crate::widgets::window(ctx, k, "Preferences", 480.0, &mut open, |ui| {
         let before = st.settings.clone();
         ui.label(RichText::new("Koikatsu").font(k.bold(k.d.text)).color(t.text_bright));
         ui.add_space(4.0);
