@@ -24,6 +24,7 @@ mod gizmo;
 mod gizmo_pass;
 mod grid_pass;
 mod jobs;
+mod keycaps;
 mod keymap;
 mod kinds;
 mod landing;

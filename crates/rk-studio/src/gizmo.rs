@@ -22,7 +22,7 @@ use crate::state::{Look, State};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, icon_button};
 use clap::ValueEnum;
-use egui::{Align2, Color32, Key, PointerButton, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Color32, PointerButton, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
 use egui_phosphor::regular as icon;
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use std::f32::consts::{FRAC_PI_2, TAU};
@@ -886,7 +886,10 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
             i.pointer.button_pressed(PointerButton::Secondary),
             i.modifiers.alt,
             i.modifiers.command,
-            i.key_pressed(Key::Escape),
+            st.keys
+                .chords(crate::keymap::Action::CancelDrag)
+                .iter()
+                .any(|c| i.key_pressed(c.key)),
         )
     });
 

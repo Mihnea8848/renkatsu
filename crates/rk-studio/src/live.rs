@@ -374,6 +374,8 @@ pub struct Live {
     /// An object is being dragged in the viewport: the camera stays where
     /// it is instead of going with what it is focused on.
     pub hold_camera: bool,
+    /// The characters outlined as selected, set by the viewport each frame.
+    pub outline: Option<Outline>,
     /// The layer the transform gizmo is drawn into.
     gizmo: GizmoPass,
     /// The layer the grid on the ground is drawn into.
@@ -393,6 +395,15 @@ pub struct Live {
 
 /// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
 const DEFAULT_COLOR_FILTER: i32 = 0;
+
+/// How the viewport outlines the selected characters.
+pub struct Outline {
+    pub objects: Vec<ObjectId>,
+    /// Linear RGBA.
+    pub color: [f32; 4],
+    /// In pixels of the picture.
+    pub width: f32,
+}
 
 impl Live {
     /// A renderer on the window's device, with nothing to draw yet.
@@ -431,6 +442,7 @@ impl Live {
             target: None,
             cam: ViewCamera::new(Orbit::from_camera(&empty), None),
             hold_camera: false,
+            outline: None,
             gizmo: GizmoPass::new(&render_state.device),
             grid: GridPass::new(&render_state.device),
             keep_depth: false,
@@ -915,12 +927,23 @@ impl Live {
         }
         let target = self.target.as_ref().expect("made above");
         let env = self.environment(scene, background);
-        let draws: Vec<_> = self
-            .actors
-            .iter()
-            .filter(|a| a.warm && scene.shown(a.id))
-            .flat_map(|a| a.chara.scene.pose())
-            .collect();
+        let mut env = env;
+        let mut draws = Vec::new();
+        let mut outlined = Vec::new();
+        for actor in self.actors.iter().filter(|a| a.warm && scene.shown(a.id)) {
+            let from = draws.len();
+            draws.extend(actor.chara.scene.pose());
+            if self.outline.as_ref().is_some_and(|o| o.objects.contains(&actor.id)) {
+                outlined.extend(from..draws.len());
+            }
+        }
+        if let Some(o) = self.outline.as_ref().filter(|_| !outlined.is_empty()) {
+            env.highlight = Some(rk_render::highlight::Highlight {
+                draws: outlined,
+                color: o.color,
+                width: o.width,
+            });
+        }
         self.renderer
             .render_to(&target.texture, &draws, &self.cam.orbit.camera(), &env, background)?;
         Ok(target.id)

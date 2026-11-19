@@ -135,7 +135,12 @@ impl Library {
 
 /// A card's own picture: the PNG image the card file starts with.
 pub fn picture(card: &Path) -> Option<egui::ColorImage> {
-    decode(std::io::BufReader::new(std::fs::File::open(card).ok()?))
+    decode(std::io::BufReader::new(std::fs::File::open(card).ok()?)).or_else(|| {
+        // A card saved without its picture still holds the face the game
+        // shows in its lists.
+        let face = rk_card::Card::load(card).ok()?.face_png;
+        decode(std::io::Cursor::new(face))
+    })
 }
 
 /// A PNG image as plain colour.
