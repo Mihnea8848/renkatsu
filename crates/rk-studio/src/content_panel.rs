@@ -1089,7 +1089,7 @@ fn maps(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, asks: &mu
     let inside = if searching { Vec::new() } else { subfolders(st, open) };
     let maps: Vec<crate::maps::ProjectMap> = crate::maps::in_project(&st.project.root)
         .into_iter()
-        .filter(|m| shown_in(content::parent(content::parent(&m.file)), open, searching))
+        .filter(|m| shown_in(m.folder(), open, searching))
         .filter(|m| !searching || m.map.name.to_lowercase().contains(&search))
         .collect();
     if maps.is_empty() && inside.is_empty() {

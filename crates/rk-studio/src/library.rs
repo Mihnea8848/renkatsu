@@ -133,8 +133,14 @@ impl Library {
     }
 }
 
-/// A card's own picture: the PNG image the card file starts with.
+/// A file's own picture: the PNG image a card or a picture file starts
+/// with, or the one a map file holds.
 pub fn picture(card: &Path) -> Option<egui::ColorImage> {
+    if card.extension().is_some_and(|e| e.eq_ignore_ascii_case("rkmap")) {
+        let p = rk_map::file::thumbnail(card).ok()??;
+        let size = [p.width as usize, p.height as usize];
+        return Some(egui::ColorImage::from_rgba_unmultiplied(size, &p.rgba));
+    }
     decode(std::io::BufReader::new(std::fs::File::open(card).ok()?)).or_else(|| {
         // A card saved without its picture still holds the face the game
         // shows in its lists.

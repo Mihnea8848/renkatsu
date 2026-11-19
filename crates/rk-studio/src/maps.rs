@@ -71,7 +71,8 @@ pub struct MapFile {
     pub source: String,
     /// The times of day it has, in order.
     pub times: Vec<MapTime>,
-    /// The game's picture of it, beside the sidecar.
+    /// The game's picture of it, beside the sidecar; for a map file, the
+    /// file itself, which holds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<String>,
     /// The text of its table of walls that hide, as the game stores it;
@@ -85,12 +86,17 @@ pub struct MapFile {
 impl MapFile {
     /// Reads what a map file says of its map, or an older sidecar.
     pub fn read(path: &Path) -> Result<MapFile> {
-        let text = if rk_map::file::is_map_file(path) {
+        let packed = rk_map::file::is_map_file(path);
+        let text = if packed {
             rk_map::file::meta_text(path)?
         } else {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
         };
-        let file: MapFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        let mut file: MapFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        // A map file holds its picture: the picture is the file itself.
+        if packed {
+            file.thumbnail = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        }
         if file.format > FORMAT {
             bail!(
                 "{} was saved by a newer Renkatsu (format {})",
@@ -132,6 +138,21 @@ impl MapFile {
 pub struct ProjectMap {
     pub file: String,
     pub map: MapFile,
+    /// Whether it is a map file, which sits in any folder; an older map
+    /// is a sidecar in a folder of its own, beside its bundle copy.
+    pub packed: bool,
+}
+
+impl ProjectMap {
+    /// The Content folder the map shows in.
+    pub fn folder(&self) -> &str {
+        let parent = crate::content::parent(&self.file);
+        if self.packed {
+            parent
+        } else {
+            crate::content::parent(parent)
+        }
+    }
 }
 
 /// The maps a project folder owns, by name: every sidecar below its maps
@@ -146,6 +167,7 @@ pub fn in_project(root: &Path) -> Vec<ProjectMap> {
             Some(ProjectMap {
                 file: relative_to(root, p)?,
                 map: MapFile::read(p).ok()?,
+                packed: rk_map::file::is_map_file(p),
             })
         })
         .collect();
@@ -383,10 +405,20 @@ mod tests {
         let mut w = rk_asset::Writer::create(&path, rk_map::file::KIND, rk_map::file::VERSION).unwrap();
         w.add("meta", text.as_bytes(), rk_asset::Pack::Raw).unwrap();
         w.finish().unwrap();
-        assert_eq!(MapFile::read(&path).unwrap(), map);
+        // Its picture is inside it.
+        let read = MapFile::read(&path).unwrap();
+        assert_eq!(read.thumbnail.as_deref(), Some("Rooftop.rkmap"));
+        assert_eq!(
+            MapFile {
+                thumbnail: None,
+                ..read
+            },
+            map
+        );
         let listed = in_project(&project.root);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].file, "Maps/Rooftop.rkmap");
+        assert_eq!(listed[0].folder(), "Maps", "a map file shows in the folder it is in");
         assert_eq!(
             owned(&project.root, "map/scene/Rooftop.unity3d").map(|m| m.file),
             Some("Maps/Rooftop.rkmap".to_owned())
