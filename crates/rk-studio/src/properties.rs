@@ -41,7 +41,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // one step of the history.
     let mut object = before.clone();
     let kind = object.kind();
-    header(ui, k, st, kind, &object.name);
+    let color = st.library.color_of(&object.content);
+    header(ui, k, st, kind, color, &object.name);
     // Who a character is: the card's profile, or the one the character
     // has in this scene. Its pages sit beside the scene's settings.
     let card_profile = match &object.content {
@@ -225,8 +226,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             show_cards = true;
                         }
                     });
+                    let no_names = std::collections::BTreeMap::new();
+                    let names = built.as_ref().map_or(&no_names, |b| &b.outfit_names);
                     let outfits: Vec<String> = (0..built.as_ref().map_or(1, |b| b.outfits.max(1)))
-                        .map(outfit_name)
+                        .map(|i| rk_chara::more_outfits::outfit_name(i, names))
                         .collect();
                     let outfits: Vec<&str> = outfits.iter().map(String::as_str).collect();
                     let waiting = built.is_none().then_some("The character is not built");
@@ -663,23 +666,6 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
     resp
 }
 
-/// The game's names for a card's seven outfits, in their order; outfits a
-/// plugin adds after them are numbered.
-fn outfit_name(index: usize) -> String {
-    const NAMES: [&str; 7] = [
-        "In school",
-        "After school",
-        "Gym",
-        "Swimsuit",
-        "Club",
-        "Casual",
-        "Sleepover",
-    ];
-    NAMES
-        .get(index)
-        .map_or_else(|| format!("Outfit {}", index + 1), |name| (*name).to_owned())
-}
-
 /// The row of pages under a character's header, each a word with a line
 /// under the open one.
 fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
@@ -1034,7 +1020,7 @@ fn choices(
 }
 
 /// The selected object at the top of the panel, then the property search.
-fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
+fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, name: &str) {
     let t = &k.t;
     let h = k.d.row + 14.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
@@ -1048,7 +1034,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
                 Pos2::new(rect.left() + 34.0, y - k.field() / 2.0),
                 Pos2::new(rect.right() - kind_w - 18.0, y + k.field() / 2.0),
             );
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 17.0, kind.color());
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 17.0, color);
             widgets::field_box(p, k, field, false, false);
             p.text(
                 Pos2::new(field.left() + 7.0, y),
@@ -1060,7 +1046,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, name: &str) {
             label(p, k, Pos2::new(field.right() + 8.0, y), kind.label(), t.text_dim);
         }
         _ => {
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 18.0, kind.color());
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 18.0, color);
             let x = p
                 .text(
                     Pos2::new(rect.left() + 34.0, y),

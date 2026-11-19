@@ -69,6 +69,8 @@ struct Actor {
     applied: Option<Mat4>,
     /// How many outfits the card has.
     outfits: usize,
+    /// The names More Outfits gives the card's outfits, by outfit number.
+    outfit_names: std::collections::BTreeMap<usize, String>,
     /// The clothes states the character was last brought to.
     clothes: States,
     /// The animation of the scene the actor last looked for, by its file
@@ -378,6 +380,8 @@ pub fn own_file(project: &Project, animation: &crate::scene::Animation) -> Optio
 #[derive(Debug, Clone)]
 pub struct Built {
     pub outfits: usize,
+    /// The names More Outfits gives the outfits, by outfit number.
+    pub outfit_names: std::collections::BTreeMap<usize, String>,
     pub warnings: usize,
     /// What the worn clothes say about their states.
     pub worn: cs::Worn,
@@ -567,6 +571,7 @@ impl Live {
     pub fn built(&self, id: ObjectId) -> Option<Built> {
         self.actors.iter().find(|a| a.id == id).map(|a| Built {
             outfits: a.outfits,
+            outfit_names: a.outfit_names.clone(),
             warnings: a.chara.warnings.len(),
             worn: a.chara.clothes.worn.clone(),
             animation: a
@@ -1023,6 +1028,7 @@ impl Live {
             distance: (home.eye - home.target).length(),
             applied: None,
             outfits: card.coordinates.len(),
+            outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],
             pose: None,
             playing: None,

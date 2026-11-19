@@ -29,6 +29,7 @@ pub mod invisible_body;
 pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;
+pub mod more_outfits;
 pub mod motion;
 pub mod overlays;
 pub mod physics;

@@ -28,6 +28,7 @@ pub const FRESH: u64 = 6 * 60 * 60;
 const LINKS: &str = "https://github.com/Mihnea8848/";
 const TITLE_CHARS: usize = 80;
 const SUMMARY_CHARS: usize = 200;
+const BODY_CHARS: usize = 4000;
 
 /// Where a piece of news comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,9 +64,25 @@ pub struct Post {
     pub title_ja: Option<String>,
     #[serde(default)]
     pub summary_ja: Option<String>,
+    /// The post itself, paragraphs separated by an empty line; empty when
+    /// the post is its summary alone.
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub body_ja: Option<String>,
 }
 
 impl Post {
+    /// The post's text in a language: its body, or its summary when it has
+    /// none.
+    pub fn body_in(&self, language: Language) -> &str {
+        match (language, &self.body_ja) {
+            (Language::Japanese, Some(body)) => body,
+            _ if !self.body.is_empty() => &self.body,
+            _ => self.summary_in(language),
+        }
+    }
+
     /// The title in a language, in English where the post has no other.
     pub fn title_in(&self, language: Language) -> &str {
         match (language, &self.title_ja) {
@@ -139,6 +156,24 @@ fn plain(text: &str, chars: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
+/// Text in paragraphs: each paragraph on one line, paragraphs apart by an
+/// empty line, cut at `chars`.
+fn paragraphs(text: &str, chars: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for block in text.replace("\r\n", "\n").split("\n\n") {
+        let line = plain(block, usize::MAX);
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    let text = out.join("\n\n");
+    if text.chars().count() <= chars {
+        return text;
+    }
+    let cut: String = text.chars().take(chars - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// A link the page may open: one into the project's own GitHub.
 fn link(url: Option<&str>) -> Option<String> {
     url.filter(|u| u.starts_with(LINKS) && !u.contains(char::is_whitespace))
@@ -185,6 +220,10 @@ pub fn parse_posts(text: &str, running: &str, today: &str) -> Result<Vec<Post>> 
             url: link(text("url")),
             title_ja: short("title_ja", TITLE_CHARS),
             summary_ja: short("summary_ja", SUMMARY_CHARS),
+            body: text("body").map(|t| paragraphs(t, BODY_CHARS)).unwrap_or_default(),
+            body_ja: text("body_ja")
+                .map(|t| paragraphs(t, BODY_CHARS))
+                .filter(|t| !t.is_empty()),
         });
     }
     Ok(posts)
@@ -219,14 +258,15 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
         let Some(day) = release["published_at"].as_str().and_then(day_of) else {
             continue;
         };
-        // The first line of the notes that says something.
-        let summary = release["body"]
-            .as_str()
-            .unwrap_or_default()
+        let notes = release["body"].as_str().unwrap_or_default();
+        // The notes without their markdown marks, a line each.
+        let lines: Vec<&str> = notes
             .lines()
             .map(|l| l.trim_start_matches(['#', '*', '-', ' ']).trim())
-            .find(|l| !l.is_empty())
-            .unwrap_or_default();
+            .collect();
+        // The first line that says something is the summary.
+        let summary = lines.iter().find(|l| !l.is_empty()).copied().unwrap_or_default();
+        let body = paragraphs(&lines.join("\n\n"), BODY_CHARS);
         posts.push(Post {
             kind: Kind::Release,
             date: day,
@@ -235,6 +275,8 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
             url: link(Some(&url)),
             title_ja: None,
             summary_ja: None,
+            body,
+            body_ja: None,
         });
     }
     Ok((posts, latest))
@@ -375,7 +417,7 @@ impl Cache {
     }
 }
 
-enum Answer {
+pub(crate) enum Answer {
     /// What the cache has is still what the server has.
     Same,
     /// The text and its ETag.
@@ -384,7 +426,7 @@ enum Answer {
 
 /// Asks for a page, with the ETag of the copy at hand. The request names
 /// the program and its version and nothing else.
-fn get(url: &str, etag: Option<&str>, limit: u64) -> Result<Answer> {
+pub(crate) fn get(url: &str, etag: Option<&str>, limit: u64) -> Result<Answer> {
     let mut request = crate::download::agent()
         .get(url)
         .header("Accept", "application/vnd.github+json");
@@ -450,6 +492,18 @@ mod tests {
         {"tag_name": "v0.1.10", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.1.10",
          "published_at": "2026-11-17T09:00:00Z", "body": "Fixes", "prerelease": false}
     ]"##;
+
+    #[test]
+    fn a_post_keeps_its_paragraphs() {
+        let text = "[[post]]\ndate = 2026-11-19\ntitle = \"Maps\"\nsummary = \"Short.\"\nbody = \"\"\"\nFirst   line\nsame paragraph.\n\nSecond paragraph.\n\"\"\"\n";
+        let posts = parse_posts(text, "0.1.8", "2026-11-19").unwrap();
+        assert_eq!(posts[0].body, "First line same paragraph.\n\nSecond paragraph.");
+        assert_eq!(posts[0].body_in(Language::English), posts[0].body);
+        // Without a body the summary stands in.
+        let text = "[[post]]\ndate = 2026-11-19\ntitle = \"Maps\"\nsummary = \"Short.\"\n";
+        let posts = parse_posts(text, "0.1.8", "2026-11-19").unwrap();
+        assert_eq!(posts[0].body_in(Language::English), "Short.");
+    }
 
     #[test]
     fn posts_are_read_filtered_and_kept_plain() {
@@ -570,6 +624,8 @@ mod tests {
             url: None,
             title_ja: None,
             summary_ja: None,
+            body: String::new(),
+            body_ja: None,
         };
         assert_eq!(post("2026-11-06").day("2026-11-19"), "6 Nov");
         assert_eq!(post("2025-12-31").day("2026-01-02"), "31 Dec 2025");

@@ -26,15 +26,18 @@
 //! directly; any other bone is looked up by name among the renderer's
 //! current bones and then in the whole body skeleton.
 //!
+//! The penis and the balls are chosen and swapped the same way, from
+//! their own dictionaries (`ReloadCharacterPenis`, `ReloadCharacterBalls`),
+//! each over its own set of meshes. Both run whatever the body did.
+//!
 //! Left out, and reported as a warning when a body asks for them: the
-//! `uncensorOverlay` and `uncensorUnderlay` textures, colour matched parts
-//! (`SetSkinColor`) and the chest normals (`SetChestNormals`). The penis
-//! and balls are swapped by the plugin as well; the game hides both on a
-//! character at rest, so they are not loaded here.
+//! `uncensorOverlay` and `uncensorUnderlay` textures and the chest
+//! normals (`SetChestNormals`). `visibleSonAlways` is left alone as well:
+//! the plugin only sets it from `DisplayPenis` outside Studio.
 
 use crate::scene::{Instance, RendererInst, Scene};
 use rk_card::{ExtData, Value};
-use rk_vfs::uncensor::{defaults, Body, Uncensors};
+use rk_vfs::uncensor::{defaults, Body, Part, Uncensors};
 use std::collections::{HashMap, HashSet};
 
 pub const KEY: &str = "com.deathweasel.bepinex.uncensorselector";
@@ -52,6 +55,10 @@ pub const BODY_PARTS: [&str; 8] = [
     "cm_o_dan00",
     "cm_o_dan_f",
 ];
+/// `UncensorSelector.PenisParts`.
+pub const PENIS_PARTS: [&str; 3] = ["o_dankon", "o_gomu", "cm_o_dan00"];
+/// `UncensorSelector.BallsParts`.
+pub const BALLS_PARTS: [&str; 2] = ["o_dan_f", "cm_o_dan_f"];
 /// `PenisParts` and `BallsParts`: these receive shadows after a swap.
 const PENIS_AND_BALLS: [&str; 5] = ["o_dankon", "o_gomu", "cm_o_dan00", "o_dan_f", "cm_o_dan_f"];
 
@@ -163,6 +170,80 @@ pub fn stored_body(ext: &ExtData, uncensors: &Uncensors) -> Option<String> {
     string("BodyGUID").map(str::to_string)
 }
 
+/// What a card asks of the plugin besides the body (`OnReload`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parts {
+    pub penis: Option<String>,
+    pub balls: Option<String>,
+    /// `DisplayPenis`: only read outside Studio, where it decides
+    /// `visibleSonAlways`.
+    pub display_penis: bool,
+    /// `DisplayBalls`: whether the balls renderer is drawn at all.
+    pub display_balls: bool,
+}
+
+/// `OnReload`'s `PenisGUID`, `BallsGUID`, `DisplayPenis` and
+/// `DisplayBalls`. `sex` is the character's (0 male, 1 female). An old
+/// card (data version 1) names one uncensor, and the migration that GUID
+/// points at says which penis and balls it became.
+///
+/// The default of `DisplayBalls` for a female is the plugin's
+/// `Default Female Balls Display` setting, which starts off.
+pub fn stored_parts(ext: &ExtData, uncensors: &Uncensors, sex: u8) -> Parts {
+    let male = sex == 0;
+    let mut out = Parts {
+        penis: None,
+        balls: None,
+        display_penis: male,
+        display_balls: male,
+    };
+    let Some(p) = ext.get(KEY) else { return out };
+    let string = |key: &str| p.data.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+    let flag = |key: &str| p.data.get(key).and_then(Value::as_bool);
+    if p.version == 1 {
+        if let Some(b) = flag("DisplayBalls") {
+            out.display_balls = b;
+        }
+        if let Some(m) = string("UncensorGUID").and_then(|g| uncensors.migrations.get(g)) {
+            out.penis.clone_from(&m.penis_guid);
+            out.balls.clone_from(&m.balls_guid);
+            if m.penis_guid.is_some() {
+                out.display_penis = true;
+            }
+        }
+        return out;
+    }
+    out.penis = string("PenisGUID").map(str::to_string);
+    out.balls = string("BallsGUID").map(str::to_string);
+    if let Some(b) = flag("DisplayPenis") {
+        out.display_penis = b;
+    }
+    if let Some(b) = flag("DisplayBalls") {
+        out.display_balls = b;
+    }
+    out
+}
+
+/// `PenisData` and `BallsData` with the default setting at "Random":
+/// the part the card names when it is installed, else one of the
+/// installed parts that allow it, picked with the card's seed, else the
+/// game's own mosaic.
+///
+/// Neither dictionary is filtered by sex. The plugin's "Random Excluded"
+/// setting (`IsExcludedFromRandom`) is not read: this engine has no
+/// configuration of the plugin's.
+pub fn select_part<'a>(parts: &'a [Part], guid: Option<&str>, seed: i32, fallback: &str) -> Option<&'a Part> {
+    if let Some(found) = guid.and_then(|g| parts.iter().find(|p| p.guid == g)) {
+        return Some(found);
+    }
+    let random: Vec<&Part> = parts.iter().filter(|p| p.allow_random).collect();
+    if !random.is_empty() {
+        let at = MonoRandom::new(seed).next(random.len() as i32);
+        return random.get(at as usize).copied();
+    }
+    parts.iter().find(|p| p.guid == fallback)
+}
+
 /// `BodyData` in Studio with the default body setting at "Random".
 /// `sex` is the character's (0 male, 1 female).
 pub fn select<'a>(uncensors: &'a Uncensors, guid: Option<&str>, sex: u8, seed: i32) -> Option<&'a Body> {
@@ -199,9 +280,6 @@ pub fn unsupported(body: &Body) -> Vec<&'static str> {
     }
     if named(&body.underlay) {
         out.push("uncensorUnderlay");
-    }
-    if !body.color_match.is_empty() {
-        out.push("colorMatch");
     }
     if body.normals != defaults::NORMALS {
         out.push("normals");
@@ -287,6 +365,37 @@ fn update(scene: &mut Scene, src: usize, dst: usize, copy_materials: bool, impla
     if let Some(materials) = materials {
         d.materials = materials;
     }
+}
+
+/// `ReloadCharacterPenis` and `ReloadCharacterBalls`: the meshes of
+/// `donor` named in `parts` go on the body's renderers of the same name,
+/// with the materials that came with them. Unlike the body swap, nothing
+/// else of the prefab is kept.
+pub fn swap_parts(scene: &mut Scene, body: &Instance, donor: &Instance, parts: &[&str], implants: Option<&Implants>) {
+    let skinned = |scene: &Scene, inst: &Instance| -> Vec<usize> {
+        inst.renderers
+            .iter()
+            .copied()
+            .filter(|&r| scene.renderers[r].skinned)
+            .collect()
+    };
+    for dst in skinned(scene, body) {
+        let name = scene.renderers[dst].name.clone();
+        if !parts.contains(&name.as_str()) {
+            continue;
+        }
+        let src = skinned(scene, donor)
+            .into_iter()
+            .find(|&r| scene.renderers[r].name == name);
+        if let Some(src) = src {
+            update(scene, src, dst, true, implants);
+        }
+    }
+    // The prefab is destroyed.
+    for &r in &donor.renderers {
+        scene.renderers[r].enabled = false;
+    }
+    scene.remove(donor.root);
 }
 
 /// `ReloadCharacterBody`: puts the meshes of `donor` (the selected body's
@@ -464,12 +573,27 @@ mod tests {
                     body("f2", 1, true),
                     body("f3", 1, false),
                 ],
+                penises: vec![part("p1", true), part("p2", true), part("p3", false)],
+                balls: vec![part("b1", true)],
                 migrations: vec![Migration {
                     uncensor_guid: "old".into(),
                     body_guid: "f3".into(),
+                    penis_guid: Some("p2".into()),
+                    balls_guid: Some("b1".into()),
                 }],
             },
         )])
+    }
+
+    fn part(guid: &str, allow_random: bool) -> rk_vfs::uncensor::Part {
+        rk_vfs::uncensor::Part {
+            guid: guid.into(),
+            display_name: guid.into(),
+            file: format!("chara/{guid}.unity3d"),
+            asset: guid.into(),
+            allow_random,
+            ..Default::default()
+        }
     }
 
     fn ext(version: i64, key: &str, value: Value) -> ExtData {
@@ -633,5 +757,71 @@ mod tests {
         // The donor is gone.
         assert!(!s.nodes[donor_root].active);
         assert!(!s.renderers[d_skin].enabled);
+    }
+
+    #[test]
+    fn the_card_names_a_penis_and_balls_of_its_own() {
+        let u = uncensors();
+        // Nothing stored: a male shows both, a female neither.
+        let empty = ExtData::new();
+        let male = stored_parts(&empty, &u, 0);
+        assert_eq!(male.penis, None);
+        assert!(male.display_penis && male.display_balls);
+        let female = stored_parts(&empty, &u, 1);
+        assert!(!female.display_penis && !female.display_balls);
+
+        let mut p = PluginData {
+            version: 2,
+            ..Default::default()
+        };
+        p.data.insert("PenisGUID".into(), Value::from("p3"));
+        p.data.insert("BallsGUID".into(), Value::from("  "));
+        p.data.insert("DisplayBalls".into(), Value::from(false));
+        let mut e = ExtData::new();
+        e.insert(KEY.into(), p);
+        let got = stored_parts(&e, &u, 0);
+        assert_eq!(got.penis.as_deref(), Some("p3"));
+        // Blank counts as none.
+        assert_eq!(got.balls, None);
+        assert!(got.display_penis && !got.display_balls);
+
+        // An old card names one uncensor; the migration says what it became.
+        let old = ext(1, "UncensorGUID", Value::from("old"));
+        let got = stored_parts(&old, &u, 1);
+        assert_eq!(got.penis.as_deref(), Some("p2"));
+        assert_eq!(got.balls.as_deref(), Some("b1"));
+        // A penis from a migration is shown whatever the sex.
+        assert!(got.display_penis);
+        assert_eq!(
+            stored_parts(&ext(1, "UncensorGUID", Value::from("gone")), &u, 0).penis,
+            None
+        );
+    }
+
+    #[test]
+    fn a_part_is_named_or_picked_with_the_cards_seed() {
+        let u = uncensors();
+        let pick = |guid: Option<&str>, seed| {
+            select_part(&u.penises, guid, seed, defaults::PENIS_GUID).map(|p| p.guid.clone())
+        };
+        // The one the card names, installed or not.
+        assert_eq!(pick(Some("p3"), 0).as_deref(), Some("p3"));
+        // Otherwise one of those that allow it, never the game's own and
+        // never one that refuses.
+        let random: Vec<String> = (0..24).filter_map(|s| pick(None, s)).collect();
+        assert!(random.iter().all(|g| g == "p1" || g == "p2"));
+        assert!(random.contains(&"p1".into()) && random.contains(&"p2".into()));
+        // A name that is not installed falls back to the same pick.
+        assert_eq!(pick(Some("absent"), 7), pick(None, 7));
+        // With nothing to pick from, the game's own mosaic.
+        let bare = Uncensors::build(Vec::new());
+        assert_eq!(
+            select_part(&bare.penises, None, 3, defaults::PENIS_GUID).map(|p| p.guid.as_str()),
+            Some(defaults::PENIS_GUID)
+        );
+        assert_eq!(
+            select_part(&bare.balls, Some("absent"), 3, defaults::BALLS_GUID).map(|p| p.guid.as_str()),
+            Some(defaults::BALLS_GUID)
+        );
     }
 }

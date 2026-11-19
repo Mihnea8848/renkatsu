@@ -69,3 +69,45 @@ fn overlay_data_decodes() {
     assert_eq!(skin_ok, with_skin);
     assert_eq!(clothes_ok, with_clothes);
 }
+
+/// Every card that names an outfit it actually has must yield that name:
+/// the plugin writes the dictionary's keys as integers, and reading them
+/// as anything else would quietly produce nothing.
+#[test]
+fn more_outfits_names_decode() {
+    use rk_chara::more_outfits;
+    let Some(game) = rk_core::test_game_dir() else { return };
+    let mut files = Vec::new();
+    rk_core::walk_files(&game.join("UserData/chara"), "png", &mut files);
+    let (mut with_key, mut with_blob, mut named, mut extra, mut shown) = (0, 0, 0, 0, 0usize);
+    for p in &files {
+        let Ok(card) = Card::load(p) else { continue };
+        let outfits = card.coordinates.len();
+        if outfits > more_outfits::GAME_OUTFITS {
+            extra += 1;
+        }
+        let Some(plugin) = card.ext.get(more_outfits::KEY) else {
+            continue;
+        };
+        with_key += 1;
+        if plugin.bytes("CoordinateNames").is_some() {
+            with_blob += 1;
+        }
+        let names = more_outfits::names(&card.ext, outfits);
+        if !names.is_empty() {
+            named += 1;
+        }
+        // Only the outfits past the game's seven take a stored name.
+        if names.keys().any(|i| *i >= more_outfits::GAME_OUTFITS) {
+            shown += 1;
+        }
+    }
+    eprintln!(
+        "More Outfits: {with_key} cards carry data, {with_blob} store names, \
+         {named} name an outfit the card has, {shown} of those past the game's seven; \
+         {extra} cards have more than seven outfits"
+    );
+    // Every card with extra outfits in this library names them, so a
+    // reader that failed to decode the keys would show up here.
+    assert_eq!(shown, extra);
+}

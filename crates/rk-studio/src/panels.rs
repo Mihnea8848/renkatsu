@@ -283,6 +283,8 @@ struct Row {
     depth: usize,
     id: Option<ObjectId>,
     kind: Kind,
+    /// The icon's colour: the kind's, blue for a man.
+    color: Color32,
     name: String,
     /// The object's own visibility switch.
     visible: bool,
@@ -319,6 +321,7 @@ fn rows(st: &State) -> Vec<Row> {
         depth: 0,
         id: None,
         kind: Kind::Scene,
+        color: Kind::Scene.color(),
         name: scene.name.clone(),
         visible: true,
         shown: true,
@@ -342,6 +345,7 @@ fn rows(st: &State) -> Vec<Row> {
             depth,
             id: Some(id),
             kind: object.kind(),
+            color: st.library.color_of(&object.content),
             name: object.name.clone(),
             visible: object.visible,
             shown: scene.shown(id),
@@ -518,11 +522,7 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     let color = if fold_resp.hovered() { text } else { faint };
                     glyph(&p, k, Pos2::new(x + 7.0, y), g, 10.0, color);
                 }
-                let tint = if selected {
-                    on_selection(row.kind.color())
-                } else {
-                    row.kind.color()
-                };
+                let tint = if selected { on_selection(row.color) } else { row.color };
                 glyph(&p, k, Pos2::new(x + 24.0, y), row.kind.glyph(), 15.0, tint);
                 let name_end = match k.d.tree {
                     Tree::Columns => rect.right() - type_w,
