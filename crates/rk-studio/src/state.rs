@@ -905,7 +905,11 @@ impl State {
             // Everything but the object itself and what goes with it.
             let others = live.map(|l| l.surface(scene, scene.subtree(id)));
             let surfaces: Vec<&dyn Surface> = others.iter().map(|s| s as &dyn Surface).collect();
-            let fall = floor_below(lowest, &surfaces) - lowest.y;
+            let ground = (!live.is_some_and(|l| l.on_map())).then_some(0.0);
+            let Some(floor) = floor_below(lowest, &surfaces, ground) else {
+                continue;
+            };
+            let fall = floor - lowest.y;
             let landed = scene
                 .parent_world(id)
                 .inverse()

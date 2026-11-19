@@ -118,6 +118,69 @@ struct MapState {
     took: f32,
     /// The map is set and its object shows.
     shown: bool,
+    /// What of the set map can be stood on, and where it is while it
+    /// shows.
+    ground: Option<MapGround>,
+    placed: Option<rk_render::map::MapPlacement>,
+}
+
+/// The meshes of a map the camera sees, in the map's own space, kept
+/// after the upload for Snap to floor.
+struct MapGround {
+    pieces: Vec<MapPiece>,
+}
+
+struct MapPiece {
+    positions: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+    bounds: ([f32; 3], [f32; 3]),
+}
+
+impl MapGround {
+    /// Takes the seen meshes' positions and indices out of `map`, which
+    /// the renderer no longer needs once it has uploaded them.
+    fn take(map: &mut rk_render::map::MapScene) -> Self {
+        let mut pieces = Vec::new();
+        for i in 0..map.objects.len() {
+            if !map.seen(&map.objects[i]) {
+                continue;
+            }
+            let mesh = &mut map.objects[i].mesh;
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            pieces.push(MapPiece {
+                positions: std::mem::take(&mut mesh.positions),
+                indices: std::mem::take(&mut mesh.indices),
+                bounds: mesh.bounds,
+            });
+        }
+        Self { pieces }
+    }
+
+    /// How far a ray in the map's own space goes before it meets the map.
+    fn meet(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for piece in &self.pieces {
+            let reach = best.unwrap_or(f32::MAX);
+            let (lo, hi) = piece.bounds;
+            if !ray_meets_box(origin, dir, [lo, hi], reach) {
+                continue;
+            }
+            for triangle in piece.indices.chunks_exact(3) {
+                let corner = |i: usize| piece.positions.get(triangle[i] as usize).copied().map(Vec3::from);
+                let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+                    continue;
+                };
+                if let Some(t) = ray_meets_triangle(origin, dir, a, b, c) {
+                    if best.is_none_or(|nearest| t < nearest) {
+                        best = Some(t);
+                    }
+                }
+            }
+        }
+        best
+    }
 }
 
 /// A character a job is building.
@@ -854,6 +917,7 @@ impl Live {
         if want.is_none() && state.set.is_some() {
             self.renderer.set_map(None);
             state.set = None;
+            state.ground = None;
         }
         if let Some((id, recipe)) = want.clone() {
             let known =
@@ -891,8 +955,9 @@ impl Live {
                     ..
                 } = state.pending.take().expect("looked at above");
                 match result {
-                    Ok(map) => {
+                    Ok(mut map) => {
                         self.renderer.set_map(Some(&map));
+                        state.ground = Some(MapGround::take(&mut map));
                         state.took = started.elapsed().as_secs_f32();
                         log.info(format!("Loaded {name} in {:.1} s", state.took));
                         state.set = Some((id, recipe));
@@ -925,6 +990,7 @@ impl Live {
             })
         });
         state.shown = placed.is_some_and(|p| p.shown);
+        state.placed = placed.filter(|p| p.shown);
         if let Some(placement) = placed {
             self.renderer.place_map(placement);
         }
@@ -997,7 +1063,23 @@ impl Live {
         Some(Vec3::new((min.x + max.x) * 0.5, min.y, (min.z + max.z) * 0.5))
     }
 
-    /// The characters as a surface to drop things on, without `except`.
+    /// The map to stand on, while it shows and is not one of `except`.
+    fn map_ground(&self, except: &[ObjectId]) -> Option<(&MapGround, rk_render::map::MapPlacement)> {
+        let (id, _) = self.map.set.as_ref()?;
+        if except.contains(id) {
+            return None;
+        }
+        self.map.ground.as_ref().zip(self.map.placed)
+    }
+
+    /// Whether a map is shown that things can be dropped on, so that the
+    /// ground at height 0 is not.
+    pub fn on_map(&self) -> bool {
+        self.map_ground(&[]).is_some()
+    }
+
+    /// The characters and the map as a surface to drop things on,
+    /// without `except`.
     pub fn surface<'a>(&'a self, scene: &'a Scene, except: Vec<ObjectId>) -> impl crate::surface::Surface + 'a {
         Meshes {
             live: self,
@@ -1272,9 +1354,17 @@ struct Meshes<'a> {
 
 impl crate::surface::Surface for Meshes<'_> {
     fn meet(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
-        self.live
+        let characters = self
+            .live
             .cast(self.scene, origin, dir, &self.except)
-            .map(|(_, far)| far)
+            .map(|(_, far)| far);
+        // The map is drawn turned and moved by its root; the ray goes
+        // into the map's space the same way, which keeps its lengths.
+        let map = self.live.map_ground(&self.except).and_then(|(ground, placed)| {
+            let back = placed.rigid().inverse();
+            ground.meet(back.transform_point3(origin), back.transform_vector3(dir))
+        });
+        characters.into_iter().chain(map).min_by(f32::total_cmp)
     }
 }
 
