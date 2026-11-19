@@ -259,3 +259,111 @@ fn fog(i: &MapInfo) -> String {
 fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
+
+/// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
+/// height looking across the map, or `above`, from a high corner with
+/// everything above head height cut away.
+pub fn render(which: &str, time: &str, view: &str, out: &std::path::Path, size: (u32, u32)) -> Result<()> {
+    use glam::Vec3;
+    let game = Game::open_user(&[])?;
+    let maps = list::read(&game, true);
+    let m = maps
+        .iter()
+        .find(|m| m.number.to_string() == which || m.level.eq_ignore_ascii_case(which))
+        .ok_or_else(|| anyhow!("no map {which}"))?;
+    let time = match time {
+        "day" => rk_map::unity::TimeOfDay::Day,
+        "evening" => rk_map::unity::TimeOfDay::Evening,
+        "night" => rk_map::unity::TimeOfDay::Night,
+        other => return Err(anyhow!("no time of day {other}: day, evening or night")),
+    };
+    let mut renderer = rk_render::Renderer::new()?;
+    let started = std::time::Instant::now();
+    let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc())?;
+    let built = started.elapsed();
+    let mut scene = scene;
+    // The middle of the objects' middles, so that a sky dome or a far
+    // backdrop does not set the frame.
+    let all: Vec<Vec3> = scene
+        .objects
+        .iter()
+        .filter(|o| !o.mesh.positions.is_empty())
+        .map(|o| (Vec3::from(o.mesh.bounds.0) + Vec3::from(o.mesh.bounds.1)) * 0.5)
+        .collect();
+    // Maps put their play area at the origin, where characters stand: the
+    // frame is what lies near it, when anything does.
+    let near: Vec<Vec3> = all
+        .iter()
+        .copied()
+        .filter(|m| Vec3::new(m.x, 0.0, m.z).length() < 20.0)
+        .collect();
+    let mut middles = if near.len() >= 5 { near } else { all };
+    let mut pick = |axis: usize, q: f32| {
+        middles.sort_by(|a, b| a[axis].total_cmp(&b[axis]));
+        middles
+            .get(((middles.len() as f32 - 1.0) * q).round() as usize)
+            .map_or(0.0, |v| v[axis])
+    };
+    let lo = Vec3::new(pick(0, 0.05), pick(1, 0.05), pick(2, 0.05));
+    let hi = Vec3::new(pick(0, 0.95), pick(1, 0.95), pick(2, 0.95));
+    let centre = (lo + hi) * 0.5;
+    let floor = lo.y;
+    let camera = match view {
+        // Within the map at eye height, from one side looking across.
+        "inside" => {
+            let eye = Vec3::new(centre.x, floor + 1.5, lo.z + (hi.z - lo.z) * 0.15);
+            rk_render::Camera {
+                eye,
+                target: Vec3::new(centre.x, floor + 1.2, hi.z),
+                fov_y_deg: 60.0,
+            }
+        }
+        // From a high corner, with everything above head height cut away.
+        "above" => {
+            scene.light.cut_above = Some(floor + 2.3);
+            let reach = (hi - lo).length().max(4.0);
+            rk_render::Camera {
+                eye: centre + Vec3::new(-0.45, 0.75, -0.45) * reach,
+                target: Vec3::new(centre.x, floor, centre.z),
+                fov_y_deg: 45.0,
+            }
+        }
+        other => return Err(anyhow!("no view {other}: inside or above")),
+    };
+    let (min, max) = scene.bounds();
+    println!(
+        "bounds {min:.1} to {max:.1}; camera {:.1} looking at {:.1}",
+        camera.eye, camera.target
+    );
+    let rgba = renderer.render_map(&scene, &camera, size.0, size.1)?;
+    rk_render::save_png(out, size.0, size.1, &rgba)?;
+    let mut textures: Vec<&std::sync::Arc<rk_render::map::MapImage>> = scene
+        .objects
+        .iter()
+        .flat_map(|o| &o.materials)
+        .filter_map(|m| m.albedo.as_ref())
+        .collect();
+    textures.sort_by_key(|t| std::sync::Arc::as_ptr(t) as usize);
+    textures.dedup_by_key(|t| std::sync::Arc::as_ptr(t) as usize);
+    let compressed = textures
+        .iter()
+        .filter(|t| matches!(t.as_ref(), rk_render::map::MapImage::Compressed { .. }))
+        .count();
+    println!(
+        "{} {}: {} objects, {} textures ({compressed} as stored), {:.0} MB on the GPU, built in {:.1} s, drawn in {:.1} s",
+        m.number,
+        m.level,
+        scene.objects.len(),
+        textures.len(),
+        textures.iter().map(|t| t.gpu_bytes()).sum::<u64>() as f64 / MB,
+        built.as_secs_f32(),
+        (started.elapsed() - built).as_secs_f32()
+    );
+    println!("  {} objects outside the view", renderer.map_culled());
+    let mut skipped: Vec<_> = skipped.into_iter().collect();
+    skipped.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (why, n) in skipped {
+        println!("  left out {n:>4}: {why}");
+    }
+    Ok(())
+}
