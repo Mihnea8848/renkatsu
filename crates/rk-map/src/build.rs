@@ -83,7 +83,10 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             match b.script(file, &o).as_str() {
                 "SunLightInfo" => sun = Some(SunLightInfo::read(&o)),
                 "LightmapPrefab" => {
-                    for u in unity::lightmap_prefab(&o).into_iter().filter(|u| u.renderer.file_id == 0) {
+                    for u in unity::lightmap_prefab(&o)
+                        .into_iter()
+                        .filter(|u| u.renderer.file_id == 0)
+                    {
                         assigned.insert(u.renderer.path_id, (u.index, u.scale_offset));
                     }
                 }
@@ -221,6 +224,14 @@ fn map_light(
         background: fog.map_or([0.35, 0.5, 0.75], |f| f.color),
         fog,
         cut_above: None,
+        // The map's light casts when its shadows are on, as far as
+        // Unity's default shadow distance.
+        shadows: main
+            .filter(|(l, _)| l.shadows > 0)
+            .map(|(l, _)| rk_render::map::SunShadows {
+                strength: l.shadow_strength,
+                distance: 50.0,
+            }),
     }
 }
 
@@ -343,6 +354,9 @@ impl Builder<'_> {
             mesh: place(&mesh, world, lightmap.map(|l| l.1)),
             materials,
             lightmap: lightmap.map(|l| l.0),
+            // 0 is off; on, two-sided and shadows only all cast.
+            casts_shadows: renderer.cast_shadows != 0,
+            receives_shadows: renderer.receive_shadows,
         }))
     }
 
@@ -530,7 +544,11 @@ fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
         .collect();
     let uv2 = match lightmap {
         Some([sx, sy, ox, oy]) => {
-            let source = if mesh.uv[1].is_empty() { &mesh.uv[0] } else { &mesh.uv[1] };
+            let source = if mesh.uv[1].is_empty() {
+                &mesh.uv[0]
+            } else {
+                &mesh.uv[1]
+            };
             source.iter().map(|[u, v]| [u * sx + ox, v * sy + oy]).collect()
         }
         None => Vec::new(),
