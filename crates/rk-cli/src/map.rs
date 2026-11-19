@@ -274,6 +274,7 @@ pub fn render(
     out: &std::path::Path,
     size: (u32, u32),
     fog: bool,
+    sky: bool,
     capture: Option<&std::path::Path>,
 ) -> Result<()> {
     use glam::Vec3;
@@ -295,6 +296,13 @@ pub fn render(
     let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
     let built = started.elapsed();
     let mut scene = scene;
+    // CharaStudio's camera draws no Unity sky (it clears to a colour);
+    // the map's own sky is drawn when asked for. What outdoor maps show
+    // behind their painted domes in the game is not settled yet: a plain
+    // sky blue stands in.
+    if !sky {
+        scene.light.sky = None;
+    }
     if !fog {
         scene.light.fog = None;
     }
