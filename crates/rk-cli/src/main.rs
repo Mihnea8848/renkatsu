@@ -79,6 +79,15 @@ enum Cmd {
         /// Wear the outdoor shoes; the game starts with the indoor ones.
         #[arg(long)]
         outdoor_shoes: bool,
+        /// CharaStudio's Son switch for a male character; the clothes
+        /// states then say when the part shows. Without it the card's own
+        /// setting counts.
+        #[arg(long)]
+        son: bool,
+        /// Draw the game's censor over the parts it covers. An uncensor
+        /// mod replaces those parts, and then there is no censor to draw.
+        #[arg(long)]
+        censor: bool,
         /// Keep hair, skirts and the bust in their rest pose.
         #[arg(long)]
         no_physics: bool,
@@ -469,6 +478,8 @@ fn main() -> Result<()> {
             no_clothes,
             no_accessories,
             outdoor_shoes,
+            son,
+            censor,
             no_physics,
             list,
             no_shadows,
@@ -490,6 +501,8 @@ fn main() -> Result<()> {
             no_clothes,
             no_accessories,
             outdoor_shoes,
+            son,
+            censor,
             no_physics,
             list,
             shadows: !no_shadows,

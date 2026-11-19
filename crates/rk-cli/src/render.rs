@@ -24,6 +24,8 @@ pub struct Args<'a> {
     pub no_clothes: bool,
     pub no_accessories: bool,
     pub outdoor_shoes: bool,
+    pub son: bool,
+    pub censor: bool,
     pub no_physics: bool,
     pub list: bool,
     /// Draw the light's real-time shadows.
@@ -83,6 +85,8 @@ pub fn render(a: Args) -> Result<()> {
         clothes: !a.no_clothes,
         accessories: !a.no_accessories,
         outdoor_shoes: a.outdoor_shoes,
+        visible_son: a.son.then_some(true),
+        censor: a.censor,
         physics: !a.no_physics,
         ..Default::default()
     };
