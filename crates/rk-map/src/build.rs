@@ -6,11 +6,11 @@
 //! time of day.
 
 use crate::scene::open;
-use crate::unity::{self, Light, RenderSettings, SunLightInfo, TimeOfDay};
+use crate::unity::{self, Light, LightmapSettings, RenderSettings, SunLightInfo, TimeOfDay};
 use anyhow::{Context, Result};
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use rk_chara::scene::Image;
-use rk_render::map::{Blend, Fog, MapImage, MapLight, MapMaterial, MapMesh, MapObject, MapScene};
+use rk_render::map::{Blend, Fog, Lightmap, MapImage, MapLight, MapMaterial, MapMesh, MapObject, MapScene};
 use rk_unityfs::objects::{GameObject, Material, Mesh, MeshFilter, Renderer, Transform};
 use rk_unityfs::{class, PPtr};
 use rk_vfs::assets::{AssetFile, LoadedBundle, ObjRef};
@@ -52,6 +52,7 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
     let mut sun: Option<SunLightInfo> = None;
     let mut lights: Vec<(Light, Mat4)> = Vec::new();
     let mut settings: Option<RenderSettings> = None;
+    let mut lightmaps: Vec<Lightmap> = Vec::new();
     for file in &loaded.files {
         let sf = &file.sf;
         // The hierarchy of this file: transforms by id, game objects by id.
@@ -74,10 +75,34 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             transform_of: &transform_of,
             objects: &objects_by_id,
         };
+        // Which renderer reads which lightmap: LightmapPrefab puts it back
+        // on them when the scene starts, over what the renderers say.
+        let mut assigned: HashMap<i64, (i32, [f32; 4])> = HashMap::new();
         for obj in sf.objects_of(class::MONO_BEHAVIOUR) {
             let Ok(o) = sf.read(obj) else { continue };
-            if b.script(file, &o) == "SunLightInfo" {
-                sun = Some(SunLightInfo::read(&o));
+            match b.script(file, &o).as_str() {
+                "SunLightInfo" => sun = Some(SunLightInfo::read(&o)),
+                "LightmapPrefab" => {
+                    for u in unity::lightmap_prefab(&o).into_iter().filter(|u| u.renderer.file_id == 0) {
+                        assigned.insert(u.renderer.path_id, (u.index, u.scale_offset));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(obj) = sf.objects_of(unity::class::LIGHTMAP_SETTINGS).next() {
+            let settings = LightmapSettings::read(&sf.read(obj)?);
+            for l in &settings.lightmaps {
+                let light = b.image(file, l.light);
+                let direction = (settings.mode == 1).then(|| b.image(file, l.direction)).flatten();
+                match light {
+                    Some(light) => lightmaps.push(Lightmap { light, direction }),
+                    // Keep the numbering: a missing one reads as none.
+                    None => lightmaps.push(Lightmap {
+                        light: Arc::new(MapImage::Decoded(Arc::new(Image::unity_black()))),
+                        direction: None,
+                    }),
+                }
             }
         }
         // Objects shown only at another time of day stay hidden.
@@ -111,7 +136,12 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
             if !renderer.enabled || !tree.shown(go, &hidden) {
                 continue;
             }
-            match b.object(file, &tree, &renderer) {
+            let lightmap = match assigned.get(&obj.path_id) {
+                Some(&(index, scale_offset)) => (index >= 0).then_some((index as usize, scale_offset)),
+                None => (renderer.lightmap_index < 0xFFFE)
+                    .then_some((renderer.lightmap_index as usize, renderer.lightmap_scale_offset)),
+            };
+            match b.object(file, &tree, &renderer, lightmap) {
                 Ok(Some(o)) => objects.push(o),
                 Ok(None) => {}
                 Err(e) => *b.skipped.entry(format!("{e:#}")).or_default() += 1,
@@ -123,7 +153,14 @@ pub fn build(game: &Game, bundle: &str, time: TimeOfDay, compressed: bool) -> Re
         }
     }
     let light = map_light(sun.as_ref(), time, &lights, settings.as_ref());
-    Ok((MapScene { objects, light }, b.skipped))
+    Ok((
+        MapScene {
+            objects,
+            lightmaps,
+            light,
+        },
+        b.skipped,
+    ))
 }
 
 /// The sun, ambient light and fog of a time of day.
@@ -264,7 +301,15 @@ impl Builder<'_> {
 
     /// A mesh renderer as an object in the world, or `None` for one with
     /// nothing to draw.
-    fn object(&mut self, file: &Arc<AssetFile>, tree: &Tree, renderer: &Renderer) -> Result<Option<MapObject>> {
+    /// `lightmap` is the lightmap the renderer reads, with where its part
+    /// of it lies (scale x, y, offset x, y).
+    fn object(
+        &mut self,
+        file: &Arc<AssetFile>,
+        tree: &Tree,
+        renderer: &Renderer,
+        lightmap: Option<(usize, [f32; 4])>,
+    ) -> Result<Option<MapObject>> {
         let go = renderer.game_object.path_id;
         let name = tree.objects.get(&go).map(|o| o.name.clone()).unwrap_or_default();
         let Some(filter) = tree
@@ -295,8 +340,9 @@ impl Builder<'_> {
         let world = tree.world_of(go);
         Ok(Some(MapObject {
             name,
-            mesh: place(&mesh, world),
+            mesh: place(&mesh, world, lightmap.map(|l| l.1)),
             materials,
+            lightmap: lightmap.map(|l| l.0),
         }))
     }
 
@@ -447,8 +493,10 @@ fn filter_of(file: &Arc<AssetFile>, component: PPtr) -> Option<MeshFilter> {
     MeshFilter::read(&file.sf.read(info).ok()?).ok()
 }
 
-/// A mesh moved into the world by `world`.
-fn place(mesh: &Mesh, world: Mat4) -> MapMesh {
+/// A mesh moved into the world by `world`. With `lightmap`, the scale and
+/// offset of its part of a lightmap, its second UV set (the first when it
+/// has none, as Unity reads it) is moved there.
+fn place(mesh: &Mesh, world: Mat4, lightmap: Option<[f32; 4]>) -> MapMesh {
     let normal = Mat3::from_mat4(world).inverse().transpose();
     let positions: Vec<[f32; 3]> = mesh
         .positions
@@ -480,7 +528,15 @@ fn place(mesh: &Mesh, world: Mat4) -> MapMesh {
             }
         })
         .collect();
+    let uv2 = match lightmap {
+        Some([sx, sy, ox, oy]) => {
+            let source = if mesh.uv[1].is_empty() { &mesh.uv[0] } else { &mesh.uv[1] };
+            source.iter().map(|[u, v]| [u * sx + ox, v * sy + oy]).collect()
+        }
+        None => Vec::new(),
+    };
     MapMesh {
+        uv2,
         bounds: MapMesh::compute_bounds(&positions),
         positions,
         normals,

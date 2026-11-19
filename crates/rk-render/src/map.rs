@@ -112,6 +112,9 @@ pub struct MapMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uv: Vec<[f32; 2]>,
+    /// Where each vertex reads its object's lightmap, already scaled and
+    /// moved into the object's part of it. Empty without a lightmap.
+    pub uv2: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// First index and count of each submesh.
     pub submeshes: Vec<(u32, u32)>,
@@ -166,7 +169,24 @@ pub struct MapObject {
     pub name: String,
     pub mesh: MapMesh,
     pub materials: Vec<Arc<MapMaterial>>,
+    /// The baked lightmap it reads, by its place in `MapScene::lightmaps`.
+    pub lightmap: Option<usize>,
 }
+
+/// A baked lightmap: the light, stored as RGBM, and, for directional
+/// lightmaps, the main direction light came from.
+#[derive(Debug)]
+pub struct Lightmap {
+    pub light: Arc<MapImage>,
+    pub direction: Option<Arc<MapImage>>,
+}
+
+/// Unity 5.6's decoding of RGBM lightmaps in linear colour
+/// (`DecodeLightmapRGBM` with the `unity_Lightmap_HDR` it sets there):
+/// light = scale * a^exponent * rgb. The scale is 5^2.2: RGBM keeps up to
+/// five times white, in gamma.
+pub const RGBM_SCALE: f32 = 34.493_242;
+pub const RGBM_EXPONENT: f32 = 2.2;
 
 /// Linear fog.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -196,6 +216,7 @@ pub struct MapLight {
 #[derive(Debug)]
 pub struct MapScene {
     pub objects: Vec<MapObject>,
+    pub lightmaps: Vec<Lightmap>,
     pub light: MapLight,
 }
 
@@ -227,6 +248,15 @@ struct Vertex {
     pos: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+    uv2: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LightmapUniform {
+    /// 1 when there is a lightmap, 1 when it is directional, then the RGBM
+    /// scale and exponent.
+    info: [f32; 4],
 }
 
 #[repr(C)]
@@ -254,6 +284,7 @@ struct MaterialUniform {
 pub(crate) struct Pipelines {
     globals: wgpu::BindGroupLayout,
     material: wgpu::BindGroupLayout,
+    lightmap: wgpu::BindGroupLayout,
     /// By blending and by whether back faces are culled.
     pipelines: HashMap<(bool, bool), wgpu::RenderPipeline>,
     repeat: wgpu::Sampler,
@@ -369,12 +400,36 @@ impl Pipelines {
                 },
             ],
         });
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let lightmap = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("map lightmap"),
+            entries: &[
+                uniform(0, wgpu::ShaderStages::FRAGMENT),
+                texture(1),
+                texture(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("map"),
-            bind_group_layouts: &[Some(&globals), Some(&material)],
+            bind_group_layouts: &[Some(&globals), Some(&material), Some(&lightmap)],
             immediate_size: 0,
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2];
         let mut pipelines = HashMap::new();
         for blended in [false, true] {
             for cull in [false, true] {
@@ -439,6 +494,7 @@ impl Pipelines {
         Pipelines {
             globals,
             material,
+            lightmap,
             pipelines,
             repeat: sampler(wgpu::AddressMode::Repeat),
             clamp: sampler(wgpu::AddressMode::ClampToEdge),
@@ -451,6 +507,8 @@ impl Pipelines {
 /// One submesh to draw.
 struct Draw {
     vb: usize,
+    /// The lightmap's bind group: 0 for none, then one per lightmap.
+    lightmap: usize,
     first: u32,
     count: u32,
     material: usize,
@@ -501,9 +559,13 @@ impl Renderer {
 
         // Textures first: the caches need the renderer mutably.
         let mut views: HashMap<usize, wgpu::TextureView> = HashMap::new();
-        for o in &map.objects {
-            for m in &o.materials {
-                let Some(image) = &m.albedo else { continue };
+        let images = map
+            .objects
+            .iter()
+            .flat_map(|o| o.materials.iter().filter_map(|m| m.albedo.as_ref()))
+            .chain(map.lightmaps.iter().flat_map(|l| std::iter::once(&l.light).chain(l.direction.as_ref())));
+        {
+            for image in images {
                 let key = Arc::as_ptr(image) as usize;
                 if views.contains_key(&key) {
                     continue;
@@ -528,6 +590,7 @@ impl Renderer {
                 views.insert(key, view);
             }
         }
+        let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
         let white = self.white.clone();
         let device = &self.device;
         let pipes = self.map.as_ref().expect("made above");
@@ -545,6 +608,44 @@ impl Renderer {
                 resource: globals_buf.as_entire_binding(),
             }],
         });
+
+        // The lightmaps' bind groups: the first for objects without one.
+        let lightmap_group = |info: [f32; 4], light: &wgpu::TextureView, direction: &wgpu::TextureView| {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("map lightmap"),
+                contents: bytemuck::bytes_of(&LightmapUniform { info }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("map lightmap"),
+                layout: &pipes.lightmap,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(light),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(direction),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&pipes.clamp),
+                    },
+                ],
+            })
+        };
+        let mut lightmaps = vec![lightmap_group([0.0; 4], &white, &white)];
+        for l in &map.lightmaps {
+            let light = view_of(&l.light).unwrap_or_else(|| white.clone());
+            let direction = l.direction.as_ref().and_then(view_of);
+            let info = [1.0, f32::from(u8::from(direction.is_some())), RGBM_SCALE, RGBM_EXPONENT];
+            lightmaps.push(lightmap_group(info, &light, direction.as_ref().unwrap_or(&white)));
+        }
 
         // One bind group per material, by its address.
         let mut materials: Vec<wgpu::BindGroup> = Vec::new();
@@ -566,6 +667,7 @@ impl Renderer {
                     pos: mesh.positions[i],
                     normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
                     uv: mesh.uv.get(i).copied().unwrap_or([0.0, 0.0]),
+                    uv2: mesh.uv2.get(i).copied().unwrap_or([0.0, 0.0]),
                 })
                 .collect();
             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -638,6 +740,7 @@ impl Renderer {
                 });
                 draws.push(Draw {
                     vb: buffers.len() - 1,
+                    lightmap: o.lightmap.filter(|i| *i < map.lightmaps.len()).map_or(0, |i| i + 1),
                     first,
                     count,
                     material: index,
@@ -727,6 +830,7 @@ impl Renderer {
             for d in &draws {
                 pass.set_pipeline(&pipes.pipelines[&(d.blended, d.cull)]);
                 pass.set_bind_group(1, &materials[d.material], &[]);
+                pass.set_bind_group(2, &lightmaps[d.lightmap], &[]);
                 let (vb, ib) = &buffers[d.vb];
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);

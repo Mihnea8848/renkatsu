@@ -282,6 +282,10 @@ pub fn render(which: &str, time: &str, view: &str, out: &std::path::Path, size: 
     let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc())?;
     let built = started.elapsed();
     let mut scene = scene;
+    // For looking at the baked light alone.
+    if std::env::var("RK_MAP_NO_SUN").is_ok() {
+        scene.light.sun_color = [0.0; 3];
+    }
     // The middle of the objects' middles, so that a sky dome or a far
     // backdrop does not set the frame.
     let all: Vec<Vec3> = scene
