@@ -47,7 +47,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.1.8, on the
+The latest version is 0.2.0, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -79,8 +79,14 @@ The latest version is 0.1.8, on the
 - 0.1.8 moves, rotates and scales objects in the viewport with gizmos, in
   global or local axes, with snapping steps of your own. Objects are selected
   with a click or a box, and every shortcut can be changed under Help.
-- Next: snapping to the floor and the grid, attaching objects to each other
-  and to bones, then posing by hand (FK and IK).
+- 0.2.0 adds maps. CharaStudio's maps are drawn with their lightmaps, sun
+  shadows, sky, reflections and walls that hide, at each time of day, and
+  are picked from a library with pictures. A project keeps its maps as
+  `.rkmap` files, which open without Koikatsu. Objects drop onto the floor
+  or the map below them, attach to each other and to a character's bones,
+  and snap to a grid. Loading runs in the background, and a home page shows
+  the news.
+- Next: posing by hand (FK and IK), then baked characters.
 
 ## Renkatsu Studio
 
@@ -111,6 +117,17 @@ The latest version is 0.1.8, on the
 - Packages: Starter Content brings Koikatsu's vanilla characters, clothing
   and animations without the game, and `rk package new` and `rk package build`
   make your own ([docs/packages.md](docs/packages.md))
+- Maps: CharaStudio's maps from a Koikatsu install with lightmaps, sun
+  shadows, sky domes, foliage, reflections, normal maps and walls that hide,
+  in day, evening and night, picked from a library grouped by place. A
+  project keeps each map as one `.rkmap` file, which can also be imported
+  from disk
+- Snap to floor drops objects onto what lies below them, characters or the
+  map; a grid to snap moves to; objects attach to other objects and to a
+  character's bones, and follow them while animations play
+- Loading runs in the background with its progress shown, and a home page
+  shows the news
+- Install Update downloads a new version, installs it and starts it again
 - Unreal Engine 5's dark look, with the window's own title bar and border
 - Renkatsu runs without Koikatsu. The Koikatsu folder, chosen in the project
   selector or in Preferences, is only needed for Koikatsu characters
@@ -154,6 +171,8 @@ The latest version is 0.1.8, on the
   yet (FK and IK come next), and community pose files cannot be imported yet
 - Without a Koikatsu install, characters come from Starter Content only.
   Cards that use mods need the mods, which come with a Koikatsu install
+- Characters are not lit by a map's sun yet and cast no shadows on the
+  map, and maps from mods are not read yet
 - CharaStudio's depth of field, fog and sun shafts (off by default) are not
   drawn yet
 - Koikatsu Sunshine content is not supported
