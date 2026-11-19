@@ -96,6 +96,7 @@ pub fn dump(path: &Path, full_ext: bool) -> Result<()> {
         "hair": c.hair.parts.iter().map(|p| p.id).collect::<Vec<_>>(),
         "coordinates": coords,
         "parameter": to_json(&c.parameter, 0),
+        "status": to_json(&c.status, 0),
         "ext": ext,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

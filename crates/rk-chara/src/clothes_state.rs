@@ -15,7 +15,12 @@
 //! `ChangeAlphaMask` lets the top's state decide how much of the body, the
 //! bra and the top's inner layer the top's mask cuts away.
 //!
-//! Not followed: the parts of `UpdateVisible` that are not clothing, the
+//! One part of the body follows the states as well: `S_Son` (`n_dankon`),
+//! which `UpdateVisible` shows while neither the bottom nor the shorts is
+//! fully on, and only while the character's own switch for it is on, as
+//! CharaStudio's State panel sets that switch.
+//!
+//! Not followed: the rest of `UpdateVisible` that is not clothing, the
 //! accessory options of a piece (`DrawOption`) and its sleeves
 //! (`DrawSode`), which follow the outfit and not the state, and the
 //! switching of the top's skirt bones (`DB_SKIRT_TOP`).
@@ -259,6 +264,9 @@ pub struct Shown {
     pub pantyhose: [bool; 2],
     /// `_alpha_a` and `_alpha_b` of the body, the bra and the inner layer.
     pub alpha: [f32; 2],
+    /// `S_Son` (`n_dankon`), the part of a male body the bottom and the
+    /// shorts cover.
+    pub son: bool,
 }
 
 /// `UpdateVisible` for the clothes of a character that is shown whole.
@@ -279,6 +287,7 @@ pub fn shown(s: &States, worn: &Worn, outdoor_shoes: bool, bottom_object: bool) 
     objects[SHOES_OUTDOOR] = outdoor_shoes && s[SHOES_OUTDOOR] == ON;
     const ALPHA: [[f32; 2]; 4] = [[1.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
     Shown {
+        son: false,
         objects,
         parts: s[TOP] != OFF,
         top: [
@@ -305,12 +314,61 @@ pub fn shown(s: &States, worn: &Worn, outdoor_shoes: bool, bottom_object: bool) 
     }
 }
 
+/// What `UpdateVisible` asks about `S_Son` besides the clothes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Son {
+    /// `ChaFileParameter.exType`. With 1 the top rules it instead of the
+    /// bottom and the shorts.
+    pub ex_type: i64,
+    /// `ChaFileStatus.visibleSon`: drawn whatever the clothes say.
+    pub whatever_is_worn: bool,
+    /// `ChaFileStatus.visibleSonAlways`, which CharaStudio's State panel
+    /// sets from its Son switch. Nothing is drawn while it is off.
+    pub switched_on: bool,
+}
+
+impl Son {
+    /// Reads what the card says, for a character the scene has not
+    /// switched itself.
+    pub fn of_card(card: &rk_card::Card) -> Son {
+        let flag = |key: &str| {
+            rk_card::map_get(&card.status, key)
+                .and_then(rk_card::Value::as_bool)
+                .unwrap_or(true)
+        };
+        Son {
+            ex_type: card.param_int("exType").unwrap_or(0),
+            whatever_is_worn: rk_card::map_get(&card.status, "visibleSon")
+                .and_then(rk_card::Value::as_bool)
+                .unwrap_or(false),
+            switched_on: flag("visibleSonAlways"),
+        }
+    }
+
+    /// Whether `S_Son` is drawn, as `UpdateVisible` decides it outside the
+    /// H scenes, where the body and the part itself are never hidden on
+    /// the scene's own account.
+    pub fn shown(&self, states: &States, kinds: &Kinds) -> bool {
+        let on = |kind: usize| kinds.is_kind(kind) && states[kind] == ON;
+        let covered = if self.ex_type == 1 {
+            on(TOP)
+        } else {
+            on(BOTTOM) || on(SHORTS)
+        };
+        self.switched_on && (!covered || self.whatever_is_worn)
+    }
+}
+
 /// The objects of a built character that the states switch.
 #[derive(Debug, Clone, Default)]
 pub struct Rig {
     pub worn: Worn,
     /// `ChaFileStatus.shoesType`: the outdoor shoes are the ones worn.
     pub outdoor_shoes: bool,
+    /// What decides `S_Son` besides the clothes.
+    pub son: Son,
+    /// `n_dankon` of the body, for a male character.
+    son_node: Option<usize>,
     /// The top object of each loaded piece.
     objects: [Option<usize>; KINDS],
     /// The top objects of the parts of a sailor or jacket top.
@@ -381,6 +439,7 @@ impl Rig {
     /// Notes the body, whose material the top's mask cuts.
     pub fn add_body(&mut self, scene: &Scene, body: &Instance) {
         self.add_alpha(scene, body, &["o_body_a"]);
+        self.son_node = scene.find(body.root, "n_dankon");
     }
 
     /// The renderers on the objects of these names, each the first of its
@@ -439,6 +498,7 @@ impl Rig {
         named(&mut out, &self.bra, "S_UWT_", &["T_DEF", "T_NUGE", "B_DEF", "B_NUGE"]);
         named(&mut out, &self.shorts, "S_UWB_", &["B_DEF", "B_NUGE", "B_NUGE2"]);
         named(&mut out, &self.pantyhose, "S_PANST_", &["DEF", "NUGE"]);
+        out.extend(self.son_node.map(|n| ("S_Son".to_owned(), n)));
         out.into_iter()
             .map(|(name, node)| (name, scene.nodes[node].active))
             .collect()
@@ -450,7 +510,9 @@ impl Rig {
     }
 
     fn shown(&self, states: &States) -> Shown {
-        shown(states, &self.worn, self.outdoor_shoes, self.objects[BOTTOM].is_some())
+        let mut out = shown(states, &self.worn, self.outdoor_shoes, self.objects[BOTTOM].is_some());
+        out.son = self.son.shown(states, &self.worn.kinds());
+        out
     }
 
     /// Shows and hides the objects as the states say.
@@ -484,6 +546,7 @@ impl Rig {
         for (node, on) in self.pantyhose.iter().zip(shown.pantyhose) {
             set(*node, on);
         }
+        set(self.son_node, shown.son);
     }
 
     /// `ChangeAlphaMask` for the top's state.
@@ -507,6 +570,43 @@ impl Rig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_male_part_hides_under_the_bottom_and_the_shorts() {
+        let kinds = worn([1; KINDS]).kinds();
+        let son = Son {
+            ex_type: 0,
+            whatever_is_worn: false,
+            switched_on: true,
+        };
+        let mut states = [ON; KINDS];
+        assert!(!son.shown(&states, &kinds), "the bottom is on");
+        states[BOTTOM] = OFF;
+        assert!(!son.shown(&states, &kinds), "the shorts are still on");
+        states[SHORTS] = OFF;
+        assert!(son.shown(&states, &kinds));
+        // A kind the outfit has no piece for never covers it.
+        let bare = Worn::default().kinds();
+        assert!(son.shown(&[ON; KINDS], &bare));
+        // The card may ask for it whatever is worn, and the switch rules
+        // both.
+        let always = Son {
+            whatever_is_worn: true,
+            ..son
+        };
+        assert!(always.shown(&[ON; KINDS], &kinds));
+        assert!(!Son {
+            switched_on: false,
+            ..always
+        }
+        .shown(&states, &kinds));
+        // `exType` 1 asks the top instead.
+        let ex = Son { ex_type: 1, ..son };
+        assert!(!ex.shown(&[ON; KINDS], &kinds), "the top is on");
+        let mut half = [ON; KINDS];
+        half[TOP] = HALF;
+        assert!(ex.shown(&half, &kinds));
+    }
     use crate::scene::{test_renderer, MaterialInst, Trs};
     use std::collections::HashMap;
 
