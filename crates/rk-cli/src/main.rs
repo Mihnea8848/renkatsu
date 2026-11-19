@@ -563,7 +563,18 @@ fn main() -> Result<()> {
                     sky,
                     capture,
                 },
-        } => map::render(&map, &time, &view, &out, (width, height), fog, sky, capture.as_deref()),
+        } => map::render(
+            &map,
+            &time,
+            &view,
+            &out,
+            (width, height),
+            map::RenderOptions {
+                fog,
+                sky,
+                capture: capture.as_deref(),
+            },
+        ),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),

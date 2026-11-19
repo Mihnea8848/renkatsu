@@ -260,6 +260,13 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// Switches of `render`.
+pub struct RenderOptions<'a> {
+    pub fog: bool,
+    pub sky: bool,
+    pub capture: Option<&'a std::path::Path>,
+}
+
 /// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
 /// height looking across the map, or `above`, from a high corner with
 /// everything above head height cut away.
@@ -273,10 +280,9 @@ pub fn render(
     view: &str,
     out: &std::path::Path,
     size: (u32, u32),
-    fog: bool,
-    sky: bool,
-    capture: Option<&std::path::Path>,
+    options: RenderOptions<'_>,
 ) -> Result<()> {
+    let RenderOptions { fog, sky, capture } = options;
     use glam::Vec3;
     let game = Game::open_user(&[])?;
     let maps = list::read(&game, true);
