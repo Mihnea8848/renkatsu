@@ -262,7 +262,7 @@ struct Drag {
     handle: Handle,
     /// The gizmo as the drag found it.
     frame: Frame,
-    /// A move along the scene's own axes, which snaps to the grid.
+    /// A move along the scene's own axes, which snaps to world positions.
     on_grid: bool,
     pivot: Pivot,
     starts: Vec<Start>,
@@ -317,8 +317,8 @@ struct Snap {
 }
 
 impl Snap {
-    /// A move of `by` from `from` along one axis, snapped: to the grid's
-    /// lines when there is a grid, else by the step.
+    /// A move of `by` from `from` along one axis, snapped: to world
+    /// positions in steps of `grid` when it is set, else by the step.
     fn moved(&self, from: f32, by: f32) -> f32 {
         match self.grid {
             Some(cell) => snapped(from + by, Some(cell)) - from,
@@ -901,7 +901,9 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
             let steps = st.settings.snap_steps;
             let snap = Snap {
                 step: (st.snap != ctrl).then(|| steps[row]),
-                grid: (st.snap != ctrl).then(|| steps[3]),
+                // Along the scene's axes a move lands on world positions in
+                // steps of the move step; the grid size is for drawing.
+                grid: (st.snap != ctrl).then(|| steps[0]),
             };
             if let Some(pos) = pos {
                 drag.follow(&view, pos, snap);
