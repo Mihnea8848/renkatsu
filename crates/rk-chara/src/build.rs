@@ -14,6 +14,7 @@ use crate::shape::{self, Rules, ShapeSet};
 use anyhow::{Context, Result};
 use glam::Vec3;
 use rk_card::Card;
+use rk_vfs::uncensor::ColorMatch;
 use rk_vfs::{cat, resolve_infos, Game, Item, Lookup, ResolveInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1654,6 +1655,61 @@ impl<'g> Builder<'g> {
         }
     }
 
+    /// Mod Bone Implantor: the `(trfSrc, trfDst)` pair of every
+    /// `BoneImplantProcess` script a prefab carries.
+    fn implant_pairs(&self, donor: &Instance) -> Vec<(Option<usize>, Option<usize>)> {
+        let mut pairs = Vec::new();
+        for (_, script) in &donor.scripts {
+            if self.script_class(script).as_deref() != Some(crate::uncensor_selector::IMPLANT_SCRIPT) {
+                continue;
+            }
+            let Ok(obj) = script.read() else { continue };
+            let node = |field: &str| {
+                let target = self.game.assets.deref(&script.file, obj.pptr(field)?)?;
+                donor.transform_nodes.get(&target.key()).copied()
+            };
+            pairs.push((node("trfSrc"), node("trfDst")));
+        }
+        pairs
+    }
+
+    /// `SetSkinColor`: a part an uncensor matches to the skin has its own
+    /// main texture rebuilt in the skin colours and put on the material
+    /// that came with it. The mod's `materialCreate` is the body's create
+    /// shader, so the body's own texture is what is built; the sunburn,
+    /// the body paint and the nails have no place in it.
+    fn color_match(&mut self, card: &Card, inst: &Instance, file: &str, mod_idx: Option<u32>, parts: &[ColorMatch]) {
+        let vpath = rk_vfs::index::norm(file);
+        for p in parts {
+            let main = self.loader.image_by_name(&vpath, &p.main_tex, mod_idx);
+            let mask = self.loader.image_by_name(&vpath, &p.color_mask, mod_idx);
+            // The plugin gives up on the part when either is missing.
+            let (Some(main), Some(mask)) = (main, mask) else {
+                self.loader.warn(format!(
+                    "colour match {}: {} or {} is missing",
+                    p.object, p.main_tex, p.color_mask
+                ));
+                continue;
+            };
+            let mut image = compose::body(&compose::BodyInputs {
+                size: 2048,
+                main: Some(&main),
+                color_mask: Some(&mask),
+                skin_main: card.body.skin_main_color,
+                skin_sub: card.body.skin_sub_color,
+                // White leaves the nails alone, and without a sunburn
+                // texture its colour never reaches the skin.
+                nail: [1.0; 4],
+                sunburn: None,
+                sunburn_color: [1.0; 4],
+                paint_mask: None,
+                paints: [Decal::none(), Decal::none()],
+            });
+            image.name = format!("{}_composed", p.object);
+            self.set_skin(inst, &[&p.object], None, image);
+        }
+    }
+
     /// Builds the body skin texture from the card.
     /// `uncensor` is the body the Uncensor Selector plugin put in place:
     /// its bundles and asset names stand in for the game's
@@ -2017,10 +2073,14 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 
     // Uncensor Selector: another body's meshes on the same renderers.
     let mut uncensor = None;
+    // `SetSkinColor` runs once the skin is built: (bundle, mod, parts).
+    let mut matched: Vec<(String, Option<u32>, Vec<ColorMatch>)> = Vec::new();
     if opts.uncensor_selector {
         use crate::uncensor_selector as us;
+        use rk_vfs::uncensor::defaults as ud;
         let uncensors = game.assets.uncensors();
         let guid = us::stored_body(&card.ext, uncensors);
+        let chosen = us::stored_parts(&card.ext, uncensors, u8::from(female));
         let voice_rate = rk_card::map_get(&card.parameter, "voiceRate")
             .and_then(rk_card::Value::as_f64)
             .unwrap_or(0.5) as f32;
@@ -2030,6 +2090,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             card.param_int("personality").unwrap_or(0),
             us::voice_pitch(voice_rate, true),
         );
+        // Which prefab the body's meshes come from, so that a part
+        // taken from the same one is not copied onto itself.
+        let mut from = (BASE.to_string(), body_name.to_string());
         if let Some(data) = us::select(uncensors, guid.as_deref(), u8::from(female), seed) {
             let vpath = rk_vfs::index::norm(&data.oo_base);
             if vpath != BASE || data.asset != body_name {
@@ -2040,20 +2103,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     Ok(donor) => {
                         // Mod Bone Implantor: bones the prefab asks to
                         // have moved into the skeleton.
-                        let mut pairs = Vec::new();
-                        for (_, script) in &donor.scripts {
-                            if b.script_class(script).as_deref() != Some(us::IMPLANT_SCRIPT) {
-                                continue;
-                            }
-                            let Ok(obj) = script.read() else { continue };
-                            let node = |field: &str| {
-                                let target = game.assets.deref(&script.file, obj.pptr(field)?)?;
-                                donor.transform_nodes.get(&target.key()).copied()
-                            };
-                            pairs.push((node("trfSrc"), node("trfDst")));
-                        }
+                        let pairs = b.implant_pairs(&donor);
                         let implants = us::implant(&mut b.scene, &pairs, &bones);
                         us::swap_meshes(&mut b.scene, &mut body, &donor, data, uncensors, implants.as_ref());
+                        from = (vpath.clone(), data.asset.clone());
                     }
                     Err(e) => b.loader.warn(format!("uncensor body {}: {e:#}", data.guid)),
                 }
@@ -2062,11 +2115,75 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 b.loader
                     .warn(format!("uncensor body {}: {part} is not applied", data.guid));
             }
+            if !data.color_match.is_empty() {
+                matched.push((data.oo_base.clone(), data.mod_idx, data.color_match.clone()));
+            }
             uncensor = Some(data);
+        }
+
+        // The penis and the balls, each over its own meshes.
+        let picks = [
+            (
+                "penis",
+                us::select_part(&uncensors.penises, chosen.penis.as_deref(), seed, ud::PENIS_GUID),
+                &us::PENIS_PARTS[..],
+            ),
+            (
+                "balls",
+                us::select_part(&uncensors.balls, chosen.balls.as_deref(), seed, ud::BALLS_GUID),
+                &us::BALLS_PARTS[..],
+            ),
+        ];
+        for (what, pick, names) in picks {
+            let Some(data) = pick else { continue };
+            // A body without these meshes, a female's, has nothing to
+            // swap; the plugin loads the prefab anyway and finds none.
+            if !body
+                .renderers
+                .iter()
+                .any(|&r| names.contains(&b.scene.renderers[r].name.as_str()))
+            {
+                continue;
+            }
+            let vpath = rk_vfs::index::norm(&data.file);
+            // The game's own part on the prefab the body already came
+            // from would copy those meshes onto themselves.
+            if (&vpath, &data.asset) != (&from.0, &from.1) {
+                match b
+                    .loader
+                    .load_prefab(&mut b.scene, &vpath, &data.asset, data.mod_idx, Some(top), Part::Body)
+                {
+                    Ok(donor) => {
+                        let pairs = b.implant_pairs(&donor);
+                        let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        us::swap_parts(&mut b.scene, &body, &donor, names, implants.as_ref());
+                    }
+                    Err(e) => b.loader.warn(format!("uncensor {what} {}: {e:#}", data.guid)),
+                }
+            }
+            if !data.color_match.is_empty() {
+                matched.push((data.file.clone(), data.mod_idx, data.color_match.clone()));
+            }
+        }
+
+        // `ReloadCharacterBalls` draws the balls only when the card says
+        // so; the first of those meshes is the one it switches.
+        if !chosen.display_balls {
+            let found = body
+                .renderers
+                .iter()
+                .copied()
+                .find(|&r| us::BALLS_PARTS.contains(&b.scene.renderers[r].name.as_str()));
+            if let Some(r) = found {
+                b.scene.renderers[r].enabled = false;
+            }
         }
     }
 
     b.skin_body(card, &body, female, uncensor, opts.censor);
+    for (file, mod_idx, parts) in &matched {
+        b.color_match(card, &body, file, *mod_idx, parts);
+    }
 
     // Parts the game only shows in special states. `n_dankon` is not
     // among them: the clothes states decide it, in `clothes_state`.
@@ -2237,7 +2354,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     if let Lookup::Found(item) = b.game.items.lookup(&b.infos, &prop, cat::CLOTHES[i], cp.id) {
                         let loads = |key: &str| item.get(key).is_some_and(|v| v != "0" && v != "p_dummy");
                         if loads("MainAB") && loads("MainData") {
-                            rig.worn.state_type[i] = item.int("StateType");
+                            rig.worn.state_type[i] = state_type(item);
                         }
                     }
                     continue;
@@ -2282,7 +2399,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                 let has_top = inst
                     .as_ref()
                     .is_some_and(|inst| inst.nodes.iter().any(|&n| b.scene.nodes[n].name == "n_top_a"));
-                let state = item.int("StateType");
+                let state = state_type(item);
                 // `infoClothes` is set once the piece's object is loaded; a
                 // sailor or jacket top loads an empty object.
                 let kind = item.int("Kind").unwrap_or(0);
@@ -2698,6 +2815,16 @@ impl Character {
         }
         motion.apply(&mut self.scene, phase);
         self.wear_heels(states);
+    }
+}
+
+/// A clothing item's `StateType`, as `ChaControl` reads it: a list without
+/// the column gives "0" (`ListInfoBase.GetInfo`), so the piece has the
+/// usual on, half off and off states.
+fn state_type(item: &Item) -> Option<i32> {
+    match item.get("StateType") {
+        None => Some(0),
+        Some(_) => item.int("StateType"),
     }
 }
 

@@ -97,6 +97,14 @@ pub fn write(dir: &Path, file: &File) -> Result<PathBuf> {
         let mode = if file.executable { 0o755 } else { 0o644 };
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
     }
+    // Windows will not rename over a running program, but lets it be
+    // moved aside first; the old copy goes at the next update.
+    #[cfg(windows)]
+    if target.exists() {
+        let old = target.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(&target, &old);
+    }
     std::fs::rename(&temporary, &target).with_context(|| format!("writing {}", target.display()))?;
     Ok(target)
 }

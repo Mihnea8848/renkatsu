@@ -20,6 +20,8 @@ pub struct Entry {
     pub name: String,
     /// The card on disk.
     pub path: PathBuf,
+    /// Whether the card is of a man, which colours its icons blue.
+    pub male: bool,
 }
 
 /// How thumbnails are filtered: they show much smaller than they are, so
@@ -52,6 +54,18 @@ pub struct Library {
 }
 
 impl Library {
+    /// The colour of a scene object's icon: its kind's, blue for a man.
+    pub fn color_of(&self, content: &crate::scene::Content) -> egui::Color32 {
+        match content {
+            crate::scene::Content::Character { card, .. }
+                if self.characters.iter().any(|c| c.file == *card && c.male) =>
+            {
+                crate::kinds::Kind::MALE
+            }
+            _ => content.kind().color(),
+        }
+    }
+
     pub fn new(project: &Project) -> Library {
         let mut library = Library {
             characters: Vec::new(),
@@ -74,10 +88,14 @@ impl Library {
         self.characters = project
             .characters()
             .into_iter()
-            .map(|c| Entry {
-                path: project.resolve(Path::new(&c.file)),
-                file: PathBuf::from(c.file),
-                name: c.name,
+            .map(|c| {
+                let path = project.resolve(Path::new(&c.file));
+                Entry {
+                    male: rk_card::Card::male_of(&path).unwrap_or(false),
+                    path,
+                    file: PathBuf::from(c.file),
+                    name: c.name,
+                }
             })
             .collect();
         self.characters.sort_by_key(|c| crate::content::natural(&c.name));
@@ -182,6 +200,7 @@ mod tests {
                 file: PathBuf::from("Characters/Simple.png"),
                 name: "Renkatsu-Chan".to_owned(),
                 path: home.join("P/Characters/Simple.png"),
+                male: false,
             }]
         );
         // A file that is no picture gives no thumbnail.

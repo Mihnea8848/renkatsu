@@ -970,7 +970,8 @@ fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &
             caption: kind.label(),
             caption_color: None,
         };
-        draw_tile(ui, k, st, cell, &resp, on, thumb, kind.color(), text, asks);
+        let color = if card.male { Kind::MALE } else { kind.color() };
+        draw_tile(ui, k, st, cell, &resp, on, thumb, color, text, asks);
         resp.context_menu(|ui| file_menu(ui, k, st, &rel, asks));
     });
 }

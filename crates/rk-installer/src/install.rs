@@ -12,8 +12,8 @@
 //! ~/Desktop/renkatsu.desktop            the desktop shortcut, if chosen
 //! ```
 
-use crate::payload::{self, File};
 use anyhow::{Context, Result};
+use rk_packages::payload::{self, File};
 use std::path::{Path, PathBuf};
 
 /// The folders an installation uses.

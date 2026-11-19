@@ -43,6 +43,7 @@ mod project;
 mod properties;
 mod scene;
 mod selector;
+mod self_update;
 mod settings;
 mod shortcuts;
 mod sources;

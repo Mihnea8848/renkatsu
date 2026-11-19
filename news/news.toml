@@ -5,9 +5,27 @@
 date = 2026-11-19
 title = "Posing comes next"
 summary = "I am working on FK and IK posing now. Baked characters come after that."
+body = """
+Characters can play the game's animations already. The next step is posing them by hand, the way CharaStudio does it.
+
+FK lets you turn each bone yourself: pick the arm, the hand or a finger and rotate it. IK works the other way round: you move a hand or a foot to where it should be, and the arm or the leg follows. Both work on the same skeleton, so you can start from an animation, pause it and fix the pose from there.
+
+Poses you make go into the project's Poses folder, beside the animations, so you can use them again on other characters.
+
+After posing come baked characters. A baked character keeps everything it needs inside the project, so a scene opens the same on a computer without Koikatsu.
+"""
 
 [[post]]
 date = 2026-11-18
 title = "Starter Content is available"
 summary = "You can use Renkatsu without Koikatsu now. Get Starter Content from the Packages window and you have characters and clothing to work with."
 url = "https://github.com/Mihnea8848/renkatsu/releases"
+body = """
+Until now Renkatsu needed a Koikatsu install to build characters. That is no longer the case.
+
+Starter Content: Characters and Clothing is a package with the bodies, faces, hair and clothing that cards are built from. Install it and the default characters work, and so do cards that only use the game's own content.
+
+To get it, open the Packages window from the project selector and choose Starter Content, or click Get Starter Content when Renkatsu offers it. The download goes on where it stopped if the connection drops.
+
+If you have Koikatsu, you can still point Renkatsu at your game folder. Then your own cards and their mods are read from there.
+"""

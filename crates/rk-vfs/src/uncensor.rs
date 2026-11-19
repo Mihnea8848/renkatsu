@@ -10,8 +10,9 @@
 //! string comparison), so that is the order kept here: it decides which
 //! body a seeded random pick lands on.
 //!
-//! Penis and balls entries are not read: the game hides those parts on a
-//! character at rest.
+//! `<penis>` and `<balls>` entries are read the same way, into their own
+//! dictionaries, each with the game's own mosaic part first
+//! (`Default.Penis`, `Default.Balls`).
 
 use crate::index::{cache_file, stamp, FileStamp, Index};
 use rayon::prelude::*;
@@ -35,6 +36,8 @@ pub mod defaults {
     pub const BODY_MATERIAL_CREATE: &str = "cf_m_body_create";
     pub const BODY_FEMALE_GUID: &str = "Default.Body.Female";
     pub const BODY_MALE_GUID: &str = "Default.Body.Male";
+    pub const PENIS_GUID: &str = "Default.Penis";
+    pub const BALLS_GUID: &str = "Default.Balls";
 }
 
 /// `ColorMatchPart`: a mesh that is recoloured to the skin.
@@ -105,18 +108,53 @@ impl Body {
     }
 }
 
+/// `PenisData` and `BallsData`: a penis or balls a zipmod offers. Both
+/// hold the same fields, and neither names a sex.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Part {
+    pub guid: String,
+    pub display_name: String,
+    /// Bundle with the prefab the meshes come from.
+    pub file: String,
+    pub asset: String,
+    pub allow_random: bool,
+    pub color_match: Vec<ColorMatch>,
+    /// The zipmod it came from; `None` for the game's own.
+    pub mod_idx: Option<u32>,
+}
+
+impl Part {
+    /// `PenisData(guid, displayName)`: the game's own part, which is the
+    /// mosaic on the male body prefab.
+    pub fn builtin(guid: &str, display_name: &str) -> Self {
+        Self {
+            guid: guid.into(),
+            display_name: display_name.into(),
+            file: defaults::OO_BASE.into(),
+            asset: defaults::ASSET_MALE.into(),
+            allow_random: false,
+            color_match: Vec::new(),
+            mod_idx: None,
+        }
+    }
+}
+
 /// `MigrationData`: where the selection of an old card (data version 1)
 /// went.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Migration {
     pub uncensor_guid: String,
     pub body_guid: String,
+    pub penis_guid: Option<String>,
+    pub balls_guid: Option<String>,
 }
 
 /// What one manifest contributes.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ManifestData {
     pub bodies: Vec<Body>,
+    pub penises: Vec<Part>,
+    pub balls: Vec<Part>,
     pub migrations: Vec<Migration>,
 }
 
@@ -130,13 +168,50 @@ fn text(node: roxmltree::Node, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `<allowRandom>`: anything but "false" or "0" allows it, the element
+/// missing included.
+fn allow_random(node: roxmltree::Node) -> bool {
+    !text(node, "allowRandom").is_some_and(|v| v.to_lowercase() == "false" || v == "0")
+}
+
+/// The `<colorMatch>` children of an element; one missing a field is
+/// dropped (`ColorMatchPart.Verify`).
+fn color_matches(node: roxmltree::Node) -> Vec<ColorMatch> {
+    node.children()
+        .filter(|c| c.has_tag_name("colorMatch"))
+        .filter_map(|c| {
+            Some(ColorMatch {
+                object: text(c, "object")?,
+                material: text(c, "material")?,
+                material_create: text(c, "materialCreate")?,
+                main_tex: text(c, "mainTex")?,
+                color_mask: text(c, "colorMask")?,
+            })
+        })
+        .collect()
+}
+
+/// `PenisData(XContainer)` and `BallsData(XContainer)`, with the checks
+/// `PopulateUncensorLists` makes: all four of these are needed.
+fn part(node: roxmltree::Node) -> Option<Part> {
+    Some(Part {
+        guid: text(node, "guid")?,
+        display_name: text(node, "displayName")?,
+        file: text(node, "file")?,
+        asset: text(node, "asset")?,
+        allow_random: allow_random(node),
+        color_match: color_matches(node),
+        mod_idx: None,
+    })
+}
+
 /// `BodyData(XContainer)` and the checks `PopulateUncensorLists` makes.
 fn body(node: roxmltree::Node) -> Option<Body> {
     use defaults::*;
     let guid = text(node, "guid")?;
     let sex = u8::from(text(node, "sex").is_some_and(|s| s.to_lowercase() == "female"));
     let male = sex == 0;
-    let allow_random = !text(node, "allowRandom").is_some_and(|v| v.to_lowercase() == "false" || v == "0");
+    let allow_random = allow_random(node);
     let mut b = Body {
         display_name: text(node, "displayName").unwrap_or_else(|| guid.clone()),
         guid,
@@ -175,19 +250,7 @@ fn body(node: roxmltree::Node) -> Option<Body> {
             .filter(|t| !t.trim().is_empty())
             .map(str::to_string)
             .collect();
-        b.color_match = oo
-            .children()
-            .filter(|c| c.has_tag_name("colorMatch"))
-            .filter_map(|c| {
-                Some(ColorMatch {
-                    object: text(c, "object")?,
-                    material: text(c, "material")?,
-                    material_create: text(c, "materialCreate")?,
-                    main_tex: text(c, "mainTex")?,
-                    color_mask: text(c, "colorMask")?,
-                })
-            })
-            .collect();
+        b.color_match = color_matches(oo);
         b.mm_base = or("mm_base", MM_BASE);
         b.material = or("material", if male { BODY_MATERIAL_MALE } else { BODY_MATERIAL_FEMALE });
         b.material_create = or("materialCreate", BODY_MATERIAL_CREATE);
@@ -214,6 +277,16 @@ pub fn parse(manifest: &str) -> ManifestData {
         .filter(|c| c.has_tag_name("body"))
         .filter_map(body)
         .collect();
+    out.penises = root
+        .children()
+        .filter(|c| c.has_tag_name("penis"))
+        .filter_map(part)
+        .collect();
+    out.balls = root
+        .children()
+        .filter(|c| c.has_tag_name("balls"))
+        .filter_map(part)
+        .collect();
     out.migrations = root
         .children()
         .filter(|c| c.has_tag_name("migration"))
@@ -221,6 +294,8 @@ pub fn parse(manifest: &str) -> ManifestData {
             Some(Migration {
                 uncensor_guid: text(m, "guidUncensor")?,
                 body_guid: text(m, "guidBody")?,
+                penis_guid: text(m, "guidPenis"),
+                balls_guid: text(m, "guidBalls"),
             })
         })
         .collect();
@@ -235,11 +310,16 @@ pub fn guid_order(a: &str, b: &str) -> Ordering {
     a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(a))
 }
 
-/// `BodyDictionary` and `MigrationDictionary`.
+/// `BodyDictionary`, `PenisDictionary`, `BallsDictionary` and
+/// `MigrationDictionary`.
 #[derive(Debug, Clone, Default)]
 pub struct Uncensors {
     /// In dictionary order: the two built-in bodies, then the mods'.
     pub bodies: Vec<Body>,
+    /// The game's own mosaic penis first, then the mods'.
+    pub penises: Vec<Part>,
+    /// The game's own mosaic balls first, then the mods'.
+    pub balls: Vec<Part>,
     pub migrations: HashMap<String, Migration>,
     /// `AllAdditionalParts`: mesh names some body adds.
     pub additional_parts: HashSet<String>,
@@ -253,6 +333,8 @@ impl Uncensors {
                 Body::builtin(0, defaults::BODY_MALE_GUID, "Default Body M"),
                 Body::builtin(1, defaults::BODY_FEMALE_GUID, "Default Body F"),
             ],
+            penises: vec![Part::builtin(defaults::PENIS_GUID, "Mosaic Penis")],
+            balls: vec![Part::builtin(defaults::BALLS_GUID, "Mosaic Balls")],
             ..Default::default()
         };
         manifests.sort_by(|a, b| guid_order(&a.0, &b.0));
@@ -266,6 +348,15 @@ impl Uncensors {
                     None => out.bodies.push(body),
                 }
             }
+            for (from, into) in [(data.penises, &mut out.penises), (data.balls, &mut out.balls)] {
+                for mut p in from {
+                    p.mod_idx = mod_idx;
+                    match into.iter_mut().find(|x| x.guid == p.guid) {
+                        Some(slot) => *slot = p,
+                        None => into.push(p),
+                    }
+                }
+            }
             for m in data.migrations {
                 out.migrations.insert(m.uncensor_guid.clone(), m);
             }
@@ -277,6 +368,14 @@ impl Uncensors {
         self.bodies.iter().find(|b| b.guid == guid)
     }
 
+    pub fn penis(&self, guid: &str) -> Option<&Part> {
+        self.penises.iter().find(|p| p.guid == guid)
+    }
+
+    pub fn balls(&self, guid: &str) -> Option<&Part> {
+        self.balls.iter().find(|p| p.guid == guid)
+    }
+
     /// Reads the manifests of the mods in use. What each zipmod holds is
     /// remembered in a cache file of its own, keyed by path, size and time.
     pub fn load(index: &Index) -> Self {
@@ -285,7 +384,7 @@ impl Uncensors {
             version: u32,
             zips: HashMap<String, (FileStamp, ManifestData)>,
         }
-        const VERSION: u32 = 1;
+        const VERSION: u32 = 2;
         let file = cache_file(&index.game_dir, "uncensor");
         let mut cache: Cache = std::fs::read(&file)
             .ok()
@@ -332,8 +431,7 @@ impl Uncensors {
             .enumerate()
             .filter_map(|(i, m)| {
                 let (_, data) = cache.zips.get(&m.path)?;
-                (!data.bodies.is_empty() || !data.migrations.is_empty())
-                    .then(|| (m.guid.clone(), Some(i as u32), data.clone()))
+                (data != &ManifestData::default()).then(|| (m.guid.clone(), Some(i as u32), data.clone()))
             })
             .collect();
         Self::build(manifests)
@@ -369,7 +467,26 @@ mod tests {
             </body>
             <body><guid>no.bundle</guid><sex>Female</sex></body>
             <body><displayName>No guid</displayName></body>
-            <migration><guidUncensor>old</guidUncensor><guidBody>SAC.innie</guidBody></migration>
+            <penis>
+                <guid>SAC.dong</guid>
+                <displayName>SAC Dong</displayName>
+                <file>chara/sac_dong.unity3d</file>
+                <asset>sac_dong</asset>
+                <colorMatch><object>o_dankon</object><material>cm_m_dankon</material>
+                    <materialCreate>cm_m_dankon_create</materialCreate>
+                    <mainTex>cm_dankon_00_t</mainTex><colorMask>cm_dankon_00_mc</colorMask></colorMatch>
+            </penis>
+            <penis><guid>no.name</guid><file>x</file><asset>y</asset></penis>
+            <penis><guid>no.asset</guid><displayName>No asset</displayName><file>x</file></penis>
+            <balls>
+                <guid>SAC.tama</guid>
+                <displayName>SAC Tama</displayName>
+                <file>chara/sac_tama.unity3d</file>
+                <asset>sac_tama</asset>
+                <allowRandom>0</allowRandom>
+            </balls>
+            <migration><guidUncensor>old</guidUncensor><guidBody>SAC.innie</guidBody>
+                <guidPenis>SAC.dong</guidPenis></migration>
             <migration><guidUncensor>broken</guidUncensor></migration>
         </KK_UncensorSelector>
     </manifest>"#;
@@ -400,10 +517,22 @@ mod tests {
             data.migrations,
             vec![Migration {
                 uncensor_guid: "old".into(),
-                body_guid: "SAC.innie".into()
+                body_guid: "SAC.innie".into(),
+                penis_guid: Some("SAC.dong".into()),
+                balls_guid: None,
             }]
         );
         assert_eq!(parse("<manifest><guid>x</guid></manifest>"), ManifestData::default());
+        // A penis needs a GUID, a name, a file and an asset.
+        assert_eq!(data.penises.len(), 1);
+        let dong = &data.penises[0];
+        assert_eq!(dong.display_name, "SAC Dong");
+        assert_eq!(dong.file, "chara/sac_dong.unity3d");
+        assert!(dong.allow_random);
+        assert_eq!(dong.color_match.len(), 1);
+        assert_eq!(dong.color_match[0].main_tex, "cm_dankon_00_t");
+        assert_eq!(data.balls.len(), 1);
+        assert!(!data.balls[0].allow_random);
     }
 
     #[test]
@@ -414,7 +543,7 @@ mod tests {
                 oo_base: "x".into(),
                 ..Default::default()
             }],
-            migrations: Vec::new(),
+            ..Default::default()
         };
         let mut again = one("b1");
         again.bodies[0].display_name = "newer".into();
@@ -443,5 +572,13 @@ mod tests {
         assert_eq!(u.body("b1").unwrap().mod_idx, Some(4));
         assert!(u.additional_parts.contains("o_extra"));
         assert_eq!(u.migrations["old"].body_guid, "SAC.innie");
+        // The game's own mosaic parts come first and are never random.
+        assert_eq!(u.penises[0].guid, defaults::PENIS_GUID);
+        assert_eq!(u.balls[0].guid, defaults::BALLS_GUID);
+        assert!(!u.penises[0].allow_random);
+        assert_eq!(u.penises[0].file, defaults::OO_BASE);
+        assert_eq!(u.penis("SAC.dong").unwrap().mod_idx, Some(1));
+        assert_eq!(u.balls("SAC.tama").unwrap().display_name, "SAC Tama");
+        assert!(u.penis("no.name").is_none());
     }
 }
