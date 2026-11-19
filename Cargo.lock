@@ -2948,6 +2948,7 @@ dependencies = [
  "rk-card",
  "rk-chara",
  "rk-core",
+ "rk-map",
  "rk-packages",
  "rk-render",
  "rk-unityfs",
@@ -2974,6 +2975,16 @@ dependencies = [
  "egui",
  "rk-packages",
  "zip",
+]
+
+[[package]]
+name = "rk-map"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "rk-chara",
+ "rk-unityfs",
+ "rk-vfs",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 9;
+const CACHE_VERSION: u32 = 10;
 const GAME_NAMES: [&str; 3] = ["koikatsu", "koikatu", "コイカツ"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -116,7 +116,7 @@ pub struct ListData {
 /// under `abdata/studio/info/`, the way Sideloader takes them: the file is
 /// named as the game names the sheet in its own bundles
 /// (`AnimeGroup_...`, `AnimeCategory_<n>_<group>`,
-/// `Anime_<n>_<group>_<category>`) and holds the same rows.
+/// `Anime_<n>_<group>_<category>`, `Map_<name>`) and holds the same rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StudioSheet {
     /// Index into [`Index::mods`].
@@ -182,7 +182,8 @@ pub fn csv_rows(text: &str) -> Vec<Vec<String>> {
 fn studio_sheet(inner: &str) -> Option<(String, String)> {
     let rest = inner.strip_prefix("studio/info/")?.strip_suffix(".csv")?;
     let (folder, name) = rest.rsplit_once('/').unwrap_or(("", rest));
-    (name.starts_with("anime") || name.starts_with("hanime_")).then(|| (folder.to_owned(), name.to_owned()))
+    (name.starts_with("anime") || name.starts_with("hanime_") || name.starts_with("map_"))
+        .then(|| (folder.to_owned(), name.to_owned()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1145,6 +1146,11 @@ mod tests {
         assert_eq!(
             studio_sheet("studio/info/x/hanime_00_01_100.csv"),
             Some(("x".to_owned(), "hanime_00_01_100".to_owned()))
+        );
+        // So are the map lists.
+        assert_eq!(
+            studio_sheet("studio/info/darksoldier/map_ds_01.csv"),
+            Some(("darksoldier".to_owned(), "map_ds_01".to_owned()))
         );
         // Item lists, the hand shapes and files elsewhere are not kept.
         assert_eq!(studio_sheet("studio/info/x/itemlist_00_01.csv"), None);

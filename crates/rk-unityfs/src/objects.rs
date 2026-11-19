@@ -95,6 +95,10 @@ pub struct Renderer {
     /// (`m_AABB`), in the space of the root bone.
     pub aabb: Option<([f32; 3], [f32; 3])>,
     pub blend_shape_weights: Vec<f32>,
+    /// The baked lightmap the renderer reads, 65535 (or more) for none, and
+    /// where its part of that lightmap lies: scale x, y and offset x, y.
+    pub lightmap_index: u32,
+    pub lightmap_scale_offset: [f32; 4],
 }
 
 impl Renderer {
@@ -114,6 +118,18 @@ impl Renderer {
                 .array("m_BlendShapeWeights")
                 .map(|a| a.iter().filter_map(UValue::as_f32).collect())
                 .unwrap_or_default(),
+            lightmap_index: o.i64("m_LightmapIndex").unwrap_or(0xFFFF) as u32,
+            lightmap_scale_offset: o
+                .get("m_LightmapTilingOffset")
+                .and_then(|v| {
+                    Some([
+                        v.get("x")?.as_f32()?,
+                        v.get("y")?.as_f32()?,
+                        v.get("z")?.as_f32()?,
+                        v.get("w")?.as_f32()?,
+                    ])
+                })
+                .unwrap_or([1.0, 1.0, 0.0, 0.0]),
         })
     }
 }
