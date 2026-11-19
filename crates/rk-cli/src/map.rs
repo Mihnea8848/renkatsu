@@ -263,7 +263,18 @@ fn clip(s: &str, n: usize) -> String {
 /// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
 /// height looking across the map, or `above`, from a high corner with
 /// everything above head height cut away.
-pub fn render(which: &str, time: &str, view: &str, out: &std::path::Path, size: (u32, u32)) -> Result<()> {
+/// With `fog`, the map's own fog is drawn; CharaStudio leaves it off unless
+/// its fog switch is on. With `capture`, the camera is the view named
+/// `view` of a CharaStudio capture's JSON, at the capture's picture size.
+pub fn render(
+    which: &str,
+    time: &str,
+    view: &str,
+    out: &std::path::Path,
+    size: (u32, u32),
+    fog: bool,
+    capture: Option<&std::path::Path>,
+) -> Result<()> {
     use glam::Vec3;
     let game = Game::open_user(&[])?;
     let maps = list::read(&game, true);
@@ -282,9 +293,15 @@ pub fn render(which: &str, time: &str, view: &str, out: &std::path::Path, size: 
     let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc())?;
     let built = started.elapsed();
     let mut scene = scene;
+    if !fog {
+        scene.light.fog = None;
+    }
     // For looking at the baked light alone.
     if std::env::var("RK_MAP_NO_SUN").is_ok() {
         scene.light.sun_color = [0.0; 3];
+    }
+    if std::env::var("RK_MAP_NO_SHADOWS").is_ok() {
+        scene.light.shadows = None;
     }
     // The middle of the objects' middles, so that a sky dome or a far
     // backdrop does not set the frame.
@@ -312,7 +329,33 @@ pub fn render(which: &str, time: &str, view: &str, out: &std::path::Path, size: 
     let hi = Vec3::new(pick(0, 0.95), pick(1, 0.95), pick(2, 0.95));
     let centre = (lo + hi) * 0.5;
     let floor = lo.y;
+    let mut size = size;
+    let recorded = match capture {
+        Some(path) => {
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            if let Some([w, h]) = json["size"].as_array().map(|a| [a[0].as_u64(), a[1].as_u64()]) {
+                size = (w.unwrap_or(900) as u32, h.unwrap_or(1400) as u32);
+            }
+            let views = json["views"].as_array().cloned().unwrap_or_default();
+            let v = views
+                .iter()
+                .find(|v| v["name"] == view)
+                .ok_or_else(|| anyhow!("the capture has no view {view}"))?;
+            let num = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) as f32;
+            let p = &v["position"];
+            let r = &v["rotation"];
+            let eye = Vec3::new(num(&p[0]), num(&p[1]), num(&p[2]));
+            let rotation = glam::Quat::from_xyzw(num(&r[0]), num(&r[1]), num(&r[2]), num(&r[3]));
+            Some(rk_render::Camera {
+                eye,
+                target: eye + rotation * Vec3::Z,
+                fov_y_deg: num(&v["fov"]),
+            })
+        }
+        None => None,
+    };
     let camera = match view {
+        _ if recorded.is_some() => recorded.expect("checked"),
         // Within the map at eye height, from one side looking across.
         "inside" => {
             let eye = Vec3::new(centre.x, floor + 1.5, lo.z + (hi.z - lo.z) * 0.15);

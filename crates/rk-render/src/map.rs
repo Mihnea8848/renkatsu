@@ -77,8 +77,9 @@ pub struct MapMaterial {
     pub albedo: Option<Arc<MapImage>>,
     /// Texture scale in xy, offset in zw.
     pub st: [f32; 4],
-    /// Linear emitted colour, added after lighting.
+    /// Linear emitted colour, added after lighting, times `emission_map`.
     pub emission: [f32; 3],
+    pub emission_map: Option<Arc<MapImage>>,
     pub blend: Blend,
     pub cutoff: f32,
     pub two_sided: bool,
@@ -99,6 +100,7 @@ impl MapMaterial {
             albedo: None,
             st: [1.0, 1.0, 0.0, 0.0],
             emission: [0.0; 3],
+            emission_map: None,
             blend: Blend::Opaque,
             cutoff: 0.5,
             two_sided: false,
@@ -177,6 +179,9 @@ pub struct MapObject {
     /// Whether it casts the sun's shadow, and whether shadows fall on it.
     pub casts_shadows: bool,
     pub receives_shadows: bool,
+    /// Its Unity layer: the sun lights, and takes shadows from, only the
+    /// layers of its culling mask.
+    pub layer: u32,
 }
 
 /// A baked lightmap: the light, stored as RGBM, and, for directional
@@ -209,7 +214,12 @@ pub struct MapLight {
     pub sun_dir: [f32; 3],
     /// Linear colour times intensity.
     pub sun_color: [f32; 3],
-    pub ambient: [f32; 3],
+    /// The layers the sun lights, a bit each.
+    pub sun_mask: u32,
+    /// Ambient light as Unity's shaders read it (`unity_SHAr` to
+    /// `unity_SHC`, see `modshader::sh_constants`), for what has no
+    /// lightmap.
+    pub ambient_sh: [[f32; 4]; 7],
     pub fog: Option<Fog>,
     /// What shows where nothing is drawn.
     pub background: [f32; 3],
@@ -334,7 +344,7 @@ struct Globals {
     eye: [f32; 4],
     sun_dir: [f32; 4],
     sun_color: [f32; 4],
-    ambient: [f32; 4],
+    sh: [[f32; 4]; 7],
     fog_color: [f32; 4],
     fog_range: [f32; 4],
 }
@@ -491,6 +501,16 @@ impl Pipelines {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -713,7 +733,7 @@ impl Renderer {
             ],
             sun_dir: [l.sun_dir[0], l.sun_dir[1], l.sun_dir[2], 0.0],
             sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
-            ambient: [l.ambient[0], l.ambient[1], l.ambient[2], 0.0],
+            sh: l.ambient_sh,
             fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
             fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
         };
@@ -723,7 +743,11 @@ impl Renderer {
         let images = map
             .objects
             .iter()
-            .flat_map(|o| o.materials.iter().filter_map(|m| m.albedo.as_ref()))
+            .flat_map(|o| {
+                o.materials
+                    .iter()
+                    .flat_map(|m| m.albedo.iter().chain(m.emission_map.iter()))
+            })
             .chain(
                 map.lightmaps
                     .iter()
@@ -899,10 +923,10 @@ impl Renderer {
 
         // One bind group per material and whether shadows fall on it.
         let mut materials: Vec<wgpu::BindGroup> = Vec::new();
-        let mut material_index: HashMap<(usize, bool), usize> = HashMap::new();
-        let mut bind_material = |m: &Arc<MapMaterial>, receives: bool| -> usize {
+        let mut material_index: HashMap<(usize, bool, bool), usize> = HashMap::new();
+        let mut bind_material = |m: &Arc<MapMaterial>, receives: bool, sunlit: bool| -> usize {
             *material_index
-                .entry((Arc::as_ptr(m) as usize, receives))
+                .entry((Arc::as_ptr(m) as usize, receives, sunlit))
                 .or_insert_with(|| {
                     let uniform = MaterialUniform {
                         color: m.color,
@@ -912,7 +936,9 @@ impl Renderer {
                             if m.blend == Blend::Cutout { m.cutoff } else { -1.0 },
                             if m.blend == Blend::Fade { 1.0 } else { 0.0 },
                             if m.unlit { 1.0 } else { 0.0 },
-                            if receives { 1.0 } else { 0.0 },
+                            // 1 when shadows fall on it, 2 more when the sun
+                            // lights it at all.
+                            f32::from(u8::from(receives)) + 2.0 * f32::from(u8::from(sunlit)),
                         ],
                     };
                     let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -926,28 +952,39 @@ impl Renderer {
                         .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
                         .unwrap_or(&white);
                     let repeat = m.albedo.as_ref().is_none_or(|i| i.repeat());
-                    materials.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("map material"),
-                        layout: &pipes.material,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: buf.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(if repeat {
-                                    &pipes.repeat
-                                } else {
-                                    &pipes.clamp
-                                }),
-                            },
-                        ],
-                    }));
+                    materials.push(
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("map material"),
+                            layout: &pipes.material,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(if repeat {
+                                        &pipes.repeat
+                                    } else {
+                                        &pipes.clamp
+                                    }),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        m.emission_map
+                                            .as_ref()
+                                            .and_then(|i| views.get(&(Arc::as_ptr(i) as usize)))
+                                            .unwrap_or(&white),
+                                    ),
+                                },
+                            ],
+                        }),
+                    );
                     materials.len() - 1
                 })
         };
@@ -964,9 +1001,10 @@ impl Renderer {
                 continue;
             }
             let seen = in_view(&view_proj, mesh.bounds);
+            let sunlit = o.layer < 32 && l.sun_mask & (1 << o.layer) != 0;
             if !seen {
                 culled += 1;
-                if !(shadowed && o.casts_shadows) {
+                if !(shadowed && sunlit && o.casts_shadows) {
                     continue;
                 }
             }
@@ -999,10 +1037,10 @@ impl Renderer {
                 if !m.drawn || count == 0 {
                     continue;
                 }
-                let index = bind_material(m, o.receives_shadows && shadowed);
+                let index = bind_material(m, o.receives_shadows && shadowed && sunlit, sunlit);
                 // Blended surfaces dither their shadow nearly away in
                 // Unity's Standard shader; they cast none here.
-                if shadowed && o.casts_shadows && m.blend != Blend::Fade {
+                if shadowed && sunlit && o.casts_shadows && m.blend != Blend::Fade {
                     casters.push((vb, first, count, index, m.blend == Blend::Cutout, !m.two_sided));
                 }
                 if seen {

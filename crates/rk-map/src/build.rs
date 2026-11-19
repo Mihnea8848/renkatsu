@@ -193,16 +193,32 @@ fn map_light(
     // A light shines along its forward axis.
     let sun_dir = -(rotation * Vec3::Z).normalize_or_zero();
     let sun_color = linear3(color).map(|c| c * intensity);
-    let ambient = settings.map_or([0.2; 3], |s| {
-        // The constant term of the scene's ambient probe, per channel.
-        let probe = &s.ambient_probe;
-        let l0 = |c: usize| probe.get(c * 9).copied().unwrap_or(0.2);
-        match s.ambient_mode {
-            unity::AmbientMode::Skybox if probe.len() == 27 => [l0(0), l0(1), l0(2)],
-            _ => linear3(s.ambient_sky),
+    // The scene's ambient light as Unity's shaders read it. Ambient from
+    // the sky is the probe Unity baked; a gradient or a flat colour is a
+    // constant term.
+    let ambient_sh = match settings {
+        Some(s) if s.ambient_mode == unity::AmbientMode::Skybox && s.ambient_probe.len() == 27 => {
+            let mut probe = [0.0f32; 27];
+            probe.copy_from_slice(&s.ambient_probe);
+            let k = s.ambient_intensity;
+            rk_render::modshader::sh_constants(&probe.map(|c| c * k))
         }
-        .map(|c| c * s.ambient_intensity)
-    });
+        Some(s) => {
+            let c = linear3(s.ambient_sky).map(|c| c * s.ambient_intensity);
+            let mut sh = [[0.0; 4]; 7];
+            for i in 0..3 {
+                sh[i][3] = c[i];
+            }
+            sh
+        }
+        None => {
+            let mut sh = [[0.0; 4]; 7];
+            for row in sh.iter_mut().take(3) {
+                row[3] = 0.2;
+            }
+            sh
+        }
+    };
     let fog = match (info, settings) {
         (Some(t), _) if t.fog => Some(Fog {
             color: linear3(t.fog_color),
@@ -220,7 +236,8 @@ fn map_light(
     MapLight {
         sun_dir: sun_dir.to_array(),
         sun_color,
-        ambient,
+        sun_mask: main.map_or(u32::MAX, |(l, _)| l.culling_mask),
+        ambient_sh,
         background: fog.map_or([0.35, 0.5, 0.75], |f| f.color),
         fog,
         cut_above: None,
@@ -357,6 +374,7 @@ impl Builder<'_> {
             // 0 is off; on, two-sided and shadows only all cast.
             casts_shadows: renderer.cast_shadows != 0,
             receives_shadows: renderer.receive_shadows,
+            layer: tree.objects.get(&go).map_or(0, |o| o.layer.max(0) as u32),
         }))
     }
 
@@ -417,12 +435,22 @@ impl Builder<'_> {
         let color = m.color("_Color").unwrap_or([1.0; 4]);
         let [cr, cg, cb] = linear3(color);
         let unlit = lower.starts_with("unlit/");
+        // Standard's emission, on with its keyword: the colour, which Unity
+        // hands to shaders linearised, times the emission map.
+        let (emission, emission_map) = if keywords.contains("_EMISSION") {
+            let c = m.color("_EmissionColor").unwrap_or([0.0; 4]);
+            let map = m.texture("_EmissionMap").and_then(|t| self.image(&r.file, t.texture));
+            (linear3(c), map)
+        } else {
+            ([0.0; 3], None)
+        };
         let two_sided = lower.contains("double") || lower.contains("2-sided") || m.float("_Cull") == Some(0.0);
         Some(Arc::new(MapMaterial {
             color: [cr, cg, cb, color[3]],
             albedo,
             st,
-            emission: [0.0; 3],
+            emission,
+            emission_map,
             blend,
             cutoff: m.float("_Cutoff").unwrap_or(0.5),
             two_sided,

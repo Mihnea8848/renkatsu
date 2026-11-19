@@ -13,7 +13,8 @@ struct Globals {
     // intensity.
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
-    ambient: vec4<f32>,
+    // Unity's unity_SHAr, SHAg, SHAb, SHBr, SHBg, SHBb and SHC.
+    sh: array<vec4<f32>, 7>,
     // Linear colour, then start and end in metres; w of `fog_range` is 1
     // when fog is on.
     fog_color: vec4<f32>,
@@ -46,6 +47,16 @@ struct Shadow {
 @group(0) @binding(2) var shadow_atlas: texture_depth_2d;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
 
+// Unity's ShadeSH9: the ambient light arriving at a surface facing `n`.
+fn shade_sh9(n: vec3<f32>) -> vec3<f32> {
+    let n4 = vec4<f32>(n, 1.0);
+    let l1 = vec3<f32>(dot(g.sh[0], n4), dot(g.sh[1], n4), dot(g.sh[2], n4));
+    let b = n.xyzz * n.yzzx;
+    let l2 = vec3<f32>(dot(g.sh[3], b), dot(g.sh[4], b), dot(g.sh[5], b));
+    let c = n.x * n.x - n.y * n.y;
+    return max(l1 + l2 + g.sh[6].rgb * c, vec3<f32>(0.0));
+}
+
 // How much of the sun reaches a point: 1 in full sun.
 fn sun_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
     if sh.params.y < 0.5 {
@@ -75,6 +86,7 @@ fn sun_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
 @group(1) @binding(0) var<uniform> m: Material;
 @group(1) @binding(1) var albedo: texture_2d<f32>;
 @group(1) @binding(2) var albedo_sampler: sampler;
+@group(1) @binding(3) var emission_map: texture_2d<f32>;
 
 // 1 when the object has a lightmap, 1 when it is directional, then the
 // RGBM scale and exponent.
@@ -118,7 +130,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     if in.world.y > g.eye.w {
         discard;
     }
-    let texel = textureSample(albedo, albedo_sampler, in.uv * m.st.xy + m.st.zw);
+    let uv = in.uv * m.st.xy + m.st.zw;
+    let texel = textureSample(albedo, albedo_sampler, uv);
+    // Standard reads every map with the main texture's tiling.
+    let glow = textureSample(emission_map, albedo_sampler, uv).rgb;
     // Sampled before anything is discarded, where control flow is uniform.
     let baked_rgbm = textureSample(lightmap, lightmap_sampler, in.uv2);
     let baked_dir = textureSample(lightmap_dir, lightmap_sampler, in.uv2);
@@ -130,9 +145,15 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     if !front {
         n = -n;
     }
-    let facing = max(dot(n, g.sun_dir.xyz), 0.0);
+    // params.w: 1 when shadows fall on it, 2 more when the sun lights it.
+    let sunlit = m.params.w > 1.5;
+    let receives = m.params.w - select(0.0, 2.0, sunlit) > 0.5;
+    var facing = 0.0;
+    if sunlit {
+        facing = max(dot(n, g.sun_dir.xyz), 0.0);
+    }
     var shade = 1.0;
-    if facing > 0.0 && m.params.w > 0.5 {
+    if facing > 0.0 && receives {
         shade = sun_visibility(in.world, n);
     }
     let sun = g.sun_color.rgb * facing * shade;
@@ -140,7 +161,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // a directional lightmap DecodeDirectionalLightmap's half Lambert term.
     // The map's sun is real-time, so the lightmap holds the rest: sky,
     // lamps and bounces.
-    var indirect = g.ambient.rgb;
+    var indirect = shade_sh9(n);
     if lm.info.x > 0.5 {
         var baked = lm.info.z * pow(baked_rgbm.a, lm.info.w) * baked_rgbm.rgb;
         if lm.info.y > 0.5 {
@@ -150,7 +171,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         indirect = baked;
     }
     let light = select(indirect + sun, vec3<f32>(1.0), m.params.z > 0.5);
-    var color = base.rgb * light + m.emission.rgb;
+    var color = base.rgb * light + m.emission.rgb * glow;
     if g.fog_range.w > 0.5 {
         let d = distance(in.world, g.eye.xyz);
         let f = clamp((g.fog_range.y - d) / max(g.fog_range.y - g.fog_range.x, 1e-4), 0.0, 1.0);
