@@ -142,6 +142,8 @@ struct Globals {
     /// `unity_SHAr` to `unity_SHC`.
     sh: [[f32; 4]; 7],
     reflection: [f32; 4],
+    /// `_ScreenParams`: xy the picture's width and height in pixels.
+    screen: [f32; 4],
 }
 
 /// `_ambientshadowG` as the shaders read it: the scene's shadow colour with
@@ -1197,6 +1199,7 @@ impl Renderer {
             shadow: [0.0; 4],
             sh: env.ambient_probe,
             reflection: [env.reflection[0], env.reflection[1], env.reflection[2], 0.0],
+            screen: [width as f32, height as f32, 0.0, 0.0],
         };
         let ramp = match &env.ramp {
             Some(image) => self.texture(image),
@@ -1401,6 +1404,16 @@ impl Renderer {
                 }
                 let mut desc = MaterialDesc::new(d.renderer.materials.get(mi));
                 desc.uniform.info[3] = shadow::receives(d.renderer.receive_shadows, desc.queue) as u32;
+                // The censor reads where the object itself is
+                // (`unity_ObjectToWorld`), which is a draw's own, not the
+                // material's.
+                if desc.uniform.info[2] == material::ItemShader::Mosaic as u32 {
+                    let at = match &d.skinning {
+                        Skinning::Bones { node, .. } => node.w_axis,
+                        Skinning::Rigid { matrix, .. } => matrix.w_axis,
+                    };
+                    desc.uniform.ext[1] = [at.x, at.y, at.z, 0.0];
+                }
                 receives |= desc.uniform.info[3] != 0 && d.renderer.cast_shadows != ShadowCasting::ShadowsOnly;
                 let bind = binds.len();
                 binds.push(self.material_bind_group(&desc));
@@ -2396,8 +2409,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and fifteen vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 304);
+        // WGSL: mat4x4 and sixteen vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 320);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);

@@ -29,6 +29,15 @@ pub struct BuildOptions {
     /// Wear the outdoor shoes instead of the indoor ones. The game loads
     /// cards without their saved status, so it starts with indoor shoes.
     pub outdoor_shoes: bool,
+    /// Draw the censor the game puts over the body parts it covers, the
+    /// meshes whose material is `Shader Forge/mnpb`. An uncensor mod
+    /// swaps those parts and their materials, and then nothing here is a
+    /// censor any more and this does not apply.
+    pub censor: bool,
+    /// CharaStudio's Son switch for a male character, which decides
+    /// whether `n_dankon` is drawn at all; the clothes states then say
+    /// when. `None` keeps what the card's status says.
+    pub visible_son: Option<bool>,
     /// Let hair, skirts, ribbons and the bust settle as the game's
     /// DynamicBone physics does.
     pub physics: bool,
@@ -87,6 +96,8 @@ impl Default for BuildOptions {
             clothes: true,
             accessories: true,
             outdoor_shoes: false,
+            censor: false,
+            visible_son: None,
             physics: true,
             settle_frames: crate::physics::SETTLE_FRAMES,
             frame_time: crate::physics::FRAME_TIME,
@@ -2026,9 +2037,24 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
 
     b.skin_body(card, &body, female, uncensor);
 
-    // Parts the game only shows in special states.
+    // The censor over the parts the game covers, left out unless it is
+    // asked for. This is after the uncensor swap above, so a part an
+    // uncensor replaced keeps its own material and is not touched.
+    if !opts.censor {
+        for i in body.renderers.clone() {
+            let keep = b.scene.renderers[i]
+                .materials
+                .first()
+                .is_none_or(|m| !crate::is_censor(&m.shader));
+            if !keep {
+                b.scene.renderers[i].enabled = false;
+            }
+        }
+    }
+
+    // Parts the game only shows in special states. `n_dankon` is not
+    // among them: the clothes states decide it, in `clothes_state`.
     for name in [
-        "n_dankon",
         "o_mnpa",
         "o_mnpb",
         "o_gomu",
@@ -2165,6 +2191,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     // What the clothes states switch.
     let mut rig = crate::clothes_state::Rig::new(opts.outdoor_shoes);
     rig.add_body(&b.scene, &body);
+    rig.son = crate::clothes_state::Son::of_card(card);
+    if let Some(on) = opts.visible_son {
+        rig.son.switched_on = on;
+    }
     let hair_settings = crate::hair_accessories::for_outfit(&card.ext, outfit);
     // Bust size, softness and weight in effect; Pushup may replace them.
     let mut bust = crate::pushup::BodyData::from_body(

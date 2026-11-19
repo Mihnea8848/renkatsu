@@ -306,16 +306,19 @@ pub fn clothes(card: &Path, outfit: usize, steps: &[String]) -> Result<()> {
         worn.shorts_have_top
     );
     let show = |chara: &rk_chara::Character, states: &States, what: &str| {
-        let on: Vec<String> = chara
-            .clothes
-            .objects(&chara.scene)
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(name, _)| name)
-            .collect();
+        let objects = chara.clothes.objects(&chara.scene);
+        let names = |want: bool| -> String {
+            objects
+                .iter()
+                .filter(|(_, on)| *on == want)
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let shown = cs::shown(states, &worn, chara.clothes.outdoor_shoes, true);
         println!("{what} -> {} alpha {:?}", text(states), shown.alpha);
-        println!("    on: {}", on.join(" "));
+        println!("    on:  {}", names(true));
+        println!("    off: {}", names(false));
     };
     let mut states = [cs::ON; KINDS];
     show(&chara, &states, "as built");

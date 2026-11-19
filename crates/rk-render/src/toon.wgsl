@@ -30,6 +30,8 @@ struct Globals {
     sh: array<vec4<f32>, 7>,
     // rgb: what the scene's reflection probe shows, HDR decoded
     reflection: vec4<f32>,
+    // _ScreenParams: xy the picture's width and height in pixels
+    screen: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
@@ -80,6 +82,7 @@ const ITEM_STUDIO: u32 = 9u;
 const ITEM_TEXTURE: u32 = 10u;
 const ITEM_OPAQUE_LOW: u32 = 11u;
 const ITEM_COLOR: u32 = 12u;
+const ITEM_MOSAIC: u32 = 13u;
 
 struct Material {
     color1: vec4<f32>,
@@ -1323,6 +1326,33 @@ fn item_emblem(i: VsOut, front: bool) -> vec4<f32> {
 
 // main_color (program 0): the material colour, unlit. The pass culls back
 // faces.
+// mnpb, the censor (pixel programs 4 and 5). It draws no texture: the
+// pattern is made from where the pixel is on screen. The blocks keep a
+// steady size in the world, so screen position is scaled by how far the
+// object is from the camera, then floored to whole blocks; a block's
+// number is hashed into one value and that tints white towards pink.
+// m.ext[0].x: _WhiteOff, which is how much of the tint applies.
+// m.ext[1].xyz: unity_ObjectToWorld's position, the object's own place.
+// `_Time` is zero here, as in the game's other shaders that drift: it
+// moves the pattern by 2.5e-5 of a block a second.
+fn item_mosaic(i: VsOut) -> vec4<f32> {
+    let distance = length(g.eye.xyz - m.ext[1].xyz);
+    let aspect = g.screen.x / g.screen.y;
+    // The clip position the game divides by its own w, rebuilt from where
+    // the pixel is: -1 to 1 across the picture, y up as the game has it.
+    let ndc = vec2<f32>(
+        i.clip.x / g.screen.x * 2.0 - 1.0,
+        1.0 - i.clip.y / g.screen.y * 2.0,
+    );
+    let block = floor((vec2<f32>(aspect * ndc.x, ndc.y) * distance + 10.0) * 12.0);
+    let both = block.x * block.y * 0.3713;
+    let u = block + 0.2127 + both;
+    let wave = (sin(u.x * 489.123) * 4.789) * (sin(u.y * 489.123) * 4.789);
+    let n = fract((u.x + 1.0) * wave);
+    let tint = vec3<f32>(0.0, 0.2 * n - 0.6, 0.1 * n - 0.6);
+    return vec4<f32>(1.0 + m.ext[0].x * tint, 1.0);
+}
+
 fn item_color(front: bool) -> vec4<f32> {
     if (!front) {
         discard;
@@ -1620,6 +1650,9 @@ fn forward(i: VsOut, front: bool) -> vec4<f32> {
             }
             case ITEM_COLOR: {
                 return item_color(front);
+            }
+            case ITEM_MOSAIC: {
+                return item_mosaic(i);
             }
             default: {
             }
