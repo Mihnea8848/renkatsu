@@ -12,16 +12,19 @@
 //! shrinks it to icons. The backtick key or the eye button hides every
 //! overlay, and Shift with Space gives the viewport the whole window.
 
-use crate::camera::RightDrag;
+use crate::camera::{Focus, RightDrag};
 use crate::design::Overlays;
 use crate::keymap::Action;
+use crate::kinds::Kind;
 use crate::modes::{actions, pipeline_missing, Pipeline, LATER, MODES, PIPELINES, TOOLS};
 use crate::panels::{dragged_over, dropped, DragCard};
+use crate::scene::ObjectId;
 use crate::state::{Command, Look, Rail, State};
 use crate::theme::Theme;
 use crate::widgets::{self, bar_divider, flat_button, glyph, hair_h, hair_v, icon_button, icon_cell};
 use egui::{Align, Align2, Color32, Key, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as icon;
+use glam::Vec3;
 
 /// How the rail lays out a mode: the name under the icon or beside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -863,10 +866,73 @@ fn pipeline_row(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, pipelin
 /// Focuses the camera on the selected object and frames it, when the
 /// object is something the viewport draws.
 pub fn focus_selection(st: &mut State) {
-    let Some(live) = st.live.as_mut() else { return };
-    if let Some(focus) = st.doc.selected.and_then(|id| live.subject(id)) {
+    let Some(focus) = st.doc.selected.and_then(|id| subject(st, id)) else {
+        return;
+    };
+    if let Some(live) = st.live.as_mut() {
         live.cam.focus_on(focus);
     }
+}
+
+/// How far from an object with no picture of its own (an item, a light,
+/// a camera) the camera stands to frame it, at scale 1.
+const PLAIN_DISTANCE: f32 = 1.5;
+
+/// An object as something to focus on. A character is framed whole, a
+/// folder with everything in it, an animation or a pose by its character,
+/// anything else around its origin. Maps are not focused on: they are
+/// what the scene stands in.
+pub fn subject(st: &State, id: ObjectId) -> Option<Focus> {
+    let live = st.live.as_ref()?;
+    let scene = st.doc.scene();
+    let object = scene.get(id)?;
+    match object.kind() {
+        Kind::Map => None,
+        Kind::Character => live.subject(id),
+        Kind::Animation | Kind::Pose => object.parent.and_then(|parent| subject(st, parent)),
+        Kind::Folder | Kind::Scene => {
+            let inside: Vec<Focus> = scene
+                .children(Some(id))
+                .into_iter()
+                .filter_map(|c| subject(st, c))
+                .collect();
+            let mut group = enclose(&inside, live.cam.orbit.fov_y_deg)?;
+            group.object = id;
+            Some(group)
+        }
+        _ => {
+            let world = scene.world(id);
+            let (scale, ..) = world.to_scale_rotation_translation();
+            Some(Focus {
+                object: id,
+                center: world.w_axis.truncate(),
+                distance: PLAIN_DISTANCE * scale.abs().max_element().max(1e-3),
+            })
+        }
+    }
+}
+
+/// One framing that holds several, seen as balls that fit a view of
+/// `fov_y_deg`.
+fn enclose(all: &[Focus], fov_y_deg: f32) -> Option<Focus> {
+    let first = all.first()?;
+    let half = (fov_y_deg.to_radians() * 0.5).sin().max(1e-3);
+    let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for f in all {
+        let r = f.distance * half;
+        min = min.min(f.center - r);
+        max = max.max(f.center + r);
+    }
+    let center = (min + max) * 0.5;
+    let radius = all
+        .iter()
+        .map(|f| f.center.distance(center) + f.distance * half)
+        .fold(0.0, f32::max);
+    Some(Focus {
+        object: first.object,
+        center,
+        distance: radius / half,
+    })
 }
 
 /// The camera's corner of the viewport, at the bottom left: what the
@@ -895,7 +961,7 @@ fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     let whole = if moved { cell.union(reset) } else { cell };
     block(ui, k, whole);
 
-    let can_focus = st.doc.selected.and_then(|id| live.subject(id));
+    let can_focus = st.doc.selected.and_then(|id| subject(st, id));
     let tip = match (&focus, can_focus) {
         (Some((kind, name)), _) => format!("Focused on the {} {name}", kind.label().to_lowercase()),
         (None, Some(_)) => st.keys.tip("Focus on the selection", Action::Focus),
@@ -1158,6 +1224,17 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
             }
         }
     }
+    // A view focused on anything but a character (which follows its own
+    // moves) goes with it as it moves.
+    let hold = live.hold_camera;
+    let focused = live.cam.focus.map(|f| f.object);
+    let now = focused
+        .filter(|id| st.doc.scene().get(*id).is_some_and(|o| o.kind() != Kind::Character))
+        .and_then(|id| subject(st, id));
+    let Some(live) = st.live.as_mut() else { return };
+    if let Some(now) = now {
+        live.cam.follow(now, hold);
+    }
     if live.cam.advance(dt) {
         ui.ctx().request_repaint();
     }
@@ -1311,4 +1388,23 @@ fn nav_cursor(ui: &Ui, nav: Nav) {
         );
     }
     painter.text(at, Align2::CENTER_CENTER, nav.glyph(), font, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_group_frames_everything_in_it() {
+        let ball = |x: f32, distance: f32| Focus {
+            object: ObjectId(1),
+            center: Vec3::new(x, 1.0, 0.0),
+            distance,
+        };
+        let group = enclose(&[ball(-2.0, 1.5), ball(2.0, 1.5)], 30.0).expect("two balls");
+        assert!((group.center - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-4);
+        // Farther back than either one alone, so both fit.
+        assert!(group.distance > 1.5 + 2.0 / 15f32.to_radians().sin() - 1e-3);
+        assert!(enclose(&[], 30.0).is_none());
+    }
 }

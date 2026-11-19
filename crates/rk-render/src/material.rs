@@ -98,7 +98,7 @@ pub fn item_shader(shader: &str) -> ItemShader {
 /// Shaders whose pixel program is ported from the game's own disassembly.
 /// Everything else goes through an approximation; `rk audit` reports how
 /// many materials that leaves.
-pub const PORTED: [&str; 42] = [
+pub const PORTED: [&str; 43] = [
     "Shader Forge/main_skin",
     "Shader Forge/main_hair",
     "Shader Forge/main_hair_front",
@@ -143,6 +143,7 @@ pub const PORTED: [&str; 42] = [
     "xukmi/EyeWPlus",
     // Mod shaders, ported from the programs in the mods' own bundles.
     "IBL_Shader_alpha",
+    "KKUSSalpha",
 ];
 
 /// Texture slots in bind order.

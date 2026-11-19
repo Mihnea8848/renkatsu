@@ -294,7 +294,12 @@ enum Ask {
 /// takes no clicks. Returns whether the dimmed part was clicked.
 pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
     let screen = ctx.content_rect();
-    let clicked = egui::Area::new(egui::Id::new((id, "veil")))
+    let area = egui::Id::new((id, "veil"));
+    let opening = !ctx.memory(|m| {
+        m.areas()
+            .visible_last_frame(&egui::LayerId::new(egui::Order::Foreground, area))
+    });
+    let clicked = egui::Area::new(area)
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
@@ -305,8 +310,11 @@ pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
         .inner;
     // A click on the veil brings it to the front, and the next time the
     // window opens it would cover the window: the window, the area named
-    // `id`, goes back on top.
-    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id)));
+    // `id`, goes back on top as it opens. Only then, so the window's own
+    // popups can still open above it.
+    if opening {
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id)));
+    }
     clicked
 }
 
