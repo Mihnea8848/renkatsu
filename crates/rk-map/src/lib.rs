@@ -6,7 +6,9 @@
 
 pub mod build;
 pub mod list;
+pub mod names;
 pub mod scene;
 pub mod sky;
+pub mod thumbnail;
 pub mod unity;
 pub mod vanish;

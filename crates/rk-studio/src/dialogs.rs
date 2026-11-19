@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 //! The questions the editor asks before it goes on: whether to copy a
-//! card's mods into the project, what to do with unsaved changes, and
-//! where a new project goes. One is open at a time, over the dimmed
+//! card's mods into the project, what to do with unsaved changes, where a
+//! new project goes, and which map the scene stands in. One is open at a time, over the dimmed
 //! window. The system's own file dialogs, which pick the cards and
 //! folders, are here too.
 
@@ -99,6 +99,29 @@ pub enum Modal {
     Import(PendingImport),
     Unsaved(After),
     Project(ProjectForm),
+    AddMap(MapChooser),
+}
+
+/// A map the map chooser offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapRow {
+    pub name: String,
+    /// Who brings it.
+    pub source: String,
+    /// The project's sidecar, for a map the project has.
+    pub owned: Option<String>,
+    /// Its place in `State::map_list`, for a map to import.
+    pub listed: Option<usize>,
+}
+
+/// The plain list of maps the Add menu opens, until the Maps view comes:
+/// the project's own first, then those it can import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapChooser {
+    pub rows: Vec<MapRow>,
+    pub chosen: Option<usize>,
+    /// What importing a chosen row copies, in bytes, once worked out.
+    pub size: Option<(usize, u64)>,
 }
 
 /// What a system file dialog was opened for.
@@ -286,6 +309,66 @@ fn import(ui: &mut Ui, k: &Look, pending: &mut PendingImport) -> Choice {
     }
 }
 
+fn map_chooser(ui: &mut Ui, k: &Look, chooser: &mut MapChooser) -> Choice {
+    let t = &k.t;
+    heading(ui, k, "Add map");
+    let mut choice = Choice::Wait;
+    egui::Frame::new()
+        .fill(t.input)
+        .inner_margin(egui::Margin::symmetric(4, 4))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("maps")
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, row) in chooser.rows.iter().enumerate() {
+                        let picked = chooser.chosen == Some(i);
+                        let size = egui::Vec2::new(ui.available_width(), k.d.row);
+                        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                        let p = ui.painter();
+                        if picked {
+                            p.rect_filled(rect, 2.0, t.select);
+                        } else if resp.hovered() {
+                            p.rect_filled(rect, 2.0, t.row_hover);
+                        }
+                        let color = if picked { egui::Color32::WHITE } else { t.text };
+                        let y = rect.center().y;
+                        p.text(
+                            egui::Pos2::new(rect.left() + 8.0, y),
+                            egui::Align2::LEFT_CENTER,
+                            &row.name,
+                            k.font(),
+                            color,
+                        );
+                        p.text(
+                            egui::Pos2::new(rect.right() - 8.0, y),
+                            egui::Align2::RIGHT_CENTER,
+                            &row.source,
+                            k.small(),
+                            if picked { color } else { t.text_dim },
+                        );
+                        if resp.clicked() {
+                            chooser.chosen = Some(i);
+                        }
+                        if resp.double_clicked() {
+                            chooser.chosen = Some(i);
+                            choice = Choice::Accept;
+                        }
+                    }
+                });
+        });
+    if let Some((_, bytes)) = chooser.size.filter(|(row, _)| Some(*row) == chooser.chosen) {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("Importing copies {} into the project.", size_text(bytes))).color(t.text_dim));
+    }
+    match buttons(ui, &[("Cancel", true), ("Add", chooser.chosen.is_some())]) {
+        Some(0) => Choice::Cancel,
+        Some(_) => Choice::Accept,
+        None => choice,
+    }
+}
+
 fn unsaved(ui: &mut Ui, k: &Look, scene: &str) -> Choice {
     heading(ui, k, "Unsaved changes");
     ui.label(format!("Save the changes to {scene}?"));
@@ -362,8 +445,19 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             Modal::Import(pending) => import(ui, k, pending),
             Modal::Unsaved(_) => unsaved(ui, k, &scene),
             Modal::Project(form) => project_form(ui, k, form),
+            Modal::AddMap(chooser) => map_chooser(ui, k, chooser),
         }
     });
+    // What importing the chosen map copies is worked out once it is chosen.
+    if let Modal::AddMap(chooser) = &mut modal {
+        let wanted = chooser
+            .chosen
+            .and_then(|i| Some((i, chooser.rows.get(i)?.listed?)))
+            .filter(|(i, _)| chooser.size.is_none_or(|(row, _)| row != *i));
+        if let Some((row, listed)) = wanted {
+            chooser.size = Some((row, st.map_size(listed)));
+        }
+    }
     let choice = match shown.inner {
         Choice::Wait if shown.should_close() => Choice::Cancel,
         other => other,
@@ -378,6 +472,11 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
             st.modal = Some(modal);
         }
         (Choice::Accept, Modal::Import(pending)) => st.confirm_import(pending),
+        (Choice::Accept, Modal::AddMap(chooser)) => {
+            if let Some(row) = chooser.chosen.and_then(|i| chooser.rows.get(i)) {
+                st.chose_map(row);
+            }
+        }
         (Choice::Accept, Modal::Unsaved(after)) => {
             if st.save() {
                 st.proceed(after, ctx);

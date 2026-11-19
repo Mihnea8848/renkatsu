@@ -1193,7 +1193,7 @@ impl Renderer {
         let right = Vec3::Y.cross(-to_eye).normalize_or_zero();
         // One light for the characters and the map: its sun, when one is
         // set.
-        let light_dir = self.map_scene.as_ref().map(|m| m.sun_dir()).or(env.light_dir);
+        let light_dir = self.shown_map().map(|m| m.sun_dir()).or(env.light_dir);
         let light = match light_dir {
             Some(d) => Vec3::from(d).normalize_or_zero(),
             None => (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize(),
@@ -1207,7 +1207,7 @@ impl Renderer {
         let depth_wanted = occlude || env.camera_depth;
         // A map is seen to its far side.
         let (near, far) = camera.clip_planes();
-        let far = self.map_scene.as_ref().map_or(far, |m| far.max(m.far(camera)));
+        let far = self.shown_map().map_or(far, |m| far.max(m.far(camera)));
         let view_proj = camera.view_proj_within(aspect, near, far);
         let base = Globals {
             view_proj: view_proj.to_cols_array(),
@@ -1785,7 +1785,7 @@ impl Renderer {
             color: if hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
             depth: DEPTH_FORMAT,
         };
-        let map_frame = match (self.map.as_mut(), self.map_scene.as_ref()) {
+        let map_frame = match (self.map.as_mut(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
             (Some(pipes), Some(gpu)) => {
                 pipes.prepare(&self.device, map_target);
                 let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect);

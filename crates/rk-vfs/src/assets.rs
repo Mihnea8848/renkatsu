@@ -367,6 +367,64 @@ impl Assets {
         Ok((tex, pixels))
     }
 
+    /// The size in bytes of the file `bundle_file` gives, without reading
+    /// it.
+    pub fn bundle_size(&self, vpath: &str) -> Option<u64> {
+        let locs = self.index.bundles.get(&norm(vpath))?;
+        let loc = locs.iter().find(|l| l.mod_idx.is_none()).or_else(|| locs.first())?;
+        match loc.mod_idx {
+            None => {
+                let root = self.index.roots.get(loc.root as usize)?;
+                Some(root.join(&loc.path).metadata().ok()?.len())
+            }
+            Some(m) => {
+                let zip_path = self.index.game_dir.join(&self.index.mods.get(m as usize)?.path);
+                let mut zip = zip::ZipArchive::new(std::fs::File::open(&zip_path).ok()?).ok()?;
+                let entry = zip.by_name(&loc.path).ok()?;
+                Some(entry.size())
+            }
+        }
+    }
+
+    /// The file of the bundle at `vpath` as it is stored, to copy it: the
+    /// copy in the game or a package before a zipmod's, as maps are read.
+    /// Gives a reader and the size in bytes.
+    pub fn bundle_file(&self, vpath: &str) -> Result<(Box<dyn Read + Send>, u64)> {
+        let vpath = norm(vpath);
+        let locs = self
+            .index
+            .bundles
+            .get(&vpath)
+            .ok_or_else(|| anyhow!("no bundle {vpath}"))?;
+        let loc = locs
+            .iter()
+            .find(|l| l.mod_idx.is_none())
+            .or_else(|| locs.first())
+            .ok_or_else(|| anyhow!("no bundle {vpath}"))?;
+        match loc.mod_idx {
+            None => {
+                let root = self
+                    .index
+                    .roots
+                    .get(loc.root as usize)
+                    .ok_or_else(|| anyhow!("{vpath} is in a folder that is not indexed"))?;
+                let path = root.join(&loc.path);
+                let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+                let size = file.metadata()?.len();
+                Ok((Box::new(file), size))
+            }
+            Some(m) => {
+                let zip_path = self.index.game_dir.join(&self.index.mods[m as usize].path);
+                let mut zip = zip::ZipArchive::new(std::fs::File::open(&zip_path)?)?;
+                let mut entry = zip.by_name(&loc.path)?;
+                let mut bytes = Vec::with_capacity(entry.size() as usize);
+                entry.read_to_end(&mut bytes)?;
+                let size = bytes.len() as u64;
+                Ok((Box::new(std::io::Cursor::new(bytes)), size))
+            }
+        }
+    }
+
     /// Name of the shader a material uses, following the reference.
     pub fn shader_name(&self, from: &Arc<AssetFile>, shader: PPtr) -> Option<String> {
         let obj = self.deref(from, shader)?;
@@ -515,6 +573,17 @@ impl Game {
     /// with packages alone.
     pub fn open_user(extra: &[std::path::PathBuf]) -> Result<Self> {
         Self::open_sources(&crate::index::Sources::detect(extra))
+    }
+
+    /// Content made of a few loose bundles alone, each under the virtual
+    /// path it had in the game (see `Index::of_bundles`).
+    pub fn of_bundles(bundles: &[(String, std::path::PathBuf)]) -> Self {
+        let index = Arc::new(Index::of_bundles(bundles));
+        let items = crate::items::ItemDb::build(&index);
+        Self {
+            assets: Assets::new(index),
+            items,
+        }
     }
 
     /// Opens the game, the packages and the folders of mods that

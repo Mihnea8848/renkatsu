@@ -105,6 +105,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     Some("A light has no size"),
                 ],
                 Content::Camera { .. } => [Some("Not available yet"); 3],
+                // CharaStudio moves and turns a map; it keeps its size.
+                Content::Map { .. } => [None, None, Some("A map keeps its size")],
                 _ => [Some("Not available yet"); 3],
             };
             let transform = &mut object.transform;
@@ -524,7 +526,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Folder | Content::Item | Content::Map => {
+            Content::Folder | Content::Item | Content::Map { .. } => {
                 if section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
                         widgets::value_box(ui, k, rect, &before.name)

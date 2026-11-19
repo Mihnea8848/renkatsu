@@ -326,6 +326,9 @@ pub struct State {
     pub picker: Option<Picker>,
     /// Cards waiting to be imported, one after the other.
     pub imports: VecDeque<Import>,
+    /// The maps of the game, the packages and the mods the open map
+    /// chooser offers to import, in its order.
+    pub map_list: Vec<rk_map::list::Entry>,
     /// The editor runs from a script: it asks nothing and leaves the
     /// user's settings as they are.
     pub scripted: bool,
@@ -786,6 +789,7 @@ impl State {
             modal: None,
             picker: None,
             imports: VecDeque::new(),
+            map_list: Vec::new(),
             scripted: false,
             update: None,
             quit: false,
@@ -989,14 +993,14 @@ impl State {
                 }
             }
             Command::Add(Kind::Character) => self.show_folder(0),
+            Command::Add(Kind::Map) => self.choose_map(),
             Command::Add(kind) => {
                 if let Some(content) = Content::of_kind(kind) {
                     let name = match kind {
                         Kind::Folder => "Folder",
                         Kind::Light => "Light",
                         Kind::Camera => "Camera",
-                        Kind::Item => "Item",
-                        _ => "Map",
+                        _ => "Item",
                     };
                     let id = self.doc.add(name, content);
                     self.unfold_to(id);
@@ -1905,6 +1909,156 @@ impl State {
         self.unfold_to(id);
         // The camera goes to her once she is built.
         self.focus_pending = Some(id);
+    }
+
+    /// Opens the list of maps to add to the scene: the project's own,
+    /// then the ones it can import.
+    fn choose_map(&mut self) {
+        let owned = crate::maps::in_project(&self.project.root);
+        let mods = self.project.mods_dir();
+        self.map_list = match self.games.get(&mods) {
+            Ok(game) => rk_map::list::read(game, false)
+                .into_iter()
+                .filter(|e| {
+                    !owned
+                        .iter()
+                        .any(|m| rk_vfs::index::norm(m.map.scene_bundle()) == rk_vfs::index::norm(&e.bundle))
+                })
+                .collect(),
+            // Without the game the project's own maps are still there.
+            Err(_) => Vec::new(),
+        };
+        let mut rows: Vec<crate::dialogs::MapRow> = owned
+            .into_iter()
+            .map(|m| crate::dialogs::MapRow {
+                name: m.map.name,
+                source: "Project".to_owned(),
+                owned: Some(m.file),
+                listed: None,
+            })
+            .collect();
+        rows.extend(self.map_list.iter().enumerate().map(|(i, e)| crate::dialogs::MapRow {
+            name: rk_map::names::shown(e),
+            source: e.source.label().to_owned(),
+            owned: None,
+            listed: Some(i),
+        }));
+        self.modal = Some(Modal::AddMap(crate::dialogs::MapChooser {
+            rows,
+            chosen: None,
+            size: None,
+        }));
+    }
+
+    /// The size importing a map of the chooser's list copies, as far as
+    /// it is known before the copy: its scene bundle.
+    pub fn map_size(&mut self, listed: usize) -> u64 {
+        let Some(entry) = self.map_list.get(listed) else {
+            return 0;
+        };
+        self.games
+            .get(&self.project.mods_dir())
+            .ok()
+            .and_then(|game| game.assets.bundle_size(&entry.bundle))
+            .unwrap_or(0)
+    }
+
+    /// The user chose a map in the chooser: the project's own goes in
+    /// the scene, another is imported first.
+    pub fn chose_map(&mut self, row: &crate::dialogs::MapRow) {
+        if let Some(file) = &row.owned {
+            self.add_map(PathBuf::from(file));
+        } else if let Some(entry) = row.listed.and_then(|i| self.map_list.get(i)).cloned() {
+            self.import_map(entry);
+        }
+    }
+
+    /// Copies a map of the game, a package or a mod into the project, and
+    /// puts it in the scene. The copy is large, so a job does it.
+    pub fn import_map(&mut self, entry: rk_map::list::Entry) {
+        let name = rk_map::names::shown(&entry);
+        let game = match self.games.shared(&self.project.mods_dir()) {
+            Ok(game) => game,
+            Err(e) => {
+                self.log.error(format!("{name} could not be imported: {e:#}"));
+                return;
+            }
+        };
+        let project = self.project.clone();
+        let job = format!("Importing {name}");
+        let work = move |p: &crate::jobs::Progress| -> Result<(String, u64)> {
+            let plan = crate::maps::plan(&game, &entry)?;
+            p.set_bytes(0, plan.bytes());
+            let file = crate::maps::import(&game, &project, &plan, &mut |bytes| {
+                p.add(bytes);
+                p.check()
+            })?;
+            Ok((file, plan.bytes()))
+        };
+        let done = move |st: &mut State, imported: Result<(String, u64)>| match imported {
+            Ok((file, bytes)) => {
+                st.log
+                    .info(format!("Imported {name} as {file}, {}", mods::size_text(bytes)));
+                st.add_map(PathBuf::from(file));
+            }
+            Err(e) if crate::jobs::was_cancelled(&e) => {
+                st.log.info(format!("The import of {name} was cancelled"));
+            }
+            Err(e) => st.log.error(format!("{name} could not be imported: {e:#}")),
+        };
+        if self.scripted {
+            let result = work(&crate::jobs::Progress::new(None));
+            done(self, result);
+            return;
+        }
+        self.jobs.spawn(&job, Show::Notice, work, done);
+    }
+
+    /// Puts a map of the project in the scene, named by its sidecar
+    /// relative to the project. A scene has one map: one it has already
+    /// is replaced, where it stands. The first map brings the camera to
+    /// CharaStudio's starting view.
+    pub fn add_map(&mut self, file: PathBuf) {
+        let map = match crate::maps::MapFile::read(&self.project.resolve(&file)) {
+            Ok(map) => map,
+            Err(e) => {
+                self.log.error(format!("The map could not be read: {e:#}"));
+                return;
+            }
+        };
+        let time = map.first_time();
+        let there = self
+            .doc
+            .scene()
+            .objects()
+            .iter()
+            .find(|o| o.kind() == Kind::Map)
+            .cloned();
+        let id = match there {
+            Some(mut object) => {
+                let hide_walls = match object.content {
+                    Content::Map { hide_walls, .. } => hide_walls,
+                    _ => true,
+                };
+                object.name = self.doc.scene().free_name(&map.name);
+                object.content = Content::Map {
+                    map: file,
+                    time,
+                    hide_walls,
+                };
+                let id = object.id;
+                self.doc.edit(object, false);
+                id
+            }
+            None => {
+                let id = self.doc.add(&map.name, Content::map(file, time));
+                if let Some(live) = self.live.as_mut() {
+                    live.studio_camera();
+                }
+                id
+            }
+        };
+        self.unfold_to(id);
     }
 
     /// Opens the folders around an object so that its row shows.

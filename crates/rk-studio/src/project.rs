@@ -13,7 +13,10 @@
 //!   Animations/        the animations the project owns, copied in on
 //!                      import as Renkatsu animation files (`.rkanim`),
 //!                      in folders the user makes
-//!   Poses/ Maps/ Items/ Renders/   kept for the features that fill them
+//!   Maps/              the maps the project owns, each in a folder of its
+//!                      own with its bundles, picture and sidecar
+//!                      (`maps.rs`), copied in on import
+//!   Poses/ Items/ Renders/   kept for the features that fill them
 //! ```
 //!
 //! `Animations` holds what CharaStudio calls anime: clips that play on a
@@ -50,7 +53,16 @@ const MODS: &str = "Mods";
 pub const OLD_LINK: &str = "rkpose";
 /// Folders every project has, as the Content browser shows them: the ones
 /// in use and the ones kept for later.
-pub const FOLDERS: [&str; 8] = [CHARACTERS, ANIMATIONS, POSES, "Maps", "Items", SCENES, "Renders", MODS];
+pub const FOLDERS: [&str; 8] = [
+    CHARACTERS,
+    ANIMATIONS,
+    POSES,
+    crate::maps::MAPS,
+    "Items",
+    SCENES,
+    "Renders",
+    MODS,
+];
 
 fn is_project_file(path: &Path) -> bool {
     path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
