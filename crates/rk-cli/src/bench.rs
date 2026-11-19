@@ -105,6 +105,7 @@ pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String], stud
             true,
             studio,
             false,
+            false,
         ) {
             Ok(s) => {
                 let views: Vec<String> = s
