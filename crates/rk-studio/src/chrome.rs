@@ -666,13 +666,15 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
 
 /// Unreal 5's play controls, centred in the menu row: flat icon buttons
 /// with no box around them, a soft background only on hover or while
-/// held, and thin dividers either side of the group. Play is green; pause and
+/// held, thin dividers either side of the group, and which physics moves
+/// behind a vertical three-dot button. Play is green; pause and
 /// stop stay grey while nothing runs, and stop turns red once it does.
 fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     let t = &k.t;
     let cell = Vec2::new(30.0, k.d.row + 2.0);
+    let dots_w = 20.0;
     let gap = 2.0;
-    let size = Vec2::new(cell.x * 3.0 + gap * 2.0, cell.y);
+    let size = Vec2::new(cell.x * 3.0 + gap * 3.0 + dots_w, cell.y);
     let group = Rect::from_min_size((center - size / 2.0).round(), size);
     let running = st.playback != Playback::Stopped;
     {
@@ -685,10 +687,11 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
         st.keys.tip("Play", Action::PlayPause),
         st.keys.tip("Pause", Action::PlayPause),
         st.keys.tip("Stop", Action::Stop),
+        "Physics".to_owned(),
     ];
     let mut x = group.left();
     for (i, tip) in tips.into_iter().enumerate() {
-        let w = cell.x;
+        let w = if i == 3 { dots_w } else { cell.x };
         let rect = Rect::from_min_size(Pos2::new(x, group.top()), Vec2::new(w, cell.y));
         x += w + gap;
         let resp = ui
@@ -738,7 +741,22 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
                 let color = if running { t.stop } else { idle };
                 p.rect_filled(Rect::from_center_size(c, Vec2::splat(11.0)), 1.5, color);
             }
-            _ => {}
+            _ => {
+                let color = if resp.hovered() { t.text_bright } else { idle };
+                for dy in [-5.0, 0.0, 5.0] {
+                    p.circle_filled(c + Vec2::new(0.0, dy), 1.6, color);
+                }
+                egui::Popup::menu(&resp).show(|ui| {
+                    ui.label(egui::RichText::new("Physics").font(k.small()).color(t.text_dim));
+                    let names = ["Hair", "Clothes", "Body", "Accessories"];
+                    for (i, name) in names.into_iter().enumerate() {
+                        if widgets::check_item(ui, k, st.settings.physics[i], name, "").clicked() {
+                            st.settings.physics[i] = !st.settings.physics[i];
+                            st.settings_changed = true;
+                        }
+                    }
+                });
+            }
         }
     }
 }

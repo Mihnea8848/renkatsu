@@ -682,6 +682,14 @@ impl Live {
     /// their animations and physics on by the clock while the scene plays.
     /// The scene names its cards relative to the project, whose mods
     /// `games` opens the game with.
+    /// Holds the kinds of physics in `still` at their rest pose, on every
+    /// character.
+    pub fn hold_physics_still(&mut self, still: &[rk_chara::physics::Belongs]) {
+        for actor in &mut self.actors {
+            actor.chara.physics.hold_still(&actor.chara.scene, still);
+        }
+    }
+
     pub fn follow(
         &mut self,
         scene: &Scene,

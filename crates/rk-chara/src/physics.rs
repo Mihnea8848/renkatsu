@@ -1735,11 +1735,31 @@ pub enum Bone {
     Ver02(Ver02),
 }
 
+/// What a physics component came with, so that a kind can be switched
+/// off: the body (its bust and buttocks too), hair, clothes or an
+/// accessory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Belongs {
+    #[default]
+    Body,
+    Hair,
+    Clothes,
+    Accessory,
+}
+
+impl Belongs {
+    pub const ALL: [Belongs; 4] = [Belongs::Hair, Belongs::Clothes, Belongs::Body, Belongs::Accessory];
+}
+
 /// Every DynamicBone component of a character with the colliders they use.
 #[derive(Debug, Clone, Default)]
 pub struct Physics {
     pub colliders: Vec<Collider>,
     pub bones: Vec<Bone>,
+    /// What each of `bones` came with; a bone without one is the body's.
+    pub belongs: Vec<Belongs>,
+    /// The kinds that hold still at their rest pose instead of moving.
+    still: Vec<Belongs>,
 }
 
 impl Physics {
@@ -1782,19 +1802,51 @@ impl Physics {
     /// back to where they were loaded. An animation writes its bones
     /// after this and before `end_frame`, as Unity's Animator does.
     pub fn begin_frame(&self, scene: &mut Scene) {
-        for b in &self.bones {
+        for (i, b) in self.bones.iter().enumerate() {
+            let moves = self.moves(i);
             match b {
                 Bone::Dynamic(d) if d.running() => d.init_transforms(scene),
                 Bone::Ver01(d) if d.running() => d.init_transforms(scene),
+                // A kind switched off holds its rest pose.
+                Bone::Ver02(d) if d.running() && !moves => d.init_transforms(scene),
                 _ => {}
             }
         }
     }
 
+    /// Whether the bone at `i` moves: its kind is not held still.
+    fn moves(&self, i: usize) -> bool {
+        let belongs = self.belongs.get(i).copied().unwrap_or_default();
+        !self.still.contains(&belongs)
+    }
+
+    /// Holds the kinds in `still` at their rest pose. A kind that moves
+    /// again starts from where its bones are, without a jump.
+    pub fn hold_still(&mut self, scene: &Scene, still: &[Belongs]) {
+        if self.still == still {
+            return;
+        }
+        for (i, b) in self.bones.iter_mut().enumerate() {
+            let belongs = self.belongs.get(i).copied().unwrap_or_default();
+            if self.still.contains(&belongs) && !still.contains(&belongs) {
+                match b {
+                    Bone::Dynamic(d) => reset_particles(scene, &mut d.particles),
+                    Bone::Ver01(d) => reset_particles(scene, &mut d.particles),
+                    Bone::Ver02(d) => reset_particles(scene, &mut d.particles),
+                }
+            }
+        }
+        self.still = still.to_vec();
+    }
+
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
-        for b in &mut self.bones {
+        let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i)).collect();
+        for (b, moves) in self.bones.iter_mut().zip(moving) {
+            if !moves {
+                continue;
+            }
             match b {
                 Bone::Dynamic(d) if d.running() => d.late_update(scene, &self.colliders, dt),
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),
@@ -1869,6 +1921,7 @@ mod tests {
         Physics {
             colliders: Vec::new(),
             bones: vec![Bone::Dynamic(DynamicBone::new(def))],
+            ..Physics::default()
         }
     }
 
@@ -2185,6 +2238,35 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_held_still_stays_at_rest_and_moves_again_when_let_go() {
+        let swung = |still: &[Belongs]| {
+            let mut scene = Scene::default();
+            let nodes = chain(&mut scene, Vec3::ZERO, Vec3::new(0.0, -0.1, 0.0), 2);
+            let mut physics = dynamic(DynamicBoneDef {
+                node: nodes[0],
+                root: Some(nodes[0]),
+                force: Vec3::new(0.002, 0.0, 0.0),
+                ..Default::default()
+            });
+            physics.belongs = vec![Belongs::Hair];
+            physics.start(&mut scene);
+            physics.hold_still(&scene, still);
+            physics.settle(&mut scene, 200, FRAME_TIME);
+            let held = position(&scene, nodes[2]);
+            physics.hold_still(&scene, &[]);
+            physics.settle(&mut scene, 200, FRAME_TIME);
+            (held, position(&scene, nodes[2]))
+        };
+        let rest = Vec3::new(0.0, -0.2, 0.0);
+        let (held, freed) = swung(&[Belongs::Hair]);
+        assert!(close(held, rest, 1e-6), "held hair moved to {held}");
+        assert!(freed.x > 0.01, "let go, the force pushes it: {freed}");
+        // Another kind held still leaves the hair moving.
+        let (moving, _) = swung(&[Belongs::Clothes]);
+        assert!(moving.x > 0.01);
+    }
+
+    #[test]
     fn frozen_axis_keeps_the_chain_in_a_plane() {
         let mut scene = Scene::default();
         let nodes = chain(&mut scene, Vec3::ZERO, Vec3::new(0.0, -0.1, 0.0), 2);
@@ -2215,6 +2297,7 @@ mod tests {
                     add_angle_scale: angle_scale,
                     ..Default::default()
                 }))],
+                ..Physics::default()
             };
             physics.start(&mut scene);
             physics.settle(&mut scene, 400, FRAME_TIME);
@@ -2265,6 +2348,7 @@ mod tests {
         let physics = Physics {
             colliders: Vec::new(),
             bones: vec![Bone::Ver02(Ver02::new(def))],
+            ..Physics::default()
         };
         (physics, [root, b1, b2, r2])
     }

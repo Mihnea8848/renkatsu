@@ -467,6 +467,16 @@ pub struct State {
 }
 
 impl State {
+    /// The kinds of physics the Play menu's switches hold still.
+    pub fn physics_still(&self) -> Vec<rk_chara::physics::Belongs> {
+        rk_chara::physics::Belongs::ALL
+            .into_iter()
+            .zip(self.settings.physics)
+            .filter(|(_, on)| !on)
+            .map(|(belongs, _)| belongs)
+            .collect()
+    }
+
     /// Hands the face shots the Content panel asked for to their thread,
     /// with the content the cards are built from.
     pub fn take_face_shots(&mut self) {
