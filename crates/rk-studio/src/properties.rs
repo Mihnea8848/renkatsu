@@ -356,7 +356,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             return;
         }
-        if !matches!(kind, Kind::Folder | Kind::Effect) && section(ui, k, st, 0, "Transform") {
+        // A character light is turned by its angles alone.
+        let chara_light = matches!(
+            object.content,
+            Content::Light {
+                light: LightKind::Character,
+                ..
+            }
+        );
+        if !matches!(kind, Kind::Folder | Kind::Effect) && !chara_light && section(ui, k, st, 0, "Transform") {
             // What each of position, rotation and scale waits for, when it
             // does nothing yet for this kind of object.
             let off: [Option<&str>; 3] = match &object.content {
@@ -365,9 +373,17 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     light: LightKind::Point | LightKind::Spot,
                     ..
                 } => [None, None, Some("A light has no size")],
-                Content::Light { from_camera, .. } => [
+                Content::Light {
+                    light: LightKind::Character,
+                    ..
+                } => [
                     Some("A directional light has no position"),
-                    (*from_camera).then_some("The light follows the camera"),
+                    Some("Turned by its angles"),
+                    Some("A light has no size"),
+                ],
+                Content::Light { .. } => [
+                    Some("A directional light has no position"),
+                    None,
                     Some("A light has no size"),
                 ],
                 Content::Camera { .. } => [None, None, Some("A camera has no size")],
@@ -648,6 +664,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             Content::Light {
                 light,
                 from_camera,
+                angles,
                 intensity,
                 shadows,
                 color,
@@ -668,11 +685,24 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         widgets::color_field(ui, k, rect, id.with("colour"), color);
                     });
                     if *light == LightKind::Character {
-                        row(ui, k, "Direction", None, |ui, rect| {
-                            let mut chosen = usize::from(!*from_camera);
-                            let options = ["From camera", "Own"];
+                        row(ui, k, "Follows", None, |ui, rect| {
+                            let mut chosen = usize::from(*from_camera);
+                            let options = ["Scene", "Camera"];
                             widgets::segmented(ui, k, rect, id.with("direction"), &mut chosen, &options);
-                            *from_camera = chosen == 0;
+                            *from_camera = chosen == 1;
+                        });
+                        row(ui, k, "Angles", None, |ui, rect| {
+                            let half = (rect.width() - 4.0) / 2.0;
+                            for (i, letter) in ["X", "Y"].into_iter().enumerate() {
+                                let cell = Rect::from_min_size(
+                                    rect.min + Vec2::new(i as f32 * (half + 4.0), 0.0),
+                                    Vec2::new(half, rect.height()),
+                                );
+                                let value = &mut angles[i];
+                                let marker = Marker::Letter(t.text_dim, letter);
+                                widgets::number(ui, k, cell, id.with(("angle", i)), value, marker, true, ANGLE);
+                                *value = value.rem_euclid(360.0);
+                            }
                         });
                     } else {
                         row(ui, k, "Lights", None, |ui, rect| {

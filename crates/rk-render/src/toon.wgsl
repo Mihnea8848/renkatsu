@@ -32,6 +32,8 @@ struct Globals {
     reflection: vec4<f32>,
     // _ScreenParams: xy the picture's width and height in pixels
     screen: vec4<f32>,
+    // _LightColor0: the light's linear colour times its intensity
+    light_color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
@@ -384,7 +386,7 @@ fn read_surface(i: VsOut) -> Surface {
 }
 
 fn light_color() -> vec3<f32> {
-    return vec3<f32>(g.params.y * 0.600000024 + g.params.z);
+    return g.light_color.rgb * 0.600000024 + vec3<f32>(g.params.z);
 }
 
 // Overlay blend, per channel.
@@ -1164,7 +1166,7 @@ fn item_glasses(i: VsOut, front: bool) -> vec4<f32> {
     rgb *= max(light_color(), a.rgb);
     rgb = clamp(rgb * m.color2.a + dark, vec3<f32>(0.0), vec3<f32>(1.0));
     // Light: the directional light and the scene's ambient light.
-    rgb *= max(ndl, 0.0) * g.params.y + g.ambient_light.rgb;
+    rgb *= max(ndl, 0.0) * g.light_color.rgb + g.ambient_light.rgb;
     let alpha = main.a * m.color2.a;
     return vec4<f32>(rgb * alpha, alpha);
 }

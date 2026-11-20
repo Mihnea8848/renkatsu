@@ -257,8 +257,15 @@ pub enum Content {
         #[serde(default)]
         light: LightKind,
         /// The light stays at the camera's upper left, as in the game's
-        /// maker, instead of shining along its own rotation.
+        /// The character light keeps its angle to the view as the camera
+        /// moves (CharaStudio's plugin lock), instead of staying fixed in
+        /// the scene as CharaStudio's own does.
         from_camera: bool,
+        /// The character light's two angles in degrees, CharaStudio's
+        /// `charaLight.rot`: the first lowers it from 40 degrees above the
+        /// scene's front, the second turns it around.
+        #[serde(default)]
+        angles: [f32; 2],
         intensity: f32,
         shadows: bool,
         #[serde(default = "white")]
@@ -357,7 +364,8 @@ impl Content {
     pub fn light() -> Content {
         Content::Light {
             light: LightKind::Character,
-            from_camera: true,
+            from_camera: false,
+            angles: [0.0; 2],
             intensity: 0.85,
             shadows: true,
             color: white(),
@@ -376,6 +384,7 @@ impl Content {
             Content::Light { intensity, .. } if light != LightKind::Character => Content::Light {
                 light,
                 from_camera: false,
+                angles: [0.0; 2],
                 intensity: if light == LightKind::Directional {
                     intensity
                 } else {
@@ -677,9 +686,31 @@ impl Object {
 
     /// Unit vector from the scene towards a light with this transform: a
     /// light shines along its own forward axis.
+    #[allow(dead_code)] // For map lights, which shine on their own.
     pub fn light_direction(&self) -> [f32; 3] {
         (-(self.transform.quat() * Vec3::Z)).to_array()
     }
+}
+
+/// The unit vector towards CharaStudio's character light: its rig turns
+/// `Euler(40, 180, 0)` by `Euler(angles[0], angles[1], 0)` in the scene
+/// (`CharaStudio_Data/level1`, Light Chara and Directional Chara). With
+/// `follow`, the camera's eye and target, the light keeps the angle to
+/// the view it has from Studio's first camera place.
+pub fn chara_light_direction(angles: [f32; 2], follow: Option<(Vec3, Vec3)>) -> Vec3 {
+    let up = 40.0f32.to_radians();
+    let turn = Quat::from_euler(glam::EulerRot::YXZ, angles[1].to_radians(), angles[0].to_radians(), 0.0);
+    let fixed = turn * Vec3::new(0.0, up.sin(), up.cos());
+    let Some((eye, target)) = follow else { return fixed };
+    // Studio's Main Camera as the scene starts.
+    let first = Quat::from_xyzw(-1.618_124_7e-8, 0.995_055_6, -0.099_319_79, -1.621_151_3e-7).normalize();
+    let forward = (target - eye).normalize_or_zero();
+    let right = Vec3::Y.cross(forward).normalize_or_zero();
+    if forward == Vec3::ZERO || right == Vec3::ZERO {
+        return fixed;
+    }
+    let now = Quat::from_mat3(&glam::Mat3::from_cols(right, forward.cross(right), forward));
+    now * first.inverse() * fixed
 }
 
 /// The rotation a new light gets, which puts it at the upper left of a
@@ -732,6 +763,23 @@ impl Scene {
         scene.add("Key light", Content::light(), lights);
         scene.add_first_effects();
         scene
+    }
+
+    /// Puts every character light at CharaStudio's start: fixed in the
+    /// scene, at angles of 0.
+    pub fn reset_chara_lights(&mut self) {
+        for object in &mut self.objects {
+            if let Content::Light {
+                light: LightKind::Character,
+                from_camera,
+                angles,
+                ..
+            } = &mut object.content
+            {
+                *from_camera = false;
+                *angles = [0.0; 2];
+            }
+        }
     }
 
     /// Adds the effects every scene had before they were objects, with
@@ -1693,6 +1741,52 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_character_light_is_charastudios_rig() {
+        let near = |a: Vec3, b: Vec3| a.distance(b) < 1e-4;
+        let up = 40.0f32.to_radians();
+        // 40 degrees above the scene's front, as Studio starts.
+        assert!(near(
+            chara_light_direction([0.0; 2], None),
+            Vec3::new(0.0, up.sin(), up.cos())
+        ));
+        // The first angle lowers it, the second turns it around.
+        assert!(near(chara_light_direction([40.0, 0.0], None), Vec3::Z));
+        assert!(near(
+            chara_light_direction([0.0, 90.0], None),
+            Vec3::new(up.cos(), up.sin(), 0.0)
+        ));
+        // Following Studio's first camera, it is where the fixed one is.
+        let view = crate::live::Live::studio_view();
+        let follow = chara_light_direction([0.0; 2], Some((view.eye, view.target)));
+        assert!(near(follow, chara_light_direction([0.0; 2], None)), "{follow}");
+        // From behind, it comes from behind the camera too.
+        let behind = chara_light_direction([0.0; 2], Some((Vec3::new(0.0, 1.0, -4.0), Vec3::new(0.0, 1.0, 0.0))));
+        assert!(behind.z < -0.5, "{behind}");
+    }
+
+    #[test]
+    fn older_character_lights_become_charastudios() {
+        let mut scene = Scene::empty();
+        let id = scene.add("Key light", Content::light(), None);
+        if let Content::Light {
+            from_camera, angles, ..
+        } = &mut scene.get_mut(id).unwrap().content
+        {
+            *from_camera = true;
+            *angles = [10.0, 20.0];
+        }
+        scene.reset_chara_lights();
+        assert!(matches!(
+            scene.get(id).unwrap().content,
+            Content::Light {
+                from_camera: false,
+                angles: [0.0, 0.0],
+                ..
+            }
+        ));
+    }
 
     fn card(name: &str) -> PathBuf {
         PathBuf::from(format!("/cards/{name}.png"))

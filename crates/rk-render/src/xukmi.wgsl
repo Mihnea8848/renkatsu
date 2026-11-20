@@ -74,7 +74,7 @@ fn xk_saturation(c: vec3<f32>) -> vec3<f32> {
 
 // _LightColor0 * 0.6 + _CustomAmbient.
 fn xk_light() -> vec3<f32> {
-    return vec3<f32>(g.params.y * 0.600000024) + m.ext[1].rgb;
+    return g.light_color.rgb * 0.600000024 + m.ext[1].rgb;
 }
 
 // The shadow mask as these shaders read it: saturate(mask * 2 - 1).
@@ -617,7 +617,7 @@ fn xk_skin(i: VsOut, front: bool) -> vec4<f32> {
     }
     plain = clamp(plain * spec_rgba.a, 0.0, 1.0);
     plain = select(plain, xk_ramp(plain), m.ext[4].w != 0.0);
-    let plain_rgb = select(spec_rgba.rgb, vec3<f32>(g.params.y), m.ext[16].w != 0.0) * spec_rgba.a;
+    let plain_rgb = select(spec_rgba.rgb, g.light_color.rgb, m.ext[16].w != 0.0) * spec_rgba.a;
     let off = m.ext[18].w;
     let base = off * (plain * plain_rgb + d) + clamp(textured * (1.0 - off), vec3<f32>(0.0), vec3<f32>(1.0));
 
@@ -709,7 +709,7 @@ fn xk_hair(i: VsOut, front: bool) -> vec4<f32> {
         streak = pow(sdot, m.ext[18].w);
     }
     streak = clamp(streak * spec_rgba.a, 0.0, 1.0);
-    let mesh_rgb = mesh * select(spec_rgba.rgb, vec3<f32>(g.params.y), m.ext[16].w != 0.0) * spec_rgba.a;
+    let mesh_rgb = mesh * select(spec_rgba.rgb, g.light_color.rgb, m.ext[16].w != 0.0) * spec_rgba.a;
 
     let ndl = clamp(dot(l, nn.n), 0.0, 1.0);
     let ramp = xk_ramp(ndl);
