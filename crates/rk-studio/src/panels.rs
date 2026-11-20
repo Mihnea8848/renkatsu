@@ -1168,7 +1168,7 @@ mod tests {
     fn a_kept_layout_comes_back_as_it_was() {
         let mut dock = default_layout(Panel::Content);
         let console = dock.find_tab(&Panel::Console).unwrap();
-        dock.set_active_tab(console);
+        dock.set_active_tab(console).unwrap();
         let text = toml::to_string(&dock).unwrap();
         let back: DockState<Panel> = toml::from_str(&text).unwrap();
         assert_eq!(toml::to_string(&back).unwrap(), text);
