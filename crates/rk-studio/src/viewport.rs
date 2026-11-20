@@ -417,12 +417,19 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         .doc
         .selection()
         .map_or(kind.color(), |o| st.library.color_of(&o.content));
+    // A light or an effect says which it is, as in Properties.
+    let (icon_of, label) = st
+        .doc
+        .selection()
+        .map_or((kind.glyph(), kind.label()), |o| (o.content.glyph(), o.content.label()));
     let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 20.0), Sense::hover());
-    glyph(ui.painter(), k, rect.center(), kind.glyph(), 16.0, color);
+    glyph(ui.painter(), k, rect.center(), icon_of, 16.0, color);
     ui.add_space(4.0);
     bar_text(ui, &name, k.bold(k.d.text), k.t.text_bright);
-    ui.add_space(5.0);
-    bar_text(ui, kind.label(), k.font(), k.t.text_dim);
+    if label != name {
+        ui.add_space(5.0);
+        bar_text(ui, label, k.font(), k.t.text_dim);
+    }
     ui.add_space(4.0);
     bar_divider(ui, k);
     ui.add_space(2.0);
@@ -432,6 +439,20 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     for (g, text, menu) in actions(kind) {
         use crate::kinds::Kind;
+        // What nothing stands behind yet is shown greyed.
+        let works = matches!(
+            (kind, *text),
+            (_, "Load card" | "Add")
+                | (Kind::Item, "Attach to")
+                | (Kind::Folder, "Hide all")
+                | (Kind::Light, "Shadows" | "Type" | "Colour")
+        );
+        if !works {
+            ui.add_enabled_ui(false, |ui| flat_button(ui, k, Some(g), text, *menu, false))
+                .response
+                .on_disabled_hover_text("Not available yet");
+            continue;
+        }
         let mut resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
             resp = resp.on_hover_text("Import card");
@@ -456,6 +477,14 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             (Kind::Folder, "Hide all") if resp.clicked() => hide_folder(st),
             (Kind::Light, "Shadows") => {
                 egui::Popup::menu(&resp).show(|ui| shadows_menu(ui, k, st));
+            }
+            (Kind::Light, "Type") => {
+                egui::Popup::menu(&resp).show(|ui| light_type_menu(ui, k, st));
+            }
+            (Kind::Light, "Colour") => {
+                egui::Popup::menu(&resp)
+                    .close_behavior(widgets::picker_closing(ui.ctx(), LIGHT_COLOUR.into()))
+                    .show(|ui| light_colour(ui, k, st));
             }
             _ if *menu => {
                 egui::Popup::menu(&resp).show(|ui| {
@@ -496,6 +525,46 @@ fn shadows_menu(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     if object != before {
         st.doc.edit(object, false);
+    }
+}
+
+/// The kinds of light, for the selected light.
+fn light_type_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::{Content, LightKind};
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let Content::Light { light, .. } = &mut object.content else {
+        return;
+    };
+    let now = *light;
+    for kind in LightKind::ALL {
+        if widgets::check_item(ui, k, now == kind, kind.label(), "").clicked() {
+            *light = kind;
+            ui.close();
+        }
+    }
+    if *light != now {
+        st.doc.edit(object, false);
+    }
+}
+
+const LIGHT_COLOUR: &str = "light colour";
+
+/// The selected light's colour picker.
+fn light_colour(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let Content::Light { color, .. } = &mut object.content else {
+        return;
+    };
+    widgets::color_picker(ui, k, LIGHT_COLOUR.into(), color);
+    if object != before {
+        let held = ui.input(|i| i.pointer.any_down());
+        st.doc.edit(object, held);
     }
 }
 
@@ -703,10 +772,14 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     crate::gizmo::grid_button(ui, k, st);
     let resp = flat_button(ui, k, Some(icon::SUN), "Lit", true, false);
     egui::Popup::menu(&resp).show(|ui| {
-        for option in ["Lit", "Unlit", "Wireframe"] {
-            if widgets::check_item(ui, k, option == "Lit", option, "").clicked() {
-                ui.close();
-            }
+        if widgets::check_item(ui, k, true, "Lit", "").clicked() {
+            ui.close();
+        }
+        // The other ways to draw wait for their own passes.
+        for option in ["Unlit", "Wireframe"] {
+            ui.add_enabled_ui(false, |ui| widgets::check_item(ui, k, false, option, ""))
+                .response
+                .on_disabled_hover_text("Not available yet");
         }
     });
     // The lens is perspective and only that; the other two turn the
@@ -1016,7 +1089,8 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     index += 1;
                     continue;
                 }
-                let on = st.mode_tool[st.mode] == index;
+                // Only the Select mode's rows are states; the others act.
+                let on = st.mode == 0 && st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
                 if *name == "Load card" {
                     // The same as the selection bar's Load card.
@@ -1045,7 +1119,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                         st.run(Command::Add(crate::kinds::Kind::Light));
                     }
                 } else if resp.clicked() {
-                    st.mode_tool[st.mode] = index;
+                    palette_tool(st, name, index);
                 }
             }
             y += palette_row(k);
@@ -1055,7 +1129,106 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 2] = ["Replace", "Reload"];
+const LATER_TOOLS: [&str; 25] = [
+    "Replace",
+    "Reload",
+    "Accessories",
+    "Expression",
+    "Gaze",
+    "Forward kinematics",
+    "Inverse kinematics",
+    "Mirror pose",
+    "Load pose",
+    "Save pose",
+    "Reset pose",
+    "Hands",
+    "Look at camera",
+    "Depth of field",
+    "Set key",
+    "Auto key",
+    "Delete key",
+    "Bake physics",
+    "New shot from view",
+    "Shot list",
+    "Still",
+    "Video",
+    "Queue",
+    "Export",
+    "Sync",
+];
+
+/// The strip's Pose tool, which waits for posing by hand.
+pub const POSE_TOOL: usize = 5;
+
+/// What a row of the palette does that is not a menu: the Select mode's
+/// ways of picking and its filters, and the Light mode's lights and
+/// effects.
+fn palette_tool(st: &mut State, name: &str, index: usize) {
+    use crate::kinds::Kind;
+    use crate::scene::{Content, Effect, LightKind};
+    let select_tool = 1;
+    match name {
+        "Objects" | "Box select" => {
+            st.tool = select_tool;
+            st.pick_filter = None;
+            st.mode_tool[st.mode] = index;
+        }
+        "All of this type" => {
+            if let Some(kind) = st.doc.selection().map(|o| o.kind()) {
+                let all: Vec<_> = st
+                    .doc
+                    .scene()
+                    .objects()
+                    .iter()
+                    .filter(|o| o.kind() == kind)
+                    .map(|o| o.id)
+                    .collect();
+                st.doc.select_many(&all);
+            }
+        }
+        "Characters" | "Items" | "Lights and cameras" => {
+            let kind = match name {
+                "Characters" => Kind::Character,
+                "Items" => Kind::Item,
+                _ => Kind::Light,
+            };
+            st.tool = select_tool;
+            if st.pick_filter == Some(kind) {
+                st.pick_filter = None;
+                st.mode_tool[st.mode] = 0;
+            } else {
+                st.pick_filter = Some(kind);
+                st.mode_tool[st.mode] = index;
+            }
+        }
+        "Key light" => {
+            let found = st.doc.scene().key_light().map(|o| o.id);
+            match found {
+                Some(id) => st.doc.select_many(&[id]),
+                None => st.run(Command::AddContent(Content::light_of(LightKind::Character))),
+            }
+        }
+        "Ambient occlusion" | "Bloom" => {
+            let found = st
+                .doc
+                .scene()
+                .objects()
+                .iter()
+                .find(|o| matches!(&o.content, Content::Effect { effect } if effect.label() == name))
+                .map(|o| o.id);
+            match found {
+                Some(id) => st.doc.select_many(&[id]),
+                None => {
+                    let effect = Effect::all().into_iter().find(|e| e.label() == name);
+                    if let Some(effect) = effect {
+                        st.run(Command::AddContent(Content::Effect { effect }));
+                    }
+                }
+            }
+        }
+        _ => st.mode_tool[st.mode] = index,
+    }
+}
 
 /// A rendering pipeline among a mode's tools: the one in use carries a
 /// check mark, and one that does not exist yet is greyed and says so.
@@ -1378,8 +1551,15 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
             keys if keys.is_empty() => format!("{name} ({key})"),
             keys => format!("{name} ({keys})"),
         };
+        let later = i == POSE_TOOL;
+        let sense = if later { Sense::hover() } else { Sense::click() };
+        let tip = if later {
+            format!("{name}: not available yet")
+        } else {
+            tip
+        };
         let resp = ui
-            .interact(r, ui.id().with(("tool-strip", i)), Sense::click())
+            .interact(r, ui.id().with(("tool-strip", i)), sense)
             .on_hover_text(tip);
         if resp.clicked() {
             st.tool = i;
@@ -1391,7 +1571,13 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
         } else if resp.hovered() {
             p.rect_filled(r.shrink(3.0), 2.0, k.t.control);
         }
-        let color = if on || resp.hovered() { Color32::WHITE } else { k.t.text };
+        let color = if later {
+            Theme::glass(k.t.text_dim, 150)
+        } else if on || resp.hovered() {
+            Color32::WHITE
+        } else {
+            k.t.text
+        };
         glyph(p, k, r.center(), g, 16.0, color);
         // A hairline sets the navigation tools and the pose tool apart.
         if i == 2 || i == 5 {
@@ -1410,7 +1596,9 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 /// in line with the scene: stepping the physics while it plays and putting
 /// it back to rest when it is stopped.
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
+    let still = st.physics_still();
     let Some(live) = st.live.as_mut() else { return };
+    live.hold_physics_still(&still);
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
     // The scene's time runs while it plays and starts over on a stop.
     match st.playback {
@@ -1539,6 +1727,9 @@ impl Nav {
 fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     use egui::PointerButton::{Middle, Primary, Secondary};
     let keys = st.keys.clone();
+    // The View tool moves the view with the left button alone, as Unity's
+    // hand does; with Alt it turns around the scene.
+    let view_tool = st.tool == 0;
     let Some(live) = st.live.as_mut() else { return };
     let cam = &mut live.cam;
     let (alt, shift, right_down) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.pointer.secondary_down()));
@@ -1568,7 +1759,7 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     } else if alt && scene.dragged_by(Primary) {
         cam.orbit_drag(delta);
         Some(Nav::Orbit)
-    } else if scene.dragged_by(Middle) {
+    } else if scene.dragged_by(Middle) || (view_tool && scene.dragged_by(Primary)) {
         cam.cancel_glide();
         cam.orbit.pan(delta, full.height());
         Some(Nav::Pan)
@@ -1622,6 +1813,32 @@ fn nav_cursor(ui: &Ui, nav: Nav) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_palette_selects_by_kind_and_finds_its_effects() {
+        use crate::scene::{Content, Effect};
+        let mut st = State::new(crate::project::Project::none(), crate::scene::Scene::new());
+        let first = st.doc.add("Fill", Content::light());
+        st.doc.add("Rim", Content::light());
+        // Every light, from one.
+        st.doc.select_many(&[first]);
+        palette_tool(&mut st, "All of this type", 2);
+        assert_eq!(st.doc.selected_all().len(), 3);
+        // A filter picks the Select tool; again, it is off.
+        palette_tool(&mut st, "Characters", 3);
+        assert_eq!((st.tool, st.pick_filter), (1, Some(crate::kinds::Kind::Character)));
+        palette_tool(&mut st, "Characters", 3);
+        assert_eq!(st.pick_filter, None);
+        // Bloom is found where the new scene keeps it.
+        palette_tool(&mut st, "Bloom", 1);
+        let chosen = st.doc.selection().map(|o| o.content.clone());
+        assert!(matches!(
+            chosen,
+            Some(Content::Effect {
+                effect: Effect::Bloom { .. }
+            })
+        ));
+    }
 
     #[test]
     fn a_group_frames_everything_in_it() {

@@ -180,6 +180,8 @@ struct PhysicsSource {
     shake: bool,
     /// Accessory slot, for the Dynamic Bone Editor's settings.
     slot: Option<usize>,
+    /// What the part is, so that its kind of physics can be held still.
+    belongs: crate::physics::Belongs,
     /// The prefab's top object, where paths to DynamicBone roots start.
     root: usize,
 }
@@ -233,7 +235,14 @@ impl<'g> Builder<'g> {
     }
 
     /// Remembers a prefab's scripts for the physics step.
-    fn physics_source(&mut self, inst: &Instance, part: bool, copy: bool, shake: bool) {
+    fn physics_source(
+        &mut self,
+        inst: &Instance,
+        part: bool,
+        copy: bool,
+        shake: bool,
+        belongs: crate::physics::Belongs,
+    ) {
         self.physics_sources.push(PhysicsSource {
             scripts: inst.scripts.clone(),
             transforms: inst.transform_nodes.clone(),
@@ -242,6 +251,7 @@ impl<'g> Builder<'g> {
             shake,
             slot: None,
             root: inst.root,
+            belongs,
         });
     }
 
@@ -640,11 +650,13 @@ impl<'g> Builder<'g> {
                             }
                         }
                         out.bones.push(Bone::Dynamic(DynamicBone::new(def)));
+                        out.belongs.push(source.belongs);
                     }
                     "DynamicBone_Ver01" => {
                         let mut def = physics::read_ver01(&obj, *node, &resolve);
                         def.enabled &= on;
                         out.bones.push(Bone::Ver01(Ver01::new(def)));
+                        out.belongs.push(source.belongs);
                     }
                     _ => {
                         let mut def = physics::read_ver02(&obj, *node, &resolve);
@@ -653,6 +665,7 @@ impl<'g> Builder<'g> {
                             crate::colliders::ver02(&mut def, *settings, added, *bust);
                         }
                         out.bones.push(Bone::Ver02(Ver02::new(def)));
+                        out.belongs.push(source.belongs);
                     }
                 }
             }
@@ -2057,7 +2070,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut bones = b.scene.name_map(body_root);
     // Root bone of every mesh the game rebinds (`RefObjKey.A_ROOTBONE`).
     let hips = bones.get("cf_j_hips").copied();
-    b.physics_source(&anim, false, false, true);
+    b.physics_source(&anim, false, false, true, crate::physics::Belongs::Body);
 
     // Head bones hang from the neck end.
     let head_parent = *bones.get("cf_s_head").context("skeleton has no cf_s_head")?;
@@ -2070,7 +2083,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         Part::Head,
     )?;
     let head_bones = b.scene.name_map(head_bone.root);
-    b.physics_source(&head_bone, false, false, true);
+    b.physics_source(&head_bone, false, false, true, crate::physics::Belongs::Body);
 
     // Body mesh.
     let body_name = if female { "p_cf_body_00" } else { "p_cm_body_00" };
@@ -2078,7 +2091,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .loader
         .load_prefab(&mut b.scene, BASE, body_name, None, Some(top), Part::Body)?;
     assign_weights(&mut b.scene, &body, &bones, "cf_j_root", hips);
-    b.physics_source(&body, false, false, true);
+    b.physics_source(&body, false, false, true, crate::physics::Belongs::Body);
 
     // Uncensor Selector: another body's meshes on the same renderers.
     let mut uncensor = None;
@@ -2237,7 +2250,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     // Head: its prefab carries the bone layout for this face type.
     if let Some(item) = b.item_or_default("head", "ChaFileFace.headId", cat::BO_HEAD, card.face.head_id, 0) {
         if let Some(head) = b.part("head", item, None, Part::Head) {
-            b.physics_source(&head, true, false, true);
+            b.physics_source(&head, true, false, true, crate::physics::Belongs::Body);
             let src = b.scene.name_map(head.root);
             for (name, &dst) in &head_bones {
                 if let Some(&s) = src.get(name) {
@@ -2320,7 +2333,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     b.hair_shadows_fix(&inst);
                     b.color_hair(&inst, hp);
                     b.hair_length(&inst, Some(hp.length));
-                    b.physics_source(&inst, true, false, !hp.no_shake);
+                    b.physics_source(&inst, true, false, !hp.no_shake, crate::physics::Belongs::Hair);
                 }
             }
         }
@@ -2389,7 +2402,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     }
                     // The game copies DynamicBone roots onto the body
                     // skeleton for tops and bottoms only.
-                    b.physics_source(inst, true, i < 2, true);
+                    b.physics_source(inst, true, i < 2, true, crate::physics::Belongs::Clothes);
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
                     rig.add_piece(&b.scene, i, inst);
                     let sources = compose::color_sources(None);
@@ -2502,7 +2515,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                             if opts.clothing_blend_shape {
                                 b.clothing_blend_shape(&inst, &blend_shapes, outfit, sub.category, 0);
                             }
-                            b.physics_source(&inst, true, true, true);
+                            b.physics_source(&inst, true, true, true, crate::physics::Belongs::Clothes);
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             rig.add_part(&b.scene, k, &inst);
                             // A sailor top's liquid goes on its one part,
@@ -2609,7 +2622,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     b.scene.nodes[inst.root].active = false;
                 }
                 accessory_nodes.insert(i, b.scene.name_map(inst.root));
-                b.physics_source(&inst, true, false, !acc.no_shake);
+                b.physics_source(&inst, true, false, !acc.no_shake, crate::physics::Belongs::Accessory);
                 if let Some(source) = b.physics_sources.last_mut() {
                     source.slot = Some(i);
                 }

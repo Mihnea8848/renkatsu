@@ -14,7 +14,7 @@ anyhow.workspace = true
 clap.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "accesskit"] }
 egui = "0.36"
-egui_dock = "0.21"
+egui_dock = { version = "0.21", features = ["serde"] }
 egui-phosphor = "0.14"
 png = "0.17"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }

@@ -387,6 +387,9 @@ pub struct State {
     pub mode: usize,
     /// The active tool of each mode, counted through its sections.
     pub mode_tool: [usize; 6],
+    /// The Select mode's filter: only characters, items, or lights and
+    /// cameras (as `Kind::Light`) are picked; none picks anything.
+    pub pick_filter: Option<Kind>,
     /// The active mode's tool palette is open.
     pub palette_open: bool,
     /// The palette stays open while working in the viewport.
@@ -449,6 +452,8 @@ pub struct State {
     /// The keys of every action: the defaults with the user's changes.
     pub keys: crate::keymap::Keymap,
     pub shortcuts_open: bool,
+    /// Help, About Renkatsu is open.
+    pub about_open: bool,
     pub shortcuts_search: String,
     /// The action and the place the Keyboard shortcuts window waits for
     /// keys for.
@@ -465,6 +470,16 @@ pub struct State {
 }
 
 impl State {
+    /// The kinds of physics the Play menu's switches hold still.
+    pub fn physics_still(&self) -> Vec<rk_chara::physics::Belongs> {
+        rk_chara::physics::Belongs::ALL
+            .into_iter()
+            .zip(self.settings.physics)
+            .filter(|(_, on)| !on)
+            .map(|(belongs, _)| belongs)
+            .collect()
+    }
+
     /// Hands the face shots the Content panel asked for to their thread,
     /// with the content the cards are built from.
     pub fn take_face_shots(&mut self) {
@@ -826,6 +841,7 @@ impl State {
             log: Log::new(),
             mode: 0,
             mode_tool: [0, 0, 1, 0, 0, 0],
+            pick_filter: None,
             palette_open: false,
             palette_pinned: true,
             rail: Rail::Named,
@@ -860,6 +876,7 @@ impl State {
             preferences_open: false,
             keys: Default::default(),
             shortcuts_open: false,
+            about_open: false,
             shortcuts_search: String::new(),
             key_capture: None,
             inputs: Vec::new(),

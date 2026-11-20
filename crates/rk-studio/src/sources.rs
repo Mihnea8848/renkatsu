@@ -50,7 +50,7 @@ pub fn dropdown(ui: &mut Ui, k: &Look, column: Rect, id: Id, items: &[Item], cho
         ui.painter(),
         k,
         Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
-        icon::CARET_DOWN,
+        crate::widgets::caret_of(&resp),
         10.0,
         color,
     );
