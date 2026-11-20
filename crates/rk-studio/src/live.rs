@@ -1444,9 +1444,13 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>) -> StudioEffects {
             continue;
         };
         match *effect {
-            Effect::ColorFilter { filter, .. } if fx.color.is_none() => {
+            Effect::ColorFilter { filter, blend } if fx.color.is_none() => {
                 let lut = filters.and_then(|f| f.get(&(filter as i32))).cloned();
-                fx.color = lut.map(|lut| ColorFilter { lut, exposure: 1.0 });
+                fx.color = lut.map(|lut| ColorFilter {
+                    lut,
+                    exposure: 1.0,
+                    blend,
+                });
             }
             Effect::Bloom {
                 intensity,

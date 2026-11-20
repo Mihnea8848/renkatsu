@@ -615,7 +615,11 @@ pub fn run(
             color: cap
                 .color_filter
                 .and_then(|id| rk_chara::build::color_filter(game, id))
-                .map(|lut| rk_render::effects::ColorFilter { lut, exposure: 1.0 }),
+                .map(|lut| rk_render::effects::ColorFilter {
+                    lut,
+                    exposure: 1.0,
+                    blend: 0.0,
+                }),
             ..cap.effects.clone()
         }),
         ..env.clone()
