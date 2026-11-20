@@ -125,7 +125,9 @@ fn physics_knows_hair_clothes_body_and_accessories() {
     let mut seen = std::collections::BTreeMap::<String, usize>::new();
     for p in files.iter().take(5) {
         let Ok(card) = rk_card::Card::load(p) else { continue };
-        let Ok(chara) = rk_chara::build::build(&game, &card, &Default::default()) else { continue };
+        let Ok(chara) = rk_chara::build::build(&game, &card, &Default::default()) else {
+            continue;
+        };
         assert_eq!(chara.physics.belongs.len(), chara.physics.bones.len());
         for b in &chara.physics.belongs {
             *seen.entry(format!("{b:?}")).or_default() += 1;

@@ -976,7 +976,8 @@ pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
         } else {
             kind.label()
         };
-        if item(ui, kind.glyph(), kind.color(), text, true) {
+        // An item has no model to add yet.
+        if item(ui, kind.glyph(), kind.color(), text, kind != Kind::Item) {
             st.run(Command::Add(kind));
         }
     }
@@ -1070,7 +1071,7 @@ fn timeline(ui: &mut Ui, k: &Look) {
     let t = &k.t;
     let bar = toolbar(ui, k, |ui| {
         for g in [icon::SKIP_BACK, icon::PLAY, icon::SKIP_FORWARD] {
-            let _ = icon_button(ui, k, g, false);
+            ui.add_enabled_ui(false, |ui| icon_button(ui, k, g, false));
         }
         bar_divider(ui, k);
         ui.add_space(2.0);

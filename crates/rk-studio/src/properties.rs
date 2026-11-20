@@ -370,7 +370,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     (*from_camera).then_some("The light follows the camera"),
                     Some("A light has no size"),
                 ],
-                Content::Camera { .. } => [Some("Not available yet"); 3],
+                Content::Camera { .. } => [None, None, Some("A camera has no size")],
+                Content::Item => [None; 3],
                 // CharaStudio moves and turns a map; it keeps its size.
                 Content::Map { .. } => [None, None, Some("A map keeps its size")],
                 _ => [Some("Not available yet"); 3],
@@ -1396,7 +1397,15 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str,
         widgets::search(&mut child, k, &mut st.property_search, "Search", w);
         let query = st.property_search.trim().to_lowercase();
         ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
-        let _ = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
+        let gear = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
+        egui::Popup::menu(&gear).show(|ui| {
+            for (text, open) in [("Expand all", true), ("Collapse all", false)] {
+                if ui.button(text).clicked() {
+                    st.sections.iter_mut().for_each(|s| *s = open);
+                    ui.close();
+                }
+            }
+        });
     }
 }
 

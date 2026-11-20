@@ -387,6 +387,9 @@ pub struct State {
     pub mode: usize,
     /// The active tool of each mode, counted through its sections.
     pub mode_tool: [usize; 6],
+    /// The Select mode's filter: only characters, items, or lights and
+    /// cameras (as `Kind::Light`) are picked; none picks anything.
+    pub pick_filter: Option<Kind>,
     /// The active mode's tool palette is open.
     pub palette_open: bool,
     /// The palette stays open while working in the viewport.
@@ -838,6 +841,7 @@ impl State {
             log: Log::new(),
             mode: 0,
             mode_tool: [0, 0, 1, 0, 0, 0],
+            pick_filter: None,
             palette_open: false,
             palette_pinned: true,
             rail: Rail::Named,
