@@ -2066,6 +2066,12 @@ impl State {
             }
             None => {
                 let id = self.doc.add(&map.name, Content::map(file, time));
+                // The map's own colour filter, which follows its time of day.
+                let effect = crate::scene::Effect::ColorFilter {
+                    filter: None,
+                    blend: 0.0,
+                };
+                self.doc.add_under(effect.label(), Content::Effect { effect }, id);
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

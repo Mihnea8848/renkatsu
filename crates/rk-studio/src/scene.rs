@@ -540,8 +540,11 @@ pub const FILTERS: [&str; 17] = [
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
+    /// `filter` is one of `FILTERS` by its number; none is the map's own
+    /// filter for its time of day, or the first without a map.
     ColorFilter {
-        filter: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<usize>,
         blend: f32,
     },
     Bloom {
@@ -580,7 +583,10 @@ impl Effect {
         let ao = rk_render::effects::AmbientOcclusion::default();
         let vignette = rk_render::effects::Vignette::default();
         [
-            Effect::ColorFilter { filter: 0, blend: 0.0 },
+            Effect::ColorFilter {
+                filter: Some(0),
+                blend: 0.0,
+            },
             Effect::Bloom {
                 intensity: bloom.intensity,
                 threshold: bloom.threshold,
@@ -1505,6 +1511,16 @@ impl Document {
         } else {
             selected.parent
         }
+    }
+
+    /// Adds an object under another, as a map's own effects are, in the
+    /// same step of the history as the one before it.
+    pub fn add_under(&mut self, name: &str, content: Content, parent: ObjectId) -> ObjectId {
+        let id = self.scene.add(name, content, None);
+        if let Some(object) = self.scene.get_mut(id) {
+            object.parent = Some(parent);
+        }
+        id
     }
 
     /// Adds an object and selects it. A folder goes beside the selection;

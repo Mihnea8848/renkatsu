@@ -80,6 +80,10 @@ pub struct ColorFilter {
     /// The table, as a data texture (not sRGB).
     pub lut: Arc<Image>,
     pub exposure: f32,
+    /// Amplify Color's `BlendAmount` (CharaStudio's `aceBlend`), 0 to 1.
+    /// The scene sets no second table, so the table fades to the neutral
+    /// one. 0 reads the table as it is.
+    pub blend: f32,
 }
 
 /// VignetteAndChromaticAberration, with the scene's zero aberration.
@@ -121,7 +125,11 @@ impl StudioEffects {
         Self {
             ao: Some(AmbientOcclusion::default()),
             bloom: Some(Bloom::default()),
-            color: lut.map(|lut| ColorFilter { lut, exposure: 1.0 }),
+            color: lut.map(|lut| ColorFilter {
+                lut,
+                exposure: 1.0,
+                blend: 0.0,
+            }),
             vignette: Some(Vignette::default()),
             backdrop: None,
         }
@@ -224,26 +232,51 @@ pub fn lut_coords(g: [f32; 3]) -> ([f32; 2], [f32; 2], f32) {
     ([u, v], [u + 1.0 / 32.0, v], f)
 }
 
-fn bilinear(image: &Image, uv: [f32; 2]) -> [f32; 3] {
+/// A texel of Amplify Color's neutral table (`CreateDefaultLut`): red
+/// along a slice, green up the rows, blue from slice to slice, each cut
+/// down to a byte.
+pub fn neutral_texel(x: u32, y: u32) -> [u8; 3] {
+    [x % 32, y, x / 32].map(|k| (k * 255 / 31) as u8)
+}
+
+/// A texel of the blend cache: the table faded to the neutral one by
+/// `blend` (Hidden/Amplify Color/BlendCache), stored in eight bits.
+pub fn blend_texel(table: [u8; 3], neutral: [u8; 3], blend: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| {
+        let (a, b) = (table[i] as f32 / 255.0, neutral[i] as f32 / 255.0);
+        ((a + blend * (b - a)) * 255.0 + 0.5).floor() / 255.0
+    })
+}
+
+fn bilinear(image: &Image, uv: [f32; 2], blend: f32) -> [f32; 3] {
     let (w, h) = (image.width as i64, image.height as i64);
     let x = uv[0] * w as f32 - 0.5;
     let y = uv[1] * h as f32 - 0.5;
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
     let at = |x: i64, y: i64| {
-        let i = ((y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) * 4) as usize;
-        [0, 1, 2].map(|c| image.rgba[i + c] as f32 / 255.0)
+        let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
+        let i = ((y * w + x) * 4) as usize;
+        let table = [0, 1, 2].map(|c| image.rgba[i + c]);
+        if blend == 0.0 {
+            table.map(|c| c as f32 / 255.0)
+        } else {
+            blend_texel(table, neutral_texel(x as u32, y as u32), blend)
+        }
     };
     let (x0, y0) = (x0 as i64, y0 as i64);
     let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
     [0, 1, 2].map(|i| (a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy)
 }
 
-/// A linear colour through the colour table, as the shader does it.
+/// A linear colour through the colour table, as the shader does it. With
+/// a blend the game reads the blend cache in place of the table, with the
+/// same lookup (Hidden/Amplify Color/Blend).
 pub fn filter_color(filter: &ColorFilter, linear: [f32; 3]) -> [f32; 3] {
     let g = linear.map(|c| to_gamma(c * filter.exposure));
     let (a, b, f) = lut_coords(g);
-    let (a, b) = (bilinear(&filter.lut, a), bilinear(&filter.lut, b));
+    let blend = filter.blend.clamp(0.0, 1.0);
+    let (a, b) = (bilinear(&filter.lut, a, blend), bilinear(&filter.lut, b, blend));
     [0, 1, 2].map(|i| to_linear(a[i] + (b[i] - a[i]) * f))
 }
 
@@ -306,7 +339,8 @@ impl Frame<'_> {
             ],
             vignette: {
                 let [i, b] = self.fx.vignette.as_ref().map_or([0.0; 2], vignette_params);
-                [i, b, 0.0, 0.0]
+                let blend = self.fx.color.as_ref().map_or(0.0, |c| c.blend.clamp(0.0, 1.0));
+                [i, b, blend, 0.0]
             },
             rand: random_data(),
         }
@@ -1105,6 +1139,7 @@ mod tests {
         let filter = ColorFilter {
             lut: Arc::new(neutral_lut()),
             exposure: 1.0,
+            blend: 0.0,
         };
         for c in [[0.1f32, 0.5, 0.9], [0.8, 0.8, 0.85], [0.3, 0.02, 0.6]] {
             let out = filter_color(&filter, c);
@@ -1116,5 +1151,102 @@ mod tests {
         // HDR values clip at white.
         let out = filter_color(&filter, [4.0, 4.0, 4.0]);
         assert!(out.iter().all(|v| (v - 1.0).abs() < 1e-3));
+    }
+
+    /// The neutral table with every colour inverted.
+    fn inverted_lut() -> Image {
+        let mut image = neutral_lut();
+        for px in image.rgba.chunks_exact_mut(4) {
+            for c in &mut px[..3] {
+                *c = 255 - *c;
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn neutral_texels_are_the_default_table() {
+        let image = neutral_lut();
+        for (i, px) in image.rgba.chunks_exact(4).enumerate() {
+            let (x, y) = (i as u32 % 1024, i as u32 / 1024);
+            assert_eq!(neutral_texel(x, y), [px[0], px[1], px[2]], "{x} {y}");
+        }
+    }
+
+    #[test]
+    fn no_blend_reads_the_table_itself() {
+        let lut = Arc::new(inverted_lut());
+        let filter = ColorFilter {
+            lut: lut.clone(),
+            exposure: 1.3,
+            blend: 0.0,
+        };
+        // The lookup as it was before the blend existed.
+        let plain = |uv: [f32; 2]| {
+            let x = uv[0] * 1024.0 - 0.5;
+            let y = uv[1] * 32.0 - 0.5;
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let at = |x: i64, y: i64| {
+                let i = ((y.clamp(0, 31) * 1024 + x.clamp(0, 1023)) * 4) as usize;
+                [0, 1, 2].map(|c| lut.rgba[i + c] as f32 / 255.0)
+            };
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+            [0, 1, 2].map(|i| (a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy)
+        };
+        for c in [[0.1f32, 0.5, 0.9], [0.8, 0.8, 0.85], [0.3, 0.02, 0.6], [2.0, 0.0, 0.4]] {
+            let g = c.map(|v| to_gamma(v * 1.3));
+            let (a, b, f) = lut_coords(g);
+            let (a, b) = (plain(a), plain(b));
+            let want = [0, 1, 2].map(|i| to_linear(a[i] + (b[i] - a[i]) * f));
+            assert_eq!(filter_color(&filter, c), want, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn blend_fades_the_table_to_the_neutral_one() {
+        // BlendCache: table + amount * (neutral - table), in eight bits.
+        assert_eq!(
+            blend_texel([255, 0, 100], [0, 255, 100], 0.5),
+            [128.0 / 255.0, 128.0 / 255.0, 100.0 / 255.0]
+        );
+        assert_eq!(
+            blend_texel([200, 10, 0], [100, 110, 255], 0.25),
+            [175.0 / 255.0, 35.0 / 255.0, 64.0 / 255.0]
+        );
+        assert_eq!(
+            blend_texel([200, 10, 0], [100, 110, 255], 1.0),
+            [100.0 / 255.0, 110.0 / 255.0, 1.0]
+        );
+
+        let lut = Arc::new(inverted_lut());
+        let filter = |blend: f32| ColorFilter {
+            lut: lut.clone(),
+            exposure: 1.0,
+            blend,
+        };
+        // A colour on a texel centre: slice 10, row 20, column 5.
+        let c = [5.0f32 / 31.0, 20.0 / 31.0, 10.0 / 31.0].map(to_linear);
+        let n = neutral_texel(10 * 32 + 5, 20);
+        let want = blend_texel(n.map(|v| 255 - v), n, 0.5).map(to_linear);
+        let out = filter_color(&filter(0.5), c);
+        for i in 0..3 {
+            assert!((out[i] - want[i]).abs() < 2e-3, "{out:?} {want:?}");
+        }
+        // Half way between a table and its inverse is mid grey.
+        assert!(out.iter().all(|v| (v - to_linear(0.5)).abs() < 4e-3), "{out:?}");
+
+        // A full blend is the neutral table, and the amount is clamped.
+        let neutral = ColorFilter {
+            lut: Arc::new(neutral_lut()),
+            exposure: 1.0,
+            blend: 0.0,
+        };
+        for c in [[0.1f32, 0.5, 0.9], [0.3, 0.02, 0.6]] {
+            assert_eq!(filter_color(&filter(1.0), c), filter_color(&neutral, c));
+            assert_eq!(filter_color(&filter(3.0), c), filter_color(&neutral, c));
+            assert_eq!(filter_color(&filter(-1.0), c), filter_color(&filter(0.0), c));
+        }
     }
 }

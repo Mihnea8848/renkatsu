@@ -138,3 +138,21 @@ fn physics_knows_hair_clothes_body_and_accessories() {
         assert!(seen.contains_key(&format!("{kind:?}")), "no {kind:?} physics");
     }
 }
+
+/// CharaStudio's 17 colour filters load from the game, each its own
+/// 1024 by 32 table.
+#[test]
+fn every_studio_colour_filter_loads() {
+    let Ok(cfg) = rk_core::Config::load() else { return };
+    let Ok(game) = rk_vfs::Game::open(&cfg) else { return };
+    let filters = rk_chara::build::color_filters(&game);
+    let ids: Vec<i32> = filters.keys().copied().collect();
+    assert_eq!(ids, (0..17).collect::<Vec<_>>());
+    for table in filters.values() {
+        assert_eq!((table.width, table.height), (1024, 32), "{}", table.name);
+    }
+    let mut tables: Vec<&[u8]> = filters.values().map(|t| &t.rgba[..]).collect();
+    tables.sort();
+    tables.dedup();
+    assert_eq!(tables.len(), 17, "two filters share a table");
+}

@@ -311,11 +311,12 @@ fn filter_rows(sheet: &rk_unityfs::UObject) -> Vec<(i32, String, String)> {
         .collect()
 }
 
-/// The colour table of a Studio colour filter by its number in the scene
-/// (`SceneInfo.aceNo`), as `Studio.Info` and `SystemButtonCtrl.SetACE` find
-/// it: every bundle under `studio/info/`, in name order, may list filters,
-/// and a later sheet replaces an earlier one's number.
-pub fn color_filter(game: &Game, id: i32) -> Option<Arc<Image>> {
+/// Studio's colour filters by their number in the scene
+/// (`SceneInfo.aceNo`), as `Studio.Info` and `SystemButtonCtrl.SetACE`
+/// find them: every bundle under `studio/info/`, in name order, may list
+/// filters, and a later sheet replaces an earlier one's number. Each is
+/// its bundle and texture name.
+fn filter_list(game: &Game) -> std::collections::BTreeMap<i32, (String, String)> {
     let mut paths: Vec<&String> = game
         .assets
         .index
@@ -324,7 +325,7 @@ pub fn color_filter(game: &Game, id: i32) -> Option<Arc<Image>> {
         .filter(|p| p.starts_with("studio/info/"))
         .collect();
     paths.sort();
-    let mut found = None;
+    let mut list = std::collections::BTreeMap::new();
     for path in paths {
         let file = path.rsplit('/').next().unwrap_or(path);
         let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
@@ -338,12 +339,29 @@ pub fn color_filter(game: &Game, id: i32) -> Option<Arc<Image>> {
             )
             .and_then(|obj| obj.read().ok());
         let Some(sheet) = sheet else { continue };
-        if let Some(row) = filter_rows(&sheet).into_iter().rfind(|r| r.0 == id) {
-            found = Some(row);
+        for (id, bundle, name) in filter_rows(&sheet) {
+            list.insert(id, (bundle, name));
         }
     }
-    let (_, bundle, name) = found?;
-    let image = Loader::new(game).image_by_name(&bundle, &name, None)?;
+    list
+}
+
+/// The colour table of a Studio colour filter by its number in the scene.
+pub fn color_filter(game: &Game, id: i32) -> Option<Arc<Image>> {
+    let (bundle, name) = filter_list(game).remove(&id)?;
+    filter_table(game, &bundle, &name)
+}
+
+/// The colour tables of every Studio colour filter, by their numbers.
+pub fn color_filters(game: &Game) -> std::collections::BTreeMap<i32, Arc<Image>> {
+    filter_list(game)
+        .into_iter()
+        .filter_map(|(id, (bundle, name))| Some((id, filter_table(game, &bundle, &name)?)))
+        .collect()
+}
+
+fn filter_table(game: &Game, bundle: &str, name: &str) -> Option<Arc<Image>> {
+    let image = Loader::new(game).image_by_name(bundle, name, None)?;
     // The effect reads the table as data, whatever the texture says.
     Some(Arc::new(Image {
         name: image.name.clone(),
