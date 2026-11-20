@@ -32,7 +32,8 @@ struct Globals {
     reflection: vec4<f32>,
     // _ScreenParams: xy the picture's width and height in pixels
     screen: vec4<f32>,
-    // _LightColor0: the light's linear colour times its intensity
+    // _LightColor0: the light's linear colour times its intensity; w is 0
+    // for meshes the light does not reach
     light_color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -197,6 +198,10 @@ fn alpha_test(alpha: f32, cutoff: f32, cut: bool) {
 // with their screen position. Without shadows the game runs the variants
 // that do not have the term.
 fn shadow_mask(i: VsOut) -> f32 {
+    // Out of the light's reach is wholly in its shadow.
+    if (g.light_color.w == 0.0) {
+        return 0.0;
+    }
     if (g.shadow.z == 0.0 || m.info.w == 0u) {
         return 1.0;
     }

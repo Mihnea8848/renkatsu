@@ -98,7 +98,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         .as_ref()
         .and_then(|live| live.failure(object.id))
         .map(str::to_owned);
-    let lights = st.doc.scene().key_light().map(|o| o.id) == Some(object.id);
     let holds = st.doc.scene().subtree(object.id).len() - 1;
     // What the object is attached to: a folder only holds it.
     let target = before
@@ -765,20 +764,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     row(ui, k, "Shadows", None, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("shadows"), shadows, "Cast");
                     });
-                    if *light == LightKind::Character && !lights {
-                        row(ui, k, "In use", None, |ui, rect| {
-                            let text = "No";
-                            ui.interact(rect, id.with("in-use"), Sense::hover())
-                                .on_hover_text("Only one character light is used");
-                            label(
-                                &ui.painter().with_clip_rect(rect),
-                                k,
-                                rect.left_center(),
-                                text,
-                                t.text_dim,
-                            );
-                        });
-                    }
                     section_end(ui, k);
                 }
             }
