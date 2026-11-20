@@ -197,10 +197,13 @@ struct Pending {
 /// What a build job hands back.
 struct Prepared {
     actor: Actor,
-    /// The colour table of Studio's first colour filter, when the build
-    /// was asked to look for it.
-    filter: Option<Option<Arc<Image>>>,
+    /// The colour tables of Studio's colour filters, when the build was
+    /// asked to look for them.
+    filters: Option<Filters>,
 }
+
+/// Studio's colour filters by their number (`SceneInfo.aceNo`).
+type Filters = std::collections::BTreeMap<i32, Arc<Image>>;
 
 /// How far a character of the scene is.
 #[derive(Debug, Clone, PartialEq)]
@@ -509,18 +512,15 @@ pub struct Live {
     pub keep_depth: bool,
     /// The camera was framed on a character once.
     framed: bool,
-    /// The colour table of Studio's first colour filter, once it was looked
-    /// for in the game; the inner `None` when the game has none.
-    filter: Option<Option<Arc<Image>>>,
+    /// The colour tables of Studio's colour filters, once they were looked
+    /// for in the game; empty when the game has none.
+    filters: Option<Filters>,
     /// Where the bones are that objects are attached to, as of the last
     /// frame followed.
     poses: Poses,
     /// The scene's map.
     map: MapState,
 }
-
-/// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
-const DEFAULT_COLOR_FILTER: i32 = 0;
 
 /// How the viewport outlines the selected characters.
 pub struct Outline {
@@ -573,7 +573,7 @@ impl Live {
             grid: GridPass::new(&render_state.device),
             keep_depth: false,
             framed: false,
-            filter: None,
+            filters: None,
             poses: Poses::default(),
             map: MapState::default(),
         })
@@ -595,7 +595,7 @@ impl Live {
             self.cam.forget(focus.object);
         }
         self.framed = false;
-        self.filter = None;
+        self.filters = None;
         if let Some(pending) = self.map.pending.take() {
             pending.handle.progress.cancel();
         }
@@ -783,7 +783,7 @@ impl Live {
                     None => continue,
                 }
             };
-            let want_filter = self.filter.is_none();
+            let want_filters = self.filters.is_none();
             let theirs = recipe.clone();
             // A build that is waited for shows nowhere.
             let show = if self.patient { Show::Quiet } else { self.show_builds };
@@ -791,8 +791,8 @@ impl Live {
                 let started = std::time::Instant::now();
                 let mut actor = Self::build(&game, id, &theirs)?;
                 actor.took = started.elapsed().as_secs_f32();
-                let filter = want_filter.then(|| rk_chara::build::color_filter(&game, DEFAULT_COLOR_FILTER));
-                Ok(Prepared { actor, filter })
+                let filters = want_filters.then(|| rk_chara::build::color_filters(&game));
+                Ok(Prepared { actor, filters })
             });
             jobs.name_when_done(&format!("Loaded {name}"));
             self.pending.push(Pending {
@@ -816,9 +816,9 @@ impl Live {
             };
             let Pending { id, recipe, name, .. } = self.pending.remove(0);
             match result {
-                Ok(Prepared { mut actor, filter }) => {
-                    if self.filter.is_none() {
-                        self.filter = filter;
+                Ok(Prepared { mut actor, filters }) => {
+                    if self.filters.is_none() {
+                        self.filters = filters;
                     }
                     let file = recipe.card.file_name().unwrap_or_default().to_string_lossy();
                     log.info(format!("Loaded {name} from {file} in {:.1} s", actor.took));
@@ -1164,7 +1164,7 @@ impl Live {
     /// picture, as in CharaStudio.
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
-        let mut effects = scene_effects(scene, self.filter.clone().flatten());
+        let mut effects = scene_effects(scene, self.filters.as_ref());
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1435,7 +1435,7 @@ fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 
 /// The effects the scene's objects ask for: the first of each that shows.
 /// An effect no object asks for is off.
-fn scene_effects(scene: &Scene, lut: Option<std::sync::Arc<rk_chara::Image>>) -> StudioEffects {
+fn scene_effects(scene: &Scene, filters: Option<&Filters>) -> StudioEffects {
     use crate::scene::Effect;
     use rk_render::effects::{AmbientOcclusion, Bloom, ColorFilter, Vignette};
     let mut fx = StudioEffects::default();
@@ -1444,8 +1444,9 @@ fn scene_effects(scene: &Scene, lut: Option<std::sync::Arc<rk_chara::Image>>) ->
             continue;
         };
         match *effect {
-            Effect::ColorFilter { .. } if fx.color.is_none() => {
-                fx.color = lut.clone().map(|lut| ColorFilter { lut, exposure: 1.0 });
+            Effect::ColorFilter { filter, .. } if fx.color.is_none() => {
+                let lut = filters.and_then(|f| f.get(&(filter as i32))).cloned();
+                fx.color = lut.map(|lut| ColorFilter { lut, exposure: 1.0 });
             }
             Effect::Bloom {
                 intensity,
