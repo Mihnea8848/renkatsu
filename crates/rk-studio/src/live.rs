@@ -1156,7 +1156,7 @@ impl Live {
     /// picture, as in CharaStudio.
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
-        let mut effects = StudioEffects::studio(self.filter.clone().flatten());
+        let mut effects = scene_effects(scene, self.filter.clone().flatten());
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1171,6 +1171,7 @@ impl Live {
                     from_camera,
                     intensity,
                     shadows,
+                    ..
                 } = light.content
                 {
                     env.light_intensity = intensity;
@@ -1422,4 +1423,50 @@ fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
     }
     let t = ac.dot(q) / det;
     (t > 0.0).then_some(t)
+}
+
+/// The effects the scene's objects ask for: the first of each that shows.
+/// An effect no object asks for is off.
+fn scene_effects(scene: &Scene, lut: Option<std::sync::Arc<rk_chara::Image>>) -> StudioEffects {
+    use crate::scene::Effect;
+    use rk_render::effects::{AmbientOcclusion, Bloom, ColorFilter, Vignette};
+    let mut fx = StudioEffects::default();
+    for object in scene.objects().iter().filter(|o| scene.shown(o.id)) {
+        let Content::Effect { effect } = &object.content else {
+            continue;
+        };
+        match *effect {
+            Effect::ColorFilter { .. } if fx.color.is_none() => {
+                fx.color = lut.clone().map(|lut| ColorFilter { lut, exposure: 1.0 });
+            }
+            Effect::Bloom {
+                intensity,
+                threshold,
+                spread,
+            } if fx.bloom.is_none() => {
+                fx.bloom = Some(Bloom {
+                    intensity,
+                    threshold,
+                    blur_spread: spread,
+                    ..Bloom::default()
+                });
+            }
+            Effect::AmbientOcclusion { intensity, radius } if fx.ao.is_none() => {
+                fx.ao = Some(AmbientOcclusion {
+                    intensity,
+                    radius,
+                    ..AmbientOcclusion::default()
+                });
+            }
+            Effect::Vignette { intensity, blur } if fx.vignette.is_none() => {
+                fx.vignette = Some(Vignette {
+                    intensity,
+                    blur,
+                    ..Vignette::default()
+                });
+            }
+            _ => {}
+        }
+    }
+    fx
 }
