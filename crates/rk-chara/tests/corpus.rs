@@ -111,3 +111,30 @@ fn more_outfits_names_decode() {
     // reader that failed to decode the keys would show up here.
     assert_eq!(shown, extra);
 }
+
+/// The physics of real characters is told apart by what it came with:
+/// hair, clothes, the body and accessories each have some.
+#[test]
+fn physics_knows_hair_clothes_body_and_accessories() {
+    use rk_chara::physics::Belongs;
+    let Ok(cfg) = rk_core::Config::load() else { return };
+    let Ok(game) = rk_vfs::Game::open(&cfg) else { return };
+    let mut files = Vec::new();
+    rk_core::walk_files(&cfg.userdata().join("chara/female"), "png", &mut files);
+    files.sort();
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
+    for p in files.iter().take(5) {
+        let Ok(card) = rk_card::Card::load(p) else { continue };
+        let Ok(chara) = rk_chara::build::build(&game, &card, &Default::default()) else {
+            continue;
+        };
+        assert_eq!(chara.physics.belongs.len(), chara.physics.bones.len());
+        for b in &chara.physics.belongs {
+            *seen.entry(format!("{b:?}")).or_default() += 1;
+        }
+    }
+    eprintln!("physics by kind over 5 cards: {seen:?}");
+    for kind in [Belongs::Hair, Belongs::Body] {
+        assert!(seen.contains_key(&format!("{kind:?}")), "no {kind:?} physics");
+    }
+}

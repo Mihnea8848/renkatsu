@@ -990,6 +990,7 @@ const ICON_REACH: f32 = 13.0;
 fn pick(st: &State, view: &View, pos: Pos2) -> Option<ObjectId> {
     let icon = icons(st)
         .into_iter()
+        .filter(|(id, ..)| pickable(st, *id))
         .filter_map(|(id, _, world)| Some((id, view.screen(world)?.distance(pos))))
         .filter(|(_, distance)| *distance < ICON_REACH)
         .min_by(|a, b| a.1.total_cmp(&b.1));
@@ -998,7 +999,22 @@ fn pick(st: &State, view: &View, pos: Pos2) -> Option<ObjectId> {
     }
     let (origin, dir) = view.ray(pos);
     let live = st.live.as_ref()?;
-    live.pick(st.doc.scene(), origin, dir).map(|(id, _)| id)
+    live.pick(st.doc.scene(), origin, dir)
+        .map(|(id, _)| id)
+        .filter(|id| pickable(st, *id))
+}
+
+/// Whether the Select mode's filter lets an object be picked: lights and
+/// cameras go together.
+fn pickable(st: &State, id: ObjectId) -> bool {
+    let Some(filter) = st.pick_filter else { return true };
+    let Some(kind) = st.doc.scene().get(id).map(|o| o.kind()) else {
+        return false;
+    };
+    match filter {
+        crate::kinds::Kind::Light => matches!(kind, crate::kinds::Kind::Light | crate::kinds::Kind::Camera),
+        other => kind == other,
+    }
 }
 
 /// The objects a box on the screen touches: a character by any of its
@@ -1017,6 +1033,7 @@ fn boxed(st: &State, view: &View, area: Rect) -> Vec<ObjectId> {
             }
         }
     }
+    found.retain(|id| pickable(st, *id));
     let order = |id: &ObjectId| st.doc.scene().objects().iter().position(|o| o.id == *id);
     found.sort_by_key(order);
     found

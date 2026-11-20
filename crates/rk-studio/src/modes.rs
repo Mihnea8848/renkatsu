@@ -238,7 +238,7 @@ pub fn actions(kind: Kind) -> &'static [Action] {
         ],
         Kind::Light => &[
             (icon::LIGHTBULB, "Type", true),
-            (icon::PALETTE, "Colour", false),
+            (icon::PALETTE, "Colour", true),
             (icon::CIRCLE_HALF, "Shadows", true),
         ],
         Kind::Camera => &[

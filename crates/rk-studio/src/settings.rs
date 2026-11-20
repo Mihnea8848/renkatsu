@@ -128,6 +128,9 @@ pub struct Settings {
     pub show_news: bool,
     /// The keys and mouse buttons pressed show in the viewport's corner.
     pub show_inputs: bool,
+    /// Whose physics moves while the scene plays: hair, clothes, the body
+    /// and accessories.
+    pub physics: [bool; 4],
     /// Cut-out edges, such as lashes and lace, are smoothed
     /// (alpha-to-coverage); the game draws them hard.
     pub smooth_edges: bool,
@@ -151,6 +154,7 @@ impl Default for Settings {
             check_updates: true,
             show_news: true,
             show_inputs: false,
+            physics: [true; 4],
             smooth_edges: true,
             snap_steps: SNAP_STEPS,
             keys: Default::default(),
@@ -240,6 +244,7 @@ mod tests {
             check_updates: false,
             show_news: false,
             show_inputs: true,
+            physics: [true; 4],
             smooth_edges: false,
             snap_steps: [0.5, 45.0, 0.25, 2.0],
             keys: [("focus".to_owned(), vec!["Ctrl+F".to_owned()])].into(),

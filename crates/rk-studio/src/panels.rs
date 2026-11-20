@@ -18,7 +18,7 @@ use egui_dock::{DockState, NodeIndex, TabViewer};
 use egui_phosphor::regular as icon;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Panel {
     Viewport,
     Outliner,
@@ -59,6 +59,30 @@ impl Panel {
             Panel::Timeline => icon::FILM_STRIP,
         }
     }
+}
+
+/// Where the panels' layout is kept between runs: beside the settings.
+fn layout_path() -> Option<PathBuf> {
+    Some(crate::settings::Settings::path()?.with_file_name("layout.toml"))
+}
+
+/// The layout the panels were left in, when it was kept and still shows
+/// the viewport.
+pub fn saved_layout() -> Option<DockState<Panel>> {
+    let text = std::fs::read_to_string(layout_path()?).ok()?;
+    let dock: DockState<Panel> = toml::from_str(&text).ok()?;
+    dock.find_tab(&Panel::Viewport).is_some().then_some(dock)
+}
+
+/// Keeps the panels' layout for the next run.
+pub fn save_layout(dock: &DockState<Panel>) -> anyhow::Result<()> {
+    let path = layout_path().ok_or_else(|| anyhow::anyhow!("no configuration folder"))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // TOML, as it keeps the sizes not set yet (NaN), which JSON cannot.
+    std::fs::write(&path, toml::to_string(dock)?)?;
+    Ok(())
 }
 
 /// Unity's arrangement, with the viewport given as much room as the side
@@ -952,7 +976,8 @@ pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
         } else {
             kind.label()
         };
-        if item(ui, kind.glyph(), kind.color(), text, true) {
+        // An item has no model to add yet.
+        if item(ui, kind.glyph(), kind.color(), text, kind != Kind::Item) {
             st.run(Command::Add(kind));
         }
     }
@@ -1046,7 +1071,7 @@ fn timeline(ui: &mut Ui, k: &Look) {
     let t = &k.t;
     let bar = toolbar(ui, k, |ui| {
         for g in [icon::SKIP_BACK, icon::PLAY, icon::SKIP_FORWARD] {
-            let _ = icon_button(ui, k, g, false);
+            ui.add_enabled_ui(false, |ui| icon_button(ui, k, g, false));
         }
         bar_divider(ui, k);
         ui.add_space(2.0);
@@ -1134,4 +1159,20 @@ fn timeline(ui: &mut Ui, k: &Look) {
     );
     hair_v(&p, x, ruler.top(), body.bottom(), t.select);
     ui.allocate_rect(body, Sense::hover());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_layout_comes_back_as_it_was() {
+        let mut dock = default_layout(Panel::Content);
+        let console = dock.find_tab(&Panel::Console).unwrap();
+        dock.set_active_tab(console).unwrap();
+        let text = toml::to_string(&dock).unwrap();
+        let back: DockState<Panel> = toml::from_str(&text).unwrap();
+        assert_eq!(toml::to_string(&back).unwrap(), text);
+        assert!(back.find_tab(&Panel::Viewport).is_some());
+    }
 }

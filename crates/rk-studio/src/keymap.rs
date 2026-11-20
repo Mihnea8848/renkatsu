@@ -685,6 +685,8 @@ impl State {
             }
             A::SelectNone => self.doc.select_many(&[]),
             A::SelectChildren => self.run(Command::SelectChildren),
+            // The Pose tool waits for posing by hand.
+            A::Tool(tool) if tool as usize == crate::viewport::POSE_TOOL => {}
             A::Tool(tool) => self.tool = tool as usize,
             A::ToggleSpace => {
                 self.gizmo.space = match self.gizmo.space {

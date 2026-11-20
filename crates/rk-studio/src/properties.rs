@@ -215,7 +215,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         p,
                         k,
                         Pos2::new(field.right() - 12.0, field.center().y + 1.0),
-                        icon::CARET_DOWN,
+                        widgets::caret_of(&resp),
                         10.0,
                         color,
                     );
@@ -370,7 +370,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     (*from_camera).then_some("The light follows the camera"),
                     Some("A light has no size"),
                 ],
-                Content::Camera { .. } => [Some("Not available yet"); 3],
+                Content::Camera { .. } => [None, None, Some("A camera has no size")],
+                Content::Item => [None; 3],
                 // CharaStudio moves and turns a map; it keeps its size.
                 Content::Map { .. } => [None, None, Some("A map keeps its size")],
                 _ => [Some("Not available yet"); 3],
@@ -453,7 +454,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             p,
                             k,
                             Pos2::new(field.right() - 12.0, field.center().y + 1.0),
-                            icon::CARET_DOWN,
+                            widgets::caret_of(&resp),
                             10.0,
                             color,
                         );
@@ -662,13 +663,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         *light = LightKind::ALL[chosen];
                     });
                     row(ui, k, "Colour", None, |ui, rect| {
-                        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
-                        widgets::value_box(ui, k, rect, &text);
-                        let swatch =
-                            Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-                        ui.painter()
-                            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+                        widgets::color_field(ui, k, rect, id.with("colour"), color);
                     });
                     if *light == LightKind::Character {
                         row(ui, k, "Direction", None, |ui, rect| {
@@ -789,7 +784,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Blur", blur, 0.0, 1.0);
                         }
                         Effect::Fog { color, start, end } => {
-                            color_row(ui, k, color);
+                            color_row(ui, k, id, color);
                             number(ui, "Start", start, 0.0, 1000.0);
                             number(ui, "End", end, 0.0, 1000.0);
                         }
@@ -798,7 +793,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Aperture", aperture, 0.0, 1.0);
                         }
                         Effect::SunShafts { color, intensity } => {
-                            color_row(ui, k, color);
+                            color_row(ui, k, id, color);
                             number(ui, "Intensity", intensity, 0.0, 4.0);
                         }
                     }
@@ -960,7 +955,7 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
         p,
         k,
         Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
-        icon::CARET_DOWN,
+        widgets::caret_of(&resp),
         10.0,
         color,
     );
@@ -1400,12 +1395,34 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str,
         child.spacing_mut().item_spacing.x = 4.0;
         let w = child.available_width() - k.field() - 4.0;
         widgets::search(&mut child, k, &mut st.property_search, "Search", w);
-        let _ = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
+        let query = st.property_search.trim().to_lowercase();
+        ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
+        let gear = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
+        egui::Popup::menu(&gear).show(|ui| {
+            for (text, open) in [("Expand all", true), ("Collapse all", false)] {
+                if ui.button(text).clicked() {
+                    st.sections.iter_mut().for_each(|s| *s = open);
+                    ui.close();
+                }
+            }
+        });
     }
 }
 
 /// The header of a section; returns whether the section is open.
+/// Where the rows find what the header's search box holds.
+const SEARCH: &str = "property search";
+
+/// What the search box holds, lowercase; empty for nothing.
+fn searched(ui: &Ui) -> String {
+    ui.data(|d| d.get_temp::<String>(Id::new(SEARCH))).unwrap_or_default()
+}
+
 fn section(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> bool {
+    // While searching, the matching rows stand alone, without sections.
+    if !searched(ui).is_empty() {
+        return true;
+    }
     let t = &k.t;
     let h = match k.d.props {
         Props::Details => k.d.row + 2.0,
@@ -1460,6 +1477,9 @@ fn section(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> 
 
 /// Space under the rows of an open section.
 fn section_end(ui: &mut Ui, k: &Look) {
+    if !searched(ui).is_empty() {
+        return;
+    }
     let gap = match k.d.props {
         Props::Details => 0.0,
         Props::Inspector => 5.0,
@@ -1557,6 +1577,13 @@ fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&m
 /// A row as `row`, `extra` taller, its name on the first line and its
 /// value growing down from there.
 fn sized_row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
+    let query = searched(ui);
+    if query.is_empty() || name.to_lowercase().contains(&query) {
+        sized_row_shown(ui, k, name, off, extra, add);
+    }
+}
+
+fn sized_row_shown(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
     let t = &k.t;
     let name_color = if off.is_some() { t.text_dim } else { t.text };
     let (h, share, least) = match k.d.props {
@@ -1682,13 +1709,8 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed:
 }
 
 /// A colour as its swatch and its hex value.
-fn color_row(ui: &mut Ui, k: &Look, color: &[f32; 3]) {
+fn color_row(ui: &mut Ui, k: &Look, id: Id, color: &mut [f32; 3]) {
     row(ui, k, "Colour", None, |ui, rect| {
-        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
-        widgets::value_box(ui, k, rect, &text);
-        let swatch = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-        ui.painter()
-            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+        widgets::color_field(ui, k, rect, id.with("colour"), color);
     });
 }

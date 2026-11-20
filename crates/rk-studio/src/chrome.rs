@@ -213,10 +213,167 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
             *reset = true;
             ui.close();
         }
-        let _ = ui.button("Save layout");
     });
     let w = (right.available_width() - 8.0).clamp(120.0, 260.0);
-    widgets::search(&mut right, k, &mut st.command_search, "Search", w);
+    let resp = widgets::search(&mut right, k, &mut st.command_search, "Search", w);
+    command_results(right.ctx(), k, st, &resp);
+}
+
+/// One thing the search box found: what it is called, where it belongs,
+/// its key, and what picking it does.
+struct Found {
+    glyph: &'static str,
+    color: egui::Color32,
+    name: String,
+    keys: String,
+    pick: Pick,
+}
+
+enum Pick {
+    Action(crate::keymap::Action),
+    Object(crate::scene::ObjectId),
+    Card(std::path::PathBuf),
+}
+
+/// What the search box finds, under it while it is being typed in: the
+/// commands, the scene's objects and the project's characters.
+fn command_results(ctx: &egui::Context, k: &Look, st: &mut State, resp: &egui::Response) {
+    use crate::keymap::{Group, ACTIONS};
+    let query = st.command_search.trim().to_lowercase();
+    if !resp.has_focus() || query.is_empty() {
+        return;
+    }
+    let mut groups: Vec<(&str, Vec<Found>)> = Vec::new();
+    let commands: Vec<Found> = ACTIONS
+        .iter()
+        .filter(|d| d.group != Group::Fly && d.name.to_lowercase().contains(&query))
+        .map(|d| Found {
+            glyph: "",
+            color: k.t.text_dim,
+            name: d.name.to_owned(),
+            keys: st.keys.text(d.action),
+            pick: Pick::Action(d.action),
+        })
+        .collect();
+    groups.push(("Commands", commands));
+    {
+        let scene = st.doc.scene();
+        let objects: Vec<Found> = scene
+            .objects()
+            .iter()
+            .filter(|o| o.name.to_lowercase().contains(&query))
+            .map(|o| Found {
+                glyph: o.content.glyph(),
+                color: st.library.color_of(&o.content),
+                name: o.name.clone(),
+                keys: String::new(),
+                pick: Pick::Object(o.id),
+            })
+            .collect();
+        groups.push(("In the scene", objects));
+        let cards: Vec<Found> = st
+            .library
+            .characters
+            .iter()
+            .filter(|c| c.name.to_lowercase().contains(&query))
+            .map(|c| Found {
+                glyph: crate::kinds::Kind::Character.glyph(),
+                color: if c.male {
+                    crate::kinds::Kind::MALE
+                } else {
+                    crate::kinds::Kind::Character.color()
+                },
+                name: c.name.clone(),
+                keys: "Add to scene".to_owned(),
+                pick: Pick::Card(c.file.clone()),
+            })
+            .collect();
+        groups.push(("Characters", cards));
+    }
+    groups.retain(|(_, list)| !list.is_empty());
+    let total: usize = groups.iter().map(|(_, l)| l.len()).sum();
+    // The highlighted one moves with the arrow keys; Enter picks it.
+    let at_id = egui::Id::new("command search at");
+    let mut at = ctx.data(|d| d.get_temp::<usize>(at_id)).unwrap_or(0);
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::ArrowDown) {
+            at += 1;
+        }
+        if i.key_pressed(egui::Key::ArrowUp) {
+            at = at.saturating_sub(1);
+        }
+    });
+    at = at.min(total.saturating_sub(1));
+    let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+    let rect = resp.rect;
+    let width = rect.width().max(320.0);
+    let mut picked = None;
+    egui::Area::new(egui::Id::new("command search results"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::Pos2::new(rect.right() - width, rect.bottom() + 4.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width - 12.0);
+                if total == 0 {
+                    ui.label(egui::RichText::new("No results").color(k.t.text_dim));
+                    return;
+                }
+                let mut n = 0;
+                for (heading, list) in &groups {
+                    ui.label(egui::RichText::new(*heading).font(k.small()).color(k.t.text_dim));
+                    for found in list.iter().take(8) {
+                        let on = n == at;
+                        let (row, hit) = ui
+                            .allocate_exact_size(egui::Vec2::new(ui.available_width(), k.d.row), egui::Sense::click());
+                        if on || hit.hovered() {
+                            ui.painter()
+                                .rect_filled(row, k.radius(), if on { k.t.select } else { k.t.hover });
+                        }
+                        let mut x = row.left() + 8.0;
+                        if !found.glyph.is_empty() {
+                            widgets::glyph(
+                                ui.painter(),
+                                k,
+                                egui::Pos2::new(x + 7.0, row.center().y),
+                                found.glyph,
+                                14.0,
+                                found.color,
+                            );
+                            x += 22.0;
+                        }
+                        let text = if on { k.t.text_bright } else { k.t.text };
+                        widgets::label(ui.painter(), k, egui::Pos2::new(x, row.center().y), &found.name, text);
+                        ui.painter().text(
+                            egui::Pos2::new(row.right() - 8.0, row.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            &found.keys,
+                            k.small(),
+                            k.t.text_dim,
+                        );
+                        if hit.clicked() || (on && enter) {
+                            picked = Some(n);
+                        }
+                        n += 1;
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+        });
+    ctx.data_mut(|d| d.insert_temp(at_id, at));
+    let Some(picked) = picked else { return };
+    let Some(found) = groups.iter().flat_map(|(_, l)| l.iter().take(8)).nth(picked) else {
+        return;
+    };
+    match &found.pick {
+        Pick::Action(action) => st.act(*action, ctx),
+        Pick::Object(id) => {
+            st.doc.select_many(&[*id]);
+            st.focus_pending = Some(*id);
+        }
+        Pick::Card(card) => st.run(crate::state::Command::AddCard(card.clone())),
+    }
+    st.command_search.clear();
+    resp.surrender_focus();
 }
 
 /// Minimise, maximise or restore, and close, at the title bar's right end,
@@ -500,14 +657,17 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
             st.shortcuts_open = true;
             ui.close();
         }
-        let _ = ui.button("About Renkatsu");
+        if ui.button("About Renkatsu").clicked() {
+            st.about_open = true;
+            ui.close();
+        }
     });
 }
 
 /// Unreal 5's play controls, centred in the menu row: flat icon buttons
 /// with no box around them, a soft background only on hover or while
-/// held, thin dividers either side of the group, and the simulation's
-/// options behind a vertical three-dot button. Play is green; pause and
+/// held, thin dividers either side of the group, and which physics moves
+/// behind a vertical three-dot button. Play is green; pause and
 /// stop stay grey while nothing runs, and stop turns red once it does.
 fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     let t = &k.t;
@@ -527,7 +687,7 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
         st.keys.tip("Play", Action::PlayPause),
         st.keys.tip("Pause", Action::PlayPause),
         st.keys.tip("Stop", Action::Stop),
-        "Simulation options".to_owned(),
+        "Physics".to_owned(),
     ];
     let mut x = group.left();
     for (i, tip) in tips.into_iter().enumerate() {
@@ -587,9 +747,14 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
                     p.circle_filled(c + Vec2::new(0.0, dy), 1.6, color);
                 }
                 egui::Popup::menu(&resp).show(|ui| {
-                    let _ = ui.button("Simulate hair");
-                    let _ = ui.button("Simulate clothes");
-                    let _ = ui.button("Reset when stopped");
+                    ui.label(egui::RichText::new("Physics").font(k.small()).color(t.text_dim));
+                    let names = ["Hair", "Clothes", "Body", "Accessories"];
+                    for (i, name) in names.into_iter().enumerate() {
+                        if widgets::check_item(ui, k, st.settings.physics[i], name, "").clicked() {
+                            st.settings.physics[i] = !st.settings.physics[i];
+                            st.settings_changed = true;
+                        }
+                    }
                 });
             }
         }
