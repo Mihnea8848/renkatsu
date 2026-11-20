@@ -389,7 +389,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             section_end(ui, k);
         }
-        if let Some((to, name, target_kind)) = &target {
+        // An effect has no place to follow; a map's own just belongs to it.
+        let shown_target = target.as_ref().filter(|_| kind != Kind::Effect);
+        if let Some((to, name, target_kind)) = shown_target {
             if section(ui, k, st, 15, "Attached to") {
                 row(ui, k, "Object", None, |ui, rect| {
                     let w = widgets::text_width(ui, "Detach", k.font()).ceil() + 18.0;
@@ -762,7 +764,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     match effect {
                         Effect::ColorFilter { filter, blend } => {
                             row(ui, k, "Filter", None, |ui, rect| {
-                                widgets::combo(ui, k, rect, id.with("filter"), filter, &crate::scene::FILTERS);
+                                // First the map's own, then the game's list.
+                                let names: Vec<&str> =
+                                    std::iter::once("Map's own").chain(crate::scene::FILTERS).collect();
+                                let mut chosen = filter.map_or(0, |f| f + 1);
+                                widgets::combo(ui, k, rect, id.with("filter"), &mut chosen, &names);
+                                *filter = chosen.checked_sub(1);
                             });
                             number(ui, "Blend", blend, 0.0, 1.0);
                         }

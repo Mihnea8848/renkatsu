@@ -93,9 +93,12 @@ pub fn open(game: &Game, bundle: &str) -> Result<Arc<LoadedBundle>> {
     all.into_iter().next().ok_or_else(|| anyhow!("no bundle {bundle}"))
 }
 
-/// The map's `SunLightInfo`, with the bundle and the file it is in, to
+/// A map's `SunLightInfo`, with the bundle and the file it is in, to
 /// follow what it points at.
-fn sun_light(game: &Game, bundle: &str) -> Result<Option<(SunLightInfo, Arc<LoadedBundle>, Arc<AssetFile>)>> {
+type SunLight = (SunLightInfo, Arc<LoadedBundle>, Arc<AssetFile>);
+
+/// The map's `SunLightInfo`, when it has one.
+fn sun_light(game: &Game, bundle: &str) -> Result<Option<SunLight>> {
     let loaded = open(game, bundle)?;
     for file in &loaded.files {
         for obj in file.sf.objects_of(class::MONO_BEHAVIOUR) {
