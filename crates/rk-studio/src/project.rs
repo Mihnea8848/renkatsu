@@ -38,8 +38,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The version of the project and scene files this build writes.
-/// 2: post-processing effects are objects of the scene.
-pub const FORMAT: u32 = 2;
+/// 2: post-processing effects are objects of the scene. 3: the character
+/// light is CharaStudio's, fixed in the scene with two angles.
+pub const FORMAT: u32 = 3;
 
 /// The extension of the project file.
 pub const EXTENSION: &str = "rkproj";
@@ -545,6 +546,11 @@ impl Project {
         // renderer always drew.
         if file.format < 2 {
             file.scene.add_first_effects();
+        }
+        // Older character lights followed the camera at an angle of their
+        // own; they become CharaStudio's.
+        if file.format < 3 {
+            file.scene.reset_chara_lights();
         }
         Ok(file.scene)
     }

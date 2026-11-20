@@ -1237,6 +1237,7 @@ impl Live {
             Some(light) => {
                 if let Content::Light {
                     from_camera,
+                    angles,
                     intensity,
                     shadows,
                     color,
@@ -1246,11 +1247,11 @@ impl Live {
                     env.light_intensity = intensity;
                     env.light_color = color;
                     env.shadows.enabled = shadows;
-                    // A light shines along its own forward axis, wherever
-                    // its folders turned it.
-                    let turn = scene.parent_world(light.id).to_scale_rotation_translation().1;
-                    let own = Vec3::from(light.light_direction());
-                    env.light_dir = (!from_camera).then(|| (turn * own).to_array());
+                    // CharaStudio's rig, fixed in the scene or kept to
+                    // the view.
+                    let camera = self.cam.orbit.camera();
+                    let follow = from_camera.then_some((camera.eye, camera.target));
+                    env.light_dir = Some(crate::scene::chara_light_direction(angles, follow).to_array());
                 }
             }
             None => {

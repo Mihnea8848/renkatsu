@@ -1205,9 +1205,9 @@ impl Renderer {
         let to_eye = (camera.eye - camera.target).normalize_or_zero();
         // Key light from the camera's upper left, as a viewer expects.
         let right = Vec3::Y.cross(-to_eye).normalize_or_zero();
-        // One light for the characters and the map: its sun, when one is
-        // set.
-        let light_dir = self.shown_map().map(|m| m.sun_dir()).or(env.light_dir);
+        // The characters' own light, as CharaStudio's character light; the
+        // map's sun when none is given.
+        let light_dir = env.light_dir.or(self.shown_map().map(|m| m.sun_dir()));
         let light = match light_dir {
             Some(d) => Vec3::from(d).normalize_or_zero(),
             None => (to_eye + Vec3::Y * 0.35 - right * 0.4).normalize(),
