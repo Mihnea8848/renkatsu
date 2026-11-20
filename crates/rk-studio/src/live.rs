@@ -99,6 +99,9 @@ struct MapRecipe {
     time: MapTime,
 }
 
+/// The name of the colour table each time of day of a map takes.
+type TimeFilters = Vec<(MapTime, Option<String>)>;
+
 /// A map a job is building.
 struct PendingMap {
     id: ObjectId,
@@ -124,6 +127,11 @@ struct MapState {
     /// What of the set map can be stood on, and where it is while it
     /// shows.
     ground: Option<MapGround>,
+    /// The colour filter of each of the set map's times of day, by the
+    /// name of its table, read from the map's bundle; and the job reading
+    /// it.
+    filters: Option<(PathBuf, TimeFilters)>,
+    reading_filters: Option<(PathBuf, Handle<TimeFilters>)>,
     placed: Option<rk_render::map::MapPlacement>,
 }
 
@@ -197,10 +205,13 @@ struct Pending {
 /// What a build job hands back.
 struct Prepared {
     actor: Actor,
-    /// The colour table of Studio's first colour filter, when the build
-    /// was asked to look for it.
-    filter: Option<Option<Arc<Image>>>,
+    /// The colour tables of Studio's colour filters, when the build was
+    /// asked to look for them.
+    filters: Option<Filters>,
 }
+
+/// Studio's colour filters by their number (`SceneInfo.aceNo`).
+type Filters = std::collections::BTreeMap<i32, Arc<Image>>;
 
 /// How far a character of the scene is.
 #[derive(Debug, Clone, PartialEq)]
@@ -509,18 +520,15 @@ pub struct Live {
     pub keep_depth: bool,
     /// The camera was framed on a character once.
     framed: bool,
-    /// The colour table of Studio's first colour filter, once it was looked
-    /// for in the game; the inner `None` when the game has none.
-    filter: Option<Option<Arc<Image>>>,
+    /// The colour tables of Studio's colour filters, once they were looked
+    /// for in the game; empty when the game has none.
+    filters: Option<Filters>,
     /// Where the bones are that objects are attached to, as of the last
     /// frame followed.
     poses: Poses,
     /// The scene's map.
     map: MapState,
 }
-
-/// The colour filter a new CharaStudio scene uses (`SceneInfo.aceNo`).
-const DEFAULT_COLOR_FILTER: i32 = 0;
 
 /// How the viewport outlines the selected characters.
 pub struct Outline {
@@ -573,7 +581,7 @@ impl Live {
             grid: GridPass::new(&render_state.device),
             keep_depth: false,
             framed: false,
-            filter: None,
+            filters: None,
             poses: Poses::default(),
             map: MapState::default(),
         })
@@ -595,7 +603,7 @@ impl Live {
             self.cam.forget(focus.object);
         }
         self.framed = false;
-        self.filter = None;
+        self.filters = None;
         if let Some(pending) = self.map.pending.take() {
             pending.handle.progress.cancel();
         }
@@ -783,7 +791,7 @@ impl Live {
                     None => continue,
                 }
             };
-            let want_filter = self.filter.is_none();
+            let want_filters = self.filters.is_none();
             let theirs = recipe.clone();
             // A build that is waited for shows nowhere.
             let show = if self.patient { Show::Quiet } else { self.show_builds };
@@ -791,8 +799,8 @@ impl Live {
                 let started = std::time::Instant::now();
                 let mut actor = Self::build(&game, id, &theirs)?;
                 actor.took = started.elapsed().as_secs_f32();
-                let filter = want_filter.then(|| rk_chara::build::color_filter(&game, DEFAULT_COLOR_FILTER));
-                Ok(Prepared { actor, filter })
+                let filters = want_filters.then(|| rk_chara::build::color_filters(&game));
+                Ok(Prepared { actor, filters })
             });
             jobs.name_when_done(&format!("Loaded {name}"));
             self.pending.push(Pending {
@@ -816,9 +824,9 @@ impl Live {
             };
             let Pending { id, recipe, name, .. } = self.pending.remove(0);
             match result {
-                Ok(Prepared { mut actor, filter }) => {
-                    if self.filter.is_none() {
-                        self.filter = filter;
+                Ok(Prepared { mut actor, filters }) => {
+                    if self.filters.is_none() {
+                        self.filters = filters;
                     }
                     let file = recipe.card.file_name().unwrap_or_default().to_string_lossy();
                     log.info(format!("Loaded {name} from {file} in {:.1} s", actor.took));
@@ -912,6 +920,58 @@ impl Live {
             }
         }
         self.follow_map(scene, project, jobs, log);
+        self.follow_map_filters(project, games, jobs);
+    }
+
+    /// Reads which colour filter each time of day of the set map takes,
+    /// from its bundle in the game or a package, once per map.
+    fn follow_map_filters(&mut self, project: &Project, games: &mut Games, jobs: &mut Jobs) {
+        let state = &mut self.map;
+        let Some((_, recipe)) = state.set.as_ref() else { return };
+        let sidecar = recipe.sidecar.clone();
+        let known = state.filters.as_ref().is_some_and(|f| f.0 == sidecar)
+            || state.reading_filters.as_ref().is_some_and(|r| r.0 == sidecar);
+        if !known {
+            let Some(game) = games.ready(&project.mods_dir()) else {
+                return;
+            };
+            let path = sidecar.clone();
+            let handle = jobs.start("Reading the map's filters", Show::Quiet, false, move |_| {
+                let file = crate::maps::MapFile::read(&path)?;
+                let bundle = file.bundles.first().map(|b| b.path.clone()).unwrap_or_default();
+                let read = rk_map::scene::time_filters(&game, &bundle)?;
+                Ok(MapTime::ALL
+                    .into_iter()
+                    .map(|t| {
+                        let name = read.iter().find(|(time, _)| *time == t.time_of_day());
+                        (t, name.and_then(|(_, n)| n.clone()))
+                    })
+                    .collect())
+            });
+            state.reading_filters = Some((sidecar, handle));
+        }
+        let done = state
+            .reading_filters
+            .as_ref()
+            .and_then(|(_, h)| if self.patient { Some(h.wait()) } else { h.try_take() });
+        if let Some(result) = done {
+            let (path, _) = state.reading_filters.take().expect("looked at above");
+            // A map whose bundle is not there keeps the first filter.
+            state.filters = Some((path, result.unwrap_or_default()));
+        }
+    }
+
+    /// The number of the colour filter the set map takes at its time of
+    /// day, among Studio's filters.
+    fn map_filter(&self) -> Option<i32> {
+        let (_, recipe) = self.map.set.as_ref()?;
+        let (path, times) = self.map.filters.as_ref()?;
+        if *path != recipe.sidecar {
+            return None;
+        }
+        let name = times.iter().find(|(t, _)| *t == recipe.time)?.1.as_ref()?;
+        let filters = self.filters.as_ref()?;
+        filters.iter().find(|(_, table)| table.name == *name).map(|(id, _)| *id)
     }
 
     /// Brings the renderer's map in line with the scene's: builds the map
@@ -1164,7 +1224,7 @@ impl Live {
     /// picture, as in CharaStudio.
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
-        let mut effects = scene_effects(scene, self.filter.clone().flatten());
+        let mut effects = scene_effects(scene, self.filters.as_ref(), self.map_filter());
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1435,17 +1495,36 @@ fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 
 /// The effects the scene's objects ask for: the first of each that shows.
 /// An effect no object asks for is off.
-fn scene_effects(scene: &Scene, lut: Option<std::sync::Arc<rk_chara::Image>>) -> StudioEffects {
+fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i32>) -> StudioEffects {
     use crate::scene::Effect;
     use rk_render::effects::{AmbientOcclusion, Bloom, ColorFilter, Vignette};
     let mut fx = StudioEffects::default();
-    for object in scene.objects().iter().filter(|o| scene.shown(o.id)) {
+    // A shown map's own effects come first, so they win over the scene's.
+    let under_map = |o: &&crate::scene::Object| {
+        let mut at = o.parent;
+        while let Some(p) = at.and_then(|p| scene.get(p)) {
+            if matches!(p.content, Content::Map { .. }) {
+                return true;
+            }
+            at = p.parent;
+        }
+        false
+    };
+    let mut objects: Vec<_> = scene.objects().iter().filter(|o| scene.shown(o.id)).collect();
+    objects.sort_by_key(|o| !under_map(o));
+    for object in objects {
         let Content::Effect { effect } = &object.content else {
             continue;
         };
         match *effect {
-            Effect::ColorFilter { .. } if fx.color.is_none() => {
-                fx.color = lut.clone().map(|lut| ColorFilter { lut, exposure: 1.0 });
+            Effect::ColorFilter { filter, blend } if fx.color.is_none() => {
+                let number = filter.map_or(map_filter.unwrap_or(0), |f| f as i32);
+                let lut = filters.and_then(|f| f.get(&number)).cloned();
+                fx.color = lut.map(|lut| ColorFilter {
+                    lut,
+                    exposure: 1.0,
+                    blend,
+                });
             }
             Effect::Bloom {
                 intensity,
@@ -1477,4 +1556,53 @@ fn scene_effects(scene: &Scene, lut: Option<std::sync::Arc<rk_chara::Image>>) ->
         }
     }
     fx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::{Effect, MapTime};
+
+    fn table(name: &str) -> Arc<Image> {
+        Arc::new(Image {
+            name: name.to_owned(),
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            srgb: false,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn a_maps_own_filter_follows_its_time_and_wins_over_the_scenes() {
+        let filters: Filters = [(0, table("Lut_Amount")), (1, table("Lut_TimeSunset1"))].into();
+        let mut scene = Scene::new();
+        let lut = |scene: &Scene, map: Option<i32>| {
+            scene_effects(scene, Some(&filters), map)
+                .color
+                .map(|c| c.lut.name.clone())
+        };
+        // The scene's own: the first filter.
+        assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_Amount"));
+        // A map's own takes its time's filter, over the scene's.
+        let map = scene.add("Hallway", Content::map("Maps/a.rkmap".into(), MapTime::Evening), None);
+        let own = scene.add(
+            "Colour filter",
+            Content::Effect {
+                effect: Effect::ColorFilter {
+                    filter: None,
+                    blend: 0.0,
+                },
+            },
+            None,
+        );
+        scene.get_mut(own).unwrap().parent = Some(map);
+        assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_TimeSunset1"));
+        // Without the map's filter known yet, the first.
+        assert_eq!(lut(&scene, None).as_deref(), Some("Lut_Amount"));
+        // Hidden, the scene's is used again.
+        scene.get_mut(own).unwrap().visible = false;
+        assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_Amount"));
+    }
 }

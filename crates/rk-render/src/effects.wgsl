@@ -20,7 +20,8 @@ struct Fx {
     uv_to_view: vec4f,
     // Threshold, intensity, exposure, whether a colour table is bound.
     bloom: vec4f,
-    // Intensity and blur, as the material gets them.
+    // Intensity and blur, as the material gets them. z: the colour
+    // table's blend amount.
     vignette: vec4f,
     // The 4 by 4 random texture: cosine, sine and a ray offset.
     rand: array<vec4f, 16>,
@@ -187,10 +188,34 @@ fn fs_blur_plus(in: FxOut) -> @location(0) vec4f {
 
 // ---- Bloom's last pass and Amplify Color ----
 
+// A texel of the blend cache. Hidden/Amplify Color/BlendCache (program 0)
+// fades the table to the neutral one (CreateDefaultLut, bytes cut down)
+// by the blend amount, into an eight bit target.
+fn blend_texel(p: vec2i, size: vec2i) -> vec3f {
+    let q = vec2u(clamp(p, vec2i(0), size - 1));
+    let table = textureLoad(lut_tex, q, 0).rgb;
+    let neutral = vec3f(vec3u(q.x % 32u, q.y, q.x / 32u) * 255u / 31u) / 255.0;
+    return floor((table + fx.vignette.z * (neutral - table)) * 255.0 + 0.5) / 255.0;
+}
+
+// The blend cache read with its bilinear, clamped sampler.
+fn blend_cache(uv: vec2f) -> vec3f {
+    let size = vec2i(textureDimensions(lut_tex));
+    let p = uv * vec2f(size) - 0.5;
+    let p0 = floor(p);
+    let w = p - p0;
+    let i = vec2i(p0);
+    let low = mix(blend_texel(i, size), blend_texel(i + vec2i(1, 0), size), w.x);
+    let high = mix(blend_texel(i + vec2i(0, 1), size), blend_texel(i + vec2i(1, 1), size), w.x);
+    return mix(low, high, w.y);
+}
+
 // Hidden/Blend pass 1 (program 0) adds the blurred bright parts to the
 // picture. Hidden/Amplify Color/Base pass 10 (HDR camera, linear colour
 // space, no tone mapping, no dithering; program 25) then looks the colour
-// up in the 32-slice table, in gamma space.
+// up in the 32-slice table, in gamma space. With a blend amount the game
+// draws Hidden/Amplify Color/Blend pass 10 (program 8), the same lookup in
+// the blend cache.
 @fragment
 fn fs_color(in: FxOut) -> @location(0) vec4f {
     var c = textureSampleLevel(tex_a, samp, in.uv, 0.0);
@@ -204,8 +229,15 @@ fn fs_color(in: FxOut) -> @location(0) vec4f {
     let f = fract(blue);
     let slice = blue - f;
     let uv0 = vec2f(g.r * 0.0302734375 + 0.00048828125 + slice * 0.03125, g.g * 0.96875 + 0.015625);
-    let a = textureSampleLevel(lut_tex, samp, uv0, 0.0).rgb;
-    let b = textureSampleLevel(lut_tex, samp, uv0 + vec2f(0.03125, 0.0), 0.0).rgb;
+    var a: vec3f;
+    var b: vec3f;
+    if fx.vignette.z == 0.0 {
+        a = textureSampleLevel(lut_tex, samp, uv0, 0.0).rgb;
+        b = textureSampleLevel(lut_tex, samp, uv0 + vec2f(0.03125, 0.0), 0.0).rgb;
+    } else {
+        a = blend_cache(uv0);
+        b = blend_cache(uv0 + vec2f(0.03125, 0.0));
+    }
     let t = mix(a, b, f);
     return vec4f(t * (t * (t * 0.305306017 + 0.682171106) + 0.0125228781), c.a);
 }

@@ -93,9 +93,12 @@ pub fn open(game: &Game, bundle: &str) -> Result<Arc<LoadedBundle>> {
     all.into_iter().next().ok_or_else(|| anyhow!("no bundle {bundle}"))
 }
 
-/// The times of day a map has: those of its `SunLightInfo`, in the
-/// game's order, or the day alone for a map without one.
-pub fn times(game: &Game, bundle: &str) -> Result<Vec<unity::TimeOfDay>> {
+/// A map's `SunLightInfo`, with the bundle and the file it is in, to
+/// follow what it points at.
+type SunLight = (SunLightInfo, Arc<LoadedBundle>, Arc<AssetFile>);
+
+/// The map's `SunLightInfo`, when it has one.
+fn sun_light(game: &Game, bundle: &str) -> Result<Option<SunLight>> {
     let loaded = open(game, bundle)?;
     for file in &loaded.files {
         for obj in file.sf.objects_of(class::MONO_BEHAVIOUR) {
@@ -107,17 +110,46 @@ pub fn times(game: &Game, bundle: &str) -> Result<Vec<unity::TimeOfDay>> {
                 .and_then(|s| s.str("m_ClassName").map(str::to_owned))
                 .unwrap_or_default();
             if script == "SunLightInfo" {
-                let mut times: Vec<unity::TimeOfDay> =
-                    SunLightInfo::read(&o).times.iter().filter_map(|t| t.time).collect();
-                times.sort_by_key(|t| *t as u8);
-                times.dedup();
-                if !times.is_empty() {
-                    return Ok(times);
+                let sun = SunLightInfo::read(&o);
+                if sun.times.iter().any(|t| t.time.is_some()) {
+                    return Ok(Some((sun, loaded.clone(), file.clone())));
                 }
             }
         }
     }
-    Ok(vec![unity::TimeOfDay::Day])
+    Ok(None)
+}
+
+/// The times of day a map has: those of its `SunLightInfo`, in the
+/// game's order, or the day alone for a map without one.
+pub fn times(game: &Game, bundle: &str) -> Result<Vec<unity::TimeOfDay>> {
+    let Some((sun, ..)) = sun_light(game, bundle)? else {
+        return Ok(vec![unity::TimeOfDay::Day]);
+    };
+    let mut times: Vec<unity::TimeOfDay> = sun.times.iter().filter_map(|t| t.time).collect();
+    times.sort_by_key(|t| *t as u8);
+    times.dedup();
+    Ok(times)
+}
+
+/// The colour filter each time of day of a map sets, by the name of its
+/// colour table (`SunLightInfo.Info.SetACE`); none for a time that sets
+/// none. Studio's filters are known by the same names.
+pub fn time_filters(game: &Game, bundle: &str) -> Result<Vec<(unity::TimeOfDay, Option<String>)>> {
+    let Some((sun, loaded, file)) = sun_light(game, bundle)? else {
+        return Ok(Vec::new());
+    };
+    Ok(sun
+        .times
+        .iter()
+        .filter_map(|t| {
+            let name = deref(game, &loaded, &file, t.lut)
+                .filter(|_| !t.lut.is_null())
+                .and_then(|r| r.read().ok())
+                .and_then(|o| o.str("m_Name").map(str::to_owned));
+            Some((t.time?, name))
+        })
+        .collect())
 }
 
 /// The other bundles a map's scene reads from, by their paths under
