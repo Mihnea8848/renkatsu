@@ -950,11 +950,10 @@ impl Live {
             });
             state.reading_filters = Some((sidecar, handle));
         }
-        let done =
-            state
-                .reading_filters
-                .as_ref()
-                .and_then(|(_, h)| if self.patient { Some(h.wait()) } else { h.try_take() });
+        let done = state
+            .reading_filters
+            .as_ref()
+            .and_then(|(_, h)| if self.patient { Some(h.wait()) } else { h.try_take() });
         if let Some(result) = done {
             let (path, _) = state.reading_filters.take().expect("looked at above");
             // A map whose bundle is not there keeps the first filter.
