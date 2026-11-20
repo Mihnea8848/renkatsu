@@ -12,7 +12,7 @@
 //! shrinks it to icons. The backtick key or the eye button hides every
 //! overlay, and Shift with Space gives the viewport the whole window.
 
-use crate::camera::{Focus, RightDrag};
+use crate::camera::{Focus, RightDrag, View};
 use crate::design::Overlays;
 use crate::keymap::Action;
 use crate::kinds::Kind;
@@ -701,19 +701,30 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     bar_divider(ui, k);
     crate::gizmo::grid_button(ui, k, st);
-    for (g, text, options) in [
-        (icon::SUN, "Lit", ["Lit", "Unlit", "Wireframe"]),
-        (icon::CUBE_FOCUS, "Perspective", ["Perspective", "Front", "Side"]),
-    ] {
-        let resp = flat_button(ui, k, Some(g), text, true, false);
-        egui::Popup::menu(&resp).show(|ui| {
-            for option in options {
-                if widgets::check_item(ui, k, option == text, option, "").clicked() {
-                    ui.close();
-                }
+    let resp = flat_button(ui, k, Some(icon::SUN), "Lit", true, false);
+    egui::Popup::menu(&resp).show(|ui| {
+        for option in ["Lit", "Unlit", "Wireframe"] {
+            if widgets::check_item(ui, k, option == "Lit", option, "").clicked() {
+                ui.close();
             }
-        });
-    }
+        }
+    });
+    // The lens is perspective and only that; the other two turn the
+    // camera to look in down an axis, which is what they are for.
+    let resp = flat_button(ui, k, Some(icon::CUBE_FOCUS), "Perspective", true, false);
+    egui::Popup::menu(&resp).show(|ui| {
+        if widgets::check_item(ui, k, true, "Perspective", "").clicked() {
+            ui.close();
+        }
+        for view in [View::Front, View::Side] {
+            if widgets::check_item(ui, k, false, view.label(), "").clicked() {
+                if let Some(live) = st.live.as_mut() {
+                    live.cam.look_from(view);
+                }
+                ui.close();
+            }
+        }
+    });
     // The rendering pipeline, by its abbreviation: the bar has little room.
     let active = &PIPELINES[0];
     let resp = flat_button(ui, k, Some(icon::STACK), active.short, true, false)

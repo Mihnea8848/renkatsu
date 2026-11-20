@@ -18,6 +18,35 @@ const FLY_RATE: f32 = 0.5;
 /// The range of the fly speed, as a multiple of the usual speed.
 pub const SPEED_RANGE: (f32, f32) = (0.1, 10.0);
 
+/// A view straight down one of the scene's axes. The game stands its
+/// characters facing the camera CharaStudio starts with, out along `+Z`,
+/// so that is the front; the side looks in from `+X`, which is a
+/// character's own right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Front,
+    Side,
+}
+
+impl View {
+    /// The turn around the vertical axis that looks in from the axis.
+    fn yaw(self) -> f32 {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        match self {
+            View::Front => PI,
+            View::Side => FRAC_PI_2,
+        }
+    }
+
+    /// What the menu of views calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Front => "Front",
+            View::Side => "Side",
+        }
+    }
+}
+
 /// Where the camera looks from: angles around a point, at a distance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Orbit {
@@ -286,6 +315,15 @@ impl ViewCamera {
         self.glide_to(to);
     }
 
+    /// Turns the view to look along an axis at what it looks at now,
+    /// level with it, keeping the target, the distance and the focus.
+    pub fn look_from(&mut self, view: View) {
+        let mut to = self.destination();
+        to.yaw = view.yaw();
+        to.pitch = 0.0;
+        self.glide_to(to);
+    }
+
     /// Looks at a point from the distance and the direction the view has,
     /// without focusing on anything.
     pub fn look_at(&mut self, point: Vec3) {
@@ -444,6 +482,24 @@ mod tests {
             distance: 2.0,
             fov_y_deg: 30.0,
         }
+    }
+
+    #[test]
+    fn a_view_down_an_axis_looks_in_from_it_and_keeps_the_rest() {
+        let mut cam = focused();
+        let (target, distance) = (cam.orbit.target, cam.orbit.distance);
+        // The front is out along +Z, where the game stands a character
+        // facing, and the side in from +X.
+        for (view, from) in [(View::Front, Vec3::Z), (View::Side, Vec3::X)] {
+            cam.look_from(view);
+            let eye = cam.orbit.camera().eye;
+            assert!((eye - (target + from * distance)).length() < 1e-4, "{view:?}: {eye}");
+        }
+        // What it looks at, from how far, and the object it goes around
+        // are left as they were.
+        assert_eq!(cam.orbit.target, target);
+        assert!((cam.orbit.distance - distance).abs() < 1e-6);
+        assert!(cam.focus.is_some());
     }
 
     fn focused() -> ViewCamera {
