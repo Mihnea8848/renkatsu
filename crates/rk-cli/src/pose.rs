@@ -351,17 +351,21 @@ pub fn mods() -> Result<()> {
     let mut by_mod: BTreeMap<u32, (usize, BTreeSet<String>)> = BTreeMap::new();
     for sheet in &index.studio_sheets {
         let Some(mod_idx) = sheet.mod_idx else { continue };
+        // Both shapes of animation sheet count, CharaStudio's own and the
+        // H scenes'; a mod whose only list files are items or maps brings
+        // no animations and belongs in none of this.
+        let Some(last) = rk_chara::animations::animation_sheet(&sheet.name) else {
+            continue;
+        };
         let entry = by_mod.entry(mod_idx).or_default();
-        if sheet.name.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("Anime_")) {
-            for row in sheet
-                .rows
-                .iter()
-                .skip(2)
-                .filter(|r| r.len() > 6 && r[0].trim().parse::<i32>().is_ok())
-            {
-                entry.0 += 1;
-                entry.1.insert(row[4].to_lowercase());
-            }
+        for row in sheet
+            .rows
+            .iter()
+            .skip(2)
+            .filter(|r| r.len() > last && (0..3).all(|i| r[i].trim().parse::<i32>().is_ok()))
+        {
+            entry.0 += 1;
+            entry.1.insert(row[4].to_lowercase());
         }
     }
     let mut total = 0;

@@ -286,6 +286,19 @@ impl Layout {
     }
 }
 
+/// Whether a sheet lists animations, in either of the two shapes, and
+/// the last column its rows carry if it does. This is the rule the
+/// library itself goes by in [`Library::add_bundle`], for anything that
+/// counts what a mod brings without reading the sheets: a sheet of
+/// items, maps or anything else lists no animations, and the H scenes'
+/// sheets list as many as CharaStudio's own.
+pub fn animation_sheet(name: &str) -> Option<usize> {
+    [Layout::Studio, Layout::HScene]
+        .into_iter()
+        .find(|l| sheet_numbers(name, l.prefix()).is_some_and(|n| n.len() == 3))
+        .map(Layout::state)
+}
+
 impl Library {
     /// Adds the sheets of one `studio/info` bundle, or of one folder of
     /// list files of a mod. `sheets` are the sheets by name, `listed` is
@@ -970,6 +983,23 @@ pub fn timing_of(game: &Game, entry: &Entry, parameters: &crate::motion::Paramet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_shapes_of_animation_sheet_are_told_from_the_other_lists() {
+        // CharaStudio's own and the H scenes', whose rows run two
+        // columns longer.
+        assert_eq!(animation_sheet("Anime_00_07_22"), Some(6));
+        assert_eq!(animation_sheet("HAnime_00_01_00"), Some(8));
+        assert_eq!(animation_sheet("hanime_00_01_00"), Some(8));
+        // The sheets that come beside them, and the other lists a mod
+        // brings, name no animations.
+        assert_eq!(animation_sheet("AnimeGroup_00"), None);
+        assert_eq!(animation_sheet("AnimeCategory_00_07"), None);
+        assert_eq!(animation_sheet("ItemList_00_00"), None);
+        // Three numbers, no more and no fewer.
+        assert_eq!(animation_sheet("Anime_00_07"), None);
+        assert_eq!(animation_sheet("Anime_00_07_22_01"), None);
+    }
 
     #[test]
     fn names_are_translated_by_their_words() {
