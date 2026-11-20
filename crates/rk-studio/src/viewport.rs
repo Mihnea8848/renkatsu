@@ -417,12 +417,19 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         .doc
         .selection()
         .map_or(kind.color(), |o| st.library.color_of(&o.content));
+    // A light or an effect says which it is, as in Properties.
+    let (icon_of, label) = st
+        .doc
+        .selection()
+        .map_or((kind.glyph(), kind.label()), |o| (o.content.glyph(), o.content.label()));
     let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 20.0), Sense::hover());
-    glyph(ui.painter(), k, rect.center(), kind.glyph(), 16.0, color);
+    glyph(ui.painter(), k, rect.center(), icon_of, 16.0, color);
     ui.add_space(4.0);
     bar_text(ui, &name, k.bold(k.d.text), k.t.text_bright);
-    ui.add_space(5.0);
-    bar_text(ui, kind.label(), k.font(), k.t.text_dim);
+    if label != name {
+        ui.add_space(5.0);
+        bar_text(ui, label, k.font(), k.t.text_dim);
+    }
     ui.add_space(4.0);
     bar_divider(ui, k);
     ui.add_space(2.0);
@@ -456,6 +463,14 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             (Kind::Folder, "Hide all") if resp.clicked() => hide_folder(st),
             (Kind::Light, "Shadows") => {
                 egui::Popup::menu(&resp).show(|ui| shadows_menu(ui, k, st));
+            }
+            (Kind::Light, "Type") => {
+                egui::Popup::menu(&resp).show(|ui| light_type_menu(ui, k, st));
+            }
+            (Kind::Light, "Colour") => {
+                egui::Popup::menu(&resp)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| light_colour(ui, st));
             }
             _ if *menu => {
                 egui::Popup::menu(&resp).show(|ui| {
@@ -496,6 +511,44 @@ fn shadows_menu(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     if object != before {
         st.doc.edit(object, false);
+    }
+}
+
+/// The kinds of light, for the selected light.
+fn light_type_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::{Content, LightKind};
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let Content::Light { light, .. } = &mut object.content else {
+        return;
+    };
+    let now = *light;
+    for kind in LightKind::ALL {
+        if widgets::check_item(ui, k, now == kind, kind.label(), "").clicked() {
+            *light = kind;
+            ui.close();
+        }
+    }
+    if *light != now {
+        st.doc.edit(object, false);
+    }
+}
+
+/// The selected light's colour picker.
+fn light_colour(ui: &mut Ui, st: &mut State) {
+    use crate::scene::Content;
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let Content::Light { color, .. } = &mut object.content else {
+        return;
+    };
+    widgets::color_picker(ui, color);
+    if object != before {
+        let held = ui.input(|i| i.pointer.any_down());
+        st.doc.edit(object, held);
     }
 }
 

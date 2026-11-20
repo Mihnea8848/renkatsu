@@ -662,13 +662,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         *light = LightKind::ALL[chosen];
                     });
                     row(ui, k, "Colour", None, |ui, rect| {
-                        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
-                        widgets::value_box(ui, k, rect, &text);
-                        let swatch =
-                            Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-                        ui.painter()
-                            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+                        widgets::color_field(ui, k, rect, id.with("colour"), color);
                     });
                     if *light == LightKind::Character {
                         row(ui, k, "Direction", None, |ui, rect| {
@@ -789,7 +783,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Blur", blur, 0.0, 1.0);
                         }
                         Effect::Fog { color, start, end } => {
-                            color_row(ui, k, color);
+                            color_row(ui, k, id, color);
                             number(ui, "Start", start, 0.0, 1000.0);
                             number(ui, "End", end, 0.0, 1000.0);
                         }
@@ -798,7 +792,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Aperture", aperture, 0.0, 1.0);
                         }
                         Effect::SunShafts { color, intensity } => {
-                            color_row(ui, k, color);
+                            color_row(ui, k, id, color);
                             number(ui, "Intensity", intensity, 0.0, 4.0);
                         }
                     }
@@ -1682,13 +1676,8 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed:
 }
 
 /// A colour as its swatch and its hex value.
-fn color_row(ui: &mut Ui, k: &Look, color: &[f32; 3]) {
+fn color_row(ui: &mut Ui, k: &Look, id: Id, color: &mut [f32; 3]) {
     row(ui, k, "Colour", None, |ui, rect| {
-        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
-        widgets::value_box(ui, k, rect, &text);
-        let swatch = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-        ui.painter()
-            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+        widgets::color_field(ui, k, rect, id.with("colour"), color);
     });
 }

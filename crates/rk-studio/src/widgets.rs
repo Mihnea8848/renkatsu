@@ -422,6 +422,36 @@ pub fn value_box(ui: &mut Ui, k: &Look, rect: Rect, text: &str) {
     );
 }
 
+/// A colour as its swatch and hex value in a field's box, which opens a
+/// colour picker.
+pub fn color_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, color: &mut [f32; 3]) {
+    let resp = ui.interact(rect, id, Sense::click());
+    let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let p = ui.painter();
+    field_box(p, k, rect, resp.hovered(), false);
+    p.with_clip_rect(rect.shrink(1.0)).text(
+        Pos2::new(rect.left() + 26.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        format!("{:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]),
+        k.font(),
+        if resp.hovered() { k.t.text_bright } else { k.t.text },
+    );
+    let swatch = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
+    p.rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+    egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| color_picker(ui, color));
+}
+
+/// egui's colour picker over a colour of 0 to 1 per channel.
+pub fn color_picker(ui: &mut Ui, color: &mut [f32; 3]) {
+    let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let mut picked = Color32::from_rgb(hex[0], hex[1], hex[2]);
+    if egui::color_picker::color_picker_color32(ui, &mut picked, egui::color_picker::Alpha::Opaque) {
+        *color = [picked.r(), picked.g(), picked.b()].map(|c| f32::from(c) / 255.0);
+    }
+}
+
 /// A dropdown: the chosen option and a caret, opening a list.
 pub fn combo(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: &mut usize, options: &[&str]) {
     let resp = dropdown_field(ui, k, rect, id, options.get(*chosen).copied().unwrap_or(""));
