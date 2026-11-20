@@ -431,26 +431,71 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         return;
     }
     for (g, text, menu) in actions(kind) {
-        let resp = flat_button(ui, k, Some(g), text, *menu, false);
+        use crate::kinds::Kind;
+        let mut resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
-            if resp.on_hover_text("Import card").clicked() {
-                st.ask(Command::ImportCard, ui.ctx());
-            }
-        } else if (kind, *text) == (crate::kinds::Kind::Item, "Attach to") {
-            egui::Popup::menu(&resp).show(|ui| {
-                let chosen = st
-                    .doc
-                    .selected
-                    .and_then(|id| crate::panels::attach_items(ui, k, st, id));
-                if let Some((to, bone)) = chosen {
-                    st.run(Command::Attach(to, bone));
-                }
-            });
-        } else if *menu {
-            egui::Popup::menu(&resp).show(|ui| {
-                ui.label(egui::RichText::new("Not available yet").color(k.t.text_dim));
-            });
+            resp = resp.on_hover_text("Import card");
         }
+        match (kind, *text) {
+            (_, "Load card") if resp.clicked() => st.ask(Command::ImportCard, ui.ctx()),
+            (Kind::Item, "Attach to") => {
+                egui::Popup::menu(&resp).show(|ui| {
+                    let chosen = st
+                        .doc
+                        .selected
+                        .and_then(|id| crate::panels::attach_items(ui, k, st, id));
+                    if let Some((to, bone)) = chosen {
+                        st.run(Command::Attach(to, bone));
+                    }
+                });
+            }
+            // The same kinds the Outliner's own Add button offers.
+            (_, "Add") => {
+                egui::Popup::menu(&resp).show(|ui| crate::panels::add_items(ui, k, st));
+            }
+            (Kind::Folder, "Hide all") if resp.clicked() => hide_folder(st),
+            (Kind::Light, "Shadows") => {
+                egui::Popup::menu(&resp).show(|ui| shadows_menu(ui, k, st));
+            }
+            _ if *menu => {
+                egui::Popup::menu(&resp).show(|ui| {
+                    ui.label(egui::RichText::new("Not available yet").color(k.t.text_dim));
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Hides everything in the selected folder, or shows it all again once
+/// none of it is left showing, as one step of the history.
+fn hide_folder(st: &mut State) {
+    let Some(folder) = st.doc.selected else { return };
+    let inside = st.doc.scene().children(Some(folder));
+    let showing = inside
+        .iter()
+        .any(|id| st.doc.scene().get(*id).is_some_and(|o| o.visible));
+    st.doc.set_visible_many(&inside, !showing);
+}
+
+/// Whether the selected light casts shadows.
+fn shadows_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let Content::Light { shadows, .. } = &mut object.content else {
+        return;
+    };
+    for (text, cast) in [("Cast", true), ("None", false)] {
+        if widgets::check_item(ui, k, *shadows == cast, text, "").clicked() {
+            *shadows = cast;
+            ui.close();
+        }
+    }
+    if object != before {
+        st.doc.edit(object, false);
     }
 }
 
@@ -557,6 +602,63 @@ fn clothing_menu(ui: &mut Ui, k: &Look, st: &mut State) {
         if *clothes != before {
             st.doc.edit(object, false);
         }
+    }
+}
+
+/// A menu of the tool palette, which opens beside the row rather than
+/// under it so that it does not cover the rest of the tools.
+fn beside(resp: &egui::Response) -> egui::Popup<'_> {
+    egui::Popup::menu(resp)
+        .align(egui::RectAlign::RIGHT_START)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+}
+
+/// Which of the card's outfits the selected character wears. The names
+/// are More Outfits' where the card carries them, and how many there are
+/// is known only once the character is built.
+fn outfit_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    ui.set_min_width(180.0);
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let built = st.live.as_ref().and_then(|live| live.built(object.id));
+    let (count, names) = built.map_or((1, Default::default()), |b| (b.outfits.max(1), b.outfit_names.clone()));
+    let Content::Character { outfit, .. } = &mut object.content else {
+        return;
+    };
+    for i in 0..count {
+        let name = rk_chara::more_outfits::outfit_name(i, &names);
+        if widgets::check_item(ui, k, *outfit == i, &name, "").clicked() {
+            *outfit = i;
+            ui.close();
+        }
+    }
+    if object != before {
+        st.doc.edit(object, false);
+    }
+}
+
+/// Which pair of shoes the selected character wears. The game keeps a
+/// state for each pair and shows the one the scene asks for.
+fn shoes_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    use crate::scene::Content;
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let before = object.clone();
+    let Content::Character { outdoor_shoes, .. } = &mut object.content else {
+        return;
+    };
+    for (text, outdoor) in [("Indoor shoes", false), ("Outdoor shoes", true)] {
+        if widgets::check_item(ui, k, *outdoor_shoes == outdoor, text, "").clicked() {
+            *outdoor_shoes = outdoor;
+            ui.close();
+        }
+    }
+    if object != before {
+        st.doc.edit(object, false);
     }
 }
 
@@ -917,6 +1019,20 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                         .align(egui::RectAlign::RIGHT_START)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui| clothing_menu(ui, k, st));
+                } else if *name == "Outfit" {
+                    beside(&resp).show(|ui| outfit_menu(ui, k, st));
+                } else if *name == "Shoes" {
+                    beside(&resp).show(|ui| shoes_menu(ui, k, st));
+                } else if *name == "Load clip" {
+                    beside(&resp).show(|ui| {
+                        if let Some(chosen) = crate::panels::animation_items(ui, k, st, st.doc.selected) {
+                            st.run(Command::Animate(chosen));
+                        }
+                    });
+                } else if *name == "Add light" {
+                    if resp.clicked() {
+                        st.run(Command::Add(crate::kinds::Kind::Light));
+                    }
                 } else if resp.clicked() {
                     st.mode_tool[st.mode] = index;
                 }
