@@ -151,6 +151,16 @@ struct Globals {
     reflection: [f32; 4],
     /// `_ScreenParams`: xy the picture's width and height in pixels.
     screen: [f32; 4],
+    /// `_LightColor0`: the light's linear colour times its intensity.
+    light_color: [f32; 4],
+}
+
+/// `_LightColor0` as Unity hands it to shaders: the light's colour,
+/// linearised, times its intensity.
+fn light_color_global(env: &Environment) -> [f32; 4] {
+    let [r, g, b, _] = material::linear([env.light_color[0], env.light_color[1], env.light_color[2], 1.0]);
+    let i = env.light_intensity;
+    [r * i, g * i, b * i, 0.0]
 }
 
 /// `_ambientshadowG` as the shaders read it: the scene's shadow colour with
@@ -199,6 +209,9 @@ pub struct Environment {
     pub line_depth: f32,
     pub line_width: f32,
     pub light_intensity: f32,
+    /// The light's colour as it is picked, 0 to 1 per channel; white
+    /// leaves `light_intensity` alone.
+    pub light_color: [f32; 3],
     pub ambient: f32,
     /// Unity's ambient light (`RenderSettings.ambientLight`), as stored.
     /// Only the lens of glasses reads the scene's ambient light.
@@ -237,6 +250,7 @@ impl Default for Environment {
             line_depth: 1.0,
             line_width: 0.307,
             light_intensity: 1.0,
+            light_color: [1.0; 3],
             // The game's shaders compute light * 0.6 + 0.4.
             ambient: 0.4,
             // Unity's default ambient colour for a new scene.
@@ -1222,6 +1236,7 @@ impl Renderer {
             sh: env.ambient_probe,
             reflection: [env.reflection[0], env.reflection[1], env.reflection[2], 0.0],
             screen: [width as f32, height as f32, 0.0, 0.0],
+            light_color: light_color_global(env),
         };
         let ramp = match &env.ramp {
             Some(image) => self.texture(image),
@@ -2128,6 +2143,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_white_light_is_its_intensity_and_a_coloured_one_is_linear() {
+        let env = |color: [f32; 3]| Environment {
+            light_intensity: 0.85,
+            light_color: color,
+            ..Environment::default()
+        };
+        assert_eq!(light_color_global(&env([1.0; 3])), [0.85, 0.85, 0.85, 0.0]);
+        let [r, g, b, _] = light_color_global(&env([1.0, 0.5, 0.0]));
+        assert_eq!((r, b), (0.85, 0.0));
+        // Half of sRGB is about a fifth in linear light.
+        assert!((g / 0.85 - 0.214).abs() < 0.001, "{g}");
+    }
+
+    #[test]
     fn shader_is_valid_wgsl() {
         let module = wgpu::naga::front::wgsl::parse_str(TOON_WGSL).expect("toon.wgsl parses");
         wgpu::naga::valid::Validator::new(
@@ -2464,8 +2493,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and sixteen vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 320);
+        // WGSL: mat4x4 and seventeen vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 336);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);

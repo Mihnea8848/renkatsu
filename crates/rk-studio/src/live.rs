@@ -1239,10 +1239,12 @@ impl Live {
                     from_camera,
                     intensity,
                     shadows,
+                    color,
                     ..
                 } = light.content
                 {
                     env.light_intensity = intensity;
+                    env.light_color = color;
                     env.shadows.enabled = shadows;
                     // A light shines along its own forward axis, wherever
                     // its folders turned it.

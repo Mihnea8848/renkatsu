@@ -124,9 +124,9 @@ fn ibl_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let n = normalize(i.tangent * nt.x + i.bitangent * nt.y + i.normal * nt.z);
     let rough_p = 1.0 - m.ext[0].x;
     let light_dir = normalize(g.light_dir.xyz);
-    // _LightColor0 of the scene's white light. The pass has no shadow
-    // variant, so the light is never dimmed.
-    let light = vec3<f32>(g.params.y);
+    // _LightColor0. The pass has no shadow variant, so the light is never
+    // dimmed.
+    let light = g.light_color.rgb;
 
     // Ambient light: the linear terms per pixel; the program takes the
     // quadratic ones per vertex, with the mesh normal.
@@ -311,9 +311,9 @@ fn kkuss_alpha(i: VsOut, front: bool) -> vec4<f32> {
     let n = normalize(n_raw);
     let rough_p = 1.0 - m.ext[0].x;
     let light_dir = normalize(g.light_dir.xyz);
-    // _LightColor0 of the scene's white light. The pass has no shadow
-    // variant, so the light is never dimmed.
-    let light = vec3<f32>(g.params.y);
+    // _LightColor0. The pass has no shadow variant, so the light is never
+    // dimmed.
+    let light = g.light_color.rgb;
 
     // Ambient light: the linear terms per pixel; the program takes the
     // quadratic ones per vertex, with the mesh normal.
