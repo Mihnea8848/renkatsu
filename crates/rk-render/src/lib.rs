@@ -155,12 +155,34 @@ struct Globals {
     light_color: [f32; 4],
 }
 
+/// One more light of the main light's kind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OtherLight {
+    /// Unit vector from the scene towards the light.
+    pub dir: [f32; 3],
+    /// Its colour as picked, 0 to 1 per channel.
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+/// The light a mesh takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawLight {
+    #[default]
+    Main,
+    /// One of `Environment::other_lights`.
+    Other(usize),
+    /// None: the scene's ambient light alone.
+    Dark,
+}
+
 /// `_LightColor0` as Unity hands it to shaders: the light's colour,
 /// linearised, times its intensity.
 fn light_color_global(env: &Environment) -> [f32; 4] {
     let [r, g, b, _] = material::linear([env.light_color[0], env.light_color[1], env.light_color[2], 1.0]);
+    // w: 1 for the meshes the light reaches.
     let i = env.light_intensity;
-    [r * i, g * i, b * i, 0.0]
+    [r * i, g * i, b * i, 1.0]
 }
 
 /// `_ambientshadowG` as the shaders read it: the scene's shadow colour with
@@ -239,6 +261,13 @@ pub struct Environment {
     pub alpha_to_coverage: bool,
     /// An outline around some of the meshes, for an editor's selection.
     pub highlight: Option<highlight::Highlight>,
+    /// More lights of the main light's kind, each lighting the meshes
+    /// `draw_lights` gives it instead of the main light. They cast no
+    /// shadows.
+    pub other_lights: Vec<OtherLight>,
+    /// The light each mesh takes, by its place in the draws; empty, or
+    /// short, leaves the rest with the main light.
+    pub draw_lights: Vec<DrawLight>,
 }
 
 impl Default for Environment {
@@ -265,6 +294,8 @@ impl Default for Environment {
             camera_depth: false,
             alpha_to_coverage: false,
             highlight: None,
+            other_lights: Vec::new(),
+            draw_lights: Vec::new(),
         }
     }
 }
@@ -1303,6 +1334,7 @@ impl Renderer {
             outline_key: PipelineKey,
             stencil_ref: u32,
             bind: usize,
+            light: DrawLight,
         }
         let mut batches = Vec::new();
         let mut items = Vec::new();
@@ -1483,6 +1515,7 @@ impl Renderer {
                     outline_key: PipelineKey::outline(&desc, hdr, covered),
                     stencil_ref: desc.stencil_ref as u32,
                     bind,
+                    light: env.draw_lights.get(draw_index).copied().unwrap_or_default(),
                 });
             }
             if receives {
@@ -1749,14 +1782,43 @@ impl Renderer {
         } else {
             None
         };
-        let globals_bg = globals_group(
-            self,
-            Globals {
-                shadow: [0.0, 0.0, if mask.is_some() { 1.0 } else { 0.0 }, 0.0],
-                ..base
-            },
-            mask.as_ref().unwrap_or(&self.white),
-        );
+        let main_globals = Globals {
+            shadow: [0.0, 0.0, if mask.is_some() { 1.0 } else { 0.0 }, 0.0],
+            ..base
+        };
+        let globals_bg = globals_group(self, main_globals, mask.as_ref().unwrap_or(&self.white));
+        // The other lights, without shadows, and none at all: a mesh no
+        // light reaches has the scene's ambient light alone.
+        let used = |l: DrawLight| env.draw_lights.contains(&l);
+        let other_bgs: Vec<_> = env
+            .other_lights
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                used(DrawLight::Other(i)).then(|| {
+                    let lit = Environment {
+                        light_color: o.color,
+                        light_intensity: o.intensity,
+                        ..Environment::default()
+                    };
+                    let d = Vec3::from(o.dir).normalize_or_zero();
+                    let globals = Globals {
+                        light_dir: [d.x, d.y, d.z, 0.0],
+                        light_color: light_color_global(&lit),
+                        shadow: [0.0; 4],
+                        ..main_globals
+                    };
+                    globals_group(self, globals, &self.white)
+                })
+            })
+            .collect();
+        let dark_bg = used(DrawLight::Dark).then(|| {
+            let globals = Globals {
+                light_color: [0.0; 4],
+                ..main_globals
+            };
+            globals_group(self, globals, mask.as_ref().unwrap_or(&self.white))
+        });
         // With screen effects the picture goes to a half-float target first.
         let mut fx_gpu = hdr.then(|| {
             self.effects
@@ -1884,6 +1946,12 @@ impl Renderer {
                     current = Some(key);
                 }
                 pass.set_stencil_reference(item.stencil_ref);
+                let group = match item.light {
+                    DrawLight::Main => None,
+                    DrawLight::Other(i) => other_bgs.get(i).and_then(Option::as_ref),
+                    DrawLight::Dark => dark_bg.as_ref(),
+                };
+                pass.set_bind_group(0, group.unwrap_or(&globals_bg), &[]);
                 let b = &batches[item.batch];
                 pass.set_vertex_buffer(0, b.vb.slice(..));
                 pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -2149,7 +2217,7 @@ mod tests {
             light_color: color,
             ..Environment::default()
         };
-        assert_eq!(light_color_global(&env([1.0; 3])), [0.85, 0.85, 0.85, 0.0]);
+        assert_eq!(light_color_global(&env([1.0; 3])), [0.85, 0.85, 0.85, 1.0]);
         let [r, g, b, _] = light_color_global(&env([1.0, 0.5, 0.0]));
         assert_eq!((r, b), (0.85, 0.0));
         // Half of sRGB is about a fifth in linear light.

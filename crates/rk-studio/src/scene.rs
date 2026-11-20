@@ -765,6 +765,40 @@ impl Scene {
         scene
     }
 
+    /// The character light a character takes: of the shown character
+    /// lights that light its light group, the brightest, as Unity picks
+    /// a main light; none when no light reaches it.
+    pub fn chara_light_of(&self, character: ObjectId) -> Option<ObjectId> {
+        let group = match self.get(character).map(|o| &o.content) {
+            Some(Content::Character { light_group, .. }) => light_group.as_deref().unwrap_or(EVERYONE),
+            _ => EVERYONE,
+        };
+        let brightness = |o: &Object| match &o.content {
+            Content::Light {
+                light: LightKind::Character,
+                groups,
+                intensity,
+                color,
+                ..
+            } if groups.as_ref().is_none_or(|list| list.iter().any(|g| g == group)) => {
+                Some(intensity * color.iter().copied().fold(0.0, f32::max))
+            }
+            _ => None,
+        };
+        let mut best: Option<(ObjectId, f32)> = None;
+        for (_, id) in self.rows() {
+            let Some(object) = self.get(id).filter(|o| self.shown(o.id)) else {
+                continue;
+            };
+            if let Some(b) = brightness(object) {
+                if best.is_none_or(|(_, top)| b > top) {
+                    best = Some((id, b));
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
     /// Puts every character light at CharaStudio's start: fixed in the
     /// scene, at angles of 0.
     pub fn reset_chara_lights(&mut self) {
@@ -1741,6 +1775,50 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_character_takes_the_brightest_light_of_its_group_or_none() {
+        let mut scene = Scene::empty();
+        let key = scene.add("Key light", Content::light(), None);
+        let anna = scene.add("Anna", Content::character("anna.png".into()), None);
+        let bea = scene.add("Bea", Content::character("bea.png".into()), None);
+        let set =
+            |scene: &mut Scene, id: ObjectId, f: &dyn Fn(&mut Content)| f(&mut scene.get_mut(id).unwrap().content);
+        set(&mut scene, bea, &|c| {
+            if let Content::Character { light_group, .. } = c {
+                *light_group = Some("Shade".into());
+            }
+        });
+        // Every group by default.
+        assert_eq!(
+            (scene.chara_light_of(anna), scene.chara_light_of(bea)),
+            (Some(key), Some(key))
+        );
+        // The key light for Everyone alone: Bea has none.
+        set(&mut scene, key, &|c| {
+            if let Content::Light { groups, .. } = c {
+                *groups = Some(vec![EVERYONE.into()]);
+            }
+        });
+        assert_eq!(
+            (scene.chara_light_of(anna), scene.chara_light_of(bea)),
+            (Some(key), None)
+        );
+        // A light of her own; the brighter wins where two reach.
+        let shade = scene.add("Shade light", Content::light(), None);
+        set(&mut scene, shade, &|c| {
+            if let Content::Light { groups, intensity, .. } = c {
+                *groups = Some(vec!["Shade".into(), EVERYONE.into()]);
+                *intensity = 0.4;
+            }
+        });
+        assert_eq!(
+            (scene.chara_light_of(anna), scene.chara_light_of(bea)),
+            (Some(key), Some(shade))
+        );
+        scene.get_mut(shade).unwrap().visible = false;
+        assert_eq!(scene.chara_light_of(bea), None);
+    }
 
     #[test]
     fn the_character_light_is_charastudios_rig() {
