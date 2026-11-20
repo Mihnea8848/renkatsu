@@ -2212,11 +2212,27 @@ mod tests {
         };
         // Whatever is selected: the key light, then an effect.
         for selected in ["Key light", "Bloom"] {
-            st.doc.selected = st.doc.scene().objects().iter().find(|o| o.name == selected).map(|o| o.id);
+            st.doc.selected = st
+                .doc
+                .scene()
+                .objects()
+                .iter()
+                .find(|o| o.name == selected)
+                .map(|o| o.id);
             st.run(Command::AddCard(PathBuf::from(&card)));
-            assert_eq!(folder_of(&st).as_deref(), Some("Characters"), "with {selected} selected");
+            assert_eq!(
+                folder_of(&st).as_deref(),
+                Some("Characters"),
+                "with {selected} selected"
+            );
         }
-        let folders = st.doc.scene().objects().iter().filter(|o| o.name == "Characters").count();
+        let folders = st
+            .doc
+            .scene()
+            .objects()
+            .iter()
+            .filter(|o| o.name == "Characters")
+            .count();
         assert_eq!(folders, 1);
         let _ = std::fs::remove_dir_all(&home);
     }
