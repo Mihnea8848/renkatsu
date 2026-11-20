@@ -36,7 +36,7 @@ use rk_chara::clothes_state::{self as cs, States};
 use rk_chara::motion::{self, Bound, Motion};
 use rk_chara::scene::{ShadowCasting, Trs};
 use rk_chara::Image;
-use rk_render::{bounds, Camera, Environment, Renderer, StudioEffects};
+use rk_render::{bounds, Camera, DrawLight, Environment, Renderer, StudioEffects};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1318,12 +1318,34 @@ impl Live {
         let mut env = env;
         let mut draws = Vec::new();
         let mut outlined = Vec::new();
+        // The character lights besides the main one, as handed over.
+        let mut others: Vec<ObjectId> = Vec::new();
         for actor in self.actors.iter().filter(|a| a.warm && scene.shown(a.id)) {
             let from = draws.len();
             draws.extend(actor.chara.scene.pose());
             if self.outline.as_ref().is_some_and(|o| o.objects.contains(&actor.id)) {
                 outlined.extend(from..draws.len());
             }
+            // The character light of the character's light group; none
+            // leaves it to the ambient light.
+            let main = scene.key_light().map(|l| l.id);
+            let light = match scene.chara_light_of(actor.id) {
+                Some(id) if Some(id) == main => DrawLight::Main,
+                Some(id) => {
+                    let at = match others.iter().position(|o| *o == id) {
+                        Some(at) => at,
+                        None => {
+                            others.push(id);
+                            env.other_lights.push(self.other_light(scene, id));
+                            others.len() - 1
+                        }
+                    };
+                    DrawLight::Other(at)
+                }
+                None => DrawLight::Dark,
+            };
+            env.draw_lights.resize(from, DrawLight::Main);
+            env.draw_lights.resize(draws.len(), light);
         }
         if let Some(o) = self.outline.as_ref().filter(|_| !outlined.is_empty()) {
             env.highlight = Some(rk_render::highlight::Highlight {
@@ -1335,6 +1357,27 @@ impl Live {
         self.renderer
             .render_to(&target.texture, &draws, &self.cam.orbit.camera(), &env, background)?;
         Ok(target.id)
+    }
+
+    /// A character light besides the main one, as the renderer takes it.
+    fn other_light(&self, scene: &Scene, id: ObjectId) -> rk_render::OtherLight {
+        let (angles, follows, color, intensity) = match scene.get(id).map(|o| &o.content) {
+            Some(Content::Light {
+                angles,
+                from_camera,
+                color,
+                intensity,
+                ..
+            }) => (*angles, *from_camera, *color, *intensity),
+            _ => ([0.0; 2], false, [1.0; 3], 0.0),
+        };
+        let camera = self.cam.orbit.camera();
+        let follow = follows.then_some((camera.eye, camera.target));
+        rk_render::OtherLight {
+            dir: crate::scene::chara_light_direction(angles, follow).to_array(),
+            color,
+            intensity,
+        }
     }
 
     /// Draws a transform gizmo into its layer of `size` pixels, as the
