@@ -10,7 +10,7 @@ use crate::design::Props;
 use crate::kinds::Kind;
 use crate::profile::{self, Profile};
 use crate::scene::MapTime;
-use crate::scene::{Content, Place};
+use crate::scene::{Content, Effect, LightKind, Place};
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
 use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
@@ -47,7 +47,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut object = before.clone();
     let kind = object.kind();
     let color = st.library.color_of(&object.content);
-    header(ui, k, st, kind, color, &object.name);
+    header(
+        ui,
+        k,
+        st,
+        object.content.glyph(),
+        object.content.label(),
+        color,
+        &object.name,
+    );
     // Who a character is: the card's profile, or the one the character
     // has in this scene. Its pages sit beside the scene's settings.
     let card_profile = match &object.content {
@@ -348,11 +356,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             return;
         }
-        if kind != Kind::Folder && section(ui, k, st, 0, "Transform") {
+        if !matches!(kind, Kind::Folder | Kind::Effect) && section(ui, k, st, 0, "Transform") {
             // What each of position, rotation and scale waits for, when it
             // does nothing yet for this kind of object.
             let off: [Option<&str>; 3] = match &object.content {
                 Content::Character { .. } => [None; 3],
+                Content::Light {
+                    light: LightKind::Point | LightKind::Spot,
+                    ..
+                } => [None, None, Some("A light has no size")],
                 Content::Light { from_camera, .. } => [
                     Some("A directional light has no position"),
                     (*from_camera).then_some("The light follows the camera"),
@@ -412,6 +424,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 outdoor_shoes,
                 simulate,
                 clothes,
+                light_group,
                 ..
             } => {
                 if section(ui, k, st, 1, "Character") {
@@ -509,6 +522,27 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                 t.accent,
                             );
                         });
+                    }
+                    let mut names: Vec<String> = std::iter::once(crate::scene::EVERYONE.to_owned())
+                        .chain(st.doc.scene().light_groups.iter().cloned())
+                        .collect();
+                    let mut new_group = false;
+                    row(ui, k, "Light group", None, |ui, rect| {
+                        let mut chosen = light_group
+                            .as_ref()
+                            .and_then(|g| names.iter().position(|n| n == g))
+                            .unwrap_or(0);
+                        let mut options: Vec<&str> = names.iter().map(String::as_str).collect();
+                        options.push("New group");
+                        widgets::combo(ui, k, rect, id.with("light group"), &mut chosen, &options);
+                        new_group = chosen == names.len();
+                        if !new_group {
+                            *light_group = (chosen > 0).then(|| names[chosen].clone());
+                        }
+                    });
+                    if new_group {
+                        names.push(st.doc.add_light_group());
+                        *light_group = names.last().cloned();
                     }
                     section_end(ui, k);
                 }
@@ -609,38 +643,106 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
             }
             Content::Light {
+                light,
                 from_camera,
                 intensity,
                 shadows,
+                color,
+                range,
+                spot_angle,
+                on_map,
+                on_characters,
+                groups,
             } => {
                 if section(ui, k, st, 1, "Light") {
-                    row(ui, k, "Type", Some("Not available yet"), |ui, rect| {
-                        widgets::combo(ui, k, rect, id.with("light"), &mut 0, &["Directional"]);
+                    row(ui, k, "Type", None, |ui, rect| {
+                        let mut chosen = LightKind::ALL.iter().position(|l| l == light).unwrap_or(0);
+                        let names = LightKind::ALL.map(|l| l.label());
+                        widgets::combo(ui, k, rect, id.with("light"), &mut chosen, &names);
+                        *light = LightKind::ALL[chosen];
                     });
-                    row(ui, k, "Colour", Some("Not available yet"), |ui, rect| {
-                        widgets::value_box(ui, k, rect, "       FFFFFF");
+                    row(ui, k, "Colour", None, |ui, rect| {
+                        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
+                        widgets::value_box(ui, k, rect, &text);
                         let swatch =
                             Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
-                        ui.painter().rect_filled(swatch, 1.0, Color32::WHITE);
+                        ui.painter()
+                            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
                     });
-                    row(ui, k, "Direction", None, |ui, rect| {
-                        let mut chosen = usize::from(!*from_camera);
-                        let options = ["From camera", "Own"];
-                        widgets::segmented(ui, k, rect, id.with("direction"), &mut chosen, &options);
-                        *from_camera = chosen == 0;
-                    });
+                    if *light == LightKind::Character {
+                        row(ui, k, "Direction", None, |ui, rect| {
+                            let mut chosen = usize::from(!*from_camera);
+                            let options = ["From camera", "Own"];
+                            widgets::segmented(ui, k, rect, id.with("direction"), &mut chosen, &options);
+                            *from_camera = chosen == 0;
+                        });
+                    } else {
+                        row(ui, k, "Lights", None, |ui, rect| {
+                            let mut chosen = match (*on_map, *on_characters) {
+                                (true, false) => 1,
+                                (false, true) => 2,
+                                _ => 0,
+                            };
+                            let options = ["Map and characters", "Map", "Characters"];
+                            widgets::combo(ui, k, rect, id.with("lights"), &mut chosen, &options);
+                            (*on_map, *on_characters) = [(true, true), (true, false), (false, true)][chosen];
+                        });
+                    }
                     row(ui, k, "Intensity", None, |ui, rect| {
                         widgets::number(ui, k, rect, id.with("intensity"), intensity, Marker::None, true, FINE);
-                        *intensity = intensity.clamp(0.0, 2.0);
+                        *intensity = intensity.clamp(0.0, 8.0);
                     });
+                    if matches!(light, LightKind::Point | LightKind::Spot) {
+                        row(ui, k, "Range", None, |ui, rect| {
+                            widgets::number(ui, k, rect, id.with("range"), range, Marker::None, true, FINE);
+                            *range = range.max(0.0);
+                        });
+                    }
+                    if *light == LightKind::Spot {
+                        row(ui, k, "Spot angle", None, |ui, rect| {
+                            widgets::number(ui, k, rect, id.with("cone"), spot_angle, Marker::None, true, ANGLE);
+                            *spot_angle = spot_angle.clamp(1.0, 179.0);
+                        });
+                    }
+                    if *light == LightKind::Character || *on_characters {
+                        let names: Vec<String> = std::iter::once(crate::scene::EVERYONE.to_owned())
+                            .chain(st.doc.scene().light_groups.iter().cloned())
+                            .collect();
+                        row(ui, k, "Groups", None, |ui, rect| {
+                            let text = match groups {
+                                None => "All".to_owned(),
+                                Some(list) if list.is_empty() => "None".to_owned(),
+                                Some(list) => list.join(", "),
+                            };
+                            let resp = widgets::dropdown_field(ui, k, rect, id.with("groups"), &text);
+                            egui::Popup::menu(&resp)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .show(|ui| {
+                                    for name in &names {
+                                        let on = groups.as_ref().is_none_or(|list| list.contains(name));
+                                        if widgets::check_item(ui, k, on, name, "").clicked() {
+                                            let mut list = groups.clone().unwrap_or_else(|| names.clone());
+                                            if on {
+                                                list.retain(|n| n != name);
+                                            } else {
+                                                list.push(name.clone());
+                                            }
+                                            let all = names.iter().all(|n| list.contains(n));
+                                            *groups = (!all).then_some(list);
+                                        }
+                                    }
+                                });
+                        });
+                    }
                     row(ui, k, "Shadows", None, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("shadows"), shadows, "Cast");
                     });
-                    if !lights {
+                    if *light == LightKind::Character && !lights {
                         row(ui, k, "In use", None, |ui, rect| {
                             let text = "No";
                             ui.interact(rect, id.with("in-use"), Sense::hover())
-                                .on_hover_text("Only one light is used");
+                                .on_hover_text("Only one character light is used");
                             label(
                                 &ui.painter().with_clip_rect(rect),
                                 k,
@@ -649,6 +751,56 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                 t.text_dim,
                             );
                         });
+                    }
+                    section_end(ui, k);
+                }
+            }
+            Content::Effect { effect } => {
+                let title = effect.label();
+                if section(ui, k, st, 1, title) {
+                    let number = |ui: &mut Ui, name: &str, value: &mut f32, lo: f32, hi: f32| {
+                        row(ui, k, name, None, |ui, rect| {
+                            widgets::number(ui, k, rect, id.with(name), value, Marker::None, true, FINE);
+                            *value = value.clamp(lo, hi);
+                        });
+                    };
+                    match effect {
+                        Effect::ColorFilter { filter, blend } => {
+                            row(ui, k, "Filter", None, |ui, rect| {
+                                widgets::combo(ui, k, rect, id.with("filter"), filter, &crate::scene::FILTERS);
+                            });
+                            number(ui, "Blend", blend, 0.0, 1.0);
+                        }
+                        Effect::Bloom {
+                            intensity,
+                            threshold,
+                            spread,
+                        } => {
+                            number(ui, "Intensity", intensity, 0.0, 4.0);
+                            number(ui, "Threshold", threshold, 0.0, 1.0);
+                            number(ui, "Spread", spread, 0.0, 4.0);
+                        }
+                        Effect::AmbientOcclusion { intensity, radius } => {
+                            number(ui, "Intensity", intensity, 0.0, 4.0);
+                            number(ui, "Radius", radius, 0.0, 2.0);
+                        }
+                        Effect::Vignette { intensity, blur } => {
+                            number(ui, "Intensity", intensity, 0.0, 1.0);
+                            number(ui, "Blur", blur, 0.0, 1.0);
+                        }
+                        Effect::Fog { color, start, end } => {
+                            color_row(ui, k, color);
+                            number(ui, "Start", start, 0.0, 1000.0);
+                            number(ui, "End", end, 0.0, 1000.0);
+                        }
+                        Effect::DepthOfField { focus, aperture } => {
+                            number(ui, "Focus", focus, 0.0, 1000.0);
+                            number(ui, "Aperture", aperture, 0.0, 1.0);
+                        }
+                        Effect::SunShafts { color, intensity } => {
+                            color_row(ui, k, color);
+                            number(ui, "Intensity", intensity, 0.0, 4.0);
+                        }
                     }
                     section_end(ui, k);
                 }
@@ -1194,7 +1346,9 @@ fn choices(
 }
 
 /// The selected object at the top of the panel, then the property search.
-fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, name: &str) {
+fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str, color: Color32, name: &str) {
+    // The type says nothing new under a name that is the type.
+    let kind_label = if kind_label == name { "" } else { kind_label };
     let t = &k.t;
     let h = k.d.row + 14.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
@@ -1203,12 +1357,12 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, nam
     match k.d.props {
         Props::Inspector => {
             // Unity's header: a field holding the name, the type beside it.
-            let kind_w = widgets::text_width(ui, kind.label(), k.font()).ceil();
+            let kind_w = widgets::text_width(ui, kind_label, k.font()).ceil();
             let field = Rect::from_min_max(
                 Pos2::new(rect.left() + 34.0, y - k.field() / 2.0),
                 Pos2::new(rect.right() - kind_w - 18.0, y + k.field() / 2.0),
             );
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 17.0, color);
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), glyph_, 17.0, color);
             widgets::field_box(p, k, field, false, false);
             p.text(
                 Pos2::new(field.left() + 7.0, y),
@@ -1217,10 +1371,10 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, nam
                 k.font(),
                 t.text_bright,
             );
-            label(p, k, Pos2::new(field.right() + 8.0, y), kind.label(), t.text_dim);
+            label(p, k, Pos2::new(field.right() + 8.0, y), kind_label, t.text_dim);
         }
         _ => {
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), kind.glyph(), 18.0, color);
+            glyph(p, k, Pos2::new(rect.left() + 19.0, y), glyph_, 18.0, color);
             let x = p
                 .text(
                     Pos2::new(rect.left() + 34.0, y),
@@ -1230,7 +1384,7 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, kind: Kind, color: Color32, nam
                     t.text_bright,
                 )
                 .right();
-            label(p, k, Pos2::new(x + 8.0, y), kind.label(), t.text_dim);
+            label(p, k, Pos2::new(x + 8.0, y), kind_label, t.text_dim);
         }
     }
     if k.d.props != Props::Inspector {
@@ -1525,4 +1679,16 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed:
             }
         }
     }
+}
+
+/// A colour as its swatch and its hex value.
+fn color_row(ui: &mut Ui, k: &Look, color: &[f32; 3]) {
+    row(ui, k, "Colour", None, |ui, rect| {
+        let hex = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let text = format!("       {:02X}{:02X}{:02X}", hex[0], hex[1], hex[2]);
+        widgets::value_box(ui, k, rect, &text);
+        let swatch = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(16.0, rect.height() - 8.0));
+        ui.painter()
+            .rect_filled(swatch, 1.0, Color32::from_rgb(hex[0], hex[1], hex[2]));
+    });
 }

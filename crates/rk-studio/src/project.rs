@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The version of the project and scene files this build writes.
-pub const FORMAT: u32 = 1;
+/// 2: post-processing effects are objects of the scene.
+pub const FORMAT: u32 = 2;
 
 /// The extension of the project file.
 pub const EXTENSION: &str = "rkproj";
@@ -539,7 +540,12 @@ impl Project {
     pub fn read_scene_at(&self, relative: &str) -> Result<Scene> {
         let path = self.root.join(relative);
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let file: SceneFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        let mut file: SceneFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        // A scene from before effects were objects had the four the
+        // renderer always drew.
+        if file.format < 2 {
+            file.scene.add_first_effects();
+        }
         Ok(file.scene)
     }
 
@@ -748,6 +754,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_scene_from_before_effects_were_objects_gets_the_four_it_had() {
+        let home = scratch("old-effects");
+        let root = home.join("P");
+        let mut project = Project::create(&root, "P").unwrap();
+        let mut scene = Scene::empty();
+        scene.add("Key light", Content::light(), None);
+        project.save_scene(&scene).unwrap();
+        let path = root.join("Scenes/Untitled scene.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut file: SceneFile = toml::from_str(&text).unwrap();
+        file.format = 1;
+        file.scene = scene;
+        std::fs::write(&path, toml::to_string(&file).unwrap()).unwrap();
+        let read = project.read_scene_at("Scenes/Untitled scene.toml").unwrap();
+        let effects: Vec<&str> = read
+            .objects()
+            .iter()
+            .filter(|o| matches!(o.content, Content::Effect { .. }))
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(effects, ["Colour filter", "Bloom", "Ambient occlusion", "Vignette"]);
+        // A scene of this build keeps what it has.
+        project.save_scene(&read).unwrap();
+        let again = project.read_scene_at("Scenes/Untitled scene.toml").unwrap();
+        assert_eq!(again.objects().len(), read.objects().len());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

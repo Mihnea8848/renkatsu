@@ -283,6 +283,9 @@ struct Row {
     depth: usize,
     id: Option<ObjectId>,
     kind: Kind,
+    /// The icon and the type: the kind's, or the light's or effect's.
+    glyph: &'static str,
+    label: &'static str,
     /// The icon's colour: the kind's, blue for a man.
     color: Color32,
     name: String,
@@ -321,6 +324,8 @@ fn rows(st: &State) -> Vec<Row> {
         depth: 0,
         id: None,
         kind: Kind::Scene,
+        glyph: Kind::Scene.glyph(),
+        label: Kind::Scene.label(),
         color: Kind::Scene.color(),
         name: scene.name.clone(),
         visible: true,
@@ -345,6 +350,8 @@ fn rows(st: &State) -> Vec<Row> {
             depth,
             id: Some(id),
             kind: object.kind(),
+            glyph: object.content.glyph(),
+            label: object.content.label(),
             color: st.library.color_of(&object.content),
             name: object.name.clone(),
             visible: object.visible,
@@ -523,7 +530,7 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     glyph(&p, k, Pos2::new(x + 7.0, y), g, 10.0, color);
                 }
                 let tint = if selected { on_selection(row.color) } else { row.color };
-                glyph(&p, k, Pos2::new(x + 24.0, y), row.kind.glyph(), 15.0, tint);
+                glyph(&p, k, Pos2::new(x + 24.0, y), row.glyph, 15.0, tint);
                 let name_end = match k.d.tree {
                     Tree::Columns => rect.right() - type_w,
                     _ => rect.right() - 28.0,
@@ -565,7 +572,7 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     p.text(
                         Pos2::new(rect.right() - type_w + 10.0, y),
                         Align2::LEFT_CENTER,
-                        row.kind.label(),
+                        row.label,
                         k.font(),
                         faint,
                     );
@@ -918,16 +925,11 @@ pub fn animation_items(
     chosen
 }
 
-/// The kinds the Add menu offers, as menu items with the kind's icon.
+/// The kinds the Add menu offers, as menu items with the kind's icon,
+/// then the kinds of light and the effects.
 pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
-    for kind in [
-        Kind::Character,
-        Kind::Item,
-        Kind::Light,
-        Kind::Camera,
-        Kind::Map,
-        Kind::Folder,
-    ] {
+    use crate::scene::{Content, Effect, LightKind};
+    let item = |ui: &mut Ui, glyph: &str, color: Color32, text: &str, on: bool| {
         let mut job = egui::text::LayoutJob::default();
         let format = |font, color| egui::TextFormat {
             font_id: font,
@@ -935,16 +937,39 @@ pub fn add_items(ui: &mut Ui, k: &Look, st: &mut State) {
             valign: Align::Center,
             ..Default::default()
         };
-        job.append(kind.glyph(), 0.0, format(k.icons(15.0), kind.color()));
+        job.append(glyph, 0.0, format(k.icons(15.0), color));
+        job.append(text, 8.0, format(k.font(), k.t.text));
+        let resp = ui.add_enabled(on, egui::Button::new(job));
+        let clicked = resp.on_disabled_hover_text("Not available yet").clicked();
+        if clicked {
+            ui.close();
+        }
+        clicked
+    };
+    for kind in [Kind::Character, Kind::Item, Kind::Camera, Kind::Map, Kind::Folder] {
         let text = if kind == Kind::Character {
             "Character from a card"
         } else {
             kind.label()
         };
-        job.append(text, 8.0, format(k.font(), k.t.text));
-        if ui.button(job).clicked() {
+        if item(ui, kind.glyph(), kind.color(), text, true) {
             st.run(Command::Add(kind));
-            ui.close();
+        }
+    }
+    let heading = |ui: &mut Ui, name: &str| {
+        ui.separator();
+        ui.label(egui::RichText::new(name).font(k.small()).color(k.t.text_dim));
+    };
+    heading(ui, "Lights");
+    for light in LightKind::ALL {
+        if item(ui, light.glyph(), Kind::Light.color(), light.label(), true) {
+            st.run(Command::AddContent(Content::light_of(light)));
+        }
+    }
+    heading(ui, "Effects");
+    for effect in Effect::all() {
+        if item(ui, effect.glyph(), Kind::Effect.color(), effect.label(), effect.drawn()) {
+            st.run(Command::AddContent(Content::Effect { effect }));
         }
     }
 }

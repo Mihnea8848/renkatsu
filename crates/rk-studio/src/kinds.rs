@@ -22,6 +22,8 @@ pub enum Kind {
     Light,
     Camera,
     Map,
+    /// A post-processing effect.
+    Effect,
     Folder,
     /// An animation, as CharaStudio's Anime menu has them: a clip that
     /// plays on a character, which may hold one pose.
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Light => [0xc8, 0xb0, 0x5a],
             Kind::Camera => [0x6a, 0x9c, 0xc0],
             Kind::Map => [0x78, 0xa8, 0x6c],
+            Kind::Effect => [0xb0, 0x84, 0xc0],
             Kind::Folder => [0xa8, 0x96, 0x74],
             Kind::Animation => [0x5c, 0xa8, 0x98],
             Kind::Pose => [0x6c, 0xa0, 0xb4],
@@ -66,10 +69,25 @@ impl Kind {
             Kind::Light => icon::LIGHTBULB,
             Kind::Camera => icon::VIDEO_CAMERA,
             Kind::Map => icon::MAP_TRIFOLD,
+            Kind::Effect => icon::MAGIC_WAND,
             Kind::Folder => icon::FOLDER_SIMPLE,
             Kind::Animation => icon::PERSON_SIMPLE_RUN,
             Kind::Pose => icon::PERSON_ARMS_SPREAD,
             Kind::Script => icon::CODE,
+        }
+    }
+
+    /// The top-level folder a new object of the kind goes into, which
+    /// keeps the Outliner in order.
+    pub fn folder(self) -> Option<&'static str> {
+        match self {
+            Kind::Character => Some("Characters"),
+            Kind::Item => Some("Items"),
+            Kind::Light => Some("Lights"),
+            Kind::Camera => Some("Cameras"),
+            Kind::Map => Some("Map"),
+            Kind::Effect => Some("Effects"),
+            _ => None,
         }
     }
 
@@ -83,6 +101,7 @@ impl Kind {
             Kind::Light => "Light",
             Kind::Camera => "Camera",
             Kind::Map => "Map",
+            Kind::Effect => "Effect",
             Kind::Folder => "Folder",
             Kind::Animation => "Animation",
             Kind::Pose => "Pose",

@@ -424,26 +424,7 @@ pub fn value_box(ui: &mut Ui, k: &Look, rect: Rect, text: &str) {
 
 /// A dropdown: the chosen option and a caret, opening a list.
 pub fn combo(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: &mut usize, options: &[&str]) {
-    let resp = ui.interact(rect, id, Sense::click());
-    let p = ui.painter();
-    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
-    p.rect_filled(rect, k.radius(), fill);
-    let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
-    p.with_clip_rect(rect.with_max_x(rect.right() - 22.0)).text(
-        Pos2::new(rect.left() + 8.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        options.get(*chosen).copied().unwrap_or(""),
-        k.font(),
-        color,
-    );
-    glyph(
-        p,
-        k,
-        Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
-        icon::CARET_DOWN,
-        10.0,
-        color,
-    );
+    let resp = dropdown_field(ui, k, rect, id, options.get(*chosen).copied().unwrap_or(""));
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(rect.width() - 10.0);
         // A long list, as of personalities, scrolls.
@@ -456,6 +437,32 @@ pub fn combo(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: &mut usize, opti
             }
         });
     });
+}
+
+/// A field that opens a list, showing `text`; the caller opens the list
+/// from the response.
+pub fn dropdown_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    let p = ui.painter();
+    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+    p.rect_filled(rect, k.radius(), fill);
+    let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+    p.with_clip_rect(rect.with_max_x(rect.right() - 22.0)).text(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        k.font(),
+        color,
+    );
+    glyph(
+        p,
+        k,
+        Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
+        icon::CARET_DOWN,
+        10.0,
+        color,
+    );
+    resp
 }
 
 /// A check box with its name to the right.

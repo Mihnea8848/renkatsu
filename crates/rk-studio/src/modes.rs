@@ -246,6 +246,7 @@ pub fn actions(kind: Kind) -> &'static [Action] {
             (icon::APERTURE, "Lens", true),
             (icon::CAMERA_PLUS, "New shot", false),
         ],
+        Kind::Effect => &[],
         Kind::Map => &[
             (icon::SWAP, "Change map", false),
             (icon::SUN_HORIZON, "Time of day", true),

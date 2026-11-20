@@ -129,6 +129,8 @@ pub enum Command {
     /// Add an object of a kind. A character needs a card, so asking for
     /// one shows the cards instead.
     Add(Kind),
+    /// Adds an object that is ready as it is: a light or an effect.
+    AddContent(Content),
     /// Add the character of one of the project's cards, named by its path
     /// relative to the project.
     AddCard(PathBuf),
@@ -1032,6 +1034,11 @@ impl State {
                     self.unfold_to(id);
                     self.focus_pending = Some(id);
                 }
+            }
+            Command::AddContent(content) => {
+                let id = self.doc.add(content.label(), content);
+                self.unfold_to(id);
+                self.focus_pending = Some(id);
             }
             Command::AddCard(card) => self.add_card(card),
             Command::AddMap(file) => self.add_map(file),
@@ -2148,12 +2155,13 @@ mod tests {
         let cup = st.doc.add("Cup", Content::Item);
         st.doc.selected = None;
         let table = st.doc.add("Table", Content::Item);
+        let parent = |st: &State, id| st.doc.scene().get(id).unwrap().parent;
+        let items = parent(&st, table);
         st.doc.select_many(&[cup, light, table]);
         st.run(Command::AttachToLast);
-        let parent = |st: &State, id| st.doc.scene().get(id).unwrap().parent;
         assert_eq!(
             (parent(&st, cup), parent(&st, light), parent(&st, table)),
-            (Some(table), Some(table), None)
+            (Some(table), Some(table), items)
         );
         // Detached, they are at the top again.
         st.doc.select_many(&[cup, light]);
@@ -2186,6 +2194,30 @@ mod tests {
         st.go_to_folder("Characters");
         st.folder_history(false);
         assert_eq!(st.subfolder, "Characters");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_card_added_from_content_goes_into_the_characters_folder() {
+        let home = scratch("content-folder");
+        let mut st = editor(&home);
+        std::fs::write(home.join("anna.png"), b"card").unwrap();
+        let card = st.project.import_card(&home.join("anna.png"), "Anna").unwrap();
+        st.project.save().unwrap();
+        st.refresh_content();
+        let folder_of = |st: &State| {
+            let scene = st.doc.scene();
+            let parent = scene.get(st.doc.selected.unwrap()).unwrap().parent;
+            parent.and_then(|p| scene.get(p)).map(|o| o.name.clone())
+        };
+        // Whatever is selected: the key light, then an effect.
+        for selected in ["Key light", "Bloom"] {
+            st.doc.selected = st.doc.scene().objects().iter().find(|o| o.name == selected).map(|o| o.id);
+            st.run(Command::AddCard(PathBuf::from(&card)));
+            assert_eq!(folder_of(&st).as_deref(), Some("Characters"), "with {selected} selected");
+        }
+        let folders = st.doc.scene().objects().iter().filter(|o| o.name == "Characters").count();
+        assert_eq!(folders, 1);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2296,6 +2328,9 @@ mod tests {
                 .collect()
         };
         let row = |depth: usize, name: &str| (depth, name.to_owned());
+        // A new scene's lights and effects, in their folders.
+        let start = names(&st);
+        let with = |rows: &[(usize, String)]| [start.clone(), rows.to_vec()].concat();
         st.run(Command::Add(Kind::Folder));
         let folder = st.doc.selected.unwrap();
         st.run(Command::Add(Kind::Camera));
@@ -2307,12 +2342,7 @@ mod tests {
         assert_eq!(st.renaming.as_ref().map(|r| r.0), Some(child));
         assert_eq!(
             names(&st),
-            [
-                row(0, "Key light"),
-                row(0, "Folder"),
-                row(1, "Camera"),
-                row(1, "Folder 2")
-            ]
+            with(&[row(0, "Folder"), row(1, "Camera"), row(1, "Folder 2")])
         );
         // Its children are selected together, hidden together and taken
         // out of it together.
@@ -2326,12 +2356,7 @@ mod tests {
         st.run(Command::Unparent);
         assert_eq!(
             names(&st),
-            [
-                row(0, "Key light"),
-                row(0, "Folder"),
-                row(0, "Camera"),
-                row(0, "Folder 2")
-            ]
+            with(&[row(0, "Folder"), row(0, "Camera"), row(0, "Folder 2")])
         );
         st.run(Command::Undo);
         assert_eq!(st.doc.scene().get(camera).unwrap().parent, Some(folder));
@@ -2344,11 +2369,11 @@ mod tests {
         let pasted = st.doc.selected.unwrap();
         assert_eq!(st.focus_pending, Some(pasted));
         assert_eq!(
-            names(&st)[4..],
+            names(&st)[start.len() + 3..],
             [row(0, "Folder 3"), row(1, "Camera 2"), row(1, "Folder 4")]
         );
         st.run(Command::Cut);
-        assert_eq!(names(&st).len(), 4);
+        assert_eq!(names(&st).len(), start.len() + 3);
         assert_eq!(st.scene_clipboard.len(), 3);
         // Focus asks the viewport for the selection.
         st.doc.selected = Some(camera);
@@ -2359,9 +2384,9 @@ mod tests {
         // one undo.
         st.doc.select_many(&[camera, child]);
         st.run(Command::Delete);
-        assert_eq!(names(&st), [row(0, "Key light"), row(0, "Folder")]);
+        assert_eq!(names(&st), with(&[row(0, "Folder")]));
         st.run(Command::Undo);
-        assert_eq!(names(&st).len(), 4);
+        assert_eq!(names(&st).len(), start.len() + 3);
         assert!(st.doc.scene().can_place(camera, Place::Into(None)));
         let _ = std::fs::remove_dir_all(&home);
     }
