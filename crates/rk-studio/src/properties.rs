@@ -1394,12 +1394,26 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str,
         child.spacing_mut().item_spacing.x = 4.0;
         let w = child.available_width() - k.field() - 4.0;
         widgets::search(&mut child, k, &mut st.property_search, "Search", w);
+        let query = st.property_search.trim().to_lowercase();
+        ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
         let _ = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
     }
 }
 
 /// The header of a section; returns whether the section is open.
+/// Where the rows find what the header's search box holds.
+const SEARCH: &str = "property search";
+
+/// What the search box holds, lowercase; empty for nothing.
+fn searched(ui: &Ui) -> String {
+    ui.data(|d| d.get_temp::<String>(Id::new(SEARCH))).unwrap_or_default()
+}
+
 fn section(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> bool {
+    // While searching, the matching rows stand alone, without sections.
+    if !searched(ui).is_empty() {
+        return true;
+    }
     let t = &k.t;
     let h = match k.d.props {
         Props::Details => k.d.row + 2.0,
@@ -1454,6 +1468,9 @@ fn section(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> 
 
 /// Space under the rows of an open section.
 fn section_end(ui: &mut Ui, k: &Look) {
+    if !searched(ui).is_empty() {
+        return;
+    }
     let gap = match k.d.props {
         Props::Details => 0.0,
         Props::Inspector => 5.0,
@@ -1551,6 +1568,13 @@ fn row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, add: impl FnOnce(&m
 /// A row as `row`, `extra` taller, its name on the first line and its
 /// value growing down from there.
 fn sized_row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
+    let query = searched(ui);
+    if query.is_empty() || name.to_lowercase().contains(&query) {
+        sized_row_shown(ui, k, name, off, extra, add);
+    }
+}
+
+fn sized_row_shown(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
     let t = &k.t;
     let name_color = if off.is_some() { t.text_dim } else { t.text };
     let (h, share, least) = match k.d.props {

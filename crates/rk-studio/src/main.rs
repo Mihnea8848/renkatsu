@@ -9,6 +9,7 @@
 // A window program on Windows: no console opens beside it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod about;
 mod anim_import;
 mod animations;
 mod bones;
@@ -230,6 +231,9 @@ struct Cli {
     /// Start with the Keyboard shortcuts window open, to picture it.
     #[arg(long, hide = true)]
     shortcuts: bool,
+    /// Start with Help, About Renkatsu open, to picture it.
+    #[arg(long, hide = true)]
+    about: bool,
     /// Print the frames that took longer than a tenth of a second when
     /// the window closes, to measure freezes.
     #[arg(long, hide = true)]
@@ -530,6 +534,7 @@ impl Studio {
         state.keys = keymap::Keymap::with(&state.settings.keys);
         state.settings.show_inputs |= cli.show_inputs;
         state.shortcuts_open = cli.shortcuts;
+        state.about_open = cli.about;
         state.scripted = cli.screenshot.is_some();
         state.jobs.wake = Some(cc.egui_ctx.clone());
         state.fetch_feed();
@@ -1003,6 +1008,7 @@ impl eframe::App for Studio {
 
         preferences::show(ctx, &k, &mut self.state);
         shortcuts::show(ctx, &k, &mut self.state);
+        about::show(ctx, &k, &mut self.state);
         packages::show(ctx, &k, &mut self.state);
         card_import::show(ctx, &k, &mut self.state);
         map_library::show(ctx, &k, &mut self.state);

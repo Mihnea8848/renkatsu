@@ -449,6 +449,8 @@ pub struct State {
     /// The keys of every action: the defaults with the user's changes.
     pub keys: crate::keymap::Keymap,
     pub shortcuts_open: bool,
+    /// Help, About Renkatsu is open.
+    pub about_open: bool,
     pub shortcuts_search: String,
     /// The action and the place the Keyboard shortcuts window waits for
     /// keys for.
@@ -860,6 +862,7 @@ impl State {
             preferences_open: false,
             keys: Default::default(),
             shortcuts_open: false,
+            about_open: false,
             shortcuts_search: String::new(),
             key_capture: None,
             inputs: Vec::new(),
