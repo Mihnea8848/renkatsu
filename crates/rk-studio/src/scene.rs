@@ -246,13 +246,42 @@ pub enum Content {
         /// card's. The card itself is never written.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<Box<crate::profile::Profile>>,
+        /// The light group the character is in; none is the group every
+        /// scene has.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        light_group: Option<String>,
     },
     Light {
+        /// What the light lights and how it shines. Scenes of Renkatsu
+        /// 0.2.1 and older have the character light only.
+        #[serde(default)]
+        light: LightKind,
         /// The light stays at the camera's upper left, as in the game's
         /// maker, instead of shining along its own rotation.
         from_camera: bool,
         intensity: f32,
         shadows: bool,
+        #[serde(default = "white")]
+        color: [f32; 3],
+        /// How far a point or spot light reaches, in metres.
+        #[serde(default = "reach")]
+        range: f32,
+        /// A spot light's cone, in degrees.
+        #[serde(default = "cone")]
+        spot_angle: f32,
+        /// Whether a map light lights the map, and the characters.
+        #[serde(default = "yes")]
+        on_map: bool,
+        #[serde(default = "yes")]
+        on_characters: bool,
+        /// The light groups whose characters it lights; none lights
+        /// every group.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        groups: Option<Vec<String>>,
+    },
+    /// A post-processing effect on the whole picture.
+    Effect {
+        effect: Effect,
     },
     Camera {
         focal_length: f32,
@@ -319,6 +348,7 @@ impl Content {
             liquid_clothes: true,
             animation: None,
             profile: None,
+            light_group: None,
         }
     }
 
@@ -326,9 +356,40 @@ impl Content {
     /// CharaStudio's 1.0.
     pub fn light() -> Content {
         Content::Light {
+            light: LightKind::Character,
             from_camera: true,
             intensity: 0.85,
             shadows: true,
+            color: white(),
+            range: reach(),
+            spot_angle: cone(),
+            on_map: true,
+            on_characters: true,
+            groups: None,
+        }
+    }
+
+    /// A new light of a kind. Map lights shine on their own, and light
+    /// the map and the characters.
+    pub fn light_of(light: LightKind) -> Content {
+        match Content::light() {
+            Content::Light { intensity, .. } if light != LightKind::Character => Content::Light {
+                light,
+                from_camera: false,
+                intensity: if light == LightKind::Directional {
+                    intensity
+                } else {
+                    1.0
+                },
+                shadows: light == LightKind::Directional,
+                color: white(),
+                range: reach(),
+                spot_angle: cone(),
+                on_map: true,
+                on_characters: true,
+                groups: None,
+            },
+            other => other,
         }
     }
 
@@ -358,6 +419,25 @@ impl Content {
             Content::Camera { .. } => Kind::Camera,
             Content::Item => Kind::Item,
             Content::Map { .. } => Kind::Map,
+            Content::Effect { .. } => Kind::Effect,
+        }
+    }
+
+    /// The icon of the object: its kind's, or its light's or effect's.
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            Content::Light { light, .. } => light.glyph(),
+            Content::Effect { effect } => effect.glyph(),
+            other => other.kind().glyph(),
+        }
+    }
+
+    /// What the object is, as its header says.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Content::Light { light, .. } => light.label(),
+            Content::Effect { effect } => effect.label(),
+            other => other.kind().label(),
         }
     }
 
@@ -376,6 +456,192 @@ impl Content {
 
 fn yes() -> bool {
     true
+}
+
+fn white() -> [f32; 3] {
+    [1.0; 3]
+}
+
+fn reach() -> f32 {
+    10.0
+}
+
+fn cone() -> f32 {
+    30.0
+}
+
+/// What a light lights. The character light is CharaStudio's: it lights
+/// the characters only. The others are map lights, as a map's own sun
+/// and lamps are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightKind {
+    #[default]
+    Character,
+    Directional,
+    Point,
+    Spot,
+}
+
+impl LightKind {
+    pub const ALL: [LightKind; 4] = [
+        LightKind::Character,
+        LightKind::Directional,
+        LightKind::Point,
+        LightKind::Spot,
+    ];
+
+    pub fn glyph(self) -> &'static str {
+        use egui_phosphor::regular as icon;
+        match self {
+            LightKind::Character => icon::USER_FOCUS,
+            LightKind::Directional => icon::SUN,
+            LightKind::Point => icon::LIGHTBULB,
+            LightKind::Spot => icon::FLASHLIGHT,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LightKind::Character => "Character light",
+            LightKind::Directional => "Directional light",
+            LightKind::Point => "Point light",
+            LightKind::Spot => "Spot light",
+        }
+    }
+}
+
+/// The light group every scene has, which every character is in until
+/// it is put in another.
+pub const EVERYONE: &str = "Everyone";
+
+/// CharaStudio's colour filters, in the order of its list (`Filter_00`).
+pub const FILTERS: [&str; 17] = [
+    "Day",
+    "Evening",
+    "Night",
+    "Live stage",
+    "Vivid",
+    "Nostalgia",
+    "Retro",
+    "Flat colour",
+    "Four colour",
+    "Comic",
+    "Mono",
+    "Sepia",
+    "Reverse mono",
+    "Reverse colour",
+    "Red accent",
+    "Blue accent",
+    "Green accent",
+];
+
+/// A post-processing effect, with its values. One object holds one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Effect {
+    ColorFilter {
+        filter: usize,
+        blend: f32,
+    },
+    Bloom {
+        intensity: f32,
+        threshold: f32,
+        spread: f32,
+    },
+    AmbientOcclusion {
+        intensity: f32,
+        radius: f32,
+    },
+    Vignette {
+        intensity: f32,
+        blur: f32,
+    },
+    Fog {
+        color: [f32; 3],
+        start: f32,
+        end: f32,
+    },
+    DepthOfField {
+        focus: f32,
+        aperture: f32,
+    },
+    SunShafts {
+        color: [f32; 3],
+        intensity: f32,
+    },
+}
+
+impl Effect {
+    /// Every effect with the values a new one starts with: the
+    /// renderer's for the four a scene has always had.
+    pub fn all() -> [Effect; 7] {
+        let bloom = rk_render::effects::Bloom::default();
+        let ao = rk_render::effects::AmbientOcclusion::default();
+        let vignette = rk_render::effects::Vignette::default();
+        [
+            Effect::ColorFilter { filter: 0, blend: 0.0 },
+            Effect::Bloom {
+                intensity: bloom.intensity,
+                threshold: bloom.threshold,
+                spread: bloom.blur_spread,
+            },
+            Effect::AmbientOcclusion {
+                intensity: ao.intensity,
+                radius: ao.radius,
+            },
+            Effect::Vignette {
+                intensity: vignette.intensity,
+                blur: vignette.blur,
+            },
+            Effect::Fog {
+                color: [0.75, 0.8, 0.85],
+                start: 10.0,
+                end: 100.0,
+            },
+            Effect::DepthOfField {
+                focus: 3.0,
+                aperture: 0.6,
+            },
+            Effect::SunShafts {
+                color: [1.0, 0.95, 0.85],
+                intensity: 1.0,
+            },
+        ]
+    }
+
+    /// Whether the renderer draws the effect yet.
+    pub fn drawn(&self) -> bool {
+        !matches!(
+            self,
+            Effect::Fog { .. } | Effect::DepthOfField { .. } | Effect::SunShafts { .. }
+        )
+    }
+
+    pub fn glyph(&self) -> &'static str {
+        use egui_phosphor::regular as icon;
+        match self {
+            Effect::ColorFilter { .. } => icon::SWATCHES,
+            Effect::Bloom { .. } => icon::SPARKLE,
+            Effect::AmbientOcclusion { .. } => icon::CIRCLE_HALF,
+            Effect::Vignette { .. } => icon::VIGNETTE,
+            Effect::Fog { .. } => icon::CLOUD_FOG,
+            Effect::DepthOfField { .. } => icon::APERTURE,
+            Effect::SunShafts { .. } => icon::SUN_HORIZON,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Effect::ColorFilter { .. } => "Colour filter",
+            Effect::Bloom { .. } => "Bloom",
+            Effect::AmbientOcclusion { .. } => "Ambient occlusion",
+            Effect::Vignette { .. } => "Vignette",
+            Effect::Fog { .. } => "Fog",
+            Effect::DepthOfField { .. } => "Depth of field",
+            Effect::SunShafts { .. } => "Sun shafts",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -433,6 +699,10 @@ pub struct Scene {
     next_id: u64,
     #[serde(default)]
     objects: Vec<Object>,
+    /// The light groups characters can be put in, besides the one every
+    /// scene has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub light_groups: Vec<String>,
     #[serde(skip)]
     poses: Poses,
 }
@@ -443,15 +713,59 @@ impl Scene {
             name: "Untitled scene".to_owned(),
             next_id: 1,
             objects: Vec::new(),
+            light_groups: Vec::new(),
             poses: Poses::default(),
         }
     }
 
-    /// What a new scene starts with: the key light.
+    /// What a new scene starts with: the key light, and the effects the
+    /// picture has always had.
     pub fn new() -> Scene {
         let mut scene = Scene::empty();
-        scene.add("Key light", Content::light(), None);
+        let lights = scene.kind_folder(Kind::Light);
+        scene.add("Key light", Content::light(), lights);
+        scene.add_first_effects();
         scene
+    }
+
+    /// Adds the effects every scene had before they were objects, with
+    /// the values the renderer had for them.
+    pub fn add_first_effects(&mut self) {
+        let folder = self.kind_folder(Kind::Effect);
+        for effect in Effect::all().into_iter().take(4) {
+            let name = effect.label();
+            self.add(name, Content::Effect { effect }, folder);
+        }
+    }
+
+    /// The top-level folder new objects of a kind go into, made when the
+    /// scene has none.
+    pub fn kind_folder(&mut self, kind: Kind) -> Option<ObjectId> {
+        let name = kind.folder()?;
+        let there = self
+            .objects
+            .iter()
+            .find(|o| o.parent.is_none() && o.kind() == Kind::Folder && o.name == name)
+            .map(|o| o.id);
+        Some(there.unwrap_or_else(|| self.add(name, Content::Folder, None)))
+    }
+
+    /// Whether an object is one of the folders objects are sorted into.
+    pub fn is_kind_folder(&self, id: ObjectId) -> bool {
+        self.get(id).is_some_and(|o| {
+            o.parent.is_none()
+                && o.kind() == Kind::Folder
+                && [
+                    Kind::Character,
+                    Kind::Item,
+                    Kind::Light,
+                    Kind::Camera,
+                    Kind::Map,
+                    Kind::Effect,
+                ]
+                .iter()
+                .any(|k| k.folder() == Some(o.name.as_str()))
+        })
     }
 
     pub fn objects(&self) -> &[Object] {
@@ -582,10 +896,15 @@ impl Scene {
     /// The light that lights the scene: the first one that shows, in tree
     /// order. The renderer has one light.
     pub fn key_light(&self) -> Option<&Object> {
-        self.rows()
-            .into_iter()
-            .filter_map(|(_, id)| self.get(id))
-            .find(|o| o.kind() == Kind::Light && self.shown(o.id))
+        self.rows().into_iter().filter_map(|(_, id)| self.get(id)).find(|o| {
+            matches!(
+                o.content,
+                Content::Light {
+                    light: LightKind::Character,
+                    ..
+                }
+            ) && self.shown(o.id)
+        })
     }
 
     /// A name no other object has: `base`, or `base` with the first free
@@ -1188,10 +1507,18 @@ impl Document {
         }
     }
 
-    /// Adds an object beside the selection and selects it.
+    /// Adds an object and selects it. A folder goes beside the selection;
+    /// anything else into the selected folder, or else into its kind's
+    /// folder.
     pub fn add(&mut self, name: &str, content: Content) -> ObjectId {
         self.checkpoint();
-        let id = self.scene.add(name, content, self.target_folder());
+        let kind = content.kind();
+        let parent = match self.selection() {
+            _ if kind == Kind::Folder => self.target_folder(),
+            Some(s) if s.kind() == Kind::Folder && !self.scene.is_kind_folder(s.id) => Some(s.id),
+            _ => self.scene.kind_folder(kind),
+        };
+        let id = self.scene.add(name, content, parent);
         self.selected = Some(id);
         id
     }
@@ -1286,6 +1613,18 @@ impl Document {
         true
     }
 
+    /// Adds a light group with the first free name, and returns it.
+    pub fn add_light_group(&mut self) -> String {
+        self.checkpoint();
+        let groups = &mut self.scene.light_groups;
+        let name = (2..)
+            .map(|n| format!("Group {n}"))
+            .find(|name| !groups.contains(name))
+            .unwrap_or_default();
+        groups.push(name.clone());
+        name
+    }
+
     /// Shows or hides an object.
     pub fn set_visible(&mut self, id: ObjectId, visible: bool) -> bool {
         if self.scene.get(id).is_none_or(|o| o.visible == visible) {
@@ -1358,10 +1697,8 @@ mod tests {
         let anna = doc.add_character("Anna", card("anna"));
         doc.selected = Some(folder);
         let bea = doc.add_character("Bea", card("bea"));
-        doc.selected = None;
-        let light = doc.add("Key light", Content::light());
-        doc.selected = None;
-        let camera = doc.add("Camera", Content::camera());
+        let light = doc.add_in("Key light", Content::light(), None);
+        let camera = doc.add_in("Camera", Content::camera(), None);
         (doc, [folder, anna, bea, light, camera])
     }
 
@@ -1446,6 +1783,48 @@ mod tests {
     }
 
     #[test]
+    fn a_new_object_goes_into_its_kinds_folder() {
+        let rows = |doc: &Document| -> Vec<(usize, String)> {
+            let scene = doc.scene();
+            scene
+                .rows()
+                .into_iter()
+                .map(|(depth, id)| (depth, scene.get(id).unwrap().name.clone()))
+                .collect()
+        };
+        let row = |depth: usize, name: &str| (depth, name.to_owned());
+        let mut doc = Document::new(Scene::new());
+        assert_eq!(
+            rows(&doc),
+            [
+                row(0, "Lights"),
+                row(1, "Key light"),
+                row(0, "Effects"),
+                row(1, "Colour filter"),
+                row(1, "Bloom"),
+                row(1, "Ambient occlusion"),
+                row(1, "Vignette"),
+            ]
+        );
+        // Beside another light, wherever the selection is.
+        doc.add("Lamp", Content::light_of(LightKind::Point));
+        // A folder of the user's that is selected takes it; another
+        // kind's folder does not.
+        doc.selected = None;
+        let props = doc.add("Props", Content::Folder);
+        doc.add("Cup", Content::Item);
+        let lights = doc.scene().objects()[0].id;
+        doc.selected = Some(lights);
+        doc.add("Desk", Content::Item);
+        assert_eq!(rows(&doc)[..3], [row(0, "Lights"), row(1, "Key light"), row(1, "Lamp")]);
+        assert_eq!(
+            rows(&doc)[8..],
+            [row(0, "Props"), row(1, "Cup"), row(0, "Items"), row(1, "Desk")]
+        );
+        assert!(doc.scene().is_kind_folder(lights) && !doc.scene().is_kind_folder(props));
+    }
+
+    #[test]
     fn adding_goes_into_the_selected_folder_and_selects() {
         let (doc, [folder, anna, bea, light, camera]) = cast();
         assert_eq!(
@@ -1480,8 +1859,8 @@ mod tests {
     fn stage() -> (Document, [ObjectId; 3]) {
         let mut doc = Document::new(Scene::empty());
         let anna = doc.add_character("Anna", card("anna"));
-        let light = doc.add("Light", Content::light());
-        let cup = doc.add("Cup", Content::Item);
+        let light = doc.add_in("Light", Content::light(), None);
+        let cup = doc.add_in("Cup", Content::Item, None);
         let mut turned = doc.scene().get(anna).unwrap().clone();
         turned.transform = Transform {
             position: [1.0, 0.0, 2.0],
