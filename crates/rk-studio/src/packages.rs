@@ -294,13 +294,13 @@ enum Ask {
 /// takes no clicks. Returns whether the dimmed part was clicked.
 pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
     let screen = ctx.content_rect();
-    let area = egui::Id::new((id, "veil"));
-    let opening = !ctx.memory(|m| {
-        m.areas()
-            .visible_last_frame(&egui::LayerId::new(egui::Order::Foreground, area))
-    });
-    let clicked = egui::Area::new(area)
-        .order(egui::Order::Foreground)
+    // The veil is a layer below the windows (Middle; they and their popups
+    // are Foreground), so a click on it, which brings it to the front of
+    // its own order, can never lift it over the window it belongs to.
+    let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new((id, "veil")));
+    let opening = !ctx.memory(|m| m.areas().visible_last_frame(&layer));
+    let clicked = egui::Area::new(layer.id)
+        .order(egui::Order::Middle)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
             let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
@@ -308,12 +308,9 @@ pub(crate) fn veil(ctx: &egui::Context, id: &str) -> bool {
             resp.clicked()
         })
         .inner;
-    // A click on the veil brings it to the front, and the next time the
-    // window opens it would cover the window: the window, the area named
-    // `id`, goes back on top as it opens. Only then, so the window's own
-    // popups can still open above it.
+    // Above whatever else sits in the middle order when it opens.
     if opening {
-        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id)));
+        ctx.move_to_top(layer);
     }
     clicked
 }
