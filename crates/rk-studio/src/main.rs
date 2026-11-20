@@ -807,7 +807,11 @@ impl Studio {
         Ok(Studio {
             look,
             state,
-            dock: panels::default_layout(bottom),
+            // A picture of the window is always of the default layout.
+            dock: match cli.screenshot {
+                None => panels::saved_layout().unwrap_or_else(|| panels::default_layout(bottom)),
+                Some(_) => panels::default_layout(bottom),
+            },
             bottom,
             screenshot: cli.screenshot.clone(),
             clicks: cli.click.clone(),
@@ -902,6 +906,14 @@ fn fonts() -> egui::FontDefinitions {
 }
 
 impl eframe::App for Studio {
+    fn on_exit(&mut self) {
+        if self.screenshot.is_none() {
+            if let Err(e) = panels::save_layout(&self.dock) {
+                eprintln!("The layout could not be kept: {e:#}");
+            }
+        }
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if self.screenshot.is_some() {
             self.scripted_pointer(raw_input);

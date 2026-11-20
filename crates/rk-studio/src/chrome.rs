@@ -213,7 +213,6 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
             *reset = true;
             ui.close();
         }
-        let _ = ui.button("Save layout");
     });
     let w = (right.available_width() - 8.0).clamp(120.0, 260.0);
     widgets::search(&mut right, k, &mut st.command_search, "Search", w);
