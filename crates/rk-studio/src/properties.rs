@@ -215,7 +215,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         p,
                         k,
                         Pos2::new(field.right() - 12.0, field.center().y + 1.0),
-                        icon::CARET_DOWN,
+                        widgets::caret_of(&resp),
                         10.0,
                         color,
                     );
@@ -453,7 +453,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             p,
                             k,
                             Pos2::new(field.right() - 12.0, field.center().y + 1.0),
-                            icon::CARET_DOWN,
+                            widgets::caret_of(&resp),
                             10.0,
                             color,
                         );
@@ -954,7 +954,7 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
         p,
         k,
         Pos2::new(rect.right() - 12.0, rect.center().y + 1.0),
-        icon::CARET_DOWN,
+        widgets::caret_of(&resp),
         10.0,
         color,
     );

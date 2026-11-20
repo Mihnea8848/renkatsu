@@ -469,8 +469,8 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             (Kind::Light, "Colour") => {
                 egui::Popup::menu(&resp)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .show(|ui| light_colour(ui, st));
+                    .close_behavior(widgets::picker_closing(ui.ctx(), LIGHT_COLOUR.into()))
+                    .show(|ui| light_colour(ui, k, st));
             }
             _ if *menu => {
                 egui::Popup::menu(&resp).show(|ui| {
@@ -535,8 +535,10 @@ fn light_type_menu(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 }
 
+const LIGHT_COLOUR: &str = "light colour";
+
 /// The selected light's colour picker.
-fn light_colour(ui: &mut Ui, st: &mut State) {
+fn light_colour(ui: &mut Ui, k: &Look, st: &mut State) {
     use crate::scene::Content;
     let Some(mut object) = st.doc.selection().cloned() else {
         return;
@@ -545,7 +547,7 @@ fn light_colour(ui: &mut Ui, st: &mut State) {
     let Content::Light { color, .. } = &mut object.content else {
         return;
     };
-    widgets::color_picker(ui, color);
+    widgets::color_picker(ui, k, LIGHT_COLOUR.into(), color);
     if object != before {
         let held = ui.input(|i| i.pointer.any_down());
         st.doc.edit(object, held);
