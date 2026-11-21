@@ -35,6 +35,13 @@ struct Globals {
     // _LightColor0: the light's linear colour times its intensity; w is 0
     // for meshes the light does not reach
     light_color: vec4<f32>,
+    // Lamps that light the character on top of its light, Renkatsu's own:
+    // three vec4 each, the place (w 1) or the way towards it (w 0), the
+    // linear colour times intensity (w the range), the way a spot shines
+    // (w the cosine of its half angle, -1 for none).
+    lamps: array<vec4<f32>, 24>,
+    // x: how many lamps
+    lamp_info: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
@@ -1698,7 +1705,44 @@ fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
 
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return forward(i, front);
+    return with_lamps(i, forward(i, front));
+}
+
+// How much a lamp reaches a point: Unity's falloff over its range, the
+// spot's cone, and the turn of the surface towards it.
+fn lamp_reach(i: VsOut, k: u32) -> vec3<f32> {
+    let place = g.lamps[k * 3u];
+    let colour = g.lamps[k * 3u + 1u];
+    let spot = g.lamps[k * 3u + 2u];
+    var to_lamp = place.xyz;
+    var atten = 1.0;
+    if (place.w > 0.5) {
+        let d = place.xyz - i.world;
+        let q = dot(d, d) / max(colour.w * colour.w, 1e-4);
+        atten = clamp((1.0 - q) * 5.0, 0.0, 1.0) / (1.0 + 25.0 * q);
+        to_lamp = normalize(d);
+        if (spot.w > -1.0) {
+            let along = dot(-to_lamp, normalize(spot.xyz));
+            atten *= smoothstep(spot.w, mix(spot.w, 1.0, 0.2), along);
+        }
+    }
+    let ndl = dot(normalize(i.normal), normalize(to_lamp));
+    // A soft toon edge: a lit side and a shadow, with a smooth border.
+    let turn = smoothstep(-0.05, 0.35, ndl);
+    return colour.rgb * atten * turn;
+}
+
+// The lamps' light on top of the character's own shading.
+fn with_lamps(i: VsOut, c: vec4<f32>) -> vec4<f32> {
+    let count = u32(g.lamp_info.x);
+    if (count == 0u) {
+        return c;
+    }
+    var light = vec3<f32>(0.0);
+    for (var k = 0u; k < count; k++) {
+        light += lamp_reach(i, k);
+    }
+    return vec4<f32>(c.rgb + c.rgb * light * 0.6, c.a);
 }
 
 // The colour with the samples the alpha tests keep, for pipelines with
@@ -1710,7 +1754,7 @@ struct Covered {
 
 @fragment
 fn fs_main_covered(i: VsOut, @builtin(front_facing) front: bool) -> Covered {
-    let color = forward(i, front);
+    let color = with_lamps(i, forward(i, front));
     return Covered(color, coverage);
 }
 
