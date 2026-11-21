@@ -10,6 +10,7 @@ pub mod map;
 pub mod material;
 pub mod mirror;
 pub mod modshader;
+mod pass;
 pub mod shadow;
 pub mod sky;
 pub mod xukmi;
@@ -1663,7 +1664,7 @@ impl Renderer {
                 }
             }
         }
-        let draw = |pass: &mut wgpu::RenderPass, r: &Self, depth_texture: bool| {
+        let draw = |pass: &mut crate::pass::Pass, r: &Self, depth_texture: bool| {
             for c in &casters {
                 let role = if depth_texture { c.role.depth } else { c.role.shadow_map };
                 let Some(cull_back) = role else { continue };
@@ -1841,7 +1842,7 @@ impl Renderer {
                 // Without shadows the depth texture is still drawn, as the
                 // game's occlusion effect asks the camera for it.
                 let group = globals_group(self, base, &self.white);
-                let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
+                let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&depth_pass(&depth_texture)));
                 pass.set_bind_group(0, &group, &[]);
                 draw(&mut pass, self, true);
                 if let Some((pipes, gpu, frame)) = &map_frame {
@@ -1917,7 +1918,7 @@ impl Renderer {
                     Some(globals_group(self, globals, &self.white))
                 });
                 {
-                    let mut pass = encoder.begin_render_pass(&depth_pass(&map));
+                    let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&depth_pass(&map)));
                     for (i, group) in groups.iter().enumerate() {
                         let Some(group) = group else { continue };
                         let [ox, oy] = shadow::atlas_origin(i);
@@ -1935,7 +1936,7 @@ impl Renderer {
                 // it too.
                 {
                     let group = globals_group(self, base, &self.white);
-                    let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
+                    let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&depth_pass(&depth_texture)));
                     pass.set_bind_group(0, &group, &[]);
                     if charas {
                         draw(&mut pass, self, true);
@@ -1989,7 +1990,7 @@ impl Renderer {
                     ],
                 });
                 {
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("shadow mask"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &mask,
@@ -2004,7 +2005,7 @@ impl Renderer {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
-                    });
+                    }));
                     pass.set_pipeline(&self.mask_pipeline);
                     pass.set_bind_group(0, &group, &[]);
                     pass.draw(0..3, 0..1);
@@ -2131,7 +2132,7 @@ impl Renderer {
                 },
             };
             {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("main"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: color_view,
@@ -2160,7 +2161,7 @@ impl Renderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
-                });
+                }));
                 // The map's solid surfaces and its sky come first, its blended
                 // ones after the characters'.
                 if let Some((pipes, gpu, frame)) = &map_frame {
@@ -2168,7 +2169,7 @@ impl Renderer {
                 }
                 pass.set_bind_group(0, &globals_bg, &[]);
                 let mut current = None;
-                let occlude = |pass: &mut wgpu::RenderPass| {
+                let occlude = |pass: &mut crate::pass::Pass| {
                     for (pipeline, group) in [&occlusion, &fog].into_iter().flatten() {
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, group, &[]);
@@ -2217,7 +2218,7 @@ impl Renderer {
                 let targets = self.targets.as_ref().expect("made above");
                 {
                     let group = globals_group(self, base, &self.white);
-                    let mut pass = encoder.begin_render_pass(&depth_pass(&targets.highlight));
+                    let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&depth_pass(&targets.highlight)));
                     pass.set_bind_group(0, &group, &[]);
                     for c in casters.iter().filter(|c| h.draws.contains(&c.draw)) {
                         let key = CasterKey {
