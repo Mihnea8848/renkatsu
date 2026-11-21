@@ -883,6 +883,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 time,
                 hide_walls,
                 light_intensity,
+                filter_decay,
             } => {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
@@ -948,6 +949,22 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             FINE,
                         );
                         *light_intensity = light_intensity.clamp(0.0, 1.0);
+                    });
+                    row(ui, k, "Filter decay", None, |ui, rect| {
+                        // How far the colour filter has faded when the map
+                        // has no light.
+                        const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+                        let names = ["None", "25%", "50%", "75%", "100%"];
+                        let mut chosen = STEPS
+                            .iter()
+                            .enumerate()
+                            .min_by(|a, b| (a.1 - *filter_decay).abs().total_cmp(&(b.1 - *filter_decay).abs()))
+                            .map_or(2, |(i, _)| i);
+                        let was = chosen;
+                        widgets::combo(ui, k, rect, id.with("filter decay"), &mut chosen, &names);
+                        if chosen != was {
+                            *filter_decay = STEPS[chosen];
+                        }
                     });
                     section_end(ui, k);
                 }

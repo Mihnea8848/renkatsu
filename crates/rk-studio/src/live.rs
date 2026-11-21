@@ -1675,6 +1675,10 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> Stud
             Effect::ColorFilter { filter, blend } if fx.color.is_none() => {
                 let number = filter.map_or(map_filter.unwrap_or(0), |f| f as i32);
                 let lut = filters.and_then(|f| f.get(&number)).cloned();
+                // The filters were made for a lit room: in a dark one their
+                // contrast turns colours deep, so the filter fades as the
+                // map's light goes, as far as the map's Filter decay says.
+                let blend = blend.max(scene.filter_fade());
                 fx.color = lut.map(|lut| ColorFilter {
                     lut,
                     exposure: 1.0,

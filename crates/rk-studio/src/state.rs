@@ -2108,13 +2108,14 @@ impl State {
             .cloned();
         let id = match there {
             Some(mut object) => {
-                let (hide_walls, light_intensity) = match object.content {
+                let (hide_walls, light_intensity, filter_decay) = match object.content {
                     Content::Map {
                         hide_walls,
                         light_intensity,
+                        filter_decay,
                         ..
-                    } => (hide_walls, light_intensity),
-                    _ => (true, 1.0),
+                    } => (hide_walls, light_intensity, filter_decay),
+                    _ => (true, 1.0, 0.5),
                 };
                 object.name = self.doc.scene().free_name(&map.name);
                 object.content = Content::Map {
@@ -2122,6 +2123,7 @@ impl State {
                     time,
                     hide_walls,
                     light_intensity,
+                    filter_decay,
                 };
                 let id = object.id;
                 self.doc.edit(object, false);
