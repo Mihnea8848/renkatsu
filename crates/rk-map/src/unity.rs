@@ -120,6 +120,40 @@ impl Light {
     }
 }
 
+/// The game's `MirrorReflection` component, on a mirror's renderer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirrorReflection {
+    pub game_object: PPtr,
+    pub enabled: bool,
+    /// `m_DisablePixelLights`: the reflection is drawn with no pixel
+    /// lights but the main one.
+    pub disable_pixel_lights: bool,
+    /// `m_TextureSize`: the side of the reflection's square texture.
+    pub texture_size: i32,
+    /// `m_ClipPlaneOffset`.
+    pub clip_offset: f32,
+    /// `m_ReflectLayers`: the layers reflected, a bit each.
+    pub layers: u32,
+}
+
+impl MirrorReflection {
+    /// Reads the component; a field left out has the script's default.
+    pub fn read(o: &UObject) -> MirrorReflection {
+        MirrorReflection {
+            game_object: o.pptr("m_GameObject").unwrap_or_default(),
+            enabled: o.i64("m_Enabled").unwrap_or(1) != 0,
+            disable_pixel_lights: o.i64("m_DisablePixelLights").unwrap_or(1) != 0,
+            texture_size: o.i64("m_TextureSize").unwrap_or(256) as i32,
+            clip_offset: o.f32("m_ClipPlaneOffset").unwrap_or(0.07),
+            layers: o
+                .get("m_ReflectLayers")
+                .and_then(|m| m.get("m_Bits"))
+                .and_then(UValue::as_i64)
+                .unwrap_or(-1) as u32,
+        }
+    }
+}
+
 /// How fog thickens with distance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FogMode {

@@ -102,6 +102,14 @@ struct MapRecipe {
 /// The name of the colour table each time of day of a map takes.
 type TimeFilters = Vec<TimeLook>;
 
+/// What the lookup job reads from a map's bundle: each time of day's look,
+/// and the mirrors.
+type MapExtras = (
+    TimeFilters,
+    Vec<rk_render::mirror::MapMirror>,
+    rk_map::motion::MapMotion,
+);
+
 /// What a map's time of day sets beside its light, read from its bundle:
 /// the colour filter by its table's name, and the sun shafts' colour and
 /// sun in the map's space.
@@ -151,7 +159,14 @@ struct MapState {
     /// name of its table, read from the map's bundle; and the job reading
     /// it.
     filters: Option<(PathBuf, TimeFilters)>,
-    reading_filters: Option<(PathBuf, Handle<TimeFilters>)>,
+    reading_filters: Option<(PathBuf, Handle<MapExtras>)>,
+    /// The set map's mirrors, read from its bundle beside its filters.
+    mirrors: Option<(PathBuf, Vec<rk_render::mirror::MapMirror>)>,
+    /// Where the set map's objects are, for its Animators to find them,
+    /// and the Animators, bound to them; the time they were last posed at.
+    places: Option<(PathBuf, Vec<rk_map::motion::Place>)>,
+    motion: Option<(PathBuf, rk_map::motion::MapMotion)>,
+    posed_at: Option<f32>,
     placed: Option<rk_render::map::MapPlacement>,
 }
 
@@ -941,6 +956,7 @@ impl Live {
         }
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
+        self.pose_map(clock.time);
     }
 
     /// Reads which colour filter each time of day of the set map takes,
@@ -961,7 +977,9 @@ impl Live {
                 let bundle = file.bundles.first().map(|b| b.path.clone()).unwrap_or_default();
                 let read = rk_map::scene::time_filters(&game, &bundle)?;
                 let shafts = rk_map::scene::time_sun_shafts(&game, &bundle)?;
-                Ok(MapTime::ALL
+                let mirrors = rk_map::mirror::mirrors(&game, &bundle).unwrap_or_default();
+                let motion = rk_map::motion::read(&game, &bundle).unwrap_or_default();
+                let times = MapTime::ALL
                     .into_iter()
                     .map(|t| {
                         let name = read.iter().find(|(time, _)| *time == t.time_of_day());
@@ -973,7 +991,8 @@ impl Live {
                             caster: shaft.and_then(|s| s.2),
                         }
                     })
-                    .collect())
+                    .collect();
+                Ok((times, mirrors, motion))
             });
             state.reading_filters = Some((sidecar, handle));
         }
@@ -983,9 +1002,38 @@ impl Live {
             .and_then(|(_, h)| if self.patient { Some(h.wait()) } else { h.try_take() });
         if let Some(result) = done {
             let (path, _) = state.reading_filters.take().expect("looked at above");
+            let (result, mirrors, mut motion) = match result {
+                Ok((times, mirrors, motion)) => (Ok(times), mirrors, motion),
+                Err(e) => (Err(e), Vec::new(), rk_map::motion::MapMotion::default()),
+            };
+            if let Some((_, places)) = state.places.as_ref().filter(|(p, _)| *p == path) {
+                motion.bind(places);
+            }
+            state.motion = Some((path.clone(), motion));
+            state.posed_at = None;
+            if state.set.as_ref().is_some_and(|(_, r)| r.sidecar == path) {
+                self.renderer.set_map_mirrors(&mirrors);
+            }
+            state.mirrors = Some((path.clone(), mirrors));
             // A map whose bundle is not there keeps the first filter.
             state.filters = Some((path, result.unwrap_or_default()));
         }
+    }
+
+    /// Poses the set map's moving objects at the scene's time: they play
+    /// while it plays, hold while it pauses, and stand at their first
+    /// frame while it is stopped, as the game shows them from the start.
+    fn pose_map(&mut self, seconds: f32) {
+        let state = &mut self.map;
+        let Some((_, recipe)) = state.set.as_ref() else { return };
+        let Some((_, motion)) = state.motion.as_ref().filter(|(p, _)| *p == recipe.sidecar) else {
+            return;
+        };
+        if motion.is_empty() || state.posed_at == Some(seconds) {
+            return;
+        }
+        self.renderer.set_map_object_matrices(&motion.pose(seconds));
+        state.posed_at = Some(seconds);
     }
 
     /// What the set map's time of day sets: its colour filter's number
@@ -1095,6 +1143,18 @@ impl Live {
                 match result {
                     Ok(mut map) => {
                         self.renderer.set_map(Some(&map));
+                        // The Animators find their objects again in this
+                        // build of the map, and pose them anew.
+                        let places = rk_map::motion::places(&map);
+                        if let Some((_, motion)) = state.motion.as_mut().filter(|(p, _)| *p == recipe.sidecar) {
+                            motion.bind(&places);
+                        }
+                        state.places = Some((recipe.sidecar.clone(), places));
+                        state.posed_at = None;
+                        // The map file has no mirrors; its bundle's are kept.
+                        if let Some((_, mirrors)) = state.mirrors.as_ref().filter(|(p, _)| *p == recipe.sidecar) {
+                            self.renderer.set_map_mirrors(mirrors);
+                        }
                         state.ground = Some(MapGround::take(&mut map));
                         state.took = started.elapsed().as_secs_f32();
                         log.info(format!("Loaded {name} in {:.1} s", state.took));
