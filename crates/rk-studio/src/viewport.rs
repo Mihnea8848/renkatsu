@@ -191,7 +191,10 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(left, bar.bottom()),
-            Vec2::new(184.0, palette_height(k, st.mode).min(rail_rect.height())),
+            Vec2::new(
+                palette_width(st.mode, 184.0),
+                palette_height(k, st.mode).min(rail_rect.height()),
+            ),
         );
         drawer(ui, k, pal);
         palette(ui, k, st, pal);
@@ -318,7 +321,7 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(rail_rect.right() + 4.0, rail_rect.top()),
-            Vec2::new(188.0, palette_height(k, st.mode)),
+            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st.mode)),
         );
         block(ui, k, pal);
         palette(ui, k, st, pal);
@@ -343,7 +346,10 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(left, top),
-            Vec2::new(196.0, palette_height(k, st.mode).min(full.bottom() - top)),
+            Vec2::new(
+                palette_width(st.mode, 196.0),
+                palette_height(k, st.mode).min(full.bottom() - top),
+            ),
         );
         drawer(ui, k, pal);
         palette(ui, k, st, pal);
@@ -1005,8 +1011,25 @@ fn palette_row(k: &Look) -> f32 {
     k.d.row + 2.0
 }
 
+/// Whether a mode's palette holds the map's controls rather than tools.
+fn map_mode(mode: usize) -> bool {
+    MODES.get(mode).is_some_and(|m| m.name == "Map")
+}
+
+/// The palette's width: the Map mode's rows need more room than tools.
+fn palette_width(mode: usize, tools: f32) -> f32 {
+    if map_mode(mode) {
+        crate::map_menu::WIDTH
+    } else {
+        tools
+    }
+}
+
 /// Height the palette needs for a mode's tools.
 fn palette_height(k: &Look, mode: usize) -> f32 {
+    if map_mode(mode) {
+        return 34.0 + crate::map_menu::height(k);
+    }
     let sections = MODES[mode].sections;
     let rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
@@ -1058,6 +1081,11 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         Theme::glass(k.t.hover, 70),
     );
 
+    if map_mode(st.mode) {
+        let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
+        crate::map_menu::panel(ui, k, st, body);
+        return;
+    }
     let mut y = head.bottom();
     let mut index = 0;
     for (section, tools) in mode.sections {
