@@ -2085,6 +2085,16 @@ impl State {
                 };
                 let fog_id = self.doc.add_under(fog.label(), Content::Effect { effect: fog }, id);
                 self.doc.hide_now(fog_id);
+                // Its sun shafts, from its own sun, off as CharaStudio
+                // starts.
+                let shafts = crate::scene::Effect::SunShafts {
+                    threshold: [128.0 / 255.0; 3],
+                    color: None,
+                };
+                let shafts_id = self
+                    .doc
+                    .add_under(shafts.label(), Content::Effect { effect: shafts }, id);
+                self.doc.hide_now(shafts_id);
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

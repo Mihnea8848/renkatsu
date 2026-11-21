@@ -827,13 +827,30 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Height", height, 0.0, 50.0);
                             number(ui, "Start", start_distance, 0.0, 50.0);
                         }
-                        Effect::DepthOfField { focus, aperture } => {
-                            number(ui, "Focus", focus, 0.0, 1000.0);
-                            number(ui, "Aperture", aperture, 0.0, 1.0);
+                        Effect::DepthOfField { focal_size, aperture } => {
+                            // CharaStudio's focal size and aperture.
+                            number(ui, "Sharp range", focal_size, 0.0, 2.0);
+                            number(ui, "Blur", aperture, 0.0, 1.0);
                         }
-                        Effect::SunShafts { color, intensity } => {
-                            color_row(ui, k, id, color);
-                            number(ui, "Intensity", intensity, 0.0, 4.0);
+                        Effect::SunShafts { threshold, color } => {
+                            // CharaStudio's threshold and colour.
+                            row(ui, k, "Sky brightness", None, |ui, rect| {
+                                widgets::color_field(ui, k, rect, id.with("threshold"), threshold);
+                            });
+                            row(ui, k, "Ray colour", None, |ui, rect| {
+                                let mut chosen = usize::from(color.is_some());
+                                widgets::combo(ui, k, rect, id.with("ray colour"), &mut chosen, &["Map's own", "Own"]);
+                                if chosen == 0 {
+                                    *color = None;
+                                } else if color.is_none() {
+                                    *color = Some([1.0; 3]);
+                                }
+                            });
+                            if let Some(own) = color {
+                                row(ui, k, "", None, |ui, rect| {
+                                    widgets::color_field(ui, k, rect, id.with("rays own"), own);
+                                });
+                            }
                         }
                     }
                     section_end(ui, k);
@@ -1763,11 +1780,4 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed:
             }
         }
     }
-}
-
-/// A colour as its swatch and its hex value.
-fn color_row(ui: &mut Ui, k: &Look, id: Id, color: &mut [f32; 3]) {
-    row(ui, k, "Colour", None, |ui, rect| {
-        widgets::color_field(ui, k, rect, id.with("colour"), color);
-    });
 }

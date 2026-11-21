@@ -534,6 +534,20 @@ impl LightKind {
 /// it is put in another.
 pub const EVERYONE: &str = "Everyone";
 
+/// CharaStudio's depth of field as a scene starts (`DOFInfo`).
+fn dof_focal_size() -> f32 {
+    0.95
+}
+
+fn dof_aperture() -> f32 {
+    0.6
+}
+
+/// The sun shafts' threshold a scene starts with (128 of 255).
+fn shaft_threshold() -> [f32; 3] {
+    [128.0 / 255.0; 3]
+}
+
 /// The top of a new Fog, as CharaStudio's panel starts.
 fn fog_height() -> f32 {
     1.0
@@ -594,13 +608,21 @@ pub enum Effect {
         #[serde(default)]
         start_distance: f32,
     },
+    /// CharaStudio's depth of field: how wide the sharp band is around
+    /// where the camera turns, 0 to 2, and how strong the blur, 0 to 1.
     DepthOfField {
-        focus: f32,
+        #[serde(default = "dof_focal_size")]
+        focal_size: f32,
+        #[serde(default = "dof_aperture")]
         aperture: f32,
     },
+    /// CharaStudio's sun shafts: how bright the sky must be for rays,
+    /// and their colour (none for the map's own, with its sun).
     SunShafts {
-        color: [f32; 3],
-        intensity: f32,
+        #[serde(default = "shaft_threshold")]
+        threshold: [f32; 3],
+        #[serde(default)]
+        color: Option<[f32; 3]>,
     },
 }
 
@@ -635,19 +657,19 @@ impl Effect {
                 start_distance: 0.0,
             },
             Effect::DepthOfField {
-                focus: 3.0,
-                aperture: 0.6,
+                focal_size: dof_focal_size(),
+                aperture: dof_aperture(),
             },
             Effect::SunShafts {
-                color: [1.0, 0.95, 0.85],
-                intensity: 1.0,
+                threshold: shaft_threshold(),
+                color: Some([1.0; 3]),
             },
         ]
     }
 
     /// Whether the renderer draws the effect yet.
     pub fn drawn(&self) -> bool {
-        !matches!(self, Effect::DepthOfField { .. } | Effect::SunShafts { .. })
+        true
     }
 
     pub fn glyph(&self) -> &'static str {
