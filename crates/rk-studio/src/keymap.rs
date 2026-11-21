@@ -652,7 +652,36 @@ pub fn handle(ctx: &egui::Context, st: &mut State) {
 impl State {
     /// Carries out an action of the keymap.
     pub fn act(&mut self, action: Action, ctx: &egui::Context) {
+        use crate::panels::Panel;
         use Action as A;
+        // Keys that edit the scene act where the scene is worked on: in
+        // Content, Delete takes the file or folder chosen there, and the
+        // rest do nothing.
+        let in_content = matches!(self.focus, Panel::Content | Panel::Console);
+        let scene_edit = matches!(
+            action,
+            A::Copy
+                | A::Cut
+                | A::Paste
+                | A::Duplicate
+                | A::Delete
+                | A::ToggleHidden
+                | A::Attach
+                | A::Unparent
+                | A::NewFolder
+                | A::SelectAll
+                | A::SelectNone
+                | A::SelectChildren
+        );
+        if in_content && scene_edit {
+            if action == A::Delete && self.focus == Panel::Content {
+                let asset = self.asset.as_ref().map(|a| a.to_string_lossy().replace('\\', "/"));
+                if let Some(rel) = asset.filter(|rel| crate::content::changeable(rel)) {
+                    self.run(Command::File(crate::state::FileOp::Delete(rel)));
+                }
+            }
+            return;
+        }
         match action {
             A::NewProject => self.ask(Command::NewProject, ctx),
             A::OpenProject => self.ask(Command::OpenProject(None), ctx),
