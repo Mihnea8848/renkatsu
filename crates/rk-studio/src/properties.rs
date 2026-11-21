@@ -805,18 +805,52 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Intensity", intensity, 0.0, 1.0);
                             number(ui, "Blur", blur, 0.0, 1.0);
                         }
-                        Effect::Fog { color, start, end } => {
-                            color_row(ui, k, id, color);
-                            number(ui, "Start", start, 0.0, 1000.0);
-                            number(ui, "End", end, 0.0, 1000.0);
+                        Effect::Fog {
+                            color,
+                            height,
+                            start_distance,
+                        } => {
+                            row(ui, k, "Colour", None, |ui, rect| {
+                                let mut chosen = usize::from(color.is_some());
+                                widgets::combo(ui, k, rect, id.with("fog colour"), &mut chosen, &["Map's own", "Own"]);
+                                if chosen == 0 {
+                                    *color = None;
+                                } else if color.is_none() {
+                                    *color = Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]);
+                                }
+                            });
+                            if let Some(own) = color {
+                                row(ui, k, "", None, |ui, rect| {
+                                    widgets::color_field(ui, k, rect, id.with("fog own"), own);
+                                });
+                            }
+                            number(ui, "Height", height, 0.0, 50.0);
+                            number(ui, "Start", start_distance, 0.0, 50.0);
                         }
-                        Effect::DepthOfField { focus, aperture } => {
-                            number(ui, "Focus", focus, 0.0, 1000.0);
-                            number(ui, "Aperture", aperture, 0.0, 1.0);
+                        Effect::DepthOfField { focal_size, aperture } => {
+                            // CharaStudio's focal size and aperture.
+                            number(ui, "Sharp range", focal_size, 0.0, 2.0);
+                            number(ui, "Blur", aperture, 0.0, 1.0);
                         }
-                        Effect::SunShafts { color, intensity } => {
-                            color_row(ui, k, id, color);
-                            number(ui, "Intensity", intensity, 0.0, 4.0);
+                        Effect::SunShafts { threshold, color } => {
+                            // CharaStudio's threshold and colour.
+                            row(ui, k, "Sky brightness", None, |ui, rect| {
+                                widgets::color_field(ui, k, rect, id.with("threshold"), threshold);
+                            });
+                            row(ui, k, "Ray colour", None, |ui, rect| {
+                                let mut chosen = usize::from(color.is_some());
+                                widgets::combo(ui, k, rect, id.with("ray colour"), &mut chosen, &["Map's own", "Own"]);
+                                if chosen == 0 {
+                                    *color = None;
+                                } else if color.is_none() {
+                                    *color = Some([1.0; 3]);
+                                }
+                            });
+                            if let Some(own) = color {
+                                row(ui, k, "", None, |ui, rect| {
+                                    widgets::color_field(ui, k, rect, id.with("rays own"), own);
+                                });
+                            }
                         }
                     }
                     section_end(ui, k);
@@ -838,7 +872,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Map { map, time, hide_walls } => {
+            Content::Map {
+                map,
+                time,
+                hide_walls,
+                light_intensity,
+            } => {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
                 let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
@@ -890,6 +929,19 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         .then_some("This map has no walls that hide");
                     row(ui, k, "Hide walls", none, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
+                    });
+                    row(ui, k, "Light intensity", None, |ui, rect| {
+                        widgets::number(
+                            ui,
+                            k,
+                            rect,
+                            id.with("map light"),
+                            light_intensity,
+                            Marker::None,
+                            true,
+                            FINE,
+                        );
+                        *light_intensity = light_intensity.clamp(0.0, 1.0);
                     });
                     section_end(ui, k);
                 }
@@ -1728,11 +1780,4 @@ fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed:
             }
         }
     }
-}
-
-/// A colour as its swatch and its hex value.
-fn color_row(ui: &mut Ui, k: &Look, id: Id, color: &mut [f32; 3]) {
-    row(ui, k, "Colour", None, |ui, rect| {
-        widgets::color_field(ui, k, rect, id.with("colour"), color);
-    });
 }

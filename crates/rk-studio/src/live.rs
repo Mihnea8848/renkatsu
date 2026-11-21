@@ -100,7 +100,27 @@ struct MapRecipe {
 }
 
 /// The name of the colour table each time of day of a map takes.
-type TimeFilters = Vec<(MapTime, Option<String>)>;
+type TimeFilters = Vec<TimeLook>;
+
+/// What a map's time of day sets beside its light, read from its bundle:
+/// the colour filter by its table's name, and the sun shafts' colour and
+/// sun in the map's space.
+#[derive(Debug, Clone, PartialEq)]
+struct TimeLook {
+    time: MapTime,
+    filter: Option<String>,
+    shaft_color: [f32; 3],
+    caster: Option<[f32; 3]>,
+}
+
+/// What the shown map's time of day hands the screen effects.
+#[derive(Debug, Clone, Copy, Default)]
+struct MapLook {
+    /// The colour filter's number among Studio's.
+    filter: Option<i32>,
+    /// The sun shafts' colour, and their sun in the scene.
+    shafts: Option<([f32; 3], Option<Vec3>)>,
+}
 
 /// A map a job is building.
 struct PendingMap {
@@ -940,11 +960,18 @@ impl Live {
                 let file = crate::maps::MapFile::read(&path)?;
                 let bundle = file.bundles.first().map(|b| b.path.clone()).unwrap_or_default();
                 let read = rk_map::scene::time_filters(&game, &bundle)?;
+                let shafts = rk_map::scene::time_sun_shafts(&game, &bundle)?;
                 Ok(MapTime::ALL
                     .into_iter()
                     .map(|t| {
                         let name = read.iter().find(|(time, _)| *time == t.time_of_day());
-                        (t, name.and_then(|(_, n)| n.clone()))
+                        let shaft = shafts.iter().find(|(time, ..)| *time == t.time_of_day());
+                        TimeLook {
+                            time: t,
+                            filter: name.and_then(|(_, n)| n.clone()),
+                            shaft_color: shaft.map_or([0.0; 3], |s| s.1),
+                            caster: shaft.and_then(|s| s.2),
+                        }
                     })
                     .collect())
             });
@@ -961,17 +988,32 @@ impl Live {
         }
     }
 
-    /// The number of the colour filter the set map takes at its time of
-    /// day, among Studio's filters.
-    fn map_filter(&self) -> Option<i32> {
-        let (_, recipe) = self.map.set.as_ref()?;
-        let (path, times) = self.map.filters.as_ref()?;
-        if *path != recipe.sidecar {
-            return None;
+    /// What the set map's time of day sets: its colour filter's number
+    /// among Studio's, and its sun shafts, their sun put where the map's
+    /// object places the map.
+    fn map_look(&self, scene: &Scene) -> MapLook {
+        let Some((id, recipe)) = self.map.set.as_ref() else {
+            return MapLook::default();
+        };
+        let Some(look) = self
+            .map
+            .filters
+            .as_ref()
+            .filter(|(path, _)| *path == recipe.sidecar)
+            .and_then(|(_, times)| times.iter().find(|t| t.time == recipe.time))
+        else {
+            return MapLook::default();
+        };
+        let filter = look.filter.as_ref().and_then(|name| {
+            let filters = self.filters.as_ref()?;
+            filters.iter().find(|(_, table)| table.name == *name).map(|(id, _)| *id)
+        });
+        let place = scene.world(*id);
+        let caster = look.caster.map(|c| place.transform_point3(Vec3::from(c)));
+        MapLook {
+            filter,
+            shafts: Some((look.shaft_color, caster)),
         }
-        let name = times.iter().find(|(t, _)| *t == recipe.time)?.1.as_ref()?;
-        let filters = self.filters.as_ref()?;
-        filters.iter().find(|(_, table)| table.name == *name).map(|(id, _)| *id)
     }
 
     /// Brings the renderer's map in line with the scene's: builds the map
@@ -980,7 +1022,9 @@ impl Live {
     /// is set stays until the one replacing it is built.
     fn follow_map(&mut self, scene: &Scene, project: &Project, jobs: &mut Jobs, log: &mut Log) {
         let wanted = scene.objects().iter().find_map(|o| match &o.content {
-            Content::Map { map, time, hide_walls } if !map.as_os_str().is_empty() => Some((
+            Content::Map {
+                map, time, hide_walls, ..
+            } if !map.as_os_str().is_empty() => Some((
                 o,
                 MapRecipe {
                     sidecar: project.resolve(map),
@@ -1224,7 +1268,11 @@ impl Live {
     /// picture, as in CharaStudio.
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
-        let mut effects = scene_effects(scene, self.filters.as_ref(), self.map_filter());
+        let mut effects = scene_effects(scene, self.filters.as_ref(), self.map_look(scene));
+        let baked = scene.objects().iter().find_map(|o| match &o.content {
+            Content::Map { light_intensity, .. } if scene.shown(o.id) => Some(*light_intensity),
+            _ => None,
+        });
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1233,6 +1281,7 @@ impl Live {
             alpha_to_coverage: self.smooth_edges,
             ..Default::default()
         };
+        env.map_light_intensity = baked.unwrap_or(1.0);
         match scene.key_light() {
             Some(light) => {
                 if let Content::Light {
@@ -1553,7 +1602,8 @@ fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 
 /// The effects the scene's objects ask for: the first of each that shows.
 /// An effect no object asks for is off.
-fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i32>) -> StudioEffects {
+fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> StudioEffects {
+    let map_filter = map.filter;
     use crate::scene::Effect;
     use rk_render::effects::{AmbientOcclusion, Bloom, ColorFilter, Vignette};
     let mut fx = StudioEffects::default();
@@ -1610,6 +1660,47 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i3
                     ..Vignette::default()
                 });
             }
+            Effect::DepthOfField { focal_size, aperture } if fx.dof.is_none() => {
+                // It focuses where the camera turns around, as the
+                // Studio's CameraTarget does.
+                fx.dof = Some(rk_render::effects::DepthOfField {
+                    focal_size,
+                    aperture,
+                    ..rk_render::effects::DepthOfField::default()
+                });
+            }
+            Effect::SunShafts { threshold, color } if fx.shafts.is_none() => {
+                // A map's own colour and sun for its time of day; without a
+                // map, the scene's colour from the middle of the picture.
+                let first = rk_render::effects::SunShafts::default();
+                let (own, caster) = match (color, map.shafts) {
+                    (None, Some((c, caster))) => (c, caster),
+                    (Some(c), Some((_, caster))) => (c, caster),
+                    (c, None) => (c.unwrap_or(first.color), None),
+                };
+                fx.shafts = Some(rk_render::effects::SunShafts {
+                    threshold,
+                    color: own,
+                    caster,
+                    ..first
+                });
+            }
+            Effect::Fog {
+                color,
+                height,
+                start_distance,
+            } if fx.fog.is_none() => {
+                // Without a map, the Studio scene's own fog mode; with a
+                // map that has fog, the renderer takes the map's.
+                let first = rk_render::effects::Fog::default();
+                fx.fog = Some(rk_render::effects::Fog {
+                    color: color.unwrap_or(first.color),
+                    color_from_map: color.is_none(),
+                    height,
+                    start_distance,
+                    ..first
+                });
+            }
             _ => {}
         }
     }
@@ -1619,6 +1710,29 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fog_that_shows_turns_the_studios_fog_on() {
+        let mut scene = Scene::empty();
+        assert!(scene_effects(&scene, None, MapLook::default()).fog.is_none());
+        let fog = scene.add(
+            "Fog",
+            Content::Effect {
+                effect: Effect::Fog {
+                    color: None,
+                    height: 5.0,
+                    start_distance: 2.0,
+                },
+            },
+            None,
+        );
+        let fx = scene_effects(&scene, None, MapLook::default()).fog.expect("on");
+        assert!(fx.color_from_map);
+        assert_eq!((fx.height, fx.start_distance), (5.0, 2.0));
+        // Hidden, it is off, as a map's own starts.
+        scene.get_mut(fog).unwrap().visible = false;
+        assert!(scene_effects(&scene, None, MapLook::default()).fog.is_none());
+    }
     use crate::scene::{Effect, MapTime};
 
     fn table(name: &str) -> Arc<Image> {
@@ -1637,9 +1751,16 @@ mod tests {
         let filters: Filters = [(0, table("Lut_Amount")), (1, table("Lut_TimeSunset1"))].into();
         let mut scene = Scene::new();
         let lut = |scene: &Scene, map: Option<i32>| {
-            scene_effects(scene, Some(&filters), map)
-                .color
-                .map(|c| c.lut.name.clone())
+            scene_effects(
+                scene,
+                Some(&filters),
+                MapLook {
+                    filter: map,
+                    shafts: None,
+                },
+            )
+            .color
+            .map(|c| c.lut.name.clone())
         };
         // The scene's own: the first filter.
         assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_Amount"));

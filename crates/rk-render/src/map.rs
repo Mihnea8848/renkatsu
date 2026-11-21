@@ -761,6 +761,8 @@ pub(crate) struct Pipelines {
     cascade: wgpu::BindGroupLayout,
     /// Shadow casters, by cut-out and by culling.
     casters: HashMap<(bool, bool), wgpu::RenderPipeline>,
+    /// The same surfaces into the camera's depth texture.
+    depth: HashMap<(bool, bool), wgpu::RenderPipeline>,
     compare: wgpu::Sampler,
     shader: wgpu::ShaderModule,
     layout: wgpu::PipelineLayout,
@@ -976,8 +978,15 @@ impl Pipelines {
             immediate_size: 0,
         });
         let mut casters = HashMap::new();
-        for cutout in [false, true] {
-            for cull in [false, true] {
+        let mut depth = HashMap::new();
+        // The camera's depth texture is the same pass without the light's
+        // bias.
+        for (camera, cutout, cull) in [false, true].into_iter().flat_map(|a| {
+            [false, true]
+                .into_iter()
+                .flat_map(move |b| [false, true].map(|c| (a, b, c)))
+        }) {
+            {
                 let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("map shadow"),
                     layout: Some(&shadow_layout),
@@ -1007,17 +1016,25 @@ impl Pipelines {
                         depth_write_enabled: Some(true),
                         depth_compare: Some(wgpu::CompareFunction::LessEqual),
                         stencil: Default::default(),
-                        bias: wgpu::DepthBiasState {
-                            constant: 2,
-                            slope_scale: 2.0,
-                            clamp: 0.0,
+                        bias: if camera {
+                            wgpu::DepthBiasState::default()
+                        } else {
+                            wgpu::DepthBiasState {
+                                constant: 2,
+                                slope_scale: 2.0,
+                                clamp: 0.0,
+                            }
                         },
                     }),
                     multisample: Default::default(),
                     multiview_mask: None,
                     cache: None,
                 });
-                casters.insert((cutout, cull), pipeline);
+                if camera {
+                    depth.insert((cutout, cull), pipeline);
+                } else {
+                    casters.insert((cutout, cull), pipeline);
+                }
             }
         }
         let compare = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1055,6 +1072,7 @@ impl Pipelines {
             black_cube,
             cascade,
             casters,
+            depth,
             compare,
             shader,
             layout,
@@ -1193,6 +1211,7 @@ struct Draw {
     rank: usize,
     blend: u8,
     cull: bool,
+    cutout: bool,
     /// Distance from the eye to the object's middle, for sorting.
     distance: f32,
     queue: i32,
@@ -1261,10 +1280,20 @@ impl MapPlacement {
 /// A map uploaded to the GPU: its buffers, textures and bind groups, made
 /// once by `Renderer::set_map`. Each frame only writes the camera's
 /// numbers into its uniform buffers and picks what to draw.
+/// What the scene adds to a map's light: lamps, and the fog the Studio's
+/// Fog switches on, in place of the map's own.
+pub(crate) struct SceneLight<'a> {
+    pub lamps: &'a [crate::Lamp],
+    pub fog: Option<Fog>,
+    /// How much of the map's baked and ambient light and reflections is
+    /// kept, 0 to 1.
+    pub baked: f32,
+}
+
 pub(crate) struct MapGpu {
     /// Where the map stands, set by `Renderer::place_map`.
     pub(crate) placement: MapPlacement,
-    light: MapLight,
+    pub(crate) light: MapLight,
     /// The lowest and highest corner of everything drawn.
     bounds: (Vec3, Vec3),
     vanish: Vec<VanishVolume>,
@@ -1280,6 +1309,8 @@ pub(crate) struct MapGpu {
     /// The sun's shadow atlas; one texel when the sun casts none.
     atlas: wgpu::TextureView,
     globals_group: wgpu::BindGroup,
+    /// The camera's view for the depth texture, with its bind group.
+    depth_view: (wgpu::Buffer, wgpu::BindGroup),
     /// The sky's uniform buffer and bind group.
     sky: Option<(wgpu::Buffer, wgpu::BindGroup)>,
 }
@@ -1327,6 +1358,18 @@ impl MapGpu {
                 .collect()
         } else {
             Vec::new()
+        };
+        let depth_view = {
+            let buf = uniform_buf("map camera depth", std::mem::size_of::<[f32; 16]>());
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("map camera depth"),
+                layout: &pipes.cascade,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            (buf, group)
         };
         let atlas_side = if shadowed { SHADOW_ATLAS } else { 1 };
         let atlas = device
@@ -1618,6 +1661,7 @@ impl MapGpu {
             globals_buf,
             shadow_buf,
             cascades,
+            depth_view,
             atlas,
             globals_group,
             sky,
@@ -1658,8 +1702,9 @@ impl MapGpu {
         camera: &Camera,
         view_proj: Mat4,
         aspect: f32,
-        lamps: &[crate::Lamp],
+        scene: SceneLight<'_>,
     ) -> MapFrame {
+        let SceneLight { lamps, fog, baked } = scene;
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
         // by the view.
@@ -1667,7 +1712,10 @@ impl MapGpu {
         let camera = &self.placement.camera_in_map(world_camera);
         let view_proj = view_proj * self.placement.rigid();
         let l = &self.light;
-        let fog = l.fog.unwrap_or(Fog {
+        // The material fog the scene asks for, not the map's own: in
+        // CharaStudio the Fog tick box switches it.
+        let lit_fog = fog;
+        let fog = lit_fog.unwrap_or(Fog {
             color: [0.0; 3],
             start: 0.0,
             end: 1.0,
@@ -1684,7 +1732,7 @@ impl MapGpu {
             sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
             sh: l.ambient_sh,
             fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
-            fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
+            fog_range: [fog.start, fog.end, 0.0, if lit_fog.is_some() { 1.0 } else { 0.0 }],
             indirect_spec: [
                 l.indirect_specular[0],
                 l.indirect_specular[1],
@@ -1704,13 +1752,15 @@ impl MapGpu {
                 ..*l
             })
             .collect();
-        let (lamp_rows, lamp_info) = crate::lamp_rows(&local, u32::MAX);
+        let (lamp_rows, mut lamp_info) = crate::lamp_rows(&local, u32::MAX);
+        lamp_info[1] = baked;
         let globals = Globals {
             lamps: lamp_rows,
             lamp_info,
             ..globals
         };
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        queue.write_buffer(&self.depth_view.0, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
 
         // The sun's shadow: four cascades over slices of the view, in a
         // square atlas, two by two.
@@ -1801,6 +1851,7 @@ impl MapGpu {
                         rank: rank[p.material],
                         blend: p.blend,
                         cull: p.cull,
+                        cutout: p.cutout,
                         distance,
                         queue: p.queue,
                     });
@@ -1861,6 +1912,21 @@ impl MapGpu {
                 pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
             }
+        }
+    }
+
+    /// Draws the opaque and cut-out surfaces of `frame` into the camera's
+    /// depth texture, which the screen effects and the characters' shadow
+    /// mask read: one camera, one depth, as Unity draws it.
+    pub(crate) fn draw_depth(&self, pipes: &Pipelines, pass: &mut wgpu::RenderPass<'_>, frame: &MapFrame) {
+        pass.set_bind_group(0, &self.depth_view.1, &[]);
+        for d in frame.draws.iter().take_while(|d| d.blend == 0) {
+            pass.set_pipeline(&pipes.depth[&(d.cutout, d.cull)]);
+            pass.set_bind_group(1, &self.materials[d.material], &[]);
+            let (v, i) = &self.buffers[d.buffers];
+            pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
         }
     }
 
@@ -2048,7 +2114,12 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, gpu.far(camera));
         let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
-        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &[]);
+        let scene = SceneLight {
+            lamps: &[],
+            fog: gpu.light.fog,
+            baked: 1.0,
+        };
+        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
 
         let size = wgpu::Extent3d {
             width,

@@ -310,7 +310,16 @@ pub enum Content {
         /// camera is outside them, as in CharaStudio.
         #[serde(default = "yes")]
         hide_walls: bool,
+        /// The map's own light, 0 to 1: how much of its baked and ambient
+        /// light, reflections and unlit surfaces is kept. Lower makes the
+        /// room darker, for lamps to light; the lamps keep their strength.
+        #[serde(default = "whole")]
+        light_intensity: f32,
     },
+}
+
+fn whole() -> f32 {
+    1.0
 }
 
 /// A map's time of day: its sun, sky and light. A map has some of them.
@@ -417,6 +426,7 @@ impl Content {
             map,
             time,
             hide_walls: true,
+            light_intensity: 1.0,
         }
     }
 
@@ -524,6 +534,25 @@ impl LightKind {
 /// it is put in another.
 pub const EVERYONE: &str = "Everyone";
 
+/// CharaStudio's depth of field as a scene starts (`DOFInfo`).
+fn dof_focal_size() -> f32 {
+    0.95
+}
+
+fn dof_aperture() -> f32 {
+    0.6
+}
+
+/// The sun shafts' threshold a scene starts with (128 of 255).
+fn shaft_threshold() -> [f32; 3] {
+    [128.0 / 255.0; 3]
+}
+
+/// The top of a new Fog, as CharaStudio's panel starts.
+fn fog_height() -> f32 {
+    1.0
+}
+
 /// CharaStudio's colour filters, in the order of its list (`Filter_00`).
 pub const FILTERS: [&str; 17] = [
     "Day",
@@ -569,18 +598,31 @@ pub enum Effect {
         intensity: f32,
         blur: f32,
     },
+    /// CharaStudio's Fog: its colour (none for the map's own), the
+    /// fog's top as a height, and how far from the camera it starts.
     Fog {
-        color: [f32; 3],
-        start: f32,
-        end: f32,
+        #[serde(default)]
+        color: Option<[f32; 3]>,
+        #[serde(default = "fog_height")]
+        height: f32,
+        #[serde(default)]
+        start_distance: f32,
     },
+    /// CharaStudio's depth of field: how wide the sharp band is around
+    /// where the camera turns, 0 to 2, and how strong the blur, 0 to 1.
     DepthOfField {
-        focus: f32,
+        #[serde(default = "dof_focal_size")]
+        focal_size: f32,
+        #[serde(default = "dof_aperture")]
         aperture: f32,
     },
+    /// CharaStudio's sun shafts: how bright the sky must be for rays,
+    /// and their colour (none for the map's own, with its sun).
     SunShafts {
-        color: [f32; 3],
-        intensity: f32,
+        #[serde(default = "shaft_threshold")]
+        threshold: [f32; 3],
+        #[serde(default)]
+        color: Option<[f32; 3]>,
     },
 }
 
@@ -610,27 +652,24 @@ impl Effect {
                 blur: vignette.blur,
             },
             Effect::Fog {
-                color: [0.75, 0.8, 0.85],
-                start: 10.0,
-                end: 100.0,
+                color: Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]),
+                height: fog_height(),
+                start_distance: 0.0,
             },
             Effect::DepthOfField {
-                focus: 3.0,
-                aperture: 0.6,
+                focal_size: dof_focal_size(),
+                aperture: dof_aperture(),
             },
             Effect::SunShafts {
-                color: [1.0, 0.95, 0.85],
-                intensity: 1.0,
+                threshold: shaft_threshold(),
+                color: Some([1.0; 3]),
             },
         ]
     }
 
     /// Whether the renderer draws the effect yet.
     pub fn drawn(&self) -> bool {
-        !matches!(
-            self,
-            Effect::Fog { .. } | Effect::DepthOfField { .. } | Effect::SunShafts { .. }
-        )
+        true
     }
 
     pub fn glyph(&self) -> &'static str {
@@ -1664,6 +1703,13 @@ impl Document {
         id
     }
 
+    /// Hides an object in the same step of the history as the one before.
+    pub fn hide_now(&mut self, id: ObjectId) {
+        if let Some(object) = self.scene.get_mut(id) {
+            object.visible = false;
+        }
+    }
+
     /// Adds an object and selects it. A folder goes beside the selection;
     /// anything else into the selected folder, or else into its kind's
     /// folder.
@@ -2692,6 +2738,7 @@ kind = "map"
                 map: PathBuf::new(),
                 time: MapTime::Day,
                 hide_walls: true,
+                light_intensity: 1.0,
             }
         );
     }

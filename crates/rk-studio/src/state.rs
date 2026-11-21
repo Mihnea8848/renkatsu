@@ -2050,15 +2050,20 @@ impl State {
             .cloned();
         let id = match there {
             Some(mut object) => {
-                let hide_walls = match object.content {
-                    Content::Map { hide_walls, .. } => hide_walls,
-                    _ => true,
+                let (hide_walls, light_intensity) = match object.content {
+                    Content::Map {
+                        hide_walls,
+                        light_intensity,
+                        ..
+                    } => (hide_walls, light_intensity),
+                    _ => (true, 1.0),
                 };
                 object.name = self.doc.scene().free_name(&map.name);
                 object.content = Content::Map {
                     map: file,
                     time,
                     hide_walls,
+                    light_intensity,
                 };
                 let id = object.id;
                 self.doc.edit(object, false);
@@ -2072,6 +2077,24 @@ impl State {
                     blend: 0.0,
                 };
                 self.doc.add_under(effect.label(), Content::Effect { effect }, id);
+                // Its fog, off as a new CharaStudio scene leaves it.
+                let fog = crate::scene::Effect::Fog {
+                    color: None,
+                    height: 1.0,
+                    start_distance: 0.0,
+                };
+                let fog_id = self.doc.add_under(fog.label(), Content::Effect { effect: fog }, id);
+                self.doc.hide_now(fog_id);
+                // Its sun shafts, from its own sun, off as CharaStudio
+                // starts.
+                let shafts = crate::scene::Effect::SunShafts {
+                    threshold: [128.0 / 255.0; 3],
+                    color: None,
+                };
+                let shafts_id = self
+                    .doc
+                    .add_under(shafts.label(), Content::Effect { effect: shafts }, id);
+                self.doc.hide_now(shafts_id);
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

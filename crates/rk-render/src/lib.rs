@@ -321,6 +321,9 @@ pub struct Environment {
     pub lamps: Vec<Lamp>,
     /// Lamps that light the map, with its sun.
     pub map_lamps: Vec<Lamp>,
+    /// How much of the map's baked and ambient light and reflections is
+    /// kept, 0 to 1: a room made darker for lamps to light.
+    pub map_light_intensity: f32,
     /// The lamps each mesh takes, a bit each by their place in `lamps`,
     /// by its place in the draws; a mesh not listed takes them all.
     pub draw_lamps: Vec<u32>,
@@ -354,6 +357,7 @@ impl Default for Environment {
             draw_lights: Vec::new(),
             lamps: Vec::new(),
             map_lamps: Vec::new(),
+            map_light_intensity: 1.0,
             draw_lamps: Vec::new(),
         }
     }
@@ -1308,7 +1312,9 @@ impl Renderer {
         let hdr = env.effects.is_some();
         let covered = env.alpha_to_coverage;
         let occlude = env.effects.as_ref().is_some_and(|fx| fx.ao.is_some());
-        let depth_wanted = occlude || env.camera_depth;
+        // GlobalFog reads it too.
+        let fogged = env.effects.as_ref().is_some_and(|fx| fx.fog.is_some());
+        let depth_wanted = occlude || fogged || env.camera_depth;
         // A map is seen to its far side.
         let (near, far) = camera.clip_planes();
         let far = self.shown_map().map_or(far, |m| far.max(m.far(camera)));
@@ -1674,6 +1680,59 @@ impl Renderer {
                 pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
             }
         };
+        // The map's frame, and its sun's shadow before the main pass.
+        let map_target = map::Target {
+            color: if hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
+            depth: DEPTH_FORMAT,
+        };
+        if let Some(pipes) = self.map.as_mut() {
+            pipes.prepare(&self.device, map_target);
+        }
+        // The Studio's fog over a map with fog data: the map's linear fog,
+        // from the scene's start, as `SunLightInfo.SetFog` and the Fog panel
+        // leave it; the map's colour when asked for.
+        let shown_fog = self
+            .map_scene
+            .as_ref()
+            .filter(|m| m.placement.shown)
+            .and_then(|m| m.light.fog);
+        let fx_resolved = env.effects.clone().map(|mut fx| {
+            if let (Some(f), Some(own)) = (fx.fog.as_mut(), shown_fog) {
+                f.mode = effects::FogMode::Linear {
+                    start: f.start_distance,
+                    end: own.end,
+                };
+                if f.color_from_map {
+                    f.color = own.color.map(effects::to_gamma);
+                }
+            }
+            fx
+        });
+        let scene_fog = fx_resolved.as_ref().and_then(|fx| fx.fog.clone());
+        let map_frame = match (self.map.as_ref(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
+            (Some(pipes), Some(gpu)) => {
+                // The scene's Fog switches the map's own fog too, in its
+                // colour and from its start, to the map's end.
+                let map_fog = scene_fog.as_ref().and_then(|f| {
+                    let own = gpu.light.fog?;
+                    let [r, g, b, _] = material::linear([f.color[0], f.color[1], f.color[2], 1.0]);
+                    Some(map::Fog {
+                        color: [r, g, b],
+                        start: f.start_distance,
+                        end: own.end,
+                    })
+                });
+                let scene = map::SceneLight {
+                    lamps: &env.map_lamps,
+                    fog: map_fog,
+                    baked: env.map_light_intensity,
+                };
+                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
+                gpu.shadow_pass(pipes, &mut encoder, &frame);
+                Some((pipes, gpu, frame))
+            }
+            _ => None,
+        };
         fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
             wgpu::RenderPassDescriptor {
                 label: Some("shadow caster"),
@@ -1698,6 +1757,9 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
             pass.set_bind_group(0, &group, &[]);
             draw(&mut pass, self, true);
+            if let Some((pipes, gpu, frame)) = &map_frame {
+                gpu.draw_depth(pipes, &mut pass, frame);
+            }
         }
         let mask = if cast {
             let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
@@ -1774,12 +1836,16 @@ impl Renderer {
             }
 
             // The camera's depth texture: the same pass, seen from the camera
-            // and without the light's bias.
+            // and without the light's bias. The map's solid surfaces are in
+            // it too.
             {
                 let group = globals_group(self, base, &self.white);
                 let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
                 pass.set_bind_group(0, &group, &[]);
                 draw(&mut pass, self, true);
+                if let Some((pipes, gpu, frame)) = &map_frame {
+                    gpu.draw_depth(pipes, &mut pass, frame);
+                }
             }
 
             // Collect the shadows into the screen-sized mask.
@@ -1907,16 +1973,23 @@ impl Renderer {
                 .take()
                 .unwrap_or_else(|| effects::Gpu::new(&self.device, COLOR_FORMAT, DEPTH_FORMAT, SAMPLES))
         });
+        let shaft_divisor = fx_resolved
+            .as_ref()
+            .and_then(|fx| fx.shafts.as_ref())
+            .map_or(2, |s| s.divisor);
         let hdr_views = fx_gpu
             .as_mut()
-            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT));
-        let fx_frame = env.effects.as_ref().map(|fx| effects::Frame {
+            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT, shaft_divisor));
+        let fx_frame = fx_resolved.as_ref().map(|fx| effects::Frame {
             fx,
             width,
             height,
             fov_y_deg: camera.fov_y_deg,
             near,
             far,
+            eye: camera.eye,
+            forward: camera.forward(),
+            focus: (camera.target - camera.eye).dot(camera.forward()),
             depth: &depth_texture,
             scene_depth: &depth_only,
             white: &self.white,
@@ -1931,6 +2004,11 @@ impl Renderer {
             (Some(gpu), Some(frame)) => gpu.occlusion(&self.device, &mut encoder, frame),
             _ => None,
         };
+        // GlobalFog comes after it and the sky ([ImageEffectOpaque]).
+        let fog = match (&fx_gpu, &fx_frame) {
+            (Some(gpu), Some(frame)) => gpu.fog(&self.device, frame),
+            _ => None,
+        };
         let solid_steps = steps
             .iter()
             .take_while(|s| items[s.item].queue <= shadow::LAST_SOLID_QUEUE)
@@ -1938,20 +2016,6 @@ impl Renderer {
         let (color_view, resolve_view) = match &hdr_views {
             Some((msaa, resolved)) => (msaa, resolved),
             None => (&msaa, target_view),
-        };
-        // The map's frame, and its sun's shadow before the main pass.
-        let map_target = map::Target {
-            color: if hdr { effects::HDR_FORMAT } else { COLOR_FORMAT },
-            depth: DEPTH_FORMAT,
-        };
-        let map_frame = match (self.map.as_mut(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
-            (Some(pipes), Some(gpu)) => {
-                pipes.prepare(&self.device, map_target);
-                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &env.map_lamps);
-                gpu.shadow_pass(pipes, &mut encoder, &frame);
-                Some((pipes as &map::Pipelines, gpu, frame))
-            }
-            _ => None,
         };
         // Behind a map is its own background, already linear.
         let clear = match &map_frame {
@@ -2005,7 +2069,7 @@ impl Renderer {
             pass.set_bind_group(0, &globals_bg, &[]);
             let mut current = None;
             let occlude = |pass: &mut wgpu::RenderPass| {
-                if let Some((pipeline, group)) = &occlusion {
+                for (pipeline, group) in [&occlusion, &fog].into_iter().flatten() {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, group, &[]);
                     pass.draw(0..3, 0..1);
@@ -2075,6 +2139,7 @@ impl Renderer {
             outline.paint(&self.device, &mut encoder, &targets.highlight, target_view, h);
         }
         drop(occlusion);
+        drop(fog);
         if fx_gpu.is_some() {
             self.effects = fx_gpu;
         }
