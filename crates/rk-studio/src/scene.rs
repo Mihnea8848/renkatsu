@@ -765,6 +765,65 @@ impl Scene {
         scene
     }
 
+    /// Whether a light lights a character's light group.
+    pub fn light_reaches(&self, light: ObjectId, character: ObjectId) -> bool {
+        let group = match self.get(character).map(|o| &o.content) {
+            Some(Content::Character { light_group, .. }) => light_group.as_deref().unwrap_or(EVERYONE),
+            _ => EVERYONE,
+        };
+        match self.get(light).map(|o| &o.content) {
+            Some(Content::Light { groups, .. }) => groups.as_ref().is_none_or(|list| list.iter().any(|g| g == group)),
+            _ => false,
+        }
+    }
+
+    /// The shown lights that light characters on top of their character
+    /// light, or with `map` those that light the map, as the renderer
+    /// takes them, in the Outliner's order.
+    pub fn lamps(&self, map: bool) -> Vec<(ObjectId, rk_render::Lamp)> {
+        let mut out = Vec::new();
+        for (_, id) in self.rows() {
+            let Some(o) = self.get(id).filter(|o| self.shown(o.id)) else {
+                continue;
+            };
+            let Content::Light {
+                light,
+                on_characters,
+                on_map,
+                color,
+                intensity,
+                range,
+                spot_angle,
+                ..
+            } = &o.content
+            else {
+                continue;
+            };
+            if *light == LightKind::Character || !(if map { *on_map } else { *on_characters }) {
+                continue;
+            }
+            let (_, turn, at) = self.world(id).to_scale_rotation_translation();
+            // A light shines along its forward axis.
+            let shines = (turn * Vec3::Z).normalize_or_zero();
+            let (at, dir) = match light {
+                LightKind::Directional => (None, -shines),
+                _ => (Some(at.to_array()), shines),
+            };
+            out.push((
+                id,
+                rk_render::Lamp {
+                    at,
+                    dir: dir.to_array(),
+                    color: *color,
+                    intensity: *intensity,
+                    range: *range,
+                    spot_angle: (*light == LightKind::Spot).then_some(*spot_angle),
+                },
+            ));
+        }
+        out
+    }
+
     /// The character light a character takes: of the shown character
     /// lights that light its light group, the brightest, as Unity picks
     /// a main light; none when no light reaches it.

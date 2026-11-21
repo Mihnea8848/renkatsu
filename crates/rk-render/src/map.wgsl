@@ -24,6 +24,30 @@ struct Globals {
     // Unity's unity_IndirectSpecColor, what a material with its
     // reflections switched off reflects.
     indirect_spec: vec4<f32>,
+    // Lamps, as the character shaders take them (toon.wgsl), in the
+    // map's own space.
+    lamps: array<vec4<f32>, 24>,
+    // x: how many lamps
+    lamp_info: vec4<f32>,
+}
+
+// The way towards lamp `k` from a point and the light it brings there:
+// Unity's falloff over its range and a spot's cone, as on characters.
+fn lamp_at(world: vec3<f32>, k: u32) -> array<vec3<f32>, 2> {
+    let place = g.lamps[k * 3u];
+    let colour = g.lamps[k * 3u + 1u];
+    let spot = g.lamps[k * 3u + 2u];
+    if place.w < 0.5 {
+        return array<vec3<f32>, 2>(normalize(place.xyz), colour.rgb);
+    }
+    let d = place.xyz - world;
+    let q = dot(d, d) / max(colour.w * colour.w, 1e-4);
+    var atten = clamp((1.0 - q) * 5.0, 0.0, 1.0) / (1.0 + 25.0 * q);
+    let l = normalize(d);
+    if spot.w > -1.0 {
+        atten *= smoothstep(spot.w, mix(spot.w, 1.0, 0.2), dot(-l, normalize(spot.xyz)));
+    }
+    return array<vec3<f32>, 2>(l, colour.rgb * atten);
 }
 
 struct Material {
@@ -279,7 +303,6 @@ struct Surface {
 // baked or ambient light on the surface.
 fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) -> vec3<f32> {
     let flags = m.flags.x;
-    let l = g.sun_dir.xyz;
     let rough = 1.0 - s.smoothness;
     let r = s.eye - 2.0 * dot(s.eye, s.n) * s.n;
     var env = g.indirect_spec.rgb;
@@ -287,6 +310,25 @@ fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) 
         env = environment(r, world, rough);
     }
     env = env * s.occlusion;
+    let a = rough * rough;
+    let nv = abs(dot(s.n, -s.eye));
+    let surface_reduction = 1.0 / (a * a + 1.0);
+    let grazing = clamp(s.smoothness + 1.0 - s.one_minus_reflectivity, 0.0, 1.0);
+    let fresnel_env = mix(s.specular, vec3<f32>(grazing), pow5(1.0 - nv));
+    var lit = s.diffuse * ambient * s.occlusion + surface_reduction * env * fresnel_env;
+    lit += standard_light(s, g.sun_dir.xyz, light);
+    // The lamps, which cast no shadows.
+    for (var k = 0u; k < u32(g.lamp_info.x); k++) {
+        let lamp = lamp_at(world, k);
+        lit += standard_light(s, lamp[0], lamp[1]);
+    }
+    return lit;
+}
+
+// What one light `light`, coming from `l`, adds to a Standard surface.
+fn standard_light(s: Surface, l: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
+    let flags = m.flags.x;
+    let rough = 1.0 - s.smoothness;
 
     let to_half = l - s.eye;
     let h = to_half * inverseSqrt(max(dot(to_half, to_half), 0.001));
@@ -316,13 +358,8 @@ fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) 
             specular_term = 0.0;
         }
     }
-    let surface_reduction = 1.0 / (a * a + 1.0);
-    let grazing = clamp(s.smoothness + 1.0 - s.one_minus_reflectivity, 0.0, 1.0);
     let fresnel = s.specular + (1.0 - s.specular) * pow5(1.0 - lh);
-    let fresnel_env = mix(s.specular, vec3<f32>(grazing), pow5(1.0 - nv));
-    return s.diffuse * (ambient * s.occlusion + light * diffuse_term)
-        + specular_term * light * fresnel
-        + surface_reduction * env * fresnel_env;
+    return s.diffuse * light * diffuse_term + specular_term * light * fresnel;
 }
 
 @fragment
@@ -447,7 +484,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         let light = g.sun_color.rgb * shade * select(0.0, 1.0, sunlit);
         color = standard(s, in.world, light, ambient) + m.emission.rgb * glow;
     } else {
-        let sun = g.sun_color.rgb * facing * shade;
+        var sun = g.sun_color.rgb * facing * shade;
+        for (var k = 0u; k < u32(g.lamp_info.x); k++) {
+            let lamp = lamp_at(in.world, k);
+            sun += lamp[1] * max(dot(n, lamp[0]), 0.0);
+        }
         var indirect = shade_sh9(n);
         if lightmapped {
             indirect = baked;

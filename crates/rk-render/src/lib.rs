@@ -153,6 +153,55 @@ struct Globals {
     screen: [f32; 4],
     /// `_LightColor0`: the light's linear colour times its intensity.
     light_color: [f32; 4],
+    /// Up to `MAX_LAMPS` lamps, three rows each (see toon.wgsl).
+    lamps: [[f32; 4]; 24],
+    /// x: how many lamps.
+    lamp_info: [f32; 4],
+}
+
+/// The most lamps one mesh takes.
+pub const MAX_LAMPS: usize = 8;
+// The uniform's rows, written out: rustc trips over the product there.
+const _: () = assert!(3 * MAX_LAMPS == 24);
+
+/// A light that lights characters on top of their own light: a lamp,
+/// Renkatsu's own, as the game's character shaders take one light.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lamp {
+    /// Where it is; none for a directional lamp.
+    pub at: Option<[f32; 3]>,
+    /// For a directional lamp, the unit vector towards it; for a spot,
+    /// the way it shines.
+    pub dir: [f32; 3],
+    /// Its colour as picked, 0 to 1 per channel.
+    pub color: [f32; 3],
+    pub intensity: f32,
+    /// How far it reaches, in metres.
+    pub range: f32,
+    /// A spot's full cone in degrees; none for a point or directional lamp.
+    pub spot_angle: Option<f32>,
+}
+
+/// The lamps' rows as the shaders take them, those of `mask` alone.
+pub(crate) fn lamp_rows(lamps: &[Lamp], mask: u32) -> ([[f32; 4]; 24], [f32; 4]) {
+    let mut rows = [[0.0; 4]; 24];
+    let mut n = 0;
+    for (i, l) in lamps.iter().enumerate().take(32) {
+        if mask & (1 << i) == 0 || n == MAX_LAMPS {
+            continue;
+        }
+        let [r, g, b, _] = material::linear([l.color[0], l.color[1], l.color[2], 1.0]);
+        let place = match l.at {
+            Some([x, y, z]) => [x, y, z, 1.0],
+            None => [l.dir[0], l.dir[1], l.dir[2], 0.0],
+        };
+        let cone = l.spot_angle.map_or(-1.0, |a| (a.to_radians() / 2.0).cos());
+        rows[n * 3] = place;
+        rows[n * 3 + 1] = [r * l.intensity, g * l.intensity, b * l.intensity, l.range];
+        rows[n * 3 + 2] = [l.dir[0], l.dir[1], l.dir[2], cone];
+        n += 1;
+    }
+    (rows, [n as f32, 0.0, 0.0, 0.0])
 }
 
 /// One more light of the main light's kind.
@@ -166,7 +215,7 @@ pub struct OtherLight {
 }
 
 /// The light a mesh takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DrawLight {
     #[default]
     Main,
@@ -268,6 +317,13 @@ pub struct Environment {
     /// The light each mesh takes, by its place in the draws; empty, or
     /// short, leaves the rest with the main light.
     pub draw_lights: Vec<DrawLight>,
+    /// Lamps that light characters on top of their light.
+    pub lamps: Vec<Lamp>,
+    /// Lamps that light the map, with its sun.
+    pub map_lamps: Vec<Lamp>,
+    /// The lamps each mesh takes, a bit each by their place in `lamps`,
+    /// by its place in the draws; a mesh not listed takes them all.
+    pub draw_lamps: Vec<u32>,
 }
 
 impl Default for Environment {
@@ -296,6 +352,9 @@ impl Default for Environment {
             highlight: None,
             other_lights: Vec::new(),
             draw_lights: Vec::new(),
+            lamps: Vec::new(),
+            map_lamps: Vec::new(),
+            draw_lamps: Vec::new(),
         }
     }
 }
@@ -1268,6 +1327,8 @@ impl Renderer {
             reflection: [env.reflection[0], env.reflection[1], env.reflection[2], 0.0],
             screen: [width as f32, height as f32, 0.0, 0.0],
             light_color: light_color_global(env),
+            lamps: [[0.0; 4]; 24],
+            lamp_info: [0.0; 4],
         };
         let ramp = match &env.ramp {
             Some(image) => self.texture(image),
@@ -1335,6 +1396,8 @@ impl Renderer {
             stencil_ref: u32,
             bind: usize,
             light: DrawLight,
+            /// The lamps it takes, a bit each.
+            lamps: u32,
         }
         let mut batches = Vec::new();
         let mut items = Vec::new();
@@ -1516,6 +1579,11 @@ impl Renderer {
                     stencil_ref: desc.stencil_ref as u32,
                     bind,
                     light: env.draw_lights.get(draw_index).copied().unwrap_or_default(),
+                    lamps: if env.lamps.is_empty() {
+                        0
+                    } else {
+                        env.draw_lamps.get(draw_index).copied().unwrap_or(u32::MAX)
+                    },
                 });
             }
             if receives {
@@ -1789,36 +1857,50 @@ impl Renderer {
         let globals_bg = globals_group(self, main_globals, mask.as_ref().unwrap_or(&self.white));
         // The other lights, without shadows, and none at all: a mesh no
         // light reaches has the scene's ambient light alone.
-        let used = |l: DrawLight| env.draw_lights.contains(&l);
-        let other_bgs: Vec<_> = env
-            .other_lights
-            .iter()
-            .enumerate()
-            .map(|(i, o)| {
-                used(DrawLight::Other(i)).then(|| {
+        // A lighting binding for each light and set of lamps a mesh takes:
+        // the other lights without shadows, none at all (the scene's
+        // ambient light alone), and the lamps a mesh's groups let in.
+        let light_globals = |light: DrawLight| -> Option<Globals> {
+            match light {
+                DrawLight::Main => Some(main_globals),
+                DrawLight::Other(i) => env.other_lights.get(i).map(|o| {
                     let lit = Environment {
                         light_color: o.color,
                         light_intensity: o.intensity,
                         ..Environment::default()
                     };
                     let d = Vec3::from(o.dir).normalize_or_zero();
-                    let globals = Globals {
+                    Globals {
                         light_dir: [d.x, d.y, d.z, 0.0],
                         light_color: light_color_global(&lit),
                         shadow: [0.0; 4],
                         ..main_globals
-                    };
-                    globals_group(self, globals, &self.white)
-                })
-            })
-            .collect();
-        let dark_bg = used(DrawLight::Dark).then(|| {
-            let globals = Globals {
-                light_color: [0.0; 4],
-                ..main_globals
+                    }
+                }),
+                DrawLight::Dark => Some(Globals {
+                    light_color: [0.0; 4],
+                    ..main_globals
+                }),
+            }
+        };
+        let mut light_groups: HashMap<(DrawLight, u32), wgpu::BindGroup> = HashMap::new();
+        for item in &items {
+            let key = (item.light, item.lamps);
+            if key == (DrawLight::Main, 0) || light_groups.contains_key(&key) {
+                continue;
+            }
+            let Some(mut globals) = light_globals(item.light) else {
+                continue;
             };
-            globals_group(self, globals, mask.as_ref().unwrap_or(&self.white))
-        });
+            (globals.lamps, globals.lamp_info) = lamp_rows(&env.lamps, item.lamps);
+            let shadowed = matches!(item.light, DrawLight::Main | DrawLight::Dark);
+            let view = if shadowed {
+                mask.as_ref().unwrap_or(&self.white)
+            } else {
+                &self.white
+            };
+            light_groups.insert(key, globals_group(self, globals, view));
+        }
         // With screen effects the picture goes to a half-float target first.
         let mut fx_gpu = hdr.then(|| {
             self.effects
@@ -1865,7 +1947,7 @@ impl Renderer {
         let map_frame = match (self.map.as_mut(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
             (Some(pipes), Some(gpu)) => {
                 pipes.prepare(&self.device, map_target);
-                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect);
+                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &env.map_lamps);
                 gpu.shadow_pass(pipes, &mut encoder, &frame);
                 Some((pipes as &map::Pipelines, gpu, frame))
             }
@@ -1946,11 +2028,7 @@ impl Renderer {
                     current = Some(key);
                 }
                 pass.set_stencil_reference(item.stencil_ref);
-                let group = match item.light {
-                    DrawLight::Main => None,
-                    DrawLight::Other(i) => other_bgs.get(i).and_then(Option::as_ref),
-                    DrawLight::Dark => dark_bg.as_ref(),
-                };
+                let group = light_groups.get(&(item.light, item.lamps));
                 pass.set_bind_group(0, group.unwrap_or(&globals_bg), &[]);
                 let b = &batches[item.batch];
                 pass.set_vertex_buffer(0, b.vb.slice(..));
@@ -2209,6 +2287,37 @@ pub fn save_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lamps_are_handed_over_as_their_masks_say() {
+        let lamp = |x: f32| Lamp {
+            at: Some([x, 1.0, 0.0]),
+            dir: [0.0, 0.0, 1.0],
+            color: [1.0, 0.5, 0.0],
+            intensity: 2.0,
+            range: 3.0,
+            spot_angle: None,
+        };
+        let spot = Lamp {
+            spot_angle: Some(60.0),
+            ..lamp(2.0)
+        };
+        let lamps = [lamp(0.0), lamp(1.0), spot];
+        // The first and the third.
+        let (rows, info) = lamp_rows(&lamps, 0b101);
+        assert_eq!(info[0], 2.0);
+        assert_eq!(rows[0], [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(rows[3], [2.0, 1.0, 0.0, 1.0]);
+        // Colour linear times intensity, the range beside it.
+        assert_eq!((rows[1][0], rows[1][2], rows[1][3]), (2.0, 0.0, 3.0));
+        // A point lamp has no cone; a spot's half angle as its cosine.
+        assert_eq!(rows[2][3], -1.0);
+        assert!((rows[5][3] - 30f32.to_radians().cos()).abs() < 1e-6);
+        // None, and never more than the shader takes.
+        assert_eq!(lamp_rows(&lamps, 0).1[0], 0.0);
+        let many = vec![lamp(0.0); 12];
+        assert_eq!(lamp_rows(&many, u32::MAX).1[0], MAX_LAMPS as f32);
+    }
 
     #[test]
     fn a_white_light_is_its_intensity_and_a_coloured_one_is_linear() {
@@ -2561,8 +2670,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and seventeen vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 336);
+        // WGSL: mat4x4 and forty-two vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 736);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);

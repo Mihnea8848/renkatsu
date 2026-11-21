@@ -1320,6 +1320,11 @@ impl Live {
         let mut outlined = Vec::new();
         // The character lights besides the main one, as handed over.
         let mut others: Vec<ObjectId> = Vec::new();
+        // The lamps: the lights that are not character lights and light
+        // the characters too.
+        let lamps = scene.lamps(false);
+        env.lamps = lamps.iter().map(|(_, lamp)| *lamp).collect();
+        env.map_lamps = scene.lamps(true).into_iter().map(|(_, lamp)| lamp).collect();
         for actor in self.actors.iter().filter(|a| a.warm && scene.shown(a.id)) {
             let from = draws.len();
             draws.extend(actor.chara.scene.pose());
@@ -1346,6 +1351,13 @@ impl Live {
             };
             env.draw_lights.resize(from, DrawLight::Main);
             env.draw_lights.resize(draws.len(), light);
+            let mask = lamps
+                .iter()
+                .enumerate()
+                .filter(|(_, (id, _))| scene.light_reaches(*id, actor.id))
+                .fold(0u32, |m, (i, _)| if i < 32 { m | 1 << i } else { m });
+            env.draw_lamps.resize(from, u32::MAX);
+            env.draw_lamps.resize(draws.len(), mask);
         }
         if let Some(o) = self.outline.as_ref().filter(|_| !outlined.is_empty()) {
             env.highlight = Some(rk_render::highlight::Highlight {
