@@ -102,6 +102,10 @@ struct MapRecipe {
 /// The name of the colour table each time of day of a map takes.
 type TimeFilters = Vec<TimeLook>;
 
+/// What the lookup job reads from a map's bundle: each time of day's look,
+/// and the mirrors.
+type MapExtras = (TimeFilters, Vec<rk_render::mirror::MapMirror>);
+
 /// What a map's time of day sets beside its light, read from its bundle:
 /// the colour filter by its table's name, and the sun shafts' colour and
 /// sun in the map's space.
@@ -151,7 +155,7 @@ struct MapState {
     /// name of its table, read from the map's bundle; and the job reading
     /// it.
     filters: Option<(PathBuf, TimeFilters)>,
-    reading_filters: Option<(PathBuf, Handle<(TimeFilters, Vec<rk_render::mirror::MapMirror>)>)>,
+    reading_filters: Option<(PathBuf, Handle<MapExtras>)>,
     /// The set map's mirrors, read from its bundle beside its filters.
     mirrors: Option<(PathBuf, Vec<rk_render::mirror::MapMirror>)>,
     placed: Option<rk_render::map::MapPlacement>,
