@@ -311,6 +311,9 @@ pub struct State {
     /// The object that was just added: the camera goes to it once the
     /// viewport has something of it to look at.
     pub focus_pending: Option<ObjectId>,
+    /// Characters to set on the map's floor once its meshes are there,
+    /// where it puts them: the map just came, or they did.
+    pub settle: Vec<ObjectId>,
     /// The scene being edited, with the selection and the undo history.
     pub doc: Document,
     /// The scene as it was last saved, to tell unsaved changes by.
@@ -806,6 +809,7 @@ impl State {
             project,
             selector: None,
             focus_pending: None,
+            settle: Vec::new(),
             saved: scene.clone(),
             doc: Document::new(scene),
             games: Games::default(),
@@ -1969,9 +1973,63 @@ impl State {
             }
         };
         let id = self.doc.add_character(&name, card);
+        // On a map she stands on its floor, where the camera looks.
+        let on_map = self.doc.scene().objects().iter().any(|o| o.kind() == Kind::Map);
+        if on_map {
+            if let Some(live) = self.live.as_ref().filter(|l| l.on_map()) {
+                let at = crate::scene::clean(live.cam.orbit.camera().target);
+                self.doc.move_now(id, at);
+            }
+            self.settle.push(id);
+        }
         self.unfold_to(id);
         // The camera goes to her once she is built.
         self.focus_pending = Some(id);
+    }
+
+    /// Sets the characters waiting for the map's floor on it, once the
+    /// map's meshes are there, in the step that added them. The camera
+    /// goes to the first.
+    pub fn settle_on_map(&mut self) {
+        if self.settle.is_empty() {
+            return;
+        }
+        let Some(live) = self.live.as_ref().filter(|l| l.on_map()) else {
+            return;
+        };
+        let waiting = std::mem::take(&mut self.settle);
+        let scene = self.doc.scene();
+        // The map alone: no one stands on another character.
+        let characters: Vec<ObjectId> = scene
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == Kind::Character)
+            .map(|o| o.id)
+            .collect();
+        let surface = live.surface(scene, characters);
+        let view = live.cam.orbit.camera();
+        let to_camera = view.eye - view.target;
+        let mut placed = Vec::new();
+        for id in waiting {
+            if scene.get(id).is_none() {
+                continue;
+            }
+            let at = scene.world(id).w_axis.truncate();
+            let Some(spot) = crate::surface::stand_spot(at, to_camera, &surface) else {
+                continue;
+            };
+            let local = scene.parent_world(id).inverse().transform_point3(spot);
+            if local.is_finite() {
+                placed.push((id, crate::scene::clean(local)));
+            }
+        }
+        drop(surface);
+        if let Some((first, _)) = placed.first() {
+            self.focus_pending = Some(*first);
+        }
+        for (id, at) in placed {
+            self.doc.move_now(id, at);
+        }
     }
 
     /// Opens the Maps library, to add a map to the scene.
@@ -2073,6 +2131,18 @@ impl State {
                 let id = self.doc.add(&map.name, Content::map(file, time));
                 // The effects that follow the map, where the scene has none.
                 self.doc.add_map_effects();
+                // The characters stand where the map has a floor, and the
+                // camera goes to the first.
+                self.settle = self
+                    .doc
+                    .scene()
+                    .objects()
+                    .iter()
+                    .filter(|o| {
+                        o.kind() == Kind::Character && o.parent.is_none_or(|p| self.doc.scene().is_kind_folder(p))
+                    })
+                    .map(|o| o.id)
+                    .collect();
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }
