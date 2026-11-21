@@ -1718,7 +1718,11 @@ impl Renderer {
                         end: own.end,
                     })
                 });
-                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &env.map_lamps, map_fog);
+                let scene = map::SceneLight {
+                    lamps: &env.map_lamps,
+                    fog: map_fog,
+                };
+                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
                 gpu.shadow_pass(pipes, &mut encoder, &frame);
                 Some((pipes, gpu, frame))
             }

@@ -1280,6 +1280,13 @@ impl MapPlacement {
 /// A map uploaded to the GPU: its buffers, textures and bind groups, made
 /// once by `Renderer::set_map`. Each frame only writes the camera's
 /// numbers into its uniform buffers and picks what to draw.
+/// What the scene adds to a map's light: lamps, and the fog the Studio's
+/// Fog switches on, in place of the map's own.
+pub(crate) struct SceneLight<'a> {
+    pub lamps: &'a [crate::Lamp],
+    pub fog: Option<Fog>,
+}
+
 pub(crate) struct MapGpu {
     /// Where the map stands, set by `Renderer::place_map`.
     pub(crate) placement: MapPlacement,
@@ -1692,9 +1699,9 @@ impl MapGpu {
         camera: &Camera,
         view_proj: Mat4,
         aspect: f32,
-        lamps: &[crate::Lamp],
-        fog: Option<Fog>,
+        scene: SceneLight<'_>,
     ) -> MapFrame {
+        let SceneLight { lamps, fog } = scene;
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
         // by the view.
@@ -2103,7 +2110,11 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, gpu.far(camera));
         let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
-        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &[], gpu.light.fog);
+        let scene = SceneLight {
+            lamps: &[],
+            fog: gpu.light.fog,
+        };
+        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
 
         let size = wgpu::Extent3d {
             width,
