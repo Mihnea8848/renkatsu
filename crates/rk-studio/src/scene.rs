@@ -319,6 +319,12 @@ pub enum Content {
         /// room darker, for lamps to light; the lamps keep their strength.
         #[serde(default = "whole")]
         light_intensity: f32,
+        /// How much of the way the scene's colour filter fades out when the
+        /// map has no light, 0 to 1, in a straight line from full light:
+        /// the filters were made for lit rooms, and turn a dark one's
+        /// colours deep.
+        #[serde(default = "half")]
+        filter_decay: f32,
     },
 }
 
@@ -433,6 +439,7 @@ impl Content {
             time,
             hide_walls: true,
             light_intensity: 1.0,
+            filter_decay: 0.5,
         }
     }
 
@@ -481,6 +488,10 @@ impl Content {
 
 fn yes() -> bool {
     true
+}
+
+fn half() -> f32 {
+    0.5
 }
 
 fn white() -> [f32; 3] {
@@ -874,6 +885,22 @@ impl Scene {
     /// The character light a character takes: of the shown character
     /// lights that light its light group, the brightest, as Unity picks
     /// a main light; none when no light reaches it.
+    /// How much the colour filter has faded at the shown map's light: none
+    /// at full light, the map's Filter decay at none.
+    pub fn filter_fade(&self) -> f32 {
+        self.objects
+            .iter()
+            .find_map(|o| match &o.content {
+                Content::Map {
+                    light_intensity,
+                    filter_decay,
+                    ..
+                } if self.shown(o.id) => Some((1.0 - light_intensity.clamp(0.0, 1.0)) * filter_decay.clamp(0.0, 1.0)),
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    }
+
     /// The shown map's Light intensity, or 1 without a map.
     pub fn map_light(&self) -> f32 {
         self.objects
@@ -2223,6 +2250,36 @@ mod tests {
     }
 
     #[test]
+    fn the_colour_filter_decays_with_the_maps_light() {
+        let mut scene = Scene::new();
+        assert_eq!(scene.filter_fade(), 0.0);
+        let map = scene.add(
+            "Hallway",
+            Content::map(PathBuf::from("Maps/a.rkmap"), MapTime::Day),
+            None,
+        );
+        // Full light: none; no light: as far as Filter decay says.
+        assert_eq!(scene.filter_fade(), 0.0);
+        let set = |scene: &mut Scene, light: f32, decay: f32| {
+            if let Content::Map {
+                light_intensity,
+                filter_decay,
+                ..
+            } = &mut scene.get_mut(map).unwrap().content
+            {
+                *light_intensity = light;
+                *filter_decay = decay;
+            }
+        };
+        set(&mut scene, 0.0, 0.5);
+        assert_eq!(scene.filter_fade(), 0.5);
+        set(&mut scene, 0.2, 1.0);
+        assert!((scene.filter_fade() - 0.8).abs() < 1e-6);
+        set(&mut scene, 0.0, 0.0);
+        assert_eq!(scene.filter_fade(), 0.0);
+    }
+
+    #[test]
     fn character_lights_dim_with_the_map_unless_unlinked() {
         let mut scene = Scene::new();
         let key = scene.key_light().unwrap().id;
@@ -3037,6 +3094,7 @@ kind = "map"
                 time: MapTime::Day,
                 hide_walls: true,
                 light_intensity: 1.0,
+                filter_decay: 0.5,
             }
         );
     }
