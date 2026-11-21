@@ -147,6 +147,9 @@ pub struct Fog {
     pub camera_far: f32,
     /// Take the map's own fog colour, when a map with fog is shown.
     pub color_from_map: bool,
+    /// Renkatsu's own fog, set in full: a map's fog neither changes it nor
+    /// is drawn under it.
+    pub own: bool,
 }
 
 impl Default for Fog {
@@ -163,6 +166,7 @@ impl Default for Fog {
             camera_near: 0.06,
             camera_far: 1000.0,
             color_from_map: false,
+            own: false,
         }
     }
 }
@@ -481,6 +485,26 @@ pub fn fog_scene_params(mode: FogMode) -> (f32, [f32; 4]) {
         FogMode::Exponential { density } => (2.0, [density * 1.201_122_4, density * LOG2_E, 0.0, 0.0]),
         FogMode::ExponentialSquared { density } => (3.0, [density * 1.201_122_4, density * LOG2_E, 0.0, 0.0]),
     }
+}
+
+/// Renkatsu's own fog as the shaders take it for what is drawn after
+/// GlobalFog: its linear colour, and its density, the mist's top, half the
+/// mist's height density and its parts (1 distance, 2 height). None for
+/// CharaStudio's fog, which those surfaces do not take.
+pub fn own_fog_params(fog: &Fog) -> Option<([f32; 4], [f32; 4])> {
+    if !fog.own {
+        return None;
+    }
+    let density = match fog.mode {
+        FogMode::ExponentialSquared { density } => density,
+        _ => return None,
+    };
+    let [r, g, b, _] = crate::material::linear([fog.color[0], fog.color[1], fog.color[2], 1.0]);
+    let flags = u8::from(fog.distance_fog) | u8::from(fog.height_fog) << 1;
+    Some((
+        [r, g, b, 1.0],
+        [density, fog.height, fog.height_density * 0.5, f32::from(flags)],
+    ))
 }
 
 /// How much of the picture GlobalFog keeps at a point, 1 for no fog

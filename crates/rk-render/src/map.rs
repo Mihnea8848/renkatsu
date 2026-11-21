@@ -711,6 +711,9 @@ struct Globals {
     indirect_spec: [f32; 4],
     lamps: [[f32; 4]; 24],
     lamp_info: [f32; 4],
+    /// Renkatsu's own fog on blended surfaces (map.wgsl `fog_kept`); w 0
+    /// for none.
+    fog_own: [f32; 4],
 }
 
 #[repr(C)]
@@ -1470,6 +1473,9 @@ impl MapView {
 pub(crate) struct SceneLight<'a> {
     pub lamps: &'a [crate::Lamp],
     pub fog: Option<Fog>,
+    /// Renkatsu's own fog, for the blended surfaces GlobalFog does not
+    /// reach: its linear colour and its numbers (`own_fog_params`).
+    pub own_fog: Option<([f32; 4], [f32; 4])>,
     /// How much of the map's baked and ambient light and reflections is
     /// kept, 0 to 1.
     pub baked: f32,
@@ -1939,7 +1945,12 @@ impl MapGpu {
         walls_from: &Camera,
         scene: SceneLight<'_>,
     ) -> MapFrame {
-        let SceneLight { lamps, fog, baked } = scene;
+        let SceneLight {
+            lamps,
+            fog,
+            own_fog,
+            baked,
+        } = scene;
         let view = &self.views[eye.view];
         let aspect = eye.aspect;
         // Everything of the map is worked out in its own space: the
@@ -1970,7 +1981,7 @@ impl MapGpu {
             sun_dir: [l.sun_dir[0], l.sun_dir[1], l.sun_dir[2], 0.0],
             sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
             sh: l.ambient_sh,
-            fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
+            fog_color: own_fog.map_or([fog.color[0], fog.color[1], fog.color[2], 1.0], |(c, _)| c),
             fog_range: [fog.start, fog.end, 0.0, if lit_fog.is_some() { 1.0 } else { 0.0 }],
             indirect_spec: [
                 l.indirect_specular[0],
@@ -1980,6 +1991,16 @@ impl MapGpu {
             ],
             lamps: [[0.0; 4]; 24],
             lamp_info: [0.0; 4],
+            // The mist's top, a world height, in the map's space.
+            fog_own: own_fog.map_or([0.0; 4], |(_, p)| {
+                let top = self
+                    .placement
+                    .rigid()
+                    .inverse()
+                    .transform_point3(glam::Vec3::new(0.0, p[1], 0.0))
+                    .y;
+                [p[0], top, p[2], p[3]]
+            }),
         };
         // The lamps, brought into the map's space as the camera is.
         let back = self.placement.rigid().inverse();
@@ -2478,6 +2499,7 @@ impl Renderer {
         let scene = SceneLight {
             lamps: &[],
             fog: gpu.light.fog,
+            own_fog: None,
             baked: 1.0,
         };
         // The map alone has no reflections drawn: its mirrors stay away.
@@ -2638,7 +2660,7 @@ mod tests {
     fn the_uniforms_are_as_wide_as_the_shader_reads_them() {
         assert_eq!(std::mem::size_of::<MaterialUniform>(), 9 * 16);
         assert_eq!(std::mem::size_of::<ProbeUniform>(), 4 * 16);
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 38 * 16);
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 39 * 16);
         assert_eq!(std::mem::size_of::<Vertex>(), 80);
     }
 

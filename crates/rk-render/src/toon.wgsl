@@ -42,8 +42,44 @@ struct Globals {
     lamps: array<vec4<f32>, 24>,
     // x: how many lamps
     lamp_info: vec4<f32>,
+    // Renkatsu's own fog on what is drawn after GlobalFog (see `fog_kept`):
+    // its linear colour, and its numbers, w 0 for none.
+    fog_color: vec4<f32>,
+    fog_own: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: Globals;
+
+// Renkatsu's own fog on what is drawn after GlobalFog (see-through
+// surfaces): how much of the colour is kept, by GlobalFog's maths for its
+// exponential squared distance fog and its height fog. `fog_own`: density, the
+// mist's top, half its height density, and 1 for distance fog plus 2 for
+// height fog (0 for none).
+fn fog_kept(world: vec3<f32>, eye: vec3<f32>, p: vec4<f32>) -> f32 {
+    let v = world - eye;
+    let len = length(v);
+    let flags = u32(p.w);
+    var way = 0.0;
+    if (flags & 1u) != 0u {
+        way += len;
+    }
+    if (flags & 2u) != 0u {
+        let over = eye.y - p.y;
+        let inside = select(0.0, 1.0, over <= 0.0);
+        let point_over = v.y + over;
+        let c1 = inside * (point_over + over);
+        let c2 = min((1.0 - 2.0 * inside) * point_over, 0.0);
+        way += -len * p.z * (c1 - c2 * c2 / abs(v.y + 1e-5));
+    }
+    let d = p.x * max(way, 0.0);
+    return clamp(exp(-d * d), 0.0, 1.0);
+}
+
+fn fogged(i: VsOut, c: vec4<f32>) -> vec4<f32> {
+    if (g.fog_own.w < 0.5) {
+        return c;
+    }
+    return vec4<f32>(mix(g.fog_color.rgb, c.rgb, fog_kept(i.world, g.eye.xyz, g.fog_own)), c.a);
+}
 @group(0) @binding(1) var ramp_tex: texture_2d<f32>;
 @group(0) @binding(2) var ramp_samp: sampler;
 // The light's shadows over the picture (Unity's screen-space
@@ -1705,7 +1741,7 @@ fn item_opaque_low(i: VsOut, front: bool) -> vec4<f32> {
 
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return with_lamps(i, forward(i, front));
+    return fogged(i, with_lamps(i, forward(i, front)));
 }
 
 // How much a lamp reaches a point: Unity's falloff over its range, the
@@ -1757,7 +1793,7 @@ struct Covered {
 
 @fragment
 fn fs_main_covered(i: VsOut, @builtin(front_facing) front: bool) -> Covered {
-    let color = with_lamps(i, forward(i, front));
+    let color = fogged(i, with_lamps(i, forward(i, front)));
     return Covered(color, coverage);
 }
 
@@ -1831,13 +1867,13 @@ fn item_alpha_outline(i: VsOut) -> vec4<f32> {
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
     let c = outline(i);
-    return vec4<f32>(c.rgb * g.lamp_info.y, c.a);
+    return fogged(i, vec4<f32>(c.rgb * g.lamp_info.y, c.a));
 }
 
 @fragment
 fn fs_outline_covered(i: VsOut) -> Covered {
     let c = outline(i);
-    return Covered(vec4<f32>(c.rgb * g.lamp_info.y, c.a), coverage);
+    return Covered(fogged(i, vec4<f32>(c.rgb * g.lamp_info.y, c.a)), coverage);
 }
 
 fn outline(i: VsOut) -> vec4<f32> {
