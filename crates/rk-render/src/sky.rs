@@ -509,7 +509,7 @@ impl SkyPass {
     /// of `color` and `depth` that `prepare` was called for.
     pub(crate) fn draw(
         &self,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut crate::pass::Pass<'_>,
         group: &wgpu::BindGroup,
         color: wgpu::TextureFormat,
         depth: wgpu::TextureFormat,

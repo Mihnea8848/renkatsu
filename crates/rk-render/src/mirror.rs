@@ -519,7 +519,7 @@ impl MirrorPass {
     /// its own pipeline and bind group set.
     pub(crate) fn draw(
         &self,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut crate::pass::Pass<'_>,
         gpu: &MirrorGpu,
         color: wgpu::TextureFormat,
         depth: wgpu::TextureFormat,

@@ -2244,6 +2244,24 @@ mod tests {
     }
 
     #[test]
+    fn delete_acts_in_the_panel_last_worked_in() {
+        let home = scratch("delete-focus");
+        let mut st = editor(&home);
+        let ctx = egui::Context::default();
+        let light = st.doc.scene().key_light().map(|o| o.id).unwrap();
+        st.doc.select_many(&[light]);
+        // Working in Content: the scene's selection stays.
+        st.focus = crate::panels::Panel::Content;
+        st.act(crate::keymap::Action::Delete, &ctx);
+        assert!(st.doc.scene().get(light).is_some());
+        // In the Outliner it goes.
+        st.focus = crate::panels::Panel::Outliner;
+        st.act(crate::keymap::Action::Delete, &ctx);
+        assert!(st.doc.scene().get(light).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn a_card_added_from_content_goes_into_the_characters_folder() {
         let home = scratch("content-folder");
         let mut st = editor(&home);
