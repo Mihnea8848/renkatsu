@@ -272,20 +272,6 @@ impl Default for SunShafts {
     }
 }
 
-/// Lamps and the sun lighting Renkatsu's own fog around them, Renkatsu's
-/// own look: each lamp's light gathered along the view through the fog,
-/// and the fog towards the sun brighter.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct FogGlow {
-    /// 1 as the fog's density gives it, 0 for none.
-    pub strength: f32,
-    /// The lamps, in the world. Directional ones are left out.
-    pub lamps: Vec<crate::Lamp>,
-    /// The way towards the shown map's sun and its linear colour times
-    /// intensity, in the world; the renderer fills it in.
-    pub sun: Option<([f32; 3], [f32; 3])>,
-}
-
 /// The screen effects of a CharaStudio scene. `None` switches one off.
 #[derive(Debug, Clone, Default)]
 pub struct StudioEffects {
@@ -299,8 +285,6 @@ pub struct StudioEffects {
     pub shafts: Option<SunShafts>,
     /// DepthOfField. Off in a new scene.
     pub dof: Option<DepthOfField>,
-    /// Lamps and the sun lighting Renkatsu's own fog, with the fog.
-    pub glow: Option<FogGlow>,
     /// A plain colour (sRGB) for the parts of the picture where nothing
     /// was drawn, kept out of the effects: the editor's grey when the
     /// scene has no map. `None` puts the effects on the whole picture, as
@@ -324,7 +308,6 @@ impl StudioEffects {
             fog: None,
             shafts: None,
             dof: None,
-            glow: None,
             backdrop: None,
         }
     }
@@ -758,13 +741,6 @@ struct FxUniform {
     shaft_color: [f32; 4],
     shaft_threshold: [f32; 4],
     rand: [[f32; 4]; 16],
-    /// Strength, how many lamps, the fog's density, 1 when on.
-    glow: [f32; 4],
-    glow_eye: [f32; 4],
-    /// The way towards the sun, w 1 when there is one; its colour.
-    glow_sun_dir: [f32; 4],
-    glow_sun: [f32; 4],
-    glow_lamps: [[f32; 4]; 24],
 }
 
 /// What the effects need to know about a frame.
@@ -809,7 +785,7 @@ impl Frame<'_> {
         let sun = shaft_sun(&shafts, self.eye, self.forward, self.fov_y_deg, w / h);
         let [sr, sg, sb] = shaft_color(&shafts, sun[2]);
         let screen = if shafts.blend == ShaftBlend::Screen { 1.0 } else { 0.0 };
-        let mut u = FxUniform {
+        FxUniform {
             size: [w, h, 1.0 / w, 1.0 / h],
             src: [0.0; 4],
             ao: [ao.radius, half_proj_scale, ao.power_exponent, bias],
@@ -850,28 +826,7 @@ impl Frame<'_> {
             shaft_color: [sr, sg, sb, screen],
             shaft_threshold: [shafts.threshold[0], shafts.threshold[1], shafts.threshold[2], 0.0],
             rand: random_data(),
-            glow: [0.0; 4],
-            glow_eye: [self.eye.x, self.eye.y, self.eye.z, 0.0],
-            glow_sun_dir: [0.0; 4],
-            glow_sun: [0.0; 4],
-            glow_lamps: [[0.0; 4]; 24],
-        };
-        // Lamps and the sun in Renkatsu's own fog.
-        let density = match self.fx.fog.as_ref().filter(|f| f.own).map(|f| f.mode) {
-            Some(FogMode::ExponentialSquared { density }) => density,
-            _ => 0.0,
-        };
-        if let Some(glow) = self.fx.glow.as_ref().filter(|g| g.strength > 0.0 && density > 0.0) {
-            let point: Vec<crate::Lamp> = glow.lamps.iter().filter(|l| l.at.is_some()).copied().collect();
-            let (rows, info) = crate::lamp_rows(&point, u32::MAX);
-            u.glow = [glow.strength, info[0], density, 1.0];
-            u.glow_lamps = rows;
-            if let Some((dir, color)) = glow.sun {
-                u.glow_sun_dir = [dir[0], dir[1], dir[2], 1.0];
-                u.glow_sun = [color[0], color[1], color[2], 0.0];
-            }
         }
-        u
     }
 }
 
@@ -905,8 +860,6 @@ pub(crate) struct Gpu {
     pipelines: HashMap<(&'static str, wgpu::TextureFormat), wgpu::RenderPipeline>,
     ao_apply: wgpu::RenderPipeline,
     fog_apply: wgpu::RenderPipeline,
-    /// The same with lights glowing in the fog, premultiplied.
-    fog_glow_apply: wgpu::RenderPipeline,
     backdrop_layout: wgpu::BindGroupLayout,
     backdrop: wgpu::RenderPipeline,
     targets: Option<Targets>,
@@ -1049,28 +1002,23 @@ impl Gpu {
         );
         // GlobalFog writes lerp(fog colour, picture, factor): the fog colour
         // over the picture by what the factor leaves out. The fog colour's
-        // alpha is 1. With lights glowing in it, the colour comes
-        // premultiplied, the glow added on top.
-        let fog_pipeline = |blend| {
-            make(
-                "fs_fog",
-                wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                },
-                Some(wgpu::DepthStencilState {
-                    format: depth_format,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                samples,
-            )
-        };
-        let fog_glow_apply = fog_pipeline(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
-        let fog_apply = fog_pipeline(wgpu::BlendState::ALPHA_BLENDING);
+        // alpha is 1.
+        let fog_apply = make(
+            "fs_fog",
+            wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+            Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            samples,
+        );
         let backdrop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("backdrop"),
             entries: &[
@@ -1138,7 +1086,6 @@ impl Gpu {
             pipelines,
             ao_apply,
             fog_apply,
-            fog_glow_apply,
             backdrop_layout,
             backdrop,
             targets: None,
@@ -1361,13 +1308,10 @@ impl Gpu {
     /// (`[ImageEffectOpaque]`); `None` when fog is off.
     pub fn fog(&self, device: &wgpu::Device, f: &Frame) -> Option<(&wgpu::RenderPipeline, wgpu::BindGroup)> {
         f.fx.fog.as_ref()?;
-        let uniform = f.uniform();
-        let pipeline = if uniform.glow[3] > 0.5 {
-            &self.fog_glow_apply
-        } else {
-            &self.fog_apply
-        };
-        Some((pipeline, self.group(device, f, uniform, f.white, f.white, f.white)))
+        Some((
+            &self.fog_apply,
+            self.group(device, f, f.uniform(), f.white, f.white, f.white),
+        ))
     }
 
     /// Runs bloom, the colour table and the vignette on the resolved HDR
@@ -1726,9 +1670,8 @@ mod tests {
     #[test]
     fn uniform_matches_the_shader() {
         // Eight vectors, the fog's seven, one for the depth of field, the
-        // sun shafts' three, the sixteen random pixels, and the glow's four
-        // and its lamps' twenty-four.
-        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 7 + 1 + 3 + 16 + 4 + 24) * 16);
+        // sun shafts' three and the sixteen random pixels.
+        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 7 + 1 + 3 + 16) * 16);
     }
 
     #[test]
