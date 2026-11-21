@@ -1710,6 +1710,16 @@ impl Renderer {
             .filter(|m| m.placement.shown)
             .and_then(|m| m.light.fog);
         let fx_resolved = env.effects.clone().map(|mut fx| {
+            // The shown map's sun lights the fog, as dim as the map's light
+            // keeps it (map.wgsl `sun_share`).
+            if let (Some(glow), Some(map)) = (fx.glow.as_mut(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
+                let turn = map.placement.rigid();
+                let dir = turn
+                    .transform_vector3(Vec3::from(map.light.sun_dir))
+                    .normalize_or_zero();
+                let share = 0.15 + 0.85 * env.map_light_intensity.clamp(0.0, 1.0);
+                glow.sun = Some((dir.to_array(), map.light.sun_color.map(|c| c * share)));
+            }
             if let (Some(f), Some(own)) = (fx.fog.as_mut().filter(|f| !f.own), shown_fog) {
                 f.mode = effects::FogMode::Linear {
                     start: f.start_distance,

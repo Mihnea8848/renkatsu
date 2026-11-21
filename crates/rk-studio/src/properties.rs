@@ -817,6 +817,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             start_distance,
                             visibility,
                             mist,
+                            glow,
                         } => {
                             row(ui, k, "Preset", None, |ui, rect| {
                                 use crate::scene::FOG_PRESETS;
@@ -880,6 +881,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                     number(ui, "Mist height", height, 0.05, 10.0);
                                     number(ui, "Mist visibility", m, 0.5, 1000.0);
                                 }
+                                number(ui, "Light glow", glow, 0.0, 4.0);
                             }
                         }
                         Effect::DepthOfField { focal_size, aperture } => {
