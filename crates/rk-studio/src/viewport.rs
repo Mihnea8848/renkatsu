@@ -1596,6 +1596,7 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 /// in line with the scene: stepping the physics while it plays and putting
 /// it back to rest when it is stopped.
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
+    st.settle_on_map();
     let still = st.physics_still();
     let Some(live) = st.live.as_mut() else { return };
     live.hold_physics_still(&still);

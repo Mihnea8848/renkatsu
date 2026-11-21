@@ -311,6 +311,9 @@ pub struct State {
     /// The object that was just added: the camera goes to it once the
     /// viewport has something of it to look at.
     pub focus_pending: Option<ObjectId>,
+    /// Characters to set on the map's floor once its meshes are there,
+    /// where it puts them: the map just came, or they did.
+    pub settle: Vec<ObjectId>,
     /// The scene being edited, with the selection and the undo history.
     pub doc: Document,
     /// The scene as it was last saved, to tell unsaved changes by.
@@ -806,6 +809,7 @@ impl State {
             project,
             selector: None,
             focus_pending: None,
+            settle: Vec::new(),
             saved: scene.clone(),
             doc: Document::new(scene),
             games: Games::default(),
@@ -1969,9 +1973,63 @@ impl State {
             }
         };
         let id = self.doc.add_character(&name, card);
+        // On a map she stands on its floor, where the camera looks.
+        let on_map = self.doc.scene().objects().iter().any(|o| o.kind() == Kind::Map);
+        if on_map {
+            if let Some(live) = self.live.as_ref().filter(|l| l.on_map()) {
+                let at = crate::scene::clean(live.cam.orbit.camera().target);
+                self.doc.move_now(id, at);
+            }
+            self.settle.push(id);
+        }
         self.unfold_to(id);
         // The camera goes to her once she is built.
         self.focus_pending = Some(id);
+    }
+
+    /// Sets the characters waiting for the map's floor on it, once the
+    /// map's meshes are there, in the step that added them. The camera
+    /// goes to the first.
+    pub fn settle_on_map(&mut self) {
+        if self.settle.is_empty() {
+            return;
+        }
+        let Some(live) = self.live.as_ref().filter(|l| l.on_map()) else {
+            return;
+        };
+        let waiting = std::mem::take(&mut self.settle);
+        let scene = self.doc.scene();
+        // The map alone: no one stands on another character.
+        let characters: Vec<ObjectId> = scene
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == Kind::Character)
+            .map(|o| o.id)
+            .collect();
+        let surface = live.surface(scene, characters);
+        let view = live.cam.orbit.camera();
+        let to_camera = view.eye - view.target;
+        let mut placed = Vec::new();
+        for id in waiting {
+            if scene.get(id).is_none() {
+                continue;
+            }
+            let at = scene.world(id).w_axis.truncate();
+            let Some(spot) = crate::surface::stand_spot(at, to_camera, &surface) else {
+                continue;
+            };
+            let local = scene.parent_world(id).inverse().transform_point3(spot);
+            if local.is_finite() {
+                placed.push((id, crate::scene::clean(local)));
+            }
+        }
+        drop(surface);
+        if let Some((first, _)) = placed.first() {
+            self.focus_pending = Some(*first);
+        }
+        for (id, at) in placed {
+            self.doc.move_now(id, at);
+        }
     }
 
     /// Opens the Maps library, to add a map to the scene.
@@ -2050,13 +2108,14 @@ impl State {
             .cloned();
         let id = match there {
             Some(mut object) => {
-                let (hide_walls, light_intensity) = match object.content {
+                let (hide_walls, light_intensity, filter_decay) = match object.content {
                     Content::Map {
                         hide_walls,
                         light_intensity,
+                        filter_decay,
                         ..
-                    } => (hide_walls, light_intensity),
-                    _ => (true, 1.0),
+                    } => (hide_walls, light_intensity, filter_decay),
+                    _ => (true, 1.0, 0.5),
                 };
                 object.name = self.doc.scene().free_name(&map.name);
                 object.content = Content::Map {
@@ -2064,6 +2123,7 @@ impl State {
                     time,
                     hide_walls,
                     light_intensity,
+                    filter_decay,
                 };
                 let id = object.id;
                 self.doc.edit(object, false);
@@ -2071,30 +2131,20 @@ impl State {
             }
             None => {
                 let id = self.doc.add(&map.name, Content::map(file, time));
-                // The map's own colour filter, which follows its time of day.
-                let effect = crate::scene::Effect::ColorFilter {
-                    filter: None,
-                    blend: 0.0,
-                };
-                self.doc.add_under(effect.label(), Content::Effect { effect }, id);
-                // Its fog, off as a new CharaStudio scene leaves it.
-                let fog = crate::scene::Effect::Fog {
-                    color: None,
-                    height: 1.0,
-                    start_distance: 0.0,
-                };
-                let fog_id = self.doc.add_under(fog.label(), Content::Effect { effect: fog }, id);
-                self.doc.hide_now(fog_id);
-                // Its sun shafts, from its own sun, off as CharaStudio
-                // starts.
-                let shafts = crate::scene::Effect::SunShafts {
-                    threshold: [128.0 / 255.0; 3],
-                    color: None,
-                };
-                let shafts_id = self
+                // The effects that follow the map, where the scene has none.
+                self.doc.add_map_effects();
+                // The characters stand where the map has a floor, and the
+                // camera goes to the first.
+                self.settle = self
                     .doc
-                    .add_under(shafts.label(), Content::Effect { effect: shafts }, id);
-                self.doc.hide_now(shafts_id);
+                    .scene()
+                    .objects()
+                    .iter()
+                    .filter(|o| {
+                        o.kind() == Kind::Character && o.parent.is_none_or(|p| self.doc.scene().is_kind_folder(p))
+                    })
+                    .map(|o| o.id)
+                    .collect();
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

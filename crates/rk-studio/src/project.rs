@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 /// The version of the project and scene files this build writes.
 /// 2: post-processing effects are objects of the scene. 3: the character
 /// light is CharaStudio's, fixed in the scene with two angles.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// The extension of the project file.
 pub const EXTENSION: &str = "rkproj";
@@ -546,6 +546,10 @@ impl Project {
         // renderer always drew.
         if file.format < 2 {
             file.scene.add_first_effects();
+        }
+        // Effects kept under their map move into the Effects folder.
+        if file.format < 4 {
+            file.scene.gather_effects();
         }
         // Older character lights followed the camera at an angle of their
         // own; they become CharaStudio's.

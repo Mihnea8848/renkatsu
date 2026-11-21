@@ -770,6 +770,26 @@ pub fn checkbox(ui: &mut Ui, k: &Look, rect: Rect, id: Id, on: &mut bool, text: 
     }
 }
 
+/// A link that can be made or broken, as a checkbox is ticked: the link
+/// symbol, whole or broken, and what it does.
+pub fn link_toggle(ui: &mut Ui, k: &Look, rect: Rect, id: Id, on: &mut bool, text: &str) {
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+    }
+    let p = ui.painter();
+    let (symbol, color) = if *on {
+        (icon::LINK_SIMPLE, k.t.select_bright)
+    } else if resp.hovered() {
+        (icon::LINK_SIMPLE_BREAK, k.t.text_bright)
+    } else {
+        (icon::LINK_SIMPLE_BREAK, k.t.text_dim)
+    };
+    glyph(p, k, Pos2::new(rect.left() + 7.0, rect.center().y), symbol, 15.0, color);
+    let color = if resp.hovered() { k.t.text_bright } else { k.t.text };
+    label(p, k, Pos2::new(rect.left() + 21.0, rect.center().y), text, color);
+}
+
 /// A choice between a few options shown side by side in one box.
 pub fn segmented(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: &mut usize, options: &[&str]) {
     boxed(ui.painter(), rect, k.radius(), k.t.input, k.t.border);
