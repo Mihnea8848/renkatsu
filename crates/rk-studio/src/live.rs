@@ -1784,22 +1784,7 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> Stud
                 start_distance,
                 visibility,
                 mist,
-                glow,
             } if fx.fog.is_none() => {
-                if (visibility.is_some() || mist.is_some()) && glow > 0.0 {
-                    // Every lamp that shows, once, lights the fog.
-                    let mut lamps = scene.lamps(false);
-                    for (id, lamp) in scene.lamps(true) {
-                        if !lamps.iter().any(|(seen, _)| *seen == id) {
-                            lamps.push((id, lamp));
-                        }
-                    }
-                    fx.glow = Some(rk_render::effects::FogGlow {
-                        strength: glow,
-                        lamps: lamps.into_iter().map(|(_, lamp)| lamp).collect(),
-                        sun: None,
-                    });
-                }
                 let first = rk_render::effects::Fog::default();
                 fx.fog = Some(if visibility.is_none() && mist.is_none() {
                     // Without a map, the Studio scene's own fog mode; with a
@@ -1838,7 +1823,6 @@ mod tests {
                     start_distance: 2.0,
                     visibility: None,
                     mist: None,
-                    glow: 1.0,
                 },
             },
             None,
