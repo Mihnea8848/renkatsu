@@ -164,6 +164,7 @@ pub fn panel(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
         hide_walls,
         light_intensity,
         filter_decay,
+        ..
     }) = st.doc.scene().get(map).map(|o| o.content.clone())
     else {
         return;

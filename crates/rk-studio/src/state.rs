@@ -400,6 +400,9 @@ pub struct State {
     pub rail: Rail,
     /// Every viewport overlay is hidden.
     pub overlays_hidden: bool,
+    /// The floating icons of lights, cameras and items are hidden (and
+    /// not picked in the viewport).
+    pub icons_hidden: bool,
     /// The viewport takes the place of all docked panels.
     pub maximised: bool,
     /// Index into `modes::TOOLS`.
@@ -850,6 +853,7 @@ impl State {
             palette_pinned: true,
             rail: Rail::Named,
             overlays_hidden: false,
+            icons_hidden: false,
             maximised: false,
             tool: 0,
             snap: true,
@@ -1987,6 +1991,29 @@ impl State {
         self.focus_pending = Some(id);
     }
 
+    /// Puts the map's movable pieces in the scene once its build knows
+    /// them.
+    pub fn list_map_pieces(&mut self) {
+        let Some(live) = self.live.as_ref() else { return };
+        let Some((map, pieces)) = live.map_pieces() else { return };
+        // The doors come from the map's bundle, read beside the build.
+        let Some(doors) = live.map_doors() else { return };
+        let listed = matches!(
+            self.doc.scene().get(map).map(|o| &o.content),
+            Some(Content::Map {
+                pieces_listed: true,
+                ..
+            }) | None
+        );
+        if listed || (pieces.is_empty() && doors.is_empty()) {
+            return;
+        }
+        let pieces = pieces.to_vec();
+        // Each kind's folder starts folded: a classroom has 25 desks.
+        let folders = self.doc.list_pieces_now(map, &pieces, &doors);
+        self.folded.extend(folders);
+    }
+
     /// Sets the characters waiting for the map's floor on it, once the
     /// map's meshes are there, in the step that added them. The camera
     /// goes to the first.
@@ -2124,7 +2151,10 @@ impl State {
                     hide_walls,
                     light_intensity,
                     filter_decay,
+                    pieces_listed: false,
                 };
+                // The old map's pieces go with it; the new map lists its own.
+                self.doc.remove_pieces_now(object.id);
                 let id = object.id;
                 self.doc.edit(object, false);
                 id

@@ -126,6 +126,11 @@ pub struct Gizmos {
     drag: Option<Drag>,
     /// Where a selection box was started.
     band: Option<Pos2>,
+    /// The icons drawn last frame, which clicks pick from.
+    shown: Vec<Shown>,
+    /// Whether each icon was behind something, for the camera's eye and
+    /// the icon's place it was worked out for.
+    behind: std::collections::HashMap<ObjectId, (Vec3, Vec3, bool)>,
 }
 
 /// Length of an axis handle in points, and the colours.
@@ -530,11 +535,21 @@ impl Drag {
 /// The objects that are picked by an icon, as they have no picture of
 /// their own, and where they are in the world.
 fn icons(st: &State) -> Vec<(ObjectId, Kind, Vec3)> {
+    if st.icons_hidden {
+        return Vec::new();
+    }
     let scene = st.doc.scene();
     scene
         .objects()
         .iter()
         .filter(|o| matches!(o.kind(), Kind::Light | Kind::Camera | Kind::Item | Kind::Map) && scene.shown(o.id))
+        // A map's pieces and doors are seen as themselves.
+        .filter(|o| {
+            !matches!(
+                o.content,
+                crate::scene::Content::MapPiece { .. } | crate::scene::Content::MapDoor { .. }
+            )
+        })
         .map(|o| (o.id, o.kind(), scene.world(o.id).w_axis.truncate()))
         .collect()
 }
@@ -982,26 +997,33 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
     false
 }
 
-/// How near the pointer has to be to an object's icon to pick it.
-const ICON_REACH: f32 = 13.0;
-
 /// The object under a point of the screen: an icon first, as icons lie
 /// over the picture, then the nearest character.
 fn pick(st: &State, view: &View, pos: Pos2) -> Option<ObjectId> {
-    let icon = icons(st)
-        .into_iter()
-        .filter(|(id, ..)| pickable(st, *id))
-        .filter_map(|(id, _, world)| Some((id, view.screen(world)?.distance(pos))))
-        .filter(|(_, distance)| *distance < ICON_REACH)
-        .min_by(|a, b| a.1.total_cmp(&b.1));
+    // The icons drawn: one of a group stands for all of it.
+    let icon = st
+        .gizmo
+        .shown
+        .iter()
+        .filter(|s| pickable(st, s.id))
+        .map(|s| (s.id, s.at.distance(pos), s.size))
+        .filter(|(_, distance, size)| *distance < size + 2.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, distance, _)| (id, distance));
     if let Some((id, _)) = icon {
         return Some(id);
     }
     let (origin, dir) = view.ray(pos);
     let live = st.live.as_ref()?;
-    live.pick(st.doc.scene(), origin, dir)
-        .map(|(id, _)| id)
-        .filter(|id| pickable(st, *id))
+    let scene = st.doc.scene();
+    let character = live.pick(scene, origin, dir);
+    // The map in front: its piece or door, or nothing for a wall.
+    if let Some((owner, t)) = live.pick_map(scene, origin, dir) {
+        if character.is_none_or(|(_, far)| t < far) {
+            return owner.filter(|id| pickable(st, *id));
+        }
+    }
+    character.map(|(id, _)| id).filter(|id| pickable(st, *id))
 }
 
 /// Whether the Select mode's filter lets an object be picked: lights and
@@ -1055,6 +1077,123 @@ fn grid_look(k: &Look, cell: f32, camera: &rk_render::Camera) -> crate::grid_pas
     }
 }
 
+/// One icon, `size` its radius and `fade` how much of it shows.
+fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, kind: Kind, selected: bool, size: f32, fade: f32) {
+    let alpha = |a: u8| (f32::from(a) * fade) as u8;
+    p.circle_filled(at, size, Theme::glass(k.t.well, alpha(215)));
+    let edge = if selected {
+        Stroke::new(1.5, k.t.select_bright)
+    } else {
+        Stroke::new(1.0, Theme::glass(k.t.hover, alpha(150)))
+    };
+    p.circle_stroke(at, size, edge);
+    glyph(
+        p,
+        k,
+        at,
+        kind.glyph(),
+        size * 14.0 / 11.0,
+        Theme::glass(kind.color(), alpha(255)),
+    );
+}
+
+/// An icon as the viewport shows it this frame: for its object and the
+/// others grouped under it.
+#[derive(Debug, Clone, Copy)]
+struct Shown {
+    id: ObjectId,
+    kind: Kind,
+    at: Pos2,
+    /// Its radius in points, smaller the further it is.
+    size: f32,
+    /// Something stands between the camera and it.
+    behind: bool,
+}
+
+/// An icon's radius at full size, and at its smallest.
+const ICON_SIZE: f32 = 11.0;
+const ICON_SMALLEST: f32 = 6.0;
+/// Up to how far an icon keeps its full size, in metres.
+const ICON_NEAR: f32 = 4.0;
+/// The least distance between two icons' middles, in points: two closer
+/// than this are one. At most one icon for each square this wide, about
+/// six in a hundred points square, whatever their size.
+const ICON_ROOM: f32 = 40.0;
+
+/// The icons to draw and pick: sized by distance, faded behind what
+/// stands in front of them, and never crowded. Of icons that would
+/// stand closer than `ICON_ROOM` one is drawn for all, the selected
+/// first, then the hovered, then the nearest; the others join it, and
+/// come apart as the camera comes closer. Whether an icon is behind
+/// something is worked out
+/// again only when it or the camera moves.
+fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown> {
+    let mut list: Vec<(Shown, f32)> = Vec::new();
+    for (id, kind, world) in icons(st) {
+        let Some(at) = view.screen(world) else { continue };
+        let way = world - view.eye;
+        let far = way.length().max(0.01);
+        let cached = st
+            .gizmo
+            .behind
+            .get(&id)
+            .filter(|(eye, w, _)| *eye == view.eye && *w == world);
+        let behind = match cached {
+            Some((_, _, behind)) => *behind,
+            None => {
+                let dir = way / far;
+                let scene = st.doc.scene();
+                let live = st.live.as_ref();
+                let map = live.and_then(|l| l.pick_map(scene, view.eye, dir)).map(|(_, t)| t);
+                let chara = live.and_then(|l| l.pick(scene, view.eye, dir)).map(|(_, t)| t);
+                let behind = map.into_iter().chain(chara).any(|t| t < far - 0.05);
+                st.gizmo.behind.insert(id, (view.eye, world, behind));
+                behind
+            }
+        };
+        let size = (ICON_SIZE * ICON_NEAR / far).clamp(ICON_SMALLEST, ICON_SIZE);
+        list.push((
+            Shown {
+                id,
+                kind,
+                at,
+                size,
+                behind,
+            },
+            far,
+        ));
+    }
+    // Who stands for a group: the selected, the hovered, then the nearest.
+    let rank = |s: &Shown, far: f32| {
+        let hovered = pointer.is_some_and(|p| p.distance(s.at) < s.size + 2.0);
+        (!st.doc.is_selected(s.id), !hovered, far)
+    };
+    list.sort_by(|a, b| {
+        let (x, y) = (rank(&a.0, a.1), rank(&b.0, b.1));
+        x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.total_cmp(&y.2))
+    });
+    let mut shown: Vec<Shown> = Vec::new();
+    for (icon, _) in list {
+        let crowded = shown
+            .iter()
+            .any(|other| other.at.distance(icon.at) < ICON_ROOM.max((other.size + icon.size) * 1.15));
+        if !crowded {
+            shown.push(icon);
+        }
+    }
+    shown
+}
+
+/// Draws the shown icons, the far under the near.
+fn draw_icons(p: &egui::Painter, k: &Look, st: &State, shown: &[Shown]) {
+    let mut order: Vec<&Shown> = shown.iter().collect();
+    order.sort_by(|a, b| a.size.total_cmp(&b.size));
+    for icon in order {
+        let fade = if icon.behind { 0.3 } else { 1.0 };
+        icon_at(p, k, icon.at, icon.kind, st.doc.is_selected(icon.id), icon.size, fade);
+    }
+}
+
 /// Draws what the pointer works with over the scene's picture: the grid,
 /// the icons of the objects that have no picture, the gizmo of the active
 /// tool, the amount of a drag beside it, and the selection box.
@@ -1077,18 +1216,10 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
         }
     }
 
-    for (id, kind, world) in icons(st) {
-        let Some(at) = view.screen(world) else { continue };
-        let selected = st.doc.is_selected(id);
-        p.circle_filled(at, 11.0, Theme::glass(k.t.well, 215));
-        let edge = if selected {
-            Stroke::new(1.5, k.t.select_bright)
-        } else {
-            Stroke::new(1.0, Theme::glass(k.t.hover, 150))
-        };
-        p.circle_stroke(at, 11.0, edge);
-        glyph(&p, k, at, kind.glyph(), 14.0, kind.color());
-    }
+    let pointer = ui.ctx().pointer_hover_pos();
+    let shown = shown_icons(st, &view, pointer);
+    draw_icons(&p, k, st, &shown);
+    st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {
         Some(drag) => Some(drag.shown()),

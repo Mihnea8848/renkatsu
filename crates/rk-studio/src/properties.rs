@@ -386,7 +386,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     Some("A light has no size"),
                 ],
                 Content::Camera { .. } => [None, None, Some("A camera has no size")],
-                Content::Item => [None; 3],
+                Content::Item | Content::MapPiece { .. } => [None; 3],
+                Content::MapDoor { .. } => [Some("A door stays in its frame"); 3],
                 // CharaStudio moves and turns a map; it keeps its size.
                 Content::Map { .. } => [None, None, Some("A map keeps its size")],
                 _ => [Some("Not available yet"); 3],
@@ -435,6 +436,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 section_end(ui, k);
             }
         }
+        let mut reset_to: Option<[f32; 3]> = None;
         match &mut object.content {
             Content::Character {
                 card,
@@ -933,6 +935,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 hide_walls,
                 light_intensity,
                 filter_decay,
+                ..
             } => {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
@@ -1018,6 +1021,34 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
+            Content::MapPiece { rest, .. } => {
+                if section(ui, k, st, 1, "Map piece") {
+                    row(ui, k, "Place", None, |ui, rect| {
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                        if widgets::flat_button(
+                            &mut child,
+                            k,
+                            Some(icon::ARROW_COUNTER_CLOCKWISE),
+                            "Reset to the map's place",
+                            false,
+                            false,
+                        )
+                        .clicked()
+                        {
+                            reset_to = Some(*rest);
+                        }
+                    });
+                    section_end(ui, k);
+                }
+            }
+            Content::MapDoor { open, .. } => {
+                if section(ui, k, st, 1, "Door") {
+                    row(ui, k, "Open", None, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("door open"), open, "");
+                    });
+                    section_end(ui, k);
+                }
+            }
             Content::Folder | Content::Item => {
                 if section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
@@ -1038,6 +1069,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
+        }
+        if let Some(rest) = reset_to {
+            object.transform.position = rest;
+            object.transform.rotation = [0.0; 3];
+            object.transform.scale = [1.0; 3];
         }
     });
     if let Content::Character { profile, .. } = &mut object.content {

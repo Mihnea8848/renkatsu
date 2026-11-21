@@ -300,6 +300,24 @@ pub enum Content {
         far: f32,
     },
     Item,
+    /// A piece of the scene's map that can be moved, hidden and copied:
+    /// its furniture and props. It stands under its map; its transform is
+    /// where it is in the map, which starts at `rest`.
+    MapPiece {
+        /// The game's name of it and which of that name it is.
+        piece: String,
+        #[serde(default)]
+        nth: u32,
+        /// Where the map has it.
+        rest: [f32; 3],
+    },
+    /// A door of the scene's map, which the game opens and closes with an
+    /// Animator: it stays in its frame and is opened or closed.
+    MapDoor {
+        /// Its Animator's object, by its path in the map.
+        door: String,
+        open: bool,
+    },
     /// The map the scene stands in. A scene has one at most; its
     /// transform moves and turns the map's root, as CharaStudio's map
     /// position and rotation do.
@@ -325,6 +343,10 @@ pub enum Content {
         /// colours deep.
         #[serde(default = "half")]
         filter_decay: f32,
+        /// Its movable pieces were put in the scene, once: pieces deleted
+        /// after stay deleted.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pieces_listed: bool,
     },
 }
 
@@ -440,6 +462,7 @@ impl Content {
             hide_walls: true,
             light_intensity: 1.0,
             filter_decay: 0.5,
+            pieces_listed: false,
         }
     }
 
@@ -449,7 +472,7 @@ impl Content {
             Content::Character { .. } => Kind::Character,
             Content::Light { .. } => Kind::Light,
             Content::Camera { .. } => Kind::Camera,
-            Content::Item => Kind::Item,
+            Content::Item | Content::MapPiece { .. } | Content::MapDoor { .. } => Kind::Item,
             Content::Map { .. } => Kind::Map,
             Content::Effect { .. } => Kind::Effect,
         }
@@ -1934,6 +1957,113 @@ impl Document {
         }
     }
 
+    /// Takes a map's pieces out of the scene, and the folders that held
+    /// them, in the same step of the history as the one before.
+    pub fn remove_pieces_now(&mut self, map: ObjectId) {
+        let inside: Vec<ObjectId> = self.scene.subtree(map).into_iter().filter(|id| *id != map).collect();
+        let pieces: Vec<ObjectId> = inside
+            .iter()
+            .copied()
+            .filter(|id| {
+                matches!(
+                    self.scene.get(*id).map(|o| &o.content),
+                    Some(Content::MapPiece { .. } | Content::MapDoor { .. })
+                )
+            })
+            .collect();
+        self.scene.objects.retain(|o| !pieces.contains(&o.id));
+        // Folders left empty by that.
+        loop {
+            let empty: Vec<ObjectId> = self
+                .scene
+                .objects
+                .iter()
+                .filter(|o| inside.contains(&o.id) && o.kind() == Kind::Folder)
+                .filter(|o| !self.scene.objects.iter().any(|c| c.parent == Some(o.id)))
+                .map(|o| o.id)
+                .collect();
+            if empty.is_empty() {
+                break;
+            }
+            self.scene.objects.retain(|o| !empty.contains(&o.id));
+        }
+    }
+
+    /// Puts a map's movable pieces in the scene under it, a folder for
+    /// each kind of which there are several, in the same step of the
+    /// history as the one before; once.
+    /// Gives the folders it made, which the Outliner starts folded.
+    pub fn list_pieces_now(
+        &mut self,
+        map: ObjectId,
+        pieces: &[crate::map_pieces::Piece],
+        doors: &[(String, bool)],
+    ) -> Vec<ObjectId> {
+        let mut folders = Vec::new();
+        let Some(Content::Map { pieces_listed, .. }) = self.scene.get_mut(map).map(|o| &mut o.content) else {
+            return folders;
+        };
+        if *pieces_listed {
+            return folders;
+        }
+        *pieces_listed = true;
+        let mut kinds: Vec<(&str, Vec<&crate::map_pieces::Piece>)> = Vec::new();
+        for p in pieces {
+            match kinds.iter_mut().find(|(label, _)| *label == p.label) {
+                Some((_, list)) => list.push(p),
+                None => kinds.push((p.label.as_str(), vec![p])),
+            }
+        }
+        for (label, list) in kinds {
+            let parent = if list.len() > 1 {
+                let folder = self.scene.add(&crate::map_pieces::plural(label), Content::Folder, None);
+                if let Some(o) = self.scene.get_mut(folder) {
+                    o.parent = Some(map);
+                }
+                folders.push(folder);
+                Some(folder)
+            } else {
+                Some(map)
+            };
+            for (n, p) in list.iter().enumerate() {
+                let name = if list.len() > 1 {
+                    format!("{label} {}", n + 1)
+                } else {
+                    label.to_owned()
+                };
+                let content = Content::MapPiece {
+                    piece: p.name.clone(),
+                    nth: p.nth,
+                    rest: p.rest.to_array(),
+                };
+                let id = self.scene.add(&name, content, parent);
+                if let Some(o) = self.scene.get_mut(id) {
+                    o.parent = parent;
+                    o.transform.position = p.rest.to_array();
+                }
+            }
+        }
+        // The doors, which open and close.
+        if !doors.is_empty() {
+            let folder = self.scene.add("Doors", Content::Folder, None);
+            if let Some(o) = self.scene.get_mut(folder) {
+                o.parent = Some(map);
+            }
+            folders.push(folder);
+            for (n, (door, open)) in doors.iter().enumerate() {
+                let content = Content::MapDoor {
+                    door: door.clone(),
+                    open: *open,
+                };
+                let id = self.scene.add(&format!("Door {}", n + 1), content, None);
+                if let Some(o) = self.scene.get_mut(id) {
+                    o.parent = Some(folder);
+                }
+            }
+        }
+        folders
+    }
+
     /// Moves an object in the same step of the history as the one before.
     pub fn move_now(&mut self, id: ObjectId, position: [f32; 3]) {
         if let Some(object) = self.scene.get_mut(id) {
@@ -3165,6 +3295,7 @@ kind = "map"
                 hide_walls: true,
                 light_intensity: 1.0,
                 filter_decay: 0.5,
+                pieces_listed: false,
             }
         );
     }

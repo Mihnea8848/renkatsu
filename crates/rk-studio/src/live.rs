@@ -168,6 +168,18 @@ struct MapState {
     motion: Option<(PathBuf, rk_map::motion::MapMotion)>,
     posed_at: Option<f32>,
     placed: Option<rk_render::map::MapPlacement>,
+    /// The set map's movable pieces, and the matrices last given to the
+    /// renderer for them.
+    pieces: Vec<crate::map_pieces::Piece>,
+    piece_matrices: Vec<(usize, glam::Mat4)>,
+    /// Where the map's Animators last posed their objects.
+    posed: Vec<(usize, glam::Mat4)>,
+    /// The pieces drawn once more for a duplicate: the map's object, the
+    /// matrix and the scene's object.
+    copies: Vec<(usize, glam::Mat4, ObjectId)>,
+    /// What each door was last sent to: open or not, and when its move
+    /// began on the clock, by its Animator's path.
+    doors_sent: std::collections::HashMap<String, (bool, Option<f32>)>,
 }
 
 /// The meshes of a map the camera sees, in the map's own space, kept
@@ -177,6 +189,8 @@ struct MapGround {
 }
 
 struct MapPiece {
+    /// Its place in the map's list of objects.
+    object: usize,
     positions: Vec<[f32; 3]>,
     indices: Vec<u32>,
     bounds: ([f32; 3], [f32; 3]),
@@ -196,6 +210,7 @@ impl MapGround {
                 continue;
             }
             pieces.push(MapPiece {
+                object: i,
                 positions: std::mem::take(&mut mesh.positions),
                 indices: std::mem::take(&mut mesh.indices),
                 bounds: mesh.bounds,
@@ -204,11 +219,44 @@ impl MapGround {
         Self { pieces }
     }
 
-    /// How far a ray in the map's own space goes before it meets the map.
-    fn meet(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
-        let mut best: Option<f32> = None;
+    /// How far a ray in an object's baked space goes before it meets that
+    /// object.
+    fn hit_object(&self, object: usize, origin: Vec3, dir: Vec3) -> Option<f32> {
+        let piece = self.pieces.iter().find(|p| p.object == object)?;
+        let (lo, hi) = piece.bounds;
+        if !ray_meets_box(origin, dir, [lo, hi], f32::MAX) {
+            return None;
+        }
+        piece
+            .indices
+            .chunks_exact(3)
+            .filter_map(|triangle| {
+                let corner = |i: usize| piece.positions.get(triangle[i] as usize).copied().map(Vec3::from);
+                ray_meets_triangle(origin, dir, corner(0)?, corner(1)?, corner(2)?)
+            })
+            .min_by(f32::total_cmp)
+    }
+
+    /// The object a ray in the map's own space meets first, and how far
+    /// along. Objects in `moved` are where their matrix puts them (none
+    /// at all when it has no size, as a hidden piece); those in `skip`
+    /// are passed through.
+    fn hit(&self, origin: Vec3, dir: Vec3, moved: &[(usize, glam::Mat4)], skip: &[usize]) -> Option<(usize, f32)> {
+        let mut best: Option<(usize, f32)> = None;
         for piece in &self.pieces {
-            let reach = best.unwrap_or(f32::MAX);
+            if skip.contains(&piece.object) {
+                continue;
+            }
+            // Into the piece's baked place: along the ray, distances stay.
+            let (origin, dir) = match moved.iter().find(|(o, _)| *o == piece.object) {
+                Some((_, m)) if m.determinant().abs() < 1e-9 => continue,
+                Some((_, m)) => {
+                    let back = m.inverse();
+                    (back.transform_point3(origin), back.transform_vector3(dir))
+                }
+                None => (origin, dir),
+            };
+            let reach = best.map_or(f32::MAX, |(_, t)| t);
             let (lo, hi) = piece.bounds;
             if !ray_meets_box(origin, dir, [lo, hi], reach) {
                 continue;
@@ -219,8 +267,8 @@ impl MapGround {
                     continue;
                 };
                 if let Some(t) = ray_meets_triangle(origin, dir, a, b, c) {
-                    if best.is_none_or(|nearest| t < nearest) {
-                        best = Some(t);
+                    if best.is_none_or(|(_, nearest)| t < nearest) {
+                        best = Some((piece.object, t));
                     }
                 }
             }
@@ -553,6 +601,8 @@ pub struct Live {
     /// The scene's picture keeps its depth, which the grid is drawn
     /// behind.
     pub keep_depth: bool,
+    /// The map's moving objects play (the Play menu's Map objects).
+    pub map_motion: bool,
     /// The camera was framed on a character once.
     framed: bool,
     /// The colour tables of Studio's colour filters, once they were looked
@@ -615,6 +665,7 @@ impl Live {
             gizmo: GizmoPass::new(&render_state.device),
             grid: GridPass::new(&render_state.device),
             keep_depth: false,
+            map_motion: true,
             framed: false,
             filters: None,
             poses: Poses::default(),
@@ -956,7 +1007,10 @@ impl Live {
         }
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
-        self.pose_map(clock.time);
+        self.send_doors(scene, &clock);
+        // Map objects that do not move stand at their first frame.
+        self.pose_map(if self.map_motion { clock.time } else { 0.0 });
+        self.place_pieces(scene);
     }
 
     /// Reads which colour filter each time of day of the set map takes,
@@ -1023,6 +1077,136 @@ impl Live {
     /// Poses the set map's moving objects at the scene's time: they play
     /// while it plays, hold while it pauses, and stand at their first
     /// frame while it is stopped, as the game shows them from the start.
+    /// The set map's doors, by their Animators' paths, and whether the
+    /// game starts each open; once its bundle is read.
+    pub fn map_doors(&self) -> Option<Vec<(String, bool)>> {
+        let (_, recipe) = self.map.set.as_ref()?;
+        let (_, motion) = self.map.motion.as_ref().filter(|(p, _)| *p == recipe.sidecar)?;
+        Some(
+            motion
+                .openings()
+                .into_iter()
+                .map(|o| (o.object, o.starts_open))
+                .collect(),
+        )
+    }
+
+    /// Sends the map's doors where the scene has them: with their move
+    /// while the scene plays and map objects move, at once otherwise, and
+    /// back to where they rest when the clock goes back past a move.
+    fn send_doors(&mut self, scene: &Scene, clock: &Clock) {
+        let Some((map, recipe)) = self.map.set.as_ref() else {
+            return;
+        };
+        let map = *map;
+        let sidecar = recipe.sidecar.clone();
+        let Some((_, motion)) = self.map.motion.as_mut().filter(|(p, _)| *p == sidecar) else {
+            return;
+        };
+        let openings = motion.openings();
+        let moving = self.map_motion && clock.now == crate::state::Playback::Playing;
+        let mut changed = false;
+        for id in scene.subtree(map) {
+            let Some(Content::MapDoor { door, open }) = scene.get(id).map(|o| &o.content) else {
+                continue;
+            };
+            let Some(opening) = openings.iter().find(|o| o.object == *door) else {
+                continue;
+            };
+            let was = self.map.doors_sent.get(door).copied();
+            let rewound = was.is_some_and(|(_, at)| at.is_some_and(|at| clock.time < at));
+            if was.map(|(o, _)| o) == Some(*open) && !rewound {
+                continue;
+            }
+            // A first sending, or a rewind, puts it where it rests.
+            let at = (moving && was.is_some() && !rewound).then_some(clock.time);
+            motion.set_open(opening, *open, at);
+            self.map.doors_sent.insert(door.clone(), (*open, at));
+            changed = true;
+        }
+        if changed {
+            self.map.posed_at = None;
+        }
+    }
+
+    /// The set map and its movable pieces, once it is built.
+    pub fn map_pieces(&self) -> Option<(ObjectId, &[crate::map_pieces::Piece])> {
+        let (id, _) = self.map.set.as_ref()?;
+        Some((*id, &self.map.pieces))
+    }
+
+    /// Draws the map's pieces where the scene has them: moved, turned,
+    /// sized, or hidden (drawn at no size, so that they cast nothing
+    /// either); a piece taken out of the scene, hidden too. A piece the
+    /// scene holds more than once (a duplicate) is drawn once more for
+    /// each further one. The renderer takes matrices in the map's space
+    /// from where the piece was baked.
+    fn place_pieces(&mut self, scene: &Scene) {
+        let Some((map, _)) = self.map.set.as_ref() else { return };
+        let map = *map;
+        let listed = matches!(
+            scene.get(map).map(|o| &o.content),
+            Some(Content::Map {
+                pieces_listed: true,
+                ..
+            })
+        );
+        let back = scene.world(map).inverse();
+        let mut matrices: Vec<(usize, glam::Mat4)> = Vec::new();
+        let mut copies: Vec<(usize, glam::Mat4, ObjectId)> = Vec::new();
+        let mut drawn: Vec<usize> = Vec::new();
+        for id in scene.subtree(map) {
+            let Some(object) = scene.get(id) else { continue };
+            let Content::MapPiece { piece, nth, rest } = &object.content else {
+                continue;
+            };
+            let Some(p) = self.map.pieces.iter().find(|p| p.name == *piece && p.nth == *nth) else {
+                continue;
+            };
+            let shown = scene.shown(id);
+            let matrix = if shown {
+                let m = back * scene.world(id) * glam::Mat4::from_translation(-Vec3::from(*rest));
+                // Where the map has it, exactly as baked.
+                if m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-5) {
+                    glam::Mat4::IDENTITY
+                } else {
+                    m
+                }
+            } else {
+                glam::Mat4::from_scale(Vec3::ZERO)
+            };
+            if drawn.contains(&p.index) {
+                if shown {
+                    copies.push((p.index, matrix, id));
+                }
+            } else {
+                drawn.push(p.index);
+                matrices.push((p.index, matrix));
+            }
+        }
+        if listed {
+            for p in &self.map.pieces {
+                if !drawn.contains(&p.index) {
+                    matrices.push((p.index, glam::Mat4::from_scale(Vec3::ZERO)));
+                }
+            }
+        }
+        if matrices != self.map.piece_matrices {
+            self.renderer.set_map_object_matrices(&matrices);
+            self.map.piece_matrices = matrices;
+        }
+        let same = copies.len() == self.map.copies.len()
+            && copies
+                .iter()
+                .zip(&self.map.copies)
+                .all(|(a, b)| a.0 == b.0 && a.1 == b.1);
+        if !same {
+            let list: Vec<(usize, glam::Mat4)> = copies.iter().map(|c| (c.0, c.1)).collect();
+            self.renderer.set_map_copies(&list);
+        }
+        self.map.copies = copies;
+    }
+
     fn pose_map(&mut self, seconds: f32) {
         let state = &mut self.map;
         let Some((_, recipe)) = state.set.as_ref() else { return };
@@ -1032,7 +1216,8 @@ impl Live {
         if motion.is_empty() || state.posed_at == Some(seconds) {
             return;
         }
-        self.renderer.set_map_object_matrices(&motion.pose(seconds));
+        state.posed = motion.pose(seconds);
+        self.renderer.set_map_object_matrices(&state.posed);
         state.posed_at = Some(seconds);
     }
 
@@ -1155,6 +1340,10 @@ impl Live {
                         if let Some((_, mirrors)) = state.mirrors.as_ref().filter(|(p, _)| *p == recipe.sidecar) {
                             self.renderer.set_map_mirrors(mirrors);
                         }
+                        state.pieces = crate::map_pieces::movable(&map);
+                        state.piece_matrices.clear();
+                        state.copies.clear();
+                        state.doors_sent.clear();
                         state.ground = Some(MapGround::take(&mut map));
                         state.took = started.elapsed().as_secs_f32();
                         log.info(format!("Loaded {name} in {:.1} s", state.took));
@@ -1268,6 +1457,92 @@ impl Live {
             return None;
         }
         self.map.ground.as_ref().zip(self.map.placed)
+    }
+
+    /// Where the map's objects stand now: posed by their Animators, then
+    /// moved as pieces of the scene.
+    fn map_moved(&self) -> Vec<(usize, glam::Mat4)> {
+        let mut all = self.map.posed.clone();
+        for (object, m) in &self.map.piece_matrices {
+            all.retain(|(o, _)| o != object);
+            all.push((*object, *m));
+        }
+        all
+    }
+
+    /// The map's objects that scene objects in `ids` are: pieces and the
+    /// parts of doors.
+    fn map_objects_of(&self, scene: &Scene, ids: &[ObjectId]) -> Vec<usize> {
+        let mut out = Vec::new();
+        for id in ids {
+            match scene.get(*id).map(|o| &o.content) {
+                Some(Content::MapPiece { piece, nth, .. }) => {
+                    if let Some(p) = self.map.pieces.iter().find(|p| p.name == *piece && p.nth == *nth) {
+                        out.push(p.index);
+                    }
+                }
+                Some(Content::MapDoor { door, .. }) => out.extend(self.door_objects(door)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The map's objects a door's Animator moves.
+    fn door_objects(&self, door: &str) -> Vec<usize> {
+        let Some((_, motion)) = self.map.motion.as_ref() else {
+            return Vec::new();
+        };
+        let Some(opening) = motion.openings().into_iter().find(|o| o.object == door) else {
+            return Vec::new();
+        };
+        opening
+            .parts
+            .iter()
+            .filter_map(|p| motion.parts.get(*p)?.object)
+            .collect()
+    }
+
+    /// The map's object a ray meets first, if the map is nearer than
+    /// `nearer`, and the scene's object it is: a piece, a door, or none
+    /// for the map itself (a wall, the floor).
+    pub fn pick_map(&self, scene: &Scene, origin: Vec3, dir: Vec3) -> Option<(Option<ObjectId>, f32)> {
+        let (map, _) = self.map.set.as_ref()?;
+        let (ground, placed) = self.map_ground(&[])?;
+        let back = placed.rigid().inverse();
+        let moved = self.map_moved();
+        let (origin, dir) = (back.transform_point3(origin), back.transform_vector3(dir));
+        let hit = ground.hit(origin, dir, &moved, &[]);
+        // A duplicate is its piece's mesh where its own matrix puts it.
+        let copy = self
+            .map
+            .copies
+            .iter()
+            .filter_map(|(object, m, id)| {
+                let to = m.inverse();
+                let t = ground.hit_object(*object, to.transform_point3(origin), to.transform_vector3(dir))?;
+                Some((*id, t))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((id, t)) = copy {
+            if hit.is_none_or(|(_, far)| t < far) {
+                return Some((Some(id), t));
+            }
+        }
+        let (object, t) = hit?;
+        let owner = scene
+            .subtree(*map)
+            .into_iter()
+            .find(|id| match scene.get(*id).map(|o| &o.content) {
+                Some(Content::MapPiece { piece, nth, .. }) => self
+                    .map
+                    .pieces
+                    .iter()
+                    .any(|p| p.index == object && p.name == *piece && p.nth == *nth),
+                Some(Content::MapDoor { door, .. }) => self.door_objects(door).contains(&object),
+                _ => false,
+            });
+        Some((owner, t))
     }
 
     /// Whether a map is shown that things can be dropped on, so that the
@@ -1621,9 +1896,18 @@ impl crate::surface::Surface for Meshes<'_> {
             .map(|(_, far)| far);
         // The map is drawn turned and moved by its root; the ray goes
         // into the map's space the same way, which keeps its lengths.
+        let skip = self.live.map_objects_of(self.scene, &self.except);
         let map = self.live.map_ground(&self.except).and_then(|(ground, placed)| {
             let back = placed.rigid().inverse();
-            ground.meet(back.transform_point3(origin), back.transform_vector3(dir))
+            let moved = self.live.map_moved();
+            ground
+                .hit(
+                    back.transform_point3(origin),
+                    back.transform_vector3(dir),
+                    &moved,
+                    &skip,
+                )
+                .map(|(_, t)| t)
         });
         characters.into_iter().chain(map).min_by(f32::total_cmp)
     }
