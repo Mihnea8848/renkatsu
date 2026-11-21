@@ -128,12 +128,12 @@ struct Layer {
 const MOST_STEPS: usize = 100_000;
 
 impl Layer {
-    /// Where the layer is `seconds` after it started in its default
-    /// state. A transition fires when its state has played to the exit
-    /// time; the first to come fires. The machine's exit leads back to
-    /// the default state.
-    fn now(&self, seconds: f32) -> Option<Now> {
-        let mut state = self.default;
+    /// Where the layer is `seconds` after it started in `from` (its
+    /// default state when the map loads). A transition fires when its
+    /// state has played to the exit time; the first to come fires. The
+    /// machine's exit leads back to the default state.
+    fn now(&self, from: usize, seconds: f32) -> Option<Now> {
+        let mut state = from;
         self.states.get(state)?;
         // When the state was entered, and at which normalized time.
         let (mut entered, mut start) = (0.0f32, 0.0f32);
@@ -201,9 +201,11 @@ impl Layer {
     /// The layer's pose after `seconds`. What only one of two blended
     /// states drives is blended with where the scene stores it, as states
     /// that write default values do.
-    fn pose(&self, seconds: f32, reference: bool, rest: &[Trs]) -> Pose {
+    fn pose(&self, from: usize, seconds: f32, reference: bool, rest: &[Trs]) -> Pose {
         let mut pose = Pose::new();
-        let Some(now) = self.now(seconds) else { return pose };
+        let Some(now) = self.now(from, seconds) else {
+            return pose;
+        };
         self.states[now.state].pose(now.at, reference, &mut pose);
         let Some((next, at, share)) = now.next else { return pose };
         let mut other = Pose::new();
@@ -241,6 +243,11 @@ fn mix(kind: Kind, a: [f32; 4], b: [f32; 4], share: f32) -> [f32; 4] {
 #[derive(Debug, Clone, Default)]
 struct Rig {
     layers: Vec<Layer>,
+    /// Its place in `MapMotion::animators`.
+    animator: usize,
+    /// The first layer's state it was sent to and the second it was, in
+    /// place of starting in its default state when the map loads.
+    sent: Option<(usize, f32)>,
 }
 
 impl Rig {
@@ -253,9 +260,14 @@ impl Rig {
             if weight <= 0.0 {
                 continue;
             }
-            let pose = layer.pose(seconds, false, rest);
+            // The first layer runs from where it was sent, if it was.
+            let (from, since) = match self.sent.filter(|_| i == 0) {
+                Some((state, at)) => (state, (seconds - at).max(0.0)),
+                None => (layer.default, seconds),
+            };
+            let pose = layer.pose(from, since, false, rest);
             let reference = if layer.additive && i > 0 {
-                Some(layer.pose(seconds, true, rest))
+                Some(layer.pose(from, since, true, rest))
             } else {
                 None
             };
@@ -354,6 +366,23 @@ pub struct StateInfo {
     pub exits: Vec<(u32, f32)>,
 }
 
+/// An Animator of a map that opens and closes something: a door.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opening {
+    /// Its place in `MapMotion::animators`, and its object's path.
+    pub animator: usize,
+    pub object: String,
+    /// The renderers it moves, by their place in `MapMotion::parts`.
+    pub parts: Vec<usize>,
+    /// Its first layer's states: held open, held closed, and the moves.
+    pub held_open: usize,
+    pub held_closed: usize,
+    pub opening: Option<usize>,
+    pub closing: Option<usize>,
+    /// The game starts it open.
+    pub starts_open: bool,
+}
+
 /// The moving objects of a map.
 #[derive(Debug, Clone, Default)]
 pub struct MapMotion {
@@ -395,6 +424,56 @@ impl MapMotion {
     /// Whether nothing of the map moves.
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty()
+    }
+
+    /// The Animators that open and close: those whose first layer has a
+    /// state held open and one held closed, by the game's names
+    /// (`open_Idle`, `close_Idle`), and the moves between them (`open`,
+    /// `close`) where it has them.
+    pub fn openings(&self) -> Vec<Opening> {
+        let mut out = Vec::new();
+        for (animator, info) in self.animators.iter().enumerate() {
+            if info.idle.is_some() || !self.rigs.iter().any(|r| r.animator == animator) {
+                continue;
+            }
+            let Some(layer) = info.layers.first() else { continue };
+            let find = |held: bool, open: bool| {
+                layer.states.iter().position(|s| {
+                    let name = s.name.to_lowercase();
+                    let opens = name.contains("open");
+                    let closes = name.contains("clos");
+                    name.contains("idle") == held && if open { opens && !closes } else { closes && !opens }
+                })
+            };
+            let (Some(held_open), Some(held_closed)) = (find(true, true), find(true, false)) else {
+                continue;
+            };
+            out.push(Opening {
+                animator,
+                object: info.object.clone(),
+                parts: info.parts.clone(),
+                held_open,
+                held_closed,
+                opening: find(false, true),
+                closing: find(false, false),
+                starts_open: layer.default_state == held_open,
+            });
+        }
+        out
+    }
+
+    /// Sends an opening Animator to open or closed: at once, or with the
+    /// move between them from second `at` of the clock that poses the map.
+    pub fn set_open(&mut self, opening: &Opening, open: bool, at: Option<f32>) {
+        let Some(rig) = self.rigs.iter_mut().find(|r| r.animator == opening.animator) else {
+            return;
+        };
+        let moving = if open { opening.opening } else { opening.closing };
+        let held = if open { opening.held_open } else { opening.held_closed };
+        rig.sent = Some(match (moving, at) {
+            (Some(state), Some(at)) => (state, at),
+            _ => (held, 0.0),
+        });
     }
 
     /// Finds each moving renderer among a built map's objects: the one of
@@ -772,6 +851,7 @@ pub fn read(game: &Game, bundle: &str) -> Result<MapMotion> {
                 });
             }
             if info.idle.is_none() && !driven.is_empty() {
+                rig.animator = motion.animators.len();
                 rigs.push((chain.len(), rig, motion.animators.len(), driven));
             }
             motion.animators.push(info);
@@ -972,11 +1052,11 @@ mod tests {
     fn a_looping_state_starts_over_and_another_holds_its_end() {
         let rest = [Trs::default()];
         let looping = layer(vec![turn(120.0, 6.0, true)]);
-        assert!((yaw(&looping.pose(1.5, false, &rest)) - 30.0).abs() < 1e-3);
-        assert!((yaw(&looping.pose(7.5, false, &rest)) - 30.0).abs() < 1e-3);
+        assert!((yaw(&looping.pose(looping.default, 1.5, false, &rest)) - 30.0).abs() < 1e-3);
+        assert!((yaw(&looping.pose(looping.default, 7.5, false, &rest)) - 30.0).abs() < 1e-3);
         let once = layer(vec![turn(120.0, 6.0, false)]);
-        assert!((yaw(&once.pose(3.0, false, &rest)) - 60.0).abs() < 1e-3);
-        assert!((yaw(&once.pose(60.0, false, &rest)) - 120.0).abs() < 1e-3);
+        assert!((yaw(&once.pose(once.default, 3.0, false, &rest)) - 60.0).abs() < 1e-3);
+        assert!((yaw(&once.pose(once.default, 60.0, false, &rest)) - 120.0).abs() < 1e-3);
     }
 
     #[test]
@@ -987,11 +1067,11 @@ mod tests {
         let mut s = turn(120.0, 12.0, true);
         s.cycle_offset = 0.25;
         let ahead = layer(vec![s.clone()]);
-        assert!((yaw(&ahead.pose(0.0, false, &rest)) - 30.0).abs() < 1e-3);
-        assert!((yaw(&ahead.pose(3.0, false, &rest)) - 60.0).abs() < 1e-3);
+        assert!((yaw(&ahead.pose(ahead.default, 0.0, false, &rest)) - 30.0).abs() < 1e-3);
+        assert!((yaw(&ahead.pose(ahead.default, 3.0, false, &rest)) - 60.0).abs() < 1e-3);
         s.speed = 0.0;
         let stopped = layer(vec![s]);
-        assert!((yaw(&stopped.pose(100.0, false, &rest)) - 30.0).abs() < 1e-3);
+        assert!((yaw(&stopped.pose(stopped.default, 100.0, false, &rest)) - 30.0).abs() < 1e-3);
     }
 
     #[test]
@@ -1002,8 +1082,8 @@ mod tests {
         open.exits = vec![exit(0, 0.0, 0.25)];
         let doors = layer(vec![hold(90.0), open, hold(0.0)]);
         for seconds in [0.0, 1.0, 500.0] {
-            assert_eq!(doors.now(seconds).map(|n| n.state), Some(0));
-            assert!((yaw(&doors.pose(seconds, false, &rest)) - 90.0).abs() < 1e-3);
+            assert_eq!(doors.now(doors.default, seconds).map(|n| n.state), Some(0));
+            assert!((yaw(&doors.pose(doors.default, seconds, false, &rest)) - 90.0).abs() < 1e-3);
         }
     }
 
@@ -1016,7 +1096,7 @@ mod tests {
         let mut play = turn(40.0, 4.0, false);
         play.exits = vec![exit(EXIT_STATE + 1, 20.5, 0.0)];
         let l = layer(vec![wait, play]);
-        let at = |seconds: f32| l.now(seconds).expect("has states");
+        let at = |seconds: f32| l.now(l.default, seconds).expect("has states");
         assert_eq!(at(80.9).state, 0);
         assert_eq!(at(81.0).state, 1);
         assert!((at(83.0).at - 0.5).abs() < 1e-4);
@@ -1026,9 +1106,9 @@ mod tests {
         assert!((at(164.0).at - 1.0).abs() < 1e-3);
         assert_eq!(at(163.0 + 81.5).state, 1);
         let rest = [Trs::default()];
-        assert!(l.pose(10.0, false, &rest).is_empty());
-        assert!((yaw(&l.pose(83.0, false, &rest)) - 20.0).abs() < 1e-3);
-        assert!((yaw(&l.pose(100.0, false, &rest)) - 40.0).abs() < 1e-3);
+        assert!(l.pose(l.default, 10.0, false, &rest).is_empty());
+        assert!((yaw(&l.pose(l.default, 83.0, false, &rest)) - 20.0).abs() < 1e-3);
+        assert!((yaw(&l.pose(l.default, 100.0, false, &rest)) - 40.0).abs() < 1e-3);
     }
 
     #[test]
@@ -1037,13 +1117,13 @@ mod tests {
         from.exits = vec![exit(1, 2.0, 0.5)];
         let l = layer(vec![from, hold(90.0)]);
         let rest = [Trs::default()];
-        assert!(yaw(&l.pose(1.9, false, &rest)).abs() < 1e-3);
-        let now = l.now(2.25).expect("has states");
+        assert!(yaw(&l.pose(l.default, 1.9, false, &rest)).abs() < 1e-3);
+        let now = l.now(l.default, 2.25).expect("has states");
         assert_eq!(now.state, 0);
         assert!(matches!(now.next, Some((1, _, share)) if (share - 0.5).abs() < 1e-4));
-        let mid = yaw(&l.pose(2.25, false, &rest));
+        let mid = yaw(&l.pose(l.default, 2.25, false, &rest));
         assert!((mid - 45.0).abs() < 1e-2, "{mid} {now:?}");
-        assert!((yaw(&l.pose(2.6, false, &rest)) - 90.0).abs() < 1e-3);
+        assert!((yaw(&l.pose(l.default, 2.6, false, &rest)) - 90.0).abs() < 1e-3);
     }
 
     #[test]
@@ -1052,17 +1132,17 @@ mod tests {
         back.speed = -1.0;
         back.exits = vec![exit(1, 1.0, 0.0)];
         let l = layer(vec![back, hold(45.0)]);
-        assert_eq!(l.now(50.0).map(|n| n.state), Some(0));
+        assert_eq!(l.now(l.default, 50.0).map(|n| n.state), Some(0));
         let rest = [Trs::default()];
-        assert!(yaw(&l.pose(50.0, false, &rest)).abs() < 1e-3);
+        assert!(yaw(&l.pose(l.default, 50.0, false, &rest)).abs() < 1e-3);
     }
 
     #[test]
     fn a_machine_that_goes_round_at_once_ends() {
         let mut a = empty();
         a.exits = vec![exit(0, 0.0, 0.0)];
-        assert!(layer(vec![a]).now(1.0).is_some());
-        assert!(layer(Vec::new()).now(1.0).is_none());
+        assert!(layer(vec![a]).now(0, 1.0).is_some());
+        assert!(layer(Vec::new()).now(0, 1.0).is_none());
     }
 
     /// A pivot at x = 2 with a part one unit along its x.
@@ -1117,6 +1197,7 @@ mod tests {
     fn a_part_is_carried_from_where_it_was_baked() {
         let mut motion = swinging(Rig {
             layers: vec![layer(vec![turn(90.0, 2.0, false)])],
+            ..Default::default()
         });
         // Unbound parts are left out.
         assert!(motion.pose(1.0).is_empty());
@@ -1166,6 +1247,7 @@ mod tests {
         let mut locals = rest;
         Rig {
             layers: vec![layer(vec![empty()]), over],
+            ..Default::default()
         }
         .apply(0.0, &rest, &mut locals);
         assert!(locals[0].rot.abs_diff_eq(euler_deg(0.0, 90.0, 0.0), 1e-5));
@@ -1181,6 +1263,7 @@ mod tests {
         let mut locals = rest;
         Rig {
             layers: vec![layer(vec![empty()]), added],
+            ..Default::default()
         }
         .apply(1.0, &rest, &mut locals);
         assert!(locals[0].rot.abs_diff_eq(euler_deg(0.0, 40.0, 0.0), 1e-5));
@@ -1190,9 +1273,11 @@ mod tests {
     fn an_animator_below_another_writes_after_it() {
         let mut motion = swinging(Rig {
             layers: vec![layer(vec![hold(90.0)])],
+            ..Default::default()
         });
         motion.rigs.push(Rig {
             layers: vec![layer(vec![hold(0.0)])],
+            ..Default::default()
         });
         motion.bind(&[place("door", [3.0, 0.0, 0.0])]);
         assert!(motion.pose(0.0)[0].1.abs_diff_eq(Mat4::IDENTITY, 1e-6));

@@ -168,6 +168,13 @@ struct MapState {
     motion: Option<(PathBuf, rk_map::motion::MapMotion)>,
     posed_at: Option<f32>,
     placed: Option<rk_render::map::MapPlacement>,
+    /// The set map's movable pieces, and the matrices last given to the
+    /// renderer for them.
+    pieces: Vec<crate::map_pieces::Piece>,
+    piece_matrices: Vec<(usize, glam::Mat4)>,
+    /// What each door was last sent to: open or not, and when its move
+    /// began on the clock, by its Animator's path.
+    doors_sent: std::collections::HashMap<String, (bool, Option<f32>)>,
 }
 
 /// The meshes of a map the camera sees, in the map's own space, kept
@@ -553,6 +560,8 @@ pub struct Live {
     /// The scene's picture keeps its depth, which the grid is drawn
     /// behind.
     pub keep_depth: bool,
+    /// The map's moving objects play (the Play menu's Map objects).
+    pub map_motion: bool,
     /// The camera was framed on a character once.
     framed: bool,
     /// The colour tables of Studio's colour filters, once they were looked
@@ -615,6 +624,7 @@ impl Live {
             gizmo: GizmoPass::new(&render_state.device),
             grid: GridPass::new(&render_state.device),
             keep_depth: false,
+            map_motion: true,
             framed: false,
             filters: None,
             poses: Poses::default(),
@@ -956,7 +966,10 @@ impl Live {
         }
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
-        self.pose_map(clock.time);
+        self.send_doors(scene, &clock);
+        // Map objects that do not move stand at their first frame.
+        self.pose_map(if self.map_motion { clock.time } else { 0.0 });
+        self.place_pieces(scene);
     }
 
     /// Reads which colour filter each time of day of the set map takes,
@@ -1023,6 +1036,100 @@ impl Live {
     /// Poses the set map's moving objects at the scene's time: they play
     /// while it plays, hold while it pauses, and stand at their first
     /// frame while it is stopped, as the game shows them from the start.
+    /// The set map's doors, by their Animators' paths, and whether the
+    /// game starts each open; once its bundle is read.
+    pub fn map_doors(&self) -> Option<Vec<(String, bool)>> {
+        let (_, recipe) = self.map.set.as_ref()?;
+        let (_, motion) = self.map.motion.as_ref().filter(|(p, _)| *p == recipe.sidecar)?;
+        Some(
+            motion
+                .openings()
+                .into_iter()
+                .map(|o| (o.object, o.starts_open))
+                .collect(),
+        )
+    }
+
+    /// Sends the map's doors where the scene has them: with their move
+    /// while the scene plays and map objects move, at once otherwise, and
+    /// back to where they rest when the clock goes back past a move.
+    fn send_doors(&mut self, scene: &Scene, clock: &Clock) {
+        let Some((map, recipe)) = self.map.set.as_ref() else {
+            return;
+        };
+        let map = *map;
+        let sidecar = recipe.sidecar.clone();
+        let Some((_, motion)) = self.map.motion.as_mut().filter(|(p, _)| *p == sidecar) else {
+            return;
+        };
+        let openings = motion.openings();
+        let moving = self.map_motion && clock.now == crate::state::Playback::Playing;
+        let mut changed = false;
+        for id in scene.subtree(map) {
+            let Some(Content::MapDoor { door, open }) = scene.get(id).map(|o| &o.content) else {
+                continue;
+            };
+            let Some(opening) = openings.iter().find(|o| o.object == *door) else {
+                continue;
+            };
+            let was = self.map.doors_sent.get(door).copied();
+            let rewound = was.is_some_and(|(_, at)| at.is_some_and(|at| clock.time < at));
+            if was.map(|(o, _)| o) == Some(*open) && !rewound {
+                continue;
+            }
+            // A first sending, or a rewind, puts it where it rests.
+            let at = (moving && was.is_some() && !rewound).then_some(clock.time);
+            motion.set_open(opening, *open, at);
+            self.map.doors_sent.insert(door.clone(), (*open, at));
+            changed = true;
+        }
+        if changed {
+            self.map.posed_at = None;
+        }
+    }
+
+    /// The set map and its movable pieces, once it is built.
+    pub fn map_pieces(&self) -> Option<(ObjectId, &[crate::map_pieces::Piece])> {
+        let (id, _) = self.map.set.as_ref()?;
+        Some((*id, &self.map.pieces))
+    }
+
+    /// Draws the map's pieces where the scene has them: moved, turned,
+    /// sized, or hidden (drawn at no size, so that they cast nothing
+    /// either). The renderer takes a matrix in the map's space from where
+    /// the piece was baked.
+    fn place_pieces(&mut self, scene: &Scene) {
+        let Some((map, _)) = self.map.set.as_ref() else { return };
+        let map = *map;
+        let back = scene.world(map).inverse();
+        let mut matrices = Vec::new();
+        for id in scene.subtree(map) {
+            let Some(object) = scene.get(id) else { continue };
+            let Content::MapPiece { piece, nth, rest } = &object.content else {
+                continue;
+            };
+            let Some(p) = self.map.pieces.iter().find(|p| p.name == *piece && p.nth == *nth) else {
+                continue;
+            };
+            let matrix = if scene.shown(id) {
+                let m = back * scene.world(id) * glam::Mat4::from_translation(-Vec3::from(*rest));
+                // Where the map has it, exactly as baked.
+                if m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-5) {
+                    glam::Mat4::IDENTITY
+                } else {
+                    m
+                }
+            } else {
+                glam::Mat4::from_scale(Vec3::ZERO)
+            };
+            matrices.push((p.index, matrix));
+        }
+        if matrices != self.map.piece_matrices {
+            self.renderer.set_map_object_matrices(&matrices);
+            self.map.piece_matrices = matrices;
+        }
+    }
+
     fn pose_map(&mut self, seconds: f32) {
         let state = &mut self.map;
         let Some((_, recipe)) = state.set.as_ref() else { return };
@@ -1155,6 +1262,9 @@ impl Live {
                         if let Some((_, mirrors)) = state.mirrors.as_ref().filter(|(p, _)| *p == recipe.sidecar) {
                             self.renderer.set_map_mirrors(mirrors);
                         }
+                        state.pieces = crate::map_pieces::movable(&map);
+
+                        state.piece_matrices.clear();
                         state.ground = Some(MapGround::take(&mut map));
                         state.took = started.elapsed().as_secs_f32();
                         log.info(format!("Loaded {name} in {:.1} s", state.took));

@@ -321,6 +321,8 @@ struct Row {
     folded: bool,
     /// The bone of its parent the object is attached to, as it is shown.
     bone: Option<String>,
+    /// How many map pieces a folder of them holds.
+    count: Option<usize>,
 }
 
 /// What a frame of the Outliner asks for, carried out once it is drawn.
@@ -357,6 +359,7 @@ fn rows(st: &State) -> Vec<Row> {
         parent: !scene.objects().is_empty(),
         folded: st.scene_folded,
         bone: None,
+        count: None,
     }];
     let mut hide_below: Option<usize> = st.scene_folded.then_some(0);
     for (depth, id) in scene.rows() {
@@ -383,9 +386,27 @@ fn rows(st: &State) -> Vec<Row> {
             parent: scene.has_children(id),
             folded: st.folded.contains(&id),
             bone: object.bone.as_deref().map(|bone| crate::bones::label(bone).to_owned()),
+            count: pieces_in(scene, id),
         });
     }
     rows
+}
+
+/// How many map pieces a folder holds, when it holds map pieces only.
+fn pieces_in(scene: &crate::scene::Scene, id: crate::scene::ObjectId) -> Option<usize> {
+    let object = scene.get(id)?;
+    if object.kind() != Kind::Folder {
+        return None;
+    }
+    let children = scene.children(Some(id));
+    let all = !children.is_empty()
+        && children.iter().all(|c| {
+            matches!(
+                scene.get(*c).map(|o| &o.content),
+                Some(crate::scene::Content::MapPiece { .. } | crate::scene::Content::MapDoor { .. })
+            )
+        });
+    all.then_some(children.len())
 }
 
 fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
@@ -589,6 +610,14 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                         let end = label(&p, k, Pos2::new(x + 36.0, y), &row.name, text);
                         if let Some(bone) = &row.bone {
                             p.text(Pos2::new(end + 8.0, y), Align2::LEFT_CENTER, bone, k.small(), faint);
+                        } else if let Some(n) = row.count {
+                            p.text(
+                                Pos2::new(end + 8.0, y),
+                                Align2::LEFT_CENTER,
+                                n.to_string(),
+                                k.small(),
+                                faint,
+                            );
                         }
                     }
                 }
