@@ -8,6 +8,7 @@ pub mod effects;
 pub mod highlight;
 pub mod map;
 pub mod material;
+pub mod mirror;
 pub mod modshader;
 pub mod shadow;
 pub mod sky;
@@ -394,6 +395,10 @@ pub struct Renderer {
     targets: Option<Targets>,
     /// The light's shadow map and its side.
     shadow_map: Option<(u32, wgpu::TextureView)>,
+    /// The same for the mirrors' reflected views, which have a size of
+    /// their own, and their targets by that size.
+    mirror_shadow_map: Option<(u32, wgpu::TextureView)>,
+    mirror_targets: HashMap<u32, Targets>,
     /// Counts frames, to drop what a frame no longer used.
     frame: u64,
     /// The screen effects' pipelines and targets, once a frame used them.
@@ -948,6 +953,8 @@ impl Renderer {
             materials: HashMap::new(),
             targets: None,
             shadow_map: None,
+            mirror_shadow_map: None,
+            mirror_targets: HashMap::new(),
             frame: 0,
             effects: None,
             highlight: None,
@@ -1629,14 +1636,6 @@ impl Renderer {
         if self.targets.as_ref().is_none_or(|t| t.size != [width, height]) {
             self.targets = Some(self.make_targets(width, height));
         }
-        let Targets {
-            msaa,
-            depth,
-            depth_only,
-            depth_texture,
-            mask,
-            ..
-        } = self.targets.clone().expect("made above");
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
@@ -1709,136 +1708,138 @@ impl Renderer {
             fx
         });
         let scene_fog = fx_resolved.as_ref().and_then(|fx| fx.fog.clone());
-        let map_frame = match (self.map.as_ref(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
-            (Some(pipes), Some(gpu)) => {
-                // The scene's Fog switches the map's own fog too, in its
-                // colour and from its start, to the map's end.
-                let map_fog = scene_fog.as_ref().and_then(|f| {
-                    let own = gpu.light.fog?;
-                    let [r, g, b, _] = material::linear([f.color[0], f.color[1], f.color[2], 1.0]);
-                    Some(map::Fog {
-                        color: [r, g, b],
-                        start: f.start_distance,
-                        end: own.end,
-                    })
-                });
-                let scene = map::SceneLight {
-                    lamps: &env.map_lamps,
-                    fog: map_fog,
-                    baked: env.map_light_intensity,
-                };
-                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
-                gpu.shadow_pass(pipes, &mut encoder, &frame);
-                Some((pipes, gpu, frame))
-            }
-            _ => None,
-        };
-        fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
-            wgpu::RenderPassDescriptor {
-                label: Some("shadow caster"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            }
+        // The views of the frame: what each mirror in sight reflects, then
+        // the camera's own. A reflection is drawn as the game's mirror
+        // camera draws it: the main camera's lens and clear colour, the
+        // mirror's layers, no screen effects.
+        let main_camera = camera;
+        struct ViewPlan {
+            eye: mirror::Eye,
+            view_proj: Mat4,
+            width: u32,
+            height: u32,
+            /// The mirror's place in the map's list, and its layers.
+            mirror: Option<(usize, u32)>,
+            /// Where a reflection is drawn: many samples, and resolved.
+            color: Option<(wgpu::TextureView, wgpu::TextureView)>,
+            targets: Targets,
         }
-        if !cast && depth_wanted {
-            // Without shadows the depth texture is still drawn, as the
-            // game's occlusion effect asks the camera for it.
-            let group = globals_group(self, base, &self.white);
-            let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
-            pass.set_bind_group(0, &group, &[]);
-            draw(&mut pass, self, true);
-            if let Some((pipes, gpu, frame)) = &map_frame {
-                gpu.draw_depth(pipes, &mut pass, frame);
-            }
-        }
-        let mask = if cast {
-            let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-
-            // The light's shadow map: four cascades side by side.
-            let set = &env.shadows;
-            let side = shadow::atlas_size(
-                width,
-                height,
-                set.resolution,
-                set.max_resolution.min(self.device.limits().max_texture_dimension_2d),
-            );
-            let half = side / 2;
-            let view = shadow::View {
-                eye: camera.eye,
-                forward: camera.forward(),
-                fov_y_deg: camera.fov_y_deg,
-                aspect,
+        let mut plans: Vec<ViewPlan> = Vec::new();
+        let reflected = self
+            .shown_map()
+            .map(|m| m.mirror_views(camera, view_proj, aspect, near, far))
+            .unwrap_or_default();
+        for v in reflected {
+            let color = match (self.map.as_ref(), self.map_scene.as_mut()) {
+                (Some(pipes), Some(gpu)) => gpu.mirror_target(&self.device, pipes, v.index, v.size, map_target.color),
+                _ => None,
             };
-            let ranges = shadow::cascade_ranges(set.camera_near, set.distance, set.cascade_splits);
-            let light_view = shadow::light_view(light);
-            // Close Fit: each cascade around the part of its view slice
-            // that holds shadow receivers. A slice without any is not drawn.
-            let bounds = shadow::receiver_bounds(&view, set, receivers.iter().copied());
-            let cascades = ranges.map(|r| {
-                let hull = shadow::focused_hull(&view.slice_corners(r.0, r.1), light, bounds.as_ref()?);
-                shadow::fit_cascade(&hull, light_view, set.near_plane_offset, [half, half], true)
-            });
-            if self.shadow_map.as_ref().is_none_or(|(s, _)| *s != side) {
-                let map = self
-                    .device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("shadow map"),
-                        size: wgpu::Extent3d {
-                            width: side,
-                            height: side,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: SHADOW_MAP_FORMAT,
-                        usage: attachment,
-                        view_formats: &[],
-                    })
-                    .create_view(&Default::default());
-                self.shadow_map = Some((side, map));
+            if color.is_none() {
+                continue;
             }
-            let map = self.shadow_map.as_ref().expect("made above").1.clone();
-            let groups = cascades.map(|c| {
-                let c = c?;
-                let globals = Globals {
-                    view_proj: c.view_proj.to_cols_array(),
-                    shadow: [
-                        shadow::caster_bias(set.bias, c.depth_range),
-                        1.0,
-                        0.0,
-                        shadow::caster_normal_bias(set.normal_bias, set.soft, c.texel),
-                    ],
-                    ..base
-                };
-                Some(globals_group(self, globals, &self.white))
+            if !self.mirror_targets.contains_key(&v.size) {
+                let made = self.make_targets(v.size, v.size);
+                self.mirror_targets.insert(v.size, made);
+            }
+            plans.push(ViewPlan {
+                eye: v.eye,
+                view_proj: v.view_proj,
+                width: v.size,
+                height: v.size,
+                mirror: Some((v.index, v.mask)),
+                color,
+                targets: self.mirror_targets[&v.size].clone(),
             });
-            {
-                let mut pass = encoder.begin_render_pass(&depth_pass(&map));
-                for (i, group) in groups.iter().enumerate() {
-                    let Some(group) = group else { continue };
-                    let [ox, oy] = shadow::atlas_origin(i);
-                    let h = half as f32;
-                    pass.set_viewport(ox * side as f32, oy * side as f32, h, h, 0.0, 1.0);
-                    pass.set_bind_group(0, group, &[]);
-                    draw(&mut pass, self, false);
+        }
+        // Kept while the map has mirrors, in sight or not.
+        if self.shown_map().is_none_or(|m| !m.has_mirrors()) {
+            self.mirror_targets.clear();
+            self.mirror_shadow_map = None;
+        }
+        plans.push(ViewPlan {
+            eye: mirror::Eye::of(camera),
+            view_proj,
+            width,
+            height,
+            mirror: None,
+            color: None,
+            targets: self.targets.clone().expect("made above"),
+        });
+        let main_base = base;
+        for plan in &plans {
+            let main = plan.mirror.is_none();
+            // The characters are on the Chara layer.
+            let charas = plan
+                .mirror
+                .is_none_or(|(_, mask)| mask & (1 << mirror::CHARA_LAYER) != 0);
+            let camera = &plan.eye.camera;
+            let (width, height, view_proj) = (plan.width, plan.height, plan.view_proj);
+            let Targets {
+                msaa,
+                depth,
+                depth_only,
+                depth_texture,
+                mask,
+                ..
+            } = plan.targets.clone();
+            let base = Globals {
+                view_proj: view_proj.to_cols_array(),
+                eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
+                screen: [width as f32, height as f32, 0.0, 0.0],
+                ..main_base
+            };
+            let map_frame = match (self.map.as_ref(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
+                (Some(pipes), Some(gpu)) => {
+                    // The scene's Fog switches the map's own fog too, in its
+                    // colour and from its start, to the map's end.
+                    let map_fog = scene_fog.as_ref().and_then(|f| {
+                        let own = gpu.light.fog?;
+                        let [r, g, b, _] = material::linear([f.color[0], f.color[1], f.color[2], 1.0]);
+                        Some(map::Fog {
+                            color: [r, g, b],
+                            start: f.start_distance,
+                            end: own.end,
+                        })
+                    });
+                    let scene = map::SceneLight {
+                        lamps: &env.map_lamps,
+                        fog: map_fog,
+                        baked: env.map_light_intensity,
+                    };
+                    let eye = map::MapEye {
+                        view: plan.mirror.map_or(0, |(index, _)| index + 1),
+                        eye: plan.eye,
+                        view_proj,
+                        aspect,
+                        screen: [width as f32, height as f32],
+                        mask: plan.mirror.map(|(_, mask)| mask),
+                    };
+                    let frame = gpu.frame(&self.queue, pipes, &eye, main_camera, scene);
+                    gpu.shadow_pass(pipes, &mut encoder, &frame);
+                    Some((pipes, gpu, frame))
+                }
+                _ => None,
+            };
+            fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
+                wgpu::RenderPassDescriptor {
+                    label: Some("shadow caster"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
                 }
             }
-
-            // The camera's depth texture: the same pass, seen from the camera
-            // and without the light's bias. The map's solid surfaces are in
-            // it too.
-            {
+            if !cast && depth_wanted && main {
+                // Without shadows the depth texture is still drawn, as the
+                // game's occlusion effect asks the camera for it.
                 let group = globals_group(self, base, &self.white);
                 let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
                 pass.set_bind_group(0, &group, &[]);
@@ -1847,301 +1848,401 @@ impl Renderer {
                     gpu.draw_depth(pipes, &mut pass, frame);
                 }
             }
-
-            // Collect the shadows into the screen-sized mask.
-            let uniform = ShadowUniform {
-                inv_view_proj: view_proj.inverse().to_cols_array(),
-                world_to_shadow: std::array::from_fn(|i| {
-                    // A cascade that was not drawn has no matrix: its pixels
-                    // compare against the nearest depth and stay lit.
-                    cascades[i]
-                        .map_or(Mat4::ZERO, |c| shadow::world_to_shadow(c.view_proj, i))
-                        .to_cols_array()
-                }),
-                splits_near: ranges.map(|r| r.0),
-                splits_far: ranges.map(|r| r.1),
-                eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
-                forward: view.forward.extend(0.0).to_array(),
-                params: [shadow::shadow_floor(set.strength), side as f32, 1.0 / side as f32, 0.0],
+            let shadow_map = if main {
+                &mut self.shadow_map
+            } else {
+                &mut self.mirror_shadow_map
             };
-            let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shadow mask"),
-                contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
+            let mask = if cast {
+                let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+
+                // The light's shadow map: four cascades side by side.
+                let set = &env.shadows;
+                let side = shadow::atlas_size(
+                    width,
+                    height,
+                    set.resolution,
+                    set.max_resolution.min(self.device.limits().max_texture_dimension_2d),
+                );
+                let half = side / 2;
+                let view = shadow::View {
+                    eye: camera.eye,
+                    forward: camera.forward(),
+                    up: plan.eye.up,
+                    fov_y_deg: camera.fov_y_deg,
+                    aspect,
+                };
+                let ranges = shadow::cascade_ranges(set.camera_near, set.distance, set.cascade_splits);
+                let light_view = shadow::light_view(light);
+                // Close Fit: each cascade around the part of its view slice
+                // that holds shadow receivers. A slice without any is not drawn.
+                let bounds = shadow::receiver_bounds(&view, set, receivers.iter().copied());
+                let cascades = ranges.map(|r| {
+                    let hull = shadow::focused_hull(&view.slice_corners(r.0, r.1), light, bounds.as_ref()?);
+                    shadow::fit_cascade(&hull, light_view, set.near_plane_offset, [half, half], true)
+                });
+                if shadow_map.as_ref().is_none_or(|(s, _)| *s != side) {
+                    let map = self
+                        .device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("shadow map"),
+                            size: wgpu::Extent3d {
+                                width: side,
+                                height: side,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: SHADOW_MAP_FORMAT,
+                            usage: attachment,
+                            view_formats: &[],
+                        })
+                        .create_view(&Default::default());
+                    *shadow_map = Some((side, map));
+                }
+                let map = shadow_map.as_ref().expect("made above").1.clone();
+                let groups = cascades.map(|c| {
+                    let c = c?;
+                    let globals = Globals {
+                        view_proj: c.view_proj.to_cols_array(),
+                        shadow: [
+                            shadow::caster_bias(set.bias, c.depth_range),
+                            1.0,
+                            0.0,
+                            shadow::caster_normal_bias(set.normal_bias, set.soft, c.texel),
+                        ],
+                        ..base
+                    };
+                    Some(globals_group(self, globals, &self.white))
+                });
+                {
+                    let mut pass = encoder.begin_render_pass(&depth_pass(&map));
+                    for (i, group) in groups.iter().enumerate() {
+                        let Some(group) = group else { continue };
+                        let [ox, oy] = shadow::atlas_origin(i);
+                        let h = half as f32;
+                        pass.set_viewport(ox * side as f32, oy * side as f32, h, h, 0.0, 1.0);
+                        pass.set_bind_group(0, group, &[]);
+                        if charas {
+                            draw(&mut pass, self, false);
+                        }
+                    }
+                }
+
+                // The camera's depth texture: the same pass, seen from the camera
+                // and without the light's bias. The map's solid surfaces are in
+                // it too.
+                {
+                    let group = globals_group(self, base, &self.white);
+                    let mut pass = encoder.begin_render_pass(&depth_pass(&depth_texture));
+                    pass.set_bind_group(0, &group, &[]);
+                    if charas {
+                        draw(&mut pass, self, true);
+                    }
+                    if let Some((pipes, gpu, frame)) = &map_frame {
+                        gpu.draw_depth(pipes, &mut pass, frame);
+                    }
+                }
+
+                // Collect the shadows into the screen-sized mask.
+                let uniform = ShadowUniform {
+                    inv_view_proj: view_proj.inverse().to_cols_array(),
+                    world_to_shadow: std::array::from_fn(|i| {
+                        // A cascade that was not drawn has no matrix: its pixels
+                        // compare against the nearest depth and stay lit.
+                        cascades[i]
+                            .map_or(Mat4::ZERO, |c| shadow::world_to_shadow(c.view_proj, i))
+                            .to_cols_array()
+                    }),
+                    splits_near: ranges.map(|r| r.0),
+                    splits_far: ranges.map(|r| r.1),
+                    eye: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
+                    forward: view.forward.extend(0.0).to_array(),
+                    params: [shadow::shadow_floor(set.strength), side as f32, 1.0 / side as f32, 0.0],
+                };
+                let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shadow mask"),
+                    contents: bytemuck::bytes_of(&uniform),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.mask_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&depth_texture),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&map),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler_shadow),
+                        },
+                    ],
+                });
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("shadow mask"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &mask,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.mask_pipeline);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                Some(mask)
+            } else {
+                None
+            };
+            let main_globals = Globals {
+                shadow: [0.0, 0.0, if mask.is_some() { 1.0 } else { 0.0 }, 0.0],
+                ..base
+            };
+            let globals_bg = globals_group(self, main_globals, mask.as_ref().unwrap_or(&self.white));
+            // The other lights, without shadows, and none at all: a mesh no
+            // light reaches has the scene's ambient light alone.
+            // A lighting binding for each light and set of lamps a mesh takes:
+            // the other lights without shadows, none at all (the scene's
+            // ambient light alone), and the lamps a mesh's groups let in.
+            let light_globals = |light: DrawLight| -> Option<Globals> {
+                match light {
+                    DrawLight::Main => Some(main_globals),
+                    DrawLight::Other(i) => env.other_lights.get(i).map(|o| {
+                        let lit = Environment {
+                            light_color: o.color,
+                            light_intensity: o.intensity,
+                            ..Environment::default()
+                        };
+                        let d = Vec3::from(o.dir).normalize_or_zero();
+                        Globals {
+                            light_dir: [d.x, d.y, d.z, 0.0],
+                            light_color: light_color_global(&lit),
+                            shadow: [0.0; 4],
+                            ..main_globals
+                        }
+                    }),
+                    DrawLight::Dark => Some(Globals {
+                        light_color: [0.0; 4],
+                        ..main_globals
+                    }),
+                }
+            };
+            let mut light_groups: HashMap<(DrawLight, u32), wgpu::BindGroup> = HashMap::new();
+            for item in &items {
+                let key = (item.light, item.lamps);
+                if key == (DrawLight::Main, 0) || light_groups.contains_key(&key) {
+                    continue;
+                }
+                let Some(mut globals) = light_globals(item.light) else {
+                    continue;
+                };
+                (globals.lamps, globals.lamp_info) = lamp_rows(&env.lamps, item.lamps);
+                let shadowed = matches!(item.light, DrawLight::Main | DrawLight::Dark);
+                let view = if shadowed {
+                    mask.as_ref().unwrap_or(&self.white)
+                } else {
+                    &self.white
+                };
+                light_groups.insert(key, globals_group(self, globals, view));
+            }
+            // With screen effects the picture goes to a half-float target first.
+            // A reflected view has none: the game's mirror camera is a bare
+            // Camera, and the effects are components of the main one.
+            let mut fx_gpu = (hdr && main).then(|| {
+                self.effects
+                    .take()
+                    .unwrap_or_else(|| effects::Gpu::new(&self.device, COLOR_FORMAT, DEPTH_FORMAT, SAMPLES))
             });
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.mask_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&depth_texture),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&map),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler_shadow),
-                    },
-                ],
+            let shaft_divisor = fx_resolved
+                .as_ref()
+                .and_then(|fx| fx.shafts.as_ref())
+                .map_or(2, |s| s.divisor);
+            let hdr_views = fx_gpu
+                .as_mut()
+                .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT, shaft_divisor));
+            let fx_frame = fx_resolved.as_ref().filter(|_| main).map(|fx| effects::Frame {
+                fx,
+                width,
+                height,
+                fov_y_deg: camera.fov_y_deg,
+                near,
+                far,
+                eye: camera.eye,
+                forward: camera.forward(),
+                focus: (camera.target - camera.eye).dot(camera.forward()),
+                depth: &depth_texture,
+                scene_depth: &depth_only,
+                white: &self.white,
+                lut: lut.as_ref(),
             });
+            // A backdrop keeps the effects off the empty parts of the picture,
+            // which the depth of the main pass tells.
+            let keep_depth = main && env.effects.as_ref().is_some_and(|fx| fx.backdrop.is_some());
+            // The game's occlusion effect multiplies the picture after the
+            // solid queues (CameraEvent.BeforeImageEffectsOpaque).
+            let occlusion = match (&fx_gpu, &fx_frame) {
+                (Some(gpu), Some(frame)) => gpu.occlusion(&self.device, &mut encoder, frame),
+                _ => None,
+            };
+            // GlobalFog comes after it and the sky ([ImageEffectOpaque]).
+            let fog = match (&fx_gpu, &fx_frame) {
+                (Some(gpu), Some(frame)) => gpu.fog(&self.device, frame),
+                _ => None,
+            };
+            let solid_steps = steps
+                .iter()
+                .take_while(|s| items[s.item].queue <= shadow::LAST_SOLID_QUEUE)
+                .count();
+            let (color_view, resolve_view) = match (&plan.color, &hdr_views) {
+                (Some((msaa, resolved)), _) => (msaa, resolved),
+                (None, Some((msaa, resolved))) => (msaa, resolved),
+                (None, None) => (&msaa, target_view),
+            };
+            // Behind a map is its own background, already linear.
+            let clear = match &map_frame {
+                Some((_, gpu, _)) => {
+                    let [r, g, b] = gpu.background().map(f64::from);
+                    wgpu::Color { r, g, b, a: 1.0 }
+                }
+                None => wgpu::Color {
+                    r: srgb_to_linear(background[0]),
+                    g: srgb_to_linear(background[1]),
+                    b: srgb_to_linear(background[2]),
+                    a: background[3],
+                },
+            };
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("shadow mask"),
+                    label: Some("main"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &mask,
+                        view: color_view,
                         depth_slice: None,
-                        resolve_target: None,
+                        resolve_target: Some(resolve_view),
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                            load: wgpu::LoadOp::Clear(clear),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: if keep_depth {
+                                wgpu::StoreOp::Store
+                            } else {
+                                wgpu::StoreOp::Discard
+                            },
+                        }),
+                        stencil_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                    }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.mask_pipeline);
-                pass.set_bind_group(0, &group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            Some(mask)
-        } else {
-            None
-        };
-        let main_globals = Globals {
-            shadow: [0.0, 0.0, if mask.is_some() { 1.0 } else { 0.0 }, 0.0],
-            ..base
-        };
-        let globals_bg = globals_group(self, main_globals, mask.as_ref().unwrap_or(&self.white));
-        // The other lights, without shadows, and none at all: a mesh no
-        // light reaches has the scene's ambient light alone.
-        // A lighting binding for each light and set of lamps a mesh takes:
-        // the other lights without shadows, none at all (the scene's
-        // ambient light alone), and the lamps a mesh's groups let in.
-        let light_globals = |light: DrawLight| -> Option<Globals> {
-            match light {
-                DrawLight::Main => Some(main_globals),
-                DrawLight::Other(i) => env.other_lights.get(i).map(|o| {
-                    let lit = Environment {
-                        light_color: o.color,
-                        light_intensity: o.intensity,
-                        ..Environment::default()
-                    };
-                    let d = Vec3::from(o.dir).normalize_or_zero();
-                    Globals {
-                        light_dir: [d.x, d.y, d.z, 0.0],
-                        light_color: light_color_global(&lit),
-                        shadow: [0.0; 4],
-                        ..main_globals
+                // The map's solid surfaces and its sky come first, its blended
+                // ones after the characters'.
+                if let Some((pipes, gpu, frame)) = &map_frame {
+                    gpu.draw_solid(pipes, map_target, &mut pass, frame);
+                }
+                pass.set_bind_group(0, &globals_bg, &[]);
+                let mut current = None;
+                let occlude = |pass: &mut wgpu::RenderPass| {
+                    for (pipeline, group) in [&occlusion, &fog].into_iter().flatten() {
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, group, &[]);
+                        pass.draw(0..3, 0..1);
+                        pass.set_bind_group(0, &globals_bg, &[]);
                     }
-                }),
-                DrawLight::Dark => Some(Globals {
-                    light_color: [0.0; 4],
-                    ..main_globals
-                }),
-            }
-        };
-        let mut light_groups: HashMap<(DrawLight, u32), wgpu::BindGroup> = HashMap::new();
-        for item in &items {
-            let key = (item.light, item.lamps);
-            if key == (DrawLight::Main, 0) || light_groups.contains_key(&key) {
-                continue;
-            }
-            let Some(mut globals) = light_globals(item.light) else {
-                continue;
-            };
-            (globals.lamps, globals.lamp_info) = lamp_rows(&env.lamps, item.lamps);
-            let shadowed = matches!(item.light, DrawLight::Main | DrawLight::Dark);
-            let view = if shadowed {
-                mask.as_ref().unwrap_or(&self.white)
-            } else {
-                &self.white
-            };
-            light_groups.insert(key, globals_group(self, globals, view));
-        }
-        // With screen effects the picture goes to a half-float target first.
-        let mut fx_gpu = hdr.then(|| {
-            self.effects
-                .take()
-                .unwrap_or_else(|| effects::Gpu::new(&self.device, COLOR_FORMAT, DEPTH_FORMAT, SAMPLES))
-        });
-        let shaft_divisor = fx_resolved
-            .as_ref()
-            .and_then(|fx| fx.shafts.as_ref())
-            .map_or(2, |s| s.divisor);
-        let hdr_views = fx_gpu
-            .as_mut()
-            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT, shaft_divisor));
-        let fx_frame = fx_resolved.as_ref().map(|fx| effects::Frame {
-            fx,
-            width,
-            height,
-            fov_y_deg: camera.fov_y_deg,
-            near,
-            far,
-            eye: camera.eye,
-            forward: camera.forward(),
-            focus: (camera.target - camera.eye).dot(camera.forward()),
-            depth: &depth_texture,
-            scene_depth: &depth_only,
-            white: &self.white,
-            lut: lut.as_ref(),
-        });
-        // A backdrop keeps the effects off the empty parts of the picture,
-        // which the depth of the main pass tells.
-        let keep_depth = env.effects.as_ref().is_some_and(|fx| fx.backdrop.is_some());
-        // The game's occlusion effect multiplies the picture after the
-        // solid queues (CameraEvent.BeforeImageEffectsOpaque).
-        let occlusion = match (&fx_gpu, &fx_frame) {
-            (Some(gpu), Some(frame)) => gpu.occlusion(&self.device, &mut encoder, frame),
-            _ => None,
-        };
-        // GlobalFog comes after it and the sky ([ImageEffectOpaque]).
-        let fog = match (&fx_gpu, &fx_frame) {
-            (Some(gpu), Some(frame)) => gpu.fog(&self.device, frame),
-            _ => None,
-        };
-        let solid_steps = steps
-            .iter()
-            .take_while(|s| items[s.item].queue <= shadow::LAST_SOLID_QUEUE)
-            .count();
-        let (color_view, resolve_view) = match &hdr_views {
-            Some((msaa, resolved)) => (msaa, resolved),
-            None => (&msaa, target_view),
-        };
-        // Behind a map is its own background, already linear.
-        let clear = match &map_frame {
-            Some((_, gpu, _)) => {
-                let [r, g, b] = gpu.background().map(f64::from);
-                wgpu::Color { r, g, b, a: 1.0 }
-            }
-            None => wgpu::Color {
-                r: srgb_to_linear(background[0]),
-                g: srgb_to_linear(background[1]),
-                b: srgb_to_linear(background[2]),
-                a: background[3],
-            },
-        };
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    depth_slice: None,
-                    resolve_target: Some(resolve_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: if keep_depth {
-                            wgpu::StoreOp::Store
-                        } else {
-                            wgpu::StoreOp::Discard
-                        },
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // The map's solid surfaces and its sky come first, its blended
-            // ones after the characters'.
-            if let Some((pipes, gpu, frame)) = &map_frame {
-                gpu.draw_solid(pipes, map_target, &mut pass, frame);
-            }
-            pass.set_bind_group(0, &globals_bg, &[]);
-            let mut current = None;
-            let occlude = |pass: &mut wgpu::RenderPass| {
-                for (pipeline, group) in [&occlusion, &fog].into_iter().flatten() {
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, group, &[]);
-                    pass.draw(0..3, 0..1);
-                    pass.set_bind_group(0, &globals_bg, &[]);
-                }
-            };
-            for (i, step) in steps.iter().enumerate() {
-                if i == solid_steps {
-                    occlude(&mut pass);
-                    current = None;
-                }
-                let item = &items[step.item];
-                let key = match step.pass {
-                    Pass::Outline => item.outline_key,
-                    Pass::Surface => item.surface_key,
-                    Pass::Depth => PipelineKey::prepass(hdr, covered),
                 };
-                if current != Some(key) {
-                    pass.set_pipeline(&self.pipelines[&key]);
-                    current = Some(key);
-                }
-                pass.set_stencil_reference(item.stencil_ref);
-                let group = light_groups.get(&(item.light, item.lamps));
-                pass.set_bind_group(0, group.unwrap_or(&globals_bg), &[]);
-                let b = &batches[item.batch];
-                pass.set_vertex_buffer(0, b.vb.slice(..));
-                pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.set_bind_group(1, &binds[item.bind], &[]);
-                pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
-            }
-            if solid_steps == steps.len() {
-                occlude(&mut pass);
-            }
-            if let Some((pipes, gpu, frame)) = &map_frame {
-                gpu.draw_blended(pipes, map_target, &mut pass, frame);
-            }
-        }
-        if let (Some(gpu), Some(frame)) = (&fx_gpu, &fx_frame) {
-            gpu.finish(&self.device, &mut encoder, frame, COLOR_FORMAT, target_view);
-        }
-        // The selection's outline, over the finished picture: the outlined
-        // meshes' depth alone, then the pixels around it. A mesh without a
-        // depth pass of its own is drawn as solid, culled at the back.
-        if let Some(h) = env.highlight.as_ref().filter(|h| !h.draws.is_empty()) {
-            let targets = self.targets.as_ref().expect("made above");
-            {
-                let group = globals_group(self, base, &self.white);
-                let mut pass = encoder.begin_render_pass(&depth_pass(&targets.highlight));
-                pass.set_bind_group(0, &group, &[]);
-                for c in casters.iter().filter(|c| h.draws.contains(&c.draw)) {
-                    let key = CasterKey {
-                        depth_texture: true,
-                        cull_back: c.role.depth.unwrap_or(true),
+                for (i, step) in steps.iter().enumerate().filter(|_| charas) {
+                    if i == solid_steps {
+                        occlude(&mut pass);
+                        current = None;
+                    }
+                    let item = &items[step.item];
+                    let key = match step.pass {
+                        Pass::Outline => item.outline_key,
+                        Pass::Surface => item.surface_key,
+                        Pass::Depth => PipelineKey::prepass(hdr, covered),
                     };
-                    pass.set_pipeline(&self.caster_pipelines[&key]);
-                    let b: &Batch = &batches[c.batch];
+                    if current != Some(key) {
+                        pass.set_pipeline(&self.pipelines[&key]);
+                        current = Some(key);
+                    }
+                    pass.set_stencil_reference(item.stencil_ref);
+                    let group = light_groups.get(&(item.light, item.lamps));
+                    pass.set_bind_group(0, group.unwrap_or(&globals_bg), &[]);
+                    let b = &batches[item.batch];
                     pass.set_vertex_buffer(0, b.vb.slice(..));
                     pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_bind_group(1, &binds[c.bind], &[]);
-                    pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                    pass.set_bind_group(1, &binds[item.bind], &[]);
+                    pass.draw_indexed(item.first..item.first + item.count, 0, 0..1);
+                }
+                if solid_steps == steps.len() {
+                    occlude(&mut pass);
+                }
+                if let Some((pipes, gpu, frame)) = &map_frame {
+                    gpu.draw_blended(pipes, map_target, &mut pass, frame);
                 }
             }
-            let outline = self
-                .highlight
-                .get_or_insert_with(|| highlight::Pass::new(&self.device, COLOR_FORMAT));
-            let targets = self.targets.as_ref().expect("made above");
-            outline.paint(&self.device, &mut encoder, &targets.highlight, target_view, h);
-        }
-        drop(occlusion);
-        drop(fog);
-        if fx_gpu.is_some() {
-            self.effects = fx_gpu;
+            if let (Some(gpu), Some(frame)) = (&fx_gpu, &fx_frame) {
+                gpu.finish(&self.device, &mut encoder, frame, COLOR_FORMAT, target_view);
+            }
+            // The selection's outline, over the finished picture: the outlined
+            // meshes' depth alone, then the pixels around it. A mesh without a
+            // depth pass of its own is drawn as solid, culled at the back.
+            if let Some(h) = env.highlight.as_ref().filter(|h| main && !h.draws.is_empty()) {
+                let targets = self.targets.as_ref().expect("made above");
+                {
+                    let group = globals_group(self, base, &self.white);
+                    let mut pass = encoder.begin_render_pass(&depth_pass(&targets.highlight));
+                    pass.set_bind_group(0, &group, &[]);
+                    for c in casters.iter().filter(|c| h.draws.contains(&c.draw)) {
+                        let key = CasterKey {
+                            depth_texture: true,
+                            cull_back: c.role.depth.unwrap_or(true),
+                        };
+                        pass.set_pipeline(&self.caster_pipelines[&key]);
+                        let b: &Batch = &batches[c.batch];
+                        pass.set_vertex_buffer(0, b.vb.slice(..));
+                        pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.set_bind_group(1, &binds[c.bind], &[]);
+                        pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                    }
+                }
+                let outline = self
+                    .highlight
+                    .get_or_insert_with(|| highlight::Pass::new(&self.device, COLOR_FORMAT));
+                let targets = self.targets.as_ref().expect("made above");
+                outline.paint(&self.device, &mut encoder, &targets.highlight, target_view, h);
+            }
+            drop(occlusion);
+            drop(fog);
+            if fx_gpu.is_some() {
+                self.effects = fx_gpu;
+            }
         }
         Ok(encoder)
     }

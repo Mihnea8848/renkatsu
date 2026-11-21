@@ -103,14 +103,16 @@ pub struct View {
     pub eye: Vec3,
     /// Unit vector the camera looks along.
     pub forward: Vec3,
+    /// The camera's up: the world's Y, but for a mirror's view.
+    pub up: Vec3,
     pub fov_y_deg: f32,
     pub aspect: f32,
 }
 
 impl View {
-    /// Right and up of the camera, with the world's Y as up.
+    /// Right and up of the camera.
     fn axes(&self) -> (Vec3, Vec3) {
-        let right = Vec3::Y.cross(self.forward).try_normalize().unwrap_or(Vec3::X);
+        let right = self.up.cross(self.forward).try_normalize().unwrap_or(Vec3::X);
         (right, self.forward.cross(right))
     }
 
@@ -548,6 +550,7 @@ mod tests {
         View {
             eye: Vec3::new(0.0, 1.4, 1.3),
             forward: Vec3::NEG_Z,
+            up: Vec3::Y,
             fov_y_deg: 23.0,
             aspect: 900.0 / 1400.0,
         }

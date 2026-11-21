@@ -176,16 +176,21 @@ pub(crate) struct SkyUniform {
 /// from -1 to 1 (y up). Matches `Mat4::look_at_lh` with
 /// `Mat4::perspective_lh`.
 pub fn camera_axes(camera: &Camera, aspect: f32) -> [Vec3; 3] {
+    eye_axes(camera, Vec3::Y, aspect)
+}
+
+/// The same for a camera whose up is not the world's: a mirror's.
+pub fn eye_axes(camera: &Camera, up: Vec3, aspect: f32) -> [Vec3; 3] {
     let forward = (camera.target - camera.eye).normalize_or_zero();
-    let right = Vec3::Y.cross(forward).normalize_or_zero();
+    let right = up.cross(forward).normalize_or_zero();
     let up = forward.cross(right);
     let tan = (camera.fov_y_deg.to_radians() * 0.5).tan();
     [right * tan * aspect, up * tan, forward]
 }
 
 /// The uniform block of a sky under a sun.
-pub(crate) fn uniform(sky: &Sky, sun_dir: [f32; 3], sun_color: [f32; 3], camera: &Camera, aspect: f32) -> SkyUniform {
-    let [right, up, forward] = camera_axes(camera, aspect);
+pub(crate) fn uniform(sky: &Sky, sun_dir: [f32; 3], sun_color: [f32; 3], axes: [Vec3; 3]) -> SkyUniform {
+    let [right, up, forward] = axes;
     let v4 = |v: [f32; 3], w: f32| [v[0], v[1], v[2], w];
     let mut u = SkyUniform {
         right: v4(right.to_array(), 0.0),
@@ -602,7 +607,7 @@ mod tests {
             ground: [0.1, 0.2, 0.3],
             exposure: 1.3,
         });
-        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0, 2.0, 3.0], &camera(), 1.0);
+        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0, 2.0, 3.0], camera_axes(&camera(), 1.0));
         assert_eq!(u.kind, [0.0, 1.0, 1.3, 0.0]);
         assert_eq!(u.params, [0.04, 1.0, 0.0, 0.0]);
         assert_eq!(u.ground, [0.1, 0.2, 0.3, 0.0]);
@@ -635,7 +640,7 @@ mod tests {
         faces[DOWN].hdr = [34.0, 2.2, 0.0, 1.0];
         let sky = Sky::SixSided { faces, look };
         assert_eq!(sky.images().count(), 1);
-        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0; 3], &camera(), 1.0);
+        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0; 3], camera_axes(&camera(), 1.0));
         assert_eq!(u.kind[0], 1.0);
         assert!((u.kind[3] - std::f32::consts::PI).abs() < 1e-6);
         assert_eq!(u.params, [0.0, 0.0, 2.0, 0.0]);
@@ -651,7 +656,7 @@ mod tests {
                 ..look
             },
         };
-        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0; 3], &camera(), 1.0);
+        let u = uniform(&sky, [0.0, 1.0, 0.0], [1.0; 3], camera_axes(&camera(), 1.0));
         assert_eq!(u.kind[0], 2.0);
         assert_eq!(u.params, [0.0, 0.0, DOUBLE_LINEAR, 1.0]);
         assert_eq!(u.hdr[0], HDR_PLAIN);

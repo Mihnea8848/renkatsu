@@ -151,7 +151,9 @@ struct MapState {
     /// name of its table, read from the map's bundle; and the job reading
     /// it.
     filters: Option<(PathBuf, TimeFilters)>,
-    reading_filters: Option<(PathBuf, Handle<TimeFilters>)>,
+    reading_filters: Option<(PathBuf, Handle<(TimeFilters, Vec<rk_render::mirror::MapMirror>)>)>,
+    /// The set map's mirrors, read from its bundle beside its filters.
+    mirrors: Option<(PathBuf, Vec<rk_render::mirror::MapMirror>)>,
     placed: Option<rk_render::map::MapPlacement>,
 }
 
@@ -961,7 +963,8 @@ impl Live {
                 let bundle = file.bundles.first().map(|b| b.path.clone()).unwrap_or_default();
                 let read = rk_map::scene::time_filters(&game, &bundle)?;
                 let shafts = rk_map::scene::time_sun_shafts(&game, &bundle)?;
-                Ok(MapTime::ALL
+                let mirrors = rk_map::mirror::mirrors(&game, &bundle).unwrap_or_default();
+                let times = MapTime::ALL
                     .into_iter()
                     .map(|t| {
                         let name = read.iter().find(|(time, _)| *time == t.time_of_day());
@@ -973,7 +976,8 @@ impl Live {
                             caster: shaft.and_then(|s| s.2),
                         }
                     })
-                    .collect())
+                    .collect();
+                Ok((times, mirrors))
             });
             state.reading_filters = Some((sidecar, handle));
         }
@@ -983,6 +987,14 @@ impl Live {
             .and_then(|(_, h)| if self.patient { Some(h.wait()) } else { h.try_take() });
         if let Some(result) = done {
             let (path, _) = state.reading_filters.take().expect("looked at above");
+            let (result, mirrors) = match result {
+                Ok((times, mirrors)) => (Ok(times), mirrors),
+                Err(e) => (Err(e), Vec::new()),
+            };
+            if state.set.as_ref().is_some_and(|(_, r)| r.sidecar == path) {
+                self.renderer.set_map_mirrors(&mirrors);
+            }
+            state.mirrors = Some((path.clone(), mirrors));
             // A map whose bundle is not there keeps the first filter.
             state.filters = Some((path, result.unwrap_or_default()));
         }
@@ -1095,6 +1107,10 @@ impl Live {
                 match result {
                     Ok(mut map) => {
                         self.renderer.set_map(Some(&map));
+                        // The map file has no mirrors; its bundle's are kept.
+                        if let Some((_, mirrors)) = state.mirrors.as_ref().filter(|(p, _)| *p == recipe.sidecar) {
+                            self.renderer.set_map_mirrors(mirrors);
+                        }
                         state.ground = Some(MapGround::take(&mut map));
                         state.took = started.elapsed().as_secs_f32();
                         log.info(format!("Loaded {name} in {:.1} s", state.took));

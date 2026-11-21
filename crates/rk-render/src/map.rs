@@ -554,6 +554,8 @@ pub struct MapScene {
     /// are not seen, though they still cast the sun's shadow when they are
     /// on its layers, as in Unity.
     pub camera_mask: u32,
+    /// The mirrors: renderers with the game's `MirrorReflection`.
+    pub mirrors: Vec<crate::mirror::MapMirror>,
 }
 
 /// The layers CharaStudio's camera draws: Water (4), Chara (10), Map (11)
@@ -778,6 +780,8 @@ pub(crate) struct Pipelines {
     /// How many objects the last frame left out as outside the view.
     culled: std::cell::Cell<usize>,
     sky: crate::sky::SkyPass,
+    /// The mirrors' surfaces.
+    mirror: crate::mirror::MirrorPass,
 }
 
 /// Uploads BC blocks with their mip levels.
@@ -1082,6 +1086,7 @@ impl Pipelines {
             images: HashMap::new(),
             culled: std::cell::Cell::new(0),
             sky: crate::sky::SkyPass::new(device, queue),
+            mirror: crate::mirror::MirrorPass::new(device, SAMPLES),
         }
     }
     /// Makes the pipelines for drawing into `target`, once. They neither
@@ -1089,6 +1094,7 @@ impl Pipelines {
     /// stays as theirs.
     pub(crate) fn prepare(&mut self, device: &wgpu::Device, target: Target) {
         self.sky.prepare(device, target.color, target.depth, SAMPLES);
+        self.mirror.prepare(device, target.color, target.depth);
         if self.pipelines.contains_key(&(target, 0, false)) {
             return;
         }
@@ -1189,6 +1195,9 @@ struct ObjectGpu {
     vanish: Vec<usize>,
     /// On a layer the camera draws, and not shadows only.
     on_camera: bool,
+    /// The layer it shows on, for the views that draw other layers than
+    /// the camera's: a mirror's. `None` for a shadow alone.
+    layer: Option<u32>,
     /// Casts the sun's shadow from somewhere.
     casts: bool,
     /// The lightmap's bind group: 0 for none, then one per lightmap.
@@ -1215,7 +1224,12 @@ struct Draw {
     /// Distance from the eye to the object's middle, for sorting.
     distance: f32,
     queue: i32,
+    /// The mirror whose surface this is, in `MapGpu::mirrors`; `NO_MIRROR`
+    /// for a submesh.
+    mirror: usize,
 }
+
+const NO_MIRROR: usize = usize::MAX;
 
 /// A submesh casting the sun's shadow this frame.
 struct Caster {
@@ -1229,6 +1243,8 @@ struct Caster {
 
 /// What one frame of an uploaded map draws, from `MapGpu::frame`.
 pub(crate) struct MapFrame {
+    /// Which of the map's views it is drawn from.
+    view: usize,
     draws: Vec<Draw>,
     casters: Vec<Caster>,
     /// Whether the sun's shadow atlas is drawn this frame.
@@ -1277,59 +1293,47 @@ impl MapPlacement {
     }
 }
 
-/// A map uploaded to the GPU: its buffers, textures and bind groups, made
-/// once by `Renderer::set_map`. Each frame only writes the camera's
-/// numbers into its uniform buffers and picks what to draw.
-/// What the scene adds to a map's light: lamps, and the fog the Studio's
-/// Fog switches on, in place of the map's own.
-pub(crate) struct SceneLight<'a> {
-    pub lamps: &'a [crate::Lamp],
-    pub fog: Option<Fog>,
-    /// How much of the map's baked and ambient light and reflections is
-    /// kept, 0 to 1.
-    pub baked: f32,
+/// A view a map's frame is drawn from: the camera's, or a mirror's.
+pub(crate) struct MapEye {
+    /// Which of the map's sets of camera numbers: 0 the camera's, then
+    /// one per mirror.
+    pub view: usize,
+    /// Where the view stands in the world.
+    pub eye: crate::mirror::Eye,
+    /// The world to the picture.
+    pub view_proj: Mat4,
+    pub aspect: f32,
+    /// The picture's width and height in pixels.
+    pub screen: [f32; 2],
+    /// The layers drawn, when not the camera's own.
+    pub mask: Option<u32>,
 }
 
-pub(crate) struct MapGpu {
-    /// Where the map stands, set by `Renderer::place_map`.
-    pub(crate) placement: MapPlacement,
-    pub(crate) light: MapLight,
-    /// The lowest and highest corner of everything drawn.
-    bounds: (Vec3, Vec3),
-    vanish: Vec<VanishVolume>,
-    objects: Vec<ObjectGpu>,
-    buffers: Vec<(wgpu::Buffer, wgpu::Buffer)>,
-    materials: Vec<wgpu::BindGroup>,
-    lightmaps: Vec<wgpu::BindGroup>,
-    reflections: Vec<wgpu::BindGroup>,
+/// The camera numbers of one view of a map, in buffers of its own: a
+/// frame writes them all before any of its passes runs.
+struct MapView {
     globals_buf: wgpu::Buffer,
     shadow_buf: wgpu::Buffer,
     /// One per cascade of the sun's shadow, with its bind group.
     cascades: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
-    /// The sun's shadow atlas; one texel when the sun casts none.
-    atlas: wgpu::TextureView,
     globals_group: wgpu::BindGroup,
-    /// The camera's view for the depth texture, with its bind group.
+    /// The view for the depth texture, with its bind group.
     depth_view: (wgpu::Buffer, wgpu::BindGroup),
     /// The sky's uniform buffer and bind group.
     sky: Option<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
-impl MapGpu {
-    /// Uploads `map`. `views` holds the view of each of its images by the
-    /// image's address, `sky_cube` the sky's cubemap and `cubes` the
-    /// reflections' cubemaps, the scene's first.
+/// The sky's textures: its cubemap and its six faces.
+type SkyViews = (Option<wgpu::TextureView>, [wgpu::TextureView; 6]);
+
+impl MapView {
     fn new(
         device: &wgpu::Device,
         pipes: &Pipelines,
-        map: &MapScene,
-        views: &HashMap<usize, wgpu::TextureView>,
-        white: &wgpu::TextureView,
-        sky_cube: Option<&wgpu::TextureView>,
-        cubes: &[wgpu::TextureView],
-    ) -> MapGpu {
-        let l = &map.light;
-        let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
+        atlas: &wgpu::TextureView,
+        shadowed: bool,
+        sky: Option<&SkyViews>,
+    ) -> MapView {
         let uniform_buf = |label, size: usize| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -1340,7 +1344,6 @@ impl MapGpu {
         };
         let globals_buf = uniform_buf("map globals", std::mem::size_of::<Globals>());
         let shadow_buf = uniform_buf("map shadow", std::mem::size_of::<ShadowUniform>());
-        let shadowed = l.shadows.is_some();
         let cascades = if shadowed {
             (0..crate::shadow::CASCADES)
                 .map(|_| {
@@ -1371,6 +1374,105 @@ impl MapGpu {
             });
             (buf, group)
         };
+        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("map globals"),
+            layout: &pipes.globals,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: globals_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: shadow_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(atlas),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&pipes.compare),
+                },
+            ],
+        });
+        // The sky's textures; its numbers follow the camera.
+        let sky = sky.map(|(cube, faces)| {
+            let buf = uniform_buf("map sky", std::mem::size_of::<crate::sky::SkyUniform>());
+            let group = pipes.sky.bind(
+                device,
+                &buf,
+                cube.as_ref(),
+                std::array::from_fn(|i| &faces[i]),
+                &pipes.clamp,
+                &pipes.repeat,
+            );
+            (buf, group)
+        });
+        MapView {
+            globals_buf,
+            shadow_buf,
+            cascades,
+            globals_group,
+            depth_view,
+            sky,
+        }
+    }
+}
+
+/// A map uploaded to the GPU: its buffers, textures and bind groups, made
+/// once by `Renderer::set_map`. Each frame only writes the camera's
+/// numbers into its uniform buffers and picks what to draw.
+/// What the scene adds to a map's light: lamps, and the fog the Studio's
+/// Fog switches on, in place of the map's own.
+pub(crate) struct SceneLight<'a> {
+    pub lamps: &'a [crate::Lamp],
+    pub fog: Option<Fog>,
+    /// How much of the map's baked and ambient light and reflections is
+    /// kept, 0 to 1.
+    pub baked: f32,
+}
+
+pub(crate) struct MapGpu {
+    /// Where the map stands, set by `Renderer::place_map`.
+    pub(crate) placement: MapPlacement,
+    pub(crate) light: MapLight,
+    /// The lowest and highest corner of everything drawn.
+    bounds: (Vec3, Vec3),
+    vanish: Vec<VanishVolume>,
+    objects: Vec<ObjectGpu>,
+    buffers: Vec<(wgpu::Buffer, wgpu::Buffer)>,
+    materials: Vec<wgpu::BindGroup>,
+    lightmaps: Vec<wgpu::BindGroup>,
+    reflections: Vec<wgpu::BindGroup>,
+    /// The sun's shadow atlas; one texel when the sun casts none. The
+    /// views draw it one after the other.
+    atlas: wgpu::TextureView,
+    /// The camera's view, then one per mirror.
+    views: Vec<MapView>,
+    /// The sky's textures, for the views made later.
+    sky_views: Option<SkyViews>,
+    /// The layers the camera draws.
+    camera_mask: u32,
+    mirrors: Vec<crate::mirror::MirrorGpu>,
+}
+
+impl MapGpu {
+    /// Uploads `map`. `views` holds the view of each of its images by the
+    /// image's address, `sky_cube` the sky's cubemap and `cubes` the
+    /// reflections' cubemaps, the scene's first.
+    fn new(
+        device: &wgpu::Device,
+        pipes: &Pipelines,
+        map: &MapScene,
+        views: &HashMap<usize, wgpu::TextureView>,
+        white: &wgpu::TextureView,
+        sky_cube: Option<&wgpu::TextureView>,
+        cubes: &[wgpu::TextureView],
+    ) -> MapGpu {
+        let l = &map.light;
+        let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
+        let shadowed = l.shadows.is_some();
         let atlas_side = if shadowed { SHADOW_ATLAS } else { 1 };
         let atlas = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -1388,47 +1490,18 @@ impl MapGpu {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("map globals"),
-            layout: &pipes.globals,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: globals_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: shadow_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&atlas),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&pipes.compare),
-                },
-            ],
-        });
-
         // The sky's textures; its numbers follow the camera.
-        let sky = l.sky.as_ref().map(|sky| {
+        let sky_views: Option<SkyViews> = l.sky.as_ref().map(|sky| {
             let face = |i: usize| match sky {
                 crate::sky::Sky::SixSided { faces, .. } => faces[i].image.as_ref().and_then(view_of),
                 _ => None,
             };
-            let faces: [Option<wgpu::TextureView>; 6] = std::array::from_fn(face);
-            let buf = uniform_buf("map sky", std::mem::size_of::<crate::sky::SkyUniform>());
-            let group = pipes.sky.bind(
-                device,
-                &buf,
-                sky_cube,
-                std::array::from_fn(|i| faces[i].as_ref().unwrap_or(white)),
-                &pipes.clamp,
-                &pipes.repeat,
-            );
-            (buf, group)
+            (
+                sky_cube.cloned(),
+                std::array::from_fn(|i| face(i).unwrap_or_else(|| white.clone())),
+            )
         });
+        let main_view = MapView::new(device, pipes, &atlas, shadowed, sky_views.as_ref());
 
         // The lightmaps' bind groups: the first for objects without one.
         let lightmap_group = |info: [f32; 4], light: &wgpu::TextureView, direction: &wgpu::TextureView| {
@@ -1593,12 +1666,14 @@ impl MapGpu {
                 middle: (Vec3::from(mesh.bounds.0) + Vec3::from(mesh.bounds.1)) * 0.5,
                 vanish: o.vanish.clone(),
                 on_camera,
+                layer: (!o.shadows_only && o.layer < 32).then_some(o.layer),
                 casts,
                 lightmap: o.lightmap.filter(|i| *i < map.lightmaps.len()).map_or(0, |i| i + 1),
                 reflection: o.probe.filter(|i| *i < map.probes.len()).map_or(0, |i| i + 1),
                 parts: Vec::new(),
             };
-            if !on_camera && !casts {
+            // A mirror may show a layer the camera does not.
+            if !on_camera && !casts && object.layer.is_none() {
                 objects.push(object);
                 continue;
             }
@@ -1648,7 +1723,7 @@ impl MapGpu {
             }
             objects.push(object);
         }
-        MapGpu {
+        let mut gpu = MapGpu {
             placement: MapPlacement::default(),
             light: l.clone(),
             bounds: map.bounds(),
@@ -1658,14 +1733,66 @@ impl MapGpu {
             materials,
             lightmaps,
             reflections,
-            globals_buf,
-            shadow_buf,
-            cascades,
-            depth_view,
             atlas,
-            globals_group,
-            sky,
+            views: vec![main_view],
+            sky_views,
+            camera_mask: map.camera_mask,
+            mirrors: Vec::new(),
+        };
+        gpu.set_mirrors(device, pipes, &map.mirrors);
+        gpu
+    }
+
+    /// Takes the map's mirrors, in place of those it had: each gets its
+    /// surface and a view of its own.
+    fn set_mirrors(&mut self, device: &wgpu::Device, pipes: &Pipelines, mirrors: &[crate::mirror::MapMirror]) {
+        self.mirrors = mirrors.iter().map(|m| pipes.mirror.upload(device, m)).collect();
+        self.views.truncate(1);
+        let shadowed = self.light.shadows.is_some();
+        for _ in mirrors {
+            let view = MapView::new(device, pipes, &self.atlas, shadowed, self.sky_views.as_ref());
+            self.views.push(view);
         }
+    }
+
+    pub(crate) fn has_mirrors(&self) -> bool {
+        !self.mirrors.is_empty()
+    }
+
+    /// The reflected views this frame draws before the camera's: one for
+    /// each mirror the camera sees the face of. The game draws a mirror's
+    /// from `OnWillRenderObject`, which Unity calls for renderers in the
+    /// camera's view.
+    pub(crate) fn mirror_views(
+        &self,
+        camera: &Camera,
+        view_proj: Mat4,
+        aspect: f32,
+        near: f32,
+        far: f32,
+    ) -> Vec<crate::mirror::MirrorView> {
+        let root = self.placement.rigid();
+        let in_map = view_proj * root;
+        self.mirrors
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| self.camera_mask & (1 << m.mirror.layer.min(31)) != 0 && in_view(&in_map, m.bounds))
+            .filter_map(|(i, m)| crate::mirror::mirror_view(i, &m.mirror.placed(root), camera, aspect, near, far))
+            .collect()
+    }
+
+    /// The textures the reflection of mirror `index` is drawn into:
+    /// many samples a pixel, and resolved.
+    pub(crate) fn mirror_target(
+        &mut self,
+        device: &wgpu::Device,
+        pipes: &Pipelines,
+        index: usize,
+        size: u32,
+        format: wgpu::TextureFormat,
+    ) -> Option<(wgpu::TextureView, wgpu::TextureView)> {
+        let gpu = self.mirrors.get_mut(index)?;
+        Some(pipes.mirror.target(device, gpu, size, format))
     }
 
     /// The unit vector towards the map's sun, in the world: the sun
@@ -1692,25 +1819,30 @@ impl MapGpu {
         ((max - min).length() * 2.0).max(50.0) + camera.eye.distance((min + max) * 0.5)
     }
 
-    /// Writes the camera's numbers for a frame seen through `view_proj`
-    /// and picks what it draws: the walls that hide, the camera's layers,
-    /// the view's bounds, blended surfaces sorted far to near.
+    /// Writes the numbers of the view `eye` for a frame and picks what it
+    /// draws: the walls that hide, the view's layers, its bounds, blended
+    /// surfaces sorted far to near. Walls hide by where `walls_from`, the
+    /// frame's own camera, stands: a mirror shows the room as the camera
+    /// has it.
     pub(crate) fn frame(
         &self,
         queue: &wgpu::Queue,
         pipes: &Pipelines,
-        camera: &Camera,
-        view_proj: Mat4,
-        aspect: f32,
+        eye: &MapEye,
+        walls_from: &Camera,
         scene: SceneLight<'_>,
     ) -> MapFrame {
         let SceneLight { lamps, fog, baked } = scene;
+        let view = &self.views[eye.view];
+        let aspect = eye.aspect;
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
         // by the view.
-        let world_camera = camera;
-        let camera = &self.placement.camera_in_map(world_camera);
-        let view_proj = view_proj * self.placement.rigid();
+        let world_eye = &eye.eye;
+        let camera = &self.placement.camera_in_map(&world_eye.camera);
+        let up = self.placement.rigid().inverse().transform_vector3(world_eye.up);
+        let walls_from = self.placement.camera_in_map(walls_from).eye;
+        let view_proj = eye.view_proj * self.placement.rigid();
         let l = &self.light;
         // The material fog the scene asks for, not the map's own: in
         // CharaStudio the Fog tick box switches it.
@@ -1759,8 +1891,8 @@ impl MapGpu {
             lamp_info,
             ..globals
         };
-        queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
-        queue.write_buffer(&self.depth_view.0, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
+        queue.write_buffer(&view.globals_buf, 0, bytemuck::bytes_of(&globals));
+        queue.write_buffer(&view.depth_view.0, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
 
         // The sun's shadow: four cascades over slices of the view, in a
         // square atlas, two by two.
@@ -1768,9 +1900,10 @@ impl MapGpu {
         let mut shadow = ShadowUniform::zeroed();
         let mut cascades: Vec<Mat4> = Vec::new();
         if let Some(set) = l.shadows {
-            let view = crate::shadow::View {
+            let slices = crate::shadow::View {
                 eye: camera.eye,
                 forward,
+                up,
                 fov_y_deg: camera.fov_y_deg,
                 aspect,
             };
@@ -1778,7 +1911,7 @@ impl MapGpu {
             let ranges = crate::shadow::cascade_ranges(0.03, set.distance, splits);
             let light = crate::shadow::light_view(Vec3::from(l.sun_dir));
             for (i, r) in ranges.iter().enumerate() {
-                let slice = view.slice_corners(r.0, r.1);
+                let slice = slices.slice_corners(r.0, r.1);
                 if let Some((vp, texel)) = fit_cascade(&slice, light, self.bounds, SHADOW_ATLAS / 2) {
                     shadow.to_atlas[i] = crate::shadow::world_to_shadow(vp, i).to_cols_array();
                     shadow.texel_world[i] = texel;
@@ -1793,13 +1926,14 @@ impl MapGpu {
                 cascades.clear();
             }
         }
-        queue.write_buffer(&self.shadow_buf, 0, bytemuck::bytes_of(&shadow));
-        for (vp, (buf, _)) in cascades.iter().zip(&self.cascades) {
+        queue.write_buffer(&view.shadow_buf, 0, bytemuck::bytes_of(&shadow));
+        for (vp, (buf, _)) in cascades.iter().zip(&view.cascades) {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&vp.to_cols_array()));
         }
-        if let (Some(sky), Some((buf, _))) = (&l.sky, &self.sky) {
+        if let (Some(sky), Some((buf, _))) = (&l.sky, &view.sky) {
             // The sky stays with the world, as Unity's skybox does.
-            let uniform = crate::sky::uniform(sky, self.sun_dir(), l.sun_color, world_camera, aspect);
+            let axes = crate::sky::eye_axes(&world_eye.camera, world_eye.up, aspect);
+            let uniform = crate::sky::uniform(sky, self.sun_dir(), l.sun_color, axes);
             queue.write_buffer(buf, 0, bytemuck::bytes_of(&uniform));
         }
 
@@ -1811,12 +1945,16 @@ impl MapGpu {
         let mut culled = 0;
         // The volumes the camera stands in hide what names them.
         let hide = self.placement.hide_walls;
-        let inside: Vec<bool> = self.vanish.iter().map(|v| hide && v.contains(camera.eye)).collect();
+        let inside: Vec<bool> = self.vanish.iter().map(|v| hide && v.contains(walls_from)).collect();
         for o in &self.objects {
             if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
                 continue;
             }
-            let seen = o.on_camera && in_view(&view_proj, o.bounds);
+            let on_layers = match eye.mask {
+                Some(mask) => o.layer.is_some_and(|l| mask & (1 << l) != 0),
+                None => o.on_camera,
+            };
+            let seen = on_layers && in_view(&view_proj, o.bounds);
             if !seen {
                 culled += 1;
                 if !o.casts {
@@ -1854,11 +1992,39 @@ impl MapGpu {
                         cutout: p.cutout,
                         distance,
                         queue: p.queue,
+                        mirror: NO_MIRROR,
                     });
                 }
             }
         }
-        pipes.culled.set(culled);
+        if eye.view == 0 {
+            pipes.culled.set(culled);
+            // The mirrors' surfaces, with the blended: the shader's queue
+            // is Transparent. A reflected view draws none: there the
+            // surface lies on the plane the view is cut at.
+            for (i, m) in self.mirrors.iter().enumerate() {
+                let on_camera = self.camera_mask & (1 << m.mirror.layer.min(31)) != 0;
+                if !on_camera || !in_view(&view_proj, m.bounds) {
+                    continue;
+                }
+                pipes.mirror.write(queue, m, view_proj, eye.screen);
+                draws.push(Draw {
+                    buffers: 0,
+                    lightmap: 0,
+                    reflection: 0,
+                    first: 0,
+                    count: 0,
+                    material: 0,
+                    rank: usize::MAX,
+                    blend: 1,
+                    cull: true,
+                    cutout: false,
+                    distance: m.middle.distance(camera.eye),
+                    queue: m.mirror.queue,
+                    mirror: i,
+                });
+            }
+        }
         // Opaque and cut-out first, then blended by queue, far to near.
         draws.sort_by(|a, b| {
             (a.blend > 0).cmp(&(b.blend > 0)).then_with(|| {
@@ -1870,6 +2036,7 @@ impl MapGpu {
             })
         });
         MapFrame {
+            view: eye.view,
             draws,
             casters,
             shadows: !cascades.is_empty(),
@@ -1898,7 +2065,7 @@ impl MapGpu {
             multiview_mask: None,
         });
         let tile = (SHADOW_ATLAS / 2) as f32;
-        for (i, (_, group)) in self.cascades.iter().enumerate() {
+        for (i, (_, group)) in self.views[frame.view].cascades.iter().enumerate() {
             let [ox, oy] = crate::shadow::atlas_origin(i);
             let (x, y) = (ox * SHADOW_ATLAS as f32, oy * SHADOW_ATLAS as f32);
             pass.set_viewport(x, y, tile, tile, 0.0, 1.0);
@@ -1919,7 +2086,7 @@ impl MapGpu {
     /// depth texture, which the screen effects and the characters' shadow
     /// mask read: one camera, one depth, as Unity draws it.
     pub(crate) fn draw_depth(&self, pipes: &Pipelines, pass: &mut wgpu::RenderPass<'_>, frame: &MapFrame) {
-        pass.set_bind_group(0, &self.depth_view.1, &[]);
+        pass.set_bind_group(0, &self.views[frame.view].depth_view.1, &[]);
         for d in frame.draws.iter().take_while(|d| d.blend == 0) {
             pass.set_pipeline(&pipes.depth[&(d.cutout, d.cull)]);
             pass.set_bind_group(1, &self.materials[d.material], &[]);
@@ -1940,12 +2107,13 @@ impl MapGpu {
         pass: &mut wgpu::RenderPass<'_>,
         frame: &MapFrame,
     ) {
-        pass.set_bind_group(0, &self.globals_group, &[]);
+        let view = &self.views[frame.view];
+        pass.set_bind_group(0, &view.globals_group, &[]);
         let solid = frame.draws.iter().take_while(|d| d.blend == 0);
-        self.draw_list(pipes, target, pass, solid);
-        if let Some((_, group)) = &self.sky {
+        self.draw_list(pipes, target, pass, view, solid);
+        if let Some((_, group)) = &view.sky {
             pipes.sky.draw(pass, group, target.color, target.depth);
-            pass.set_bind_group(0, &self.globals_group, &[]);
+            pass.set_bind_group(0, &view.globals_group, &[]);
         }
     }
 
@@ -1957,9 +2125,10 @@ impl MapGpu {
         pass: &mut wgpu::RenderPass<'_>,
         frame: &MapFrame,
     ) {
-        pass.set_bind_group(0, &self.globals_group, &[]);
+        let view = &self.views[frame.view];
+        pass.set_bind_group(0, &view.globals_group, &[]);
         let blended = frame.draws.iter().skip_while(|d| d.blend == 0);
-        self.draw_list(pipes, target, pass, blended);
+        self.draw_list(pipes, target, pass, view, blended);
     }
 
     fn draw_list<'a>(
@@ -1967,9 +2136,18 @@ impl MapGpu {
         pipes: &Pipelines,
         target: Target,
         pass: &mut wgpu::RenderPass<'_>,
+        view: &MapView,
         draws: impl Iterator<Item = &'a Draw>,
     ) {
         for d in draws {
+            if let Some(mirror) = self.mirrors.get(d.mirror) {
+                // Its pipeline has a layout of its own: the map's globals
+                // go back in afterwards.
+                if pipes.mirror.draw(pass, mirror, target.color, target.depth) {
+                    pass.set_bind_group(0, &view.globals_group, &[]);
+                }
+                continue;
+            }
             pass.set_pipeline(&pipes.pipelines[&(target, d.blend, d.cull)]);
             pass.set_bind_group(1, &self.materials[d.material], &[]);
             pass.set_bind_group(2, &self.lightmaps[d.lightmap], &[]);
@@ -2088,6 +2266,15 @@ impl Renderer {
         }
     }
 
+    /// Gives the map that `set_map` uploaded its mirrors, in place of
+    /// those its scene had: for a map whose file holds none, read from the
+    /// game's bundle afterwards.
+    pub fn set_map_mirrors(&mut self, mirrors: &[crate::mirror::MapMirror]) {
+        if let (Some(pipes), Some(map)) = (self.map.as_ref(), self.map_scene.as_mut()) {
+            map.set_mirrors(&self.device, pipes, mirrors);
+        }
+    }
+
     /// The map that is set and shown.
     pub(crate) fn shown_map(&self) -> Option<&MapGpu> {
         self.map_scene.as_ref().filter(|m| m.placement.shown)
@@ -2119,7 +2306,16 @@ impl Renderer {
             fog: gpu.light.fog,
             baked: 1.0,
         };
-        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
+        // The map alone has no reflections drawn: its mirrors stay away.
+        let eye = MapEye {
+            view: 0,
+            eye: crate::mirror::Eye::of(camera),
+            view_proj,
+            aspect,
+            screen: [width as f32, height as f32],
+            mask: None,
+        };
+        let frame = gpu.frame(&self.queue, pipes, &eye, camera, scene);
 
         let size = wgpu::Extent3d {
             width,
