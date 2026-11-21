@@ -27,7 +27,8 @@ struct Globals {
     // Lamps, as the character shaders take them (toon.wgsl), in the
     // map's own space.
     lamps: array<vec4<f32>, 24>,
-    // x: how many lamps
+    // x: how many lamps, y: how much of the map's baked and ambient light
+    // and reflections is kept (1 all, 0 none)
     lamp_info: vec4<f32>,
 }
 
@@ -309,7 +310,7 @@ fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) 
     if (flags & F_NO_REFLECTIONS) == 0u {
         env = environment(r, world, rough);
     }
-    env = env * s.occlusion;
+    env = env * s.occlusion * g.lamp_info.y;
     let a = rough * rough;
     let nv = abs(dot(s.n, -s.eye));
     let surface_reduction = 1.0 / (a * a + 1.0);
@@ -481,6 +482,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         if !lightmapped {
             ambient = max(sh_l0l1(n) + in.ambient_l2, vec3<f32>(0.0));
         }
+        ambient *= g.lamp_info.y;
         let light = g.sun_color.rgb * shade * select(0.0, 1.0, sunlit);
         color = standard(s, in.world, light, ambient) + m.emission.rgb * glow;
     } else {
@@ -493,7 +495,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         if lightmapped {
             indirect = baked;
         }
-        let light = select(indirect + sun, vec3<f32>(1.0), m.params.z > 0.5);
+        indirect *= g.lamp_info.y;
+        // An unlit surface's texture holds its light: it is baked light too.
+        let light = select(indirect + sun, vec3<f32>(g.lamp_info.y), m.params.z > 0.5);
         color = base.rgb * light + m.emission.rgb * glow;
     }
     if g.fog_range.w > 0.5 {

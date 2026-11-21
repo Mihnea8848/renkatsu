@@ -310,7 +310,16 @@ pub enum Content {
         /// camera is outside them, as in CharaStudio.
         #[serde(default = "yes")]
         hide_walls: bool,
+        /// The map's own light, 0 to 1: how much of its baked and ambient
+        /// light, reflections and unlit surfaces is kept. Lower makes the
+        /// room darker, for lamps to light; the lamps keep their strength.
+        #[serde(default = "whole")]
+        light_intensity: f32,
     },
+}
+
+fn whole() -> f32 {
+    1.0
 }
 
 /// A map's time of day: its sun, sky and light. A map has some of them.
@@ -417,6 +426,7 @@ impl Content {
             map,
             time,
             hide_walls: true,
+            light_intensity: 1.0,
         }
     }
 
@@ -2706,6 +2716,7 @@ kind = "map"
                 map: PathBuf::new(),
                 time: MapTime::Day,
                 hide_walls: true,
+                light_intensity: 1.0,
             }
         );
     }

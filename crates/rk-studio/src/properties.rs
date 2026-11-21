@@ -855,7 +855,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Map { map, time, hide_walls } => {
+            Content::Map {
+                map,
+                time,
+                hide_walls,
+                light_intensity,
+            } => {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
                 let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
@@ -907,6 +912,19 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         .then_some("This map has no walls that hide");
                     row(ui, k, "Hide walls", none, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
+                    });
+                    row(ui, k, "Light intensity", None, |ui, rect| {
+                        widgets::number(
+                            ui,
+                            k,
+                            rect,
+                            id.with("map light"),
+                            light_intensity,
+                            Marker::None,
+                            true,
+                            FINE,
+                        );
+                        *light_intensity = light_intensity.clamp(0.0, 1.0);
                     });
                     section_end(ui, k);
                 }

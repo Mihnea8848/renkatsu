@@ -1285,6 +1285,9 @@ impl MapPlacement {
 pub(crate) struct SceneLight<'a> {
     pub lamps: &'a [crate::Lamp],
     pub fog: Option<Fog>,
+    /// How much of the map's baked and ambient light and reflections is
+    /// kept, 0 to 1.
+    pub baked: f32,
 }
 
 pub(crate) struct MapGpu {
@@ -1701,7 +1704,7 @@ impl MapGpu {
         aspect: f32,
         scene: SceneLight<'_>,
     ) -> MapFrame {
-        let SceneLight { lamps, fog } = scene;
+        let SceneLight { lamps, fog, baked } = scene;
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
         // by the view.
@@ -1749,7 +1752,8 @@ impl MapGpu {
                 ..*l
             })
             .collect();
-        let (lamp_rows, lamp_info) = crate::lamp_rows(&local, u32::MAX);
+        let (lamp_rows, mut lamp_info) = crate::lamp_rows(&local, u32::MAX);
+        lamp_info[1] = baked;
         let globals = Globals {
             lamps: lamp_rows,
             lamp_info,
@@ -2113,6 +2117,7 @@ impl Renderer {
         let scene = SceneLight {
             lamps: &[],
             fog: gpu.light.fog,
+            baked: 1.0,
         };
         let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
 

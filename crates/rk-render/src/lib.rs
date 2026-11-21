@@ -321,6 +321,9 @@ pub struct Environment {
     pub lamps: Vec<Lamp>,
     /// Lamps that light the map, with its sun.
     pub map_lamps: Vec<Lamp>,
+    /// How much of the map's baked and ambient light and reflections is
+    /// kept, 0 to 1: a room made darker for lamps to light.
+    pub map_light_intensity: f32,
     /// The lamps each mesh takes, a bit each by their place in `lamps`,
     /// by its place in the draws; a mesh not listed takes them all.
     pub draw_lamps: Vec<u32>,
@@ -354,6 +357,7 @@ impl Default for Environment {
             draw_lights: Vec::new(),
             lamps: Vec::new(),
             map_lamps: Vec::new(),
+            map_light_intensity: 1.0,
             draw_lamps: Vec::new(),
         }
     }
@@ -1721,6 +1725,7 @@ impl Renderer {
                 let scene = map::SceneLight {
                     lamps: &env.map_lamps,
                     fog: map_fog,
+                    baked: env.map_light_intensity,
                 };
                 let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, scene);
                 gpu.shadow_pass(pipes, &mut encoder, &frame);

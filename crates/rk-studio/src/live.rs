@@ -980,7 +980,9 @@ impl Live {
     /// is set stays until the one replacing it is built.
     fn follow_map(&mut self, scene: &Scene, project: &Project, jobs: &mut Jobs, log: &mut Log) {
         let wanted = scene.objects().iter().find_map(|o| match &o.content {
-            Content::Map { map, time, hide_walls } if !map.as_os_str().is_empty() => Some((
+            Content::Map {
+                map, time, hide_walls, ..
+            } if !map.as_os_str().is_empty() => Some((
                 o,
                 MapRecipe {
                     sidecar: project.resolve(map),
@@ -1225,6 +1227,10 @@ impl Live {
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
         let mut effects = scene_effects(scene, self.filters.as_ref(), self.map_filter());
+        let baked = scene.objects().iter().find_map(|o| match &o.content {
+            Content::Map { light_intensity, .. } if scene.shown(o.id) => Some(*light_intensity),
+            _ => None,
+        });
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1233,6 +1239,7 @@ impl Live {
             alpha_to_coverage: self.smooth_edges,
             ..Default::default()
         };
+        env.map_light_intensity = baked.unwrap_or(1.0);
         match scene.key_light() {
             Some(light) => {
                 if let Content::Light {
