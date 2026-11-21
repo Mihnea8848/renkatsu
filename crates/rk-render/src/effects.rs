@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
 use rk_chara::Image;
 use wgpu::util::DeviceExt;
 
@@ -104,6 +105,63 @@ impl Default for Vignette {
     }
 }
 
+/// `RenderSettings.fogMode` with the numbers each mode reads, which
+/// GlobalFog takes from the scene.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FogMode {
+    /// `FogMode.Linear`: what a map with a `SunLightInfo` sets, with the
+    /// map's start and end distance.
+    Linear { start: f32, end: f32 },
+    /// `FogMode.Exponential`.
+    Exponential { density: f32 },
+    /// `FogMode.ExponentialSquared`: the Studio scene's own, density 0.01.
+    ExponentialSquared { density: f32 },
+}
+
+/// GlobalFog (`UnityStandardAssets.ImageEffects.GlobalFog`) as the Studio
+/// camera carries it (`CharaStudio_Data/level1`, MonoBehaviour 8974):
+/// height fog on, distance fog off, radial distance on, height density
+/// 0.001. CharaStudio's Fog panel writes the colour, `height` and
+/// `start_distance` (`SystemButtonCtrl.FogInfo`); the rest never changes
+/// in the Studio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fog {
+    /// `RenderSettings.fogColor`, sRGB as the scene stores it.
+    pub color: [f32; 3],
+    /// The fog's top, a world height (0 to 50 in the Studio).
+    pub height: f32,
+    /// Pushes the fog away from the camera (0 to 50 in the Studio).
+    pub start_distance: f32,
+    pub height_density: f32,
+    pub height_fog: bool,
+    pub distance_fog: bool,
+    /// Distance fog by the distance to the eye, not by depth.
+    pub radial: bool,
+    pub mode: FogMode,
+    /// The Studio camera's clip planes. GlobalFog takes a pixel nothing
+    /// was drawn on as lying on the far plane, and distance fog starts at
+    /// the near plane.
+    pub camera_near: f32,
+    pub camera_far: f32,
+}
+
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: [137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0],
+            height: 1.0,
+            start_distance: 0.0,
+            height_density: 0.001,
+            height_fog: true,
+            distance_fog: false,
+            radial: true,
+            mode: FogMode::ExponentialSquared { density: 0.01 },
+            camera_near: 0.06,
+            camera_far: 1000.0,
+        }
+    }
+}
+
 /// The screen effects of a CharaStudio scene. `None` switches one off.
 #[derive(Debug, Clone, Default)]
 pub struct StudioEffects {
@@ -111,6 +169,8 @@ pub struct StudioEffects {
     pub bloom: Option<Bloom>,
     pub color: Option<ColorFilter>,
     pub vignette: Option<Vignette>,
+    /// GlobalFog. Off in a new scene.
+    pub fog: Option<Fog>,
     /// A plain colour (sRGB) for the parts of the picture where nothing
     /// was drawn, kept out of the effects: the editor's grey when the
     /// scene has no map. `None` puts the effects on the whole picture, as
@@ -131,6 +191,7 @@ impl StudioEffects {
                 blend: 0.0,
             }),
             vignette: Some(Vignette::default()),
+            fog: None,
             backdrop: None,
         }
     }
@@ -280,6 +341,76 @@ pub fn filter_color(filter: &ColorFilter, linear: [f32; 3]) -> [f32; 3] {
     [0, 1, 2].map(|i| to_linear(a[i] + (b[i] - a[i]) * f))
 }
 
+/// `_HeightParams` as `GlobalFog.OnRenderImage` sets it: the fog's top,
+/// the camera's height over it, whether the camera is inside the fog, and
+/// half the height density.
+pub fn fog_height_params(fog: &Fog, camera_y: f32) -> [f32; 4] {
+    let over = camera_y - fog.height;
+    [
+        fog.height,
+        over,
+        if over <= 0.0 { 1.0 } else { 0.0 },
+        fog.height_density * 0.5,
+    ]
+}
+
+/// `_SceneFogMode.x` and `_SceneFogParams`: the scene's fog mode as a
+/// number, and its density over the square root of ln 2, its density over
+/// ln 2, and the linear mode's slope and offset.
+pub fn fog_scene_params(mode: FogMode) -> (f32, [f32; 4]) {
+    // The component writes 1.442695f, which is this number as a float.
+    use std::f32::consts::LOG2_E;
+    match mode {
+        FogMode::Linear { start, end } => {
+            let range = end - start;
+            let inv = if range.abs() > 0.0001 { 1.0 / range } else { 0.0 };
+            (1.0, [0.0, 0.0, -inv, end * inv])
+        }
+        FogMode::Exponential { density } => (2.0, [density * 1.201_122_4, density * LOG2_E, 0.0, 0.0]),
+        FogMode::ExponentialSquared { density } => (3.0, [density * 1.201_122_4, density * LOG2_E, 0.0, 0.0]),
+    }
+}
+
+/// How much of the picture GlobalFog keeps at a point, 1 for no fog
+/// (Hidden/GlobalFog, programs 0, 2 and 3: distance, both, height).
+/// `v` goes from the camera to the point and `eye_depth` is the point's
+/// depth along the view.
+pub fn fog_factor(fog: &Fog, camera_y: f32, v: [f32; 3], eye_depth: f32) -> f32 {
+    let length = |s: f32| ((v[0] * s).powi(2) + (v[1] * s).powi(2) + (v[2] * s).powi(2)).sqrt();
+    let mut g = -fog.start_distance.max(0.0);
+    if fog.distance_fog {
+        let distance = if fog.radial { length(1.0) } else { eye_depth };
+        g += distance - fog.camera_near;
+    }
+    if fog.height_fog {
+        let [top, over, inside, density] = fog_height_params(fog, camera_y);
+        let point_over = v[1] + camera_y - top;
+        let c1 = inside * (point_over + over);
+        let c2 = ((1.0 - 2.0 * inside) * point_over).min(0.0);
+        g += -length(density) * (c1 - c2 * c2 / (v[1] + 1.0e-5).abs());
+    }
+    let g = g.max(0.0);
+    let (mode, p) = fog_scene_params(fog.mode);
+    let factor = if mode == 1.0 {
+        g * p[2] + p[3]
+    } else if mode == 2.0 {
+        (-g * p[1]).exp2()
+    } else {
+        (-(g * p[0]).powi(2)).exp2()
+    };
+    factor.clamp(0.0, 1.0)
+}
+
+/// GlobalFog's rays, as its `_FrustumCornersWS` gives them between the
+/// corners: the way from the camera to a pixel's point for one unit of
+/// eye depth is `z + x * ndc.x + y * ndc.y`.
+pub fn fog_rays(forward: Vec3, fov_y_deg: f32, aspect: f32) -> [Vec3; 3] {
+    let right = Vec3::Y.cross(forward).normalize_or_zero();
+    let up = forward.cross(right);
+    let tan = (fov_y_deg.to_radians() * 0.5).tan();
+    [right * tan * aspect, up * tan, forward]
+}
+
 /// `Fx` in `effects.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -292,6 +423,13 @@ struct FxUniform {
     uv_to_view: [f32; 4],
     bloom: [f32; 4],
     vignette: [f32; 4],
+    fog_color: [f32; 4],
+    fog_height: [f32; 4],
+    fog_distance: [f32; 4],
+    fog_scene: [f32; 4],
+    fog_ray_x: [f32; 4],
+    fog_ray_y: [f32; 4],
+    fog_ray_z: [f32; 4],
     rand: [[f32; 4]; 16],
 }
 
@@ -303,6 +441,9 @@ pub(crate) struct Frame<'a> {
     pub fov_y_deg: f32,
     pub near: f32,
     pub far: f32,
+    /// Where the camera is and where it looks, in the world.
+    pub eye: Vec3,
+    pub forward: Vec3,
     /// The camera's depth texture.
     pub depth: &'a wgpu::TextureView,
     /// The depth aspect of the main pass's multisampled depth, which tells
@@ -320,6 +461,12 @@ impl Frame<'_> {
         let ao = self.fx.ao.clone().unwrap_or_default();
         let bias = ao.bias.clamp(0.0, 1.0);
         let bloom = self.fx.bloom.as_ref();
+        let fog = self.fx.fog.clone().unwrap_or_default();
+        let [ray_x, ray_y, ray_z] = fog_rays(self.forward, self.fov_y_deg, w / h);
+        let (fog_mode, fog_scene) = fog_scene_params(fog.mode);
+        let fog_flags = u8::from(fog.distance_fog) | u8::from(fog.radial) << 1 | u8::from(fog.height_fog) << 2;
+        // A colour, which Unity hands to shaders linearised.
+        let fog_color = crate::material::linear([fog.color[0], fog.color[1], fog.color[2], 1.0]);
         FxUniform {
             size: [w, h, 1.0 / w, 1.0 / h],
             src: [0.0; 4],
@@ -342,6 +489,18 @@ impl Frame<'_> {
                 let blend = self.fx.color.as_ref().map_or(0.0, |c| c.blend.clamp(0.0, 1.0));
                 [i, b, blend, 0.0]
             },
+            fog_color,
+            fog_height: fog_height_params(&fog, self.eye.y),
+            fog_distance: [
+                -fog.start_distance.max(0.0),
+                fog.camera_far,
+                fog_mode,
+                f32::from(fog_flags),
+            ],
+            fog_scene,
+            fog_ray_x: [ray_x.x, ray_x.y, ray_x.z, self.eye.y],
+            fog_ray_y: [ray_y.x, ray_y.y, ray_y.z, 0.0],
+            fog_ray_z: [ray_z.x, ray_z.y, ray_z.z, fog.camera_near],
             rand: random_data(),
         }
     }
@@ -371,6 +530,7 @@ pub(crate) struct Gpu {
     sampler: wgpu::Sampler,
     pipelines: HashMap<(&'static str, wgpu::TextureFormat), wgpu::RenderPipeline>,
     ao_apply: wgpu::RenderPipeline,
+    fog_apply: wgpu::RenderPipeline,
     backdrop_layout: wgpu::BindGroupLayout,
     backdrop: wgpu::RenderPipeline,
     targets: Option<Targets>,
@@ -501,6 +661,25 @@ impl Gpu {
             }),
             samples,
         );
+        // GlobalFog writes lerp(fog colour, picture, factor): the fog colour
+        // over the picture by what the factor leaves out. The fog colour's
+        // alpha is 1.
+        let fog_apply = make(
+            "fs_fog",
+            wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+            Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            samples,
+        );
         let backdrop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("backdrop"),
             entries: &[
@@ -567,6 +746,7 @@ impl Gpu {
             sampler,
             pipelines,
             ao_apply,
+            fog_apply,
             backdrop_layout,
             backdrop,
             targets: None,
@@ -752,6 +932,14 @@ impl Gpu {
             f.white,
         );
         Some((&self.ao_apply, self.group(device, f, base, &t.ao[0], f.white)))
+    }
+
+    /// The pipeline and bind group that lay GlobalFog over the camera's
+    /// target from the depth texture, after the solid queues and the sky
+    /// (`[ImageEffectOpaque]`); `None` when fog is off.
+    pub fn fog(&self, device: &wgpu::Device, f: &Frame) -> Option<(&wgpu::RenderPipeline, wgpu::BindGroup)> {
+        f.fx.fog.as_ref()?;
+        Some((&self.fog_apply, self.group(device, f, f.uniform(), f.white, f.white)))
     }
 
     /// Runs bloom, the colour table and the vignette on the resolved HDR
@@ -983,8 +1171,8 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader() {
-        // Eight vectors and the sixteen random pixels.
-        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 16) * 16);
+        // Eight vectors, the fog's seven and the sixteen random pixels.
+        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 7 + 16) * 16);
     }
 
     #[test]
@@ -1007,6 +1195,121 @@ mod tests {
                 blur_spread: 0.75
             }
         );
+    }
+
+    #[test]
+    fn fog_is_the_studio_cameras_component() {
+        // CharaStudio_Data/level1, GlobalFog 8974 and the RenderSettings.
+        let fog = Fog::default();
+        assert!(fog.height_fog && !fog.distance_fog && fog.radial);
+        assert_eq!((fog.height, fog.height_density, fog.start_distance), (1.0, 0.001, 0.0));
+        assert_eq!(fog.mode, FogMode::ExponentialSquared { density: 0.01 });
+        assert_eq!((fog.camera_near, fog.camera_far), (0.06, 1000.0));
+        assert!(StudioEffects::studio(None).fog.is_none());
+    }
+
+    #[test]
+    fn fog_parameters_follow_the_component() {
+        let fog = Fog {
+            height: 50.0,
+            ..Fog::default()
+        };
+        // Inside the fog the third number is 1.
+        assert_eq!(fog_height_params(&fog, 1.0), [50.0, -49.0, 1.0, 0.0005]);
+        assert_eq!(fog_height_params(&fog, 60.0), [50.0, 10.0, 0.0, 0.0005]);
+        let (mode, p) = fog_scene_params(FogMode::Linear {
+            start: 10.0,
+            end: 110.0,
+        });
+        assert_eq!(mode, 1.0);
+        assert!((p[2] + 0.01).abs() < 1e-7 && (p[3] - 1.1).abs() < 1e-6, "{p:?}");
+        // A range of nothing gives no slope, as the component guards it.
+        assert_eq!(fog_scene_params(FogMode::Linear { start: 5.0, end: 5.0 }).1, [0.0; 4]);
+        let (mode, p) = fog_scene_params(FogMode::ExponentialSquared { density: 0.01 });
+        assert_eq!(mode, 3.0);
+        assert!((p[0] - 0.012_011_224).abs() < 1e-8 && (p[1] - 0.014_426_95).abs() < 1e-8);
+        assert_eq!(fog_scene_params(FogMode::Exponential { density: 0.01 }).0, 2.0);
+        assert_eq!("1.442695".parse::<f32>(), Ok(std::f32::consts::LOG2_E));
+    }
+
+    #[test]
+    fn height_fog_thickens_with_the_way_through_it() {
+        // The camera inside the fog, 49 under its top, and a point 10 away
+        // at the same height: g = 0.0005 * 10 * (49 + 49) = 0.49.
+        let inside = Fog {
+            height: 50.0,
+            mode: FogMode::Linear { start: 0.0, end: 300.0 },
+            ..Fog::default()
+        };
+        let f = fog_factor(&inside, 1.0, [0.0, 0.0, 10.0], 10.0);
+        assert!((f - (300.0 - 0.49) / 300.0).abs() < 1e-6, "{f}");
+        // The start distance is taken off before the fog's curve.
+        let pushed = Fog {
+            start_distance: 0.2,
+            ..inside.clone()
+        };
+        let f = fog_factor(&pushed, 1.0, [0.0, 0.0, 10.0], 10.0);
+        assert!((f - (300.0 - 0.29) / 300.0).abs() < 1e-6, "{f}");
+        // Exponential squared, the Studio's own mode: exp(-(0.01 g)^2).
+        let squared = Fog {
+            height: 50.0,
+            ..Fog::default()
+        };
+        let f = fog_factor(&squared, 1.0, [0.0, 0.0, 1000.0], 1000.0);
+        assert!((f - (-(0.49f32).powi(2)).exp()).abs() < 1e-5, "{f}");
+        let exponential = Fog {
+            mode: FogMode::Exponential { density: 0.01 },
+            ..squared.clone()
+        };
+        let f = fog_factor(&exponential, 1.0, [0.0, 0.0, 1000.0], 1000.0);
+        assert!((f - (-0.49f32).exp()).abs() < 1e-5, "{f}");
+        // The camera over the fog: a point over it too is clear, one under
+        // it has g = |aV| * depth under the top squared / |V.y|.
+        let over = Fog {
+            mode: FogMode::Linear { start: 0.0, end: 1.0 },
+            ..Fog::default()
+        };
+        assert_eq!(fog_factor(&over, 2.0, [3.0, -0.5, 0.0], 3.0), 1.0);
+        let f = fog_factor(&over, 2.0, [3.0, -2.0, 0.0], 3.0);
+        let g = 0.0005 * 13f32.sqrt() * 1.0 / (2.0 - 1.0e-5);
+        assert!((f - (1.0 - g)).abs() < 1e-6, "{f}");
+    }
+
+    #[test]
+    fn fog_rays_reach_the_point_a_pixel_shows() {
+        let (eye, target) = (Vec3::new(1.0, 1.5, -3.0), Vec3::new(0.2, 0.9, 0.0));
+        let forward = (target - eye).normalize();
+        let (fov, aspect) = (23.0f32, 16.0 / 9.0);
+        let view = glam::Mat4::look_at_lh(eye, target, Vec3::Y);
+        let proj = glam::Mat4::perspective_lh(fov.to_radians(), aspect, 0.06, 1000.0);
+        let [x, y, z] = fog_rays(forward, fov, aspect);
+        for point in [Vec3::new(0.5, 0.0, 0.3), Vec3::new(-0.4, 1.7, 1.0)] {
+            let ndc = (proj * view).project_point3(point);
+            let depth = view.transform_point3(point).z;
+            let reached = eye + (z + x * ndc.x + y * ndc.y) * depth;
+            assert!((reached - point).length() < 1e-4, "{reached} {point}");
+        }
+    }
+
+    #[test]
+    fn distance_fog_counts_from_the_near_plane() {
+        // Hidden/GlobalFog programs 0 and 2, which the Studio leaves off.
+        let fog = Fog {
+            height_fog: false,
+            distance_fog: true,
+            mode: FogMode::Linear { start: 0.0, end: 100.0 },
+            ..Fog::default()
+        };
+        let f = fog_factor(&fog, 1.0, [3.0, 0.0, 4.0], 4.0);
+        assert!((f - (100.0 - (5.0 - 0.06)) / 100.0).abs() < 1e-6, "{f}");
+        let by_depth = Fog {
+            radial: false,
+            ..fog.clone()
+        };
+        let f = fog_factor(&by_depth, 1.0, [3.0, 0.0, 4.0], 4.0);
+        assert!((f - (100.0 - (4.0 - 0.06)) / 100.0).abs() < 1e-6, "{f}");
+        // Past the end everything is fog.
+        assert_eq!(fog_factor(&fog, 1.0, [0.0, 0.0, 500.0], 500.0), 0.0);
     }
 
     #[test]

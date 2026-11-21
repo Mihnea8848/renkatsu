@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
 // CharaStudio's screen effects, in the order its camera runs them: Amplify
-// Occlusion, BloomAndFlares, Amplify Color and VignetteAndChromaticAberration.
+// Occlusion, GlobalFog, BloomAndFlares, Amplify Color and VignetteAndChromaticAberration.
 // Each function follows the game's compiled shader program named above it.
 
 struct Fx {
@@ -23,6 +23,22 @@ struct Fx {
     // Intensity and blur, as the material gets them. z: the colour
     // table's blend amount.
     vignette: vec4f,
+    // GlobalFog. The fog colour, linear.
+    fog_color: vec4f,
+    // _HeightParams: the fog's top, the camera's height over it, 1 when the
+    // camera is inside the fog, half the height density.
+    fog_height: vec4f,
+    // _DistanceParams.x, the eye depth of a pixel nothing was drawn on,
+    // _SceneFogMode.x, and which fogs are on: 1 distance, 2 radial, 4 height.
+    fog_distance: vec4f,
+    // _SceneFogParams.
+    fog_scene: vec4f,
+    // The world ray of a pixel for one unit of eye depth is
+    // z + x * ndc.x + y * ndc.y. x.w: the camera's height. z.w: the
+    // game camera's near plane.
+    fog_ray_x: vec4f,
+    fog_ray_y: vec4f,
+    fog_ray_z: vec4f,
     // The 4 by 4 random texture: cosine, sine and a ray offset.
     rand: array<vec4f, 16>,
 }
@@ -151,6 +167,61 @@ fn fs_ao_apply(in: FxOut) -> @location(0) vec4f {
     let occlusion = textureLoad(tex_a, vec2i(in.pos.xy), 0).x;
     let tint = mix(fx.levels.rgb, vec3f(1.0), occlusion);
     return vec4f(vec3f(1.0) + fx.levels.a * (tint - vec3f(1.0)), 1.0);
+}
+
+// ---- GlobalFog ----
+
+// Hidden/GlobalFog, programs 0 (pass 1, distance), 2 (pass 0, both) and 3
+// (pass 2, height: the one the Studio camera runs). The three differ only
+// in which terms they add to g. `v` goes from the camera to the point.
+fn fog_factor(v: vec3f, depth: f32) -> f32 {
+    let flags = u32(fx.fog_distance.w);
+    var g = fx.fog_distance.x;
+    if (flags & 1u) != 0u {
+        var d = depth;
+        if (flags & 2u) != 0u {
+            d = length(v);
+        }
+        g += d - fx.fog_ray_z.w;
+    }
+    if (flags & 4u) != 0u {
+        let hp = fx.fog_height;
+        let point_over = v.y + fx.fog_ray_x.w - hp.x;
+        let c1 = hp.z * (point_over + hp.y);
+        let c2 = min((1.0 - 2.0 * hp.z) * point_over, 0.0);
+        g += -length(v * hp.w) * (c1 - c2 * c2 / abs(v.y + 1.0e-5));
+    }
+    g = max(g, 0.0);
+    let mode = fx.fog_distance.z;
+    var f = 0.0;
+    if mode == 1.0 {
+        f = g * fx.fog_scene.z + fx.fog_scene.w;
+    } else if mode == 2.0 {
+        f = exp2(-g * fx.fog_scene.y);
+    } else if mode == 3.0 {
+        let e = g * fx.fog_scene.x;
+        f = exp2(-e * e);
+    }
+    return saturate(f);
+}
+
+// The pass writes lerp(unity_FogColor, picture, factor); here the fog
+// colour is blended over the picture by one minus the factor. The game's
+// far-pixel test compares the raw depth with 1, which its reversed depth
+// only has on the near plane, so the sky is fogged as a point on the far
+// plane: a pixel nothing was drawn on takes the game camera's far plane.
+@fragment
+fn fs_fog(in: FxOut) -> @location(0) vec4f {
+    let z = textureLoad(depth_tex, vec2i(in.pos.xy), 0);
+    let near = fx.ao2.z;
+    let far = fx.ao2.w;
+    var depth = near * far / (far - z * (far - near));
+    if z >= 1.0 {
+        depth = fx.fog_distance.y;
+    }
+    let ndc = vec2f(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let ray = fx.fog_ray_z.xyz + fx.fog_ray_x.xyz * ndc.x + fx.fog_ray_y.xyz * ndc.y;
+    return vec4f(fx.fog_color.rgb, 1.0 - fog_factor(ray * depth, depth));
 }
 
 // ---- BloomAndFlares ----
