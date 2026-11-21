@@ -143,6 +143,8 @@ pub struct Fog {
     /// the near plane.
     pub camera_near: f32,
     pub camera_far: f32,
+    /// Take the map's own fog colour, when a map with fog is shown.
+    pub color_from_map: bool,
 }
 
 impl Default for Fog {
@@ -158,6 +160,7 @@ impl Default for Fog {
             mode: FogMode::ExponentialSquared { density: 0.01 },
             camera_near: 0.06,
             camera_far: 1000.0,
+            color_from_map: false,
         }
     }
 }

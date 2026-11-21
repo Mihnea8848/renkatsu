@@ -524,6 +524,11 @@ impl LightKind {
 /// it is put in another.
 pub const EVERYONE: &str = "Everyone";
 
+/// The top of a new Fog, as CharaStudio's panel starts.
+fn fog_height() -> f32 {
+    1.0
+}
+
 /// CharaStudio's colour filters, in the order of its list (`Filter_00`).
 pub const FILTERS: [&str; 17] = [
     "Day",
@@ -569,10 +574,15 @@ pub enum Effect {
         intensity: f32,
         blur: f32,
     },
+    /// CharaStudio's Fog: its colour (none for the map's own), the
+    /// fog's top as a height, and how far from the camera it starts.
     Fog {
-        color: [f32; 3],
-        start: f32,
-        end: f32,
+        #[serde(default)]
+        color: Option<[f32; 3]>,
+        #[serde(default = "fog_height")]
+        height: f32,
+        #[serde(default)]
+        start_distance: f32,
     },
     DepthOfField {
         focus: f32,
@@ -610,9 +620,9 @@ impl Effect {
                 blur: vignette.blur,
             },
             Effect::Fog {
-                color: [0.75, 0.8, 0.85],
-                start: 10.0,
-                end: 100.0,
+                color: Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]),
+                height: fog_height(),
+                start_distance: 0.0,
             },
             Effect::DepthOfField {
                 focus: 3.0,
@@ -627,10 +637,7 @@ impl Effect {
 
     /// Whether the renderer draws the effect yet.
     pub fn drawn(&self) -> bool {
-        !matches!(
-            self,
-            Effect::Fog { .. } | Effect::DepthOfField { .. } | Effect::SunShafts { .. }
-        )
+        !matches!(self, Effect::DepthOfField { .. } | Effect::SunShafts { .. })
     }
 
     pub fn glyph(&self) -> &'static str {
@@ -1662,6 +1669,13 @@ impl Document {
             object.parent = Some(parent);
         }
         id
+    }
+
+    /// Hides an object in the same step of the history as the one before.
+    pub fn hide_now(&mut self, id: ObjectId) {
+        if let Some(object) = self.scene.get_mut(id) {
+            object.visible = false;
+        }
     }
 
     /// Adds an object and selects it. A folder goes beside the selection;

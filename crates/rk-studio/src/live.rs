@@ -1610,6 +1610,22 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i3
                     ..Vignette::default()
                 });
             }
+            Effect::Fog {
+                color,
+                height,
+                start_distance,
+            } if fx.fog.is_none() => {
+                // Without a map, the Studio scene's own fog mode; with a
+                // map that has fog, the renderer takes the map's.
+                let first = rk_render::effects::Fog::default();
+                fx.fog = Some(rk_render::effects::Fog {
+                    color: color.unwrap_or(first.color),
+                    color_from_map: color.is_none(),
+                    height,
+                    start_distance,
+                    ..first
+                });
+            }
             _ => {}
         }
     }
@@ -1619,6 +1635,29 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map_filter: Option<i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fog_that_shows_turns_the_studios_fog_on() {
+        let mut scene = Scene::empty();
+        assert!(scene_effects(&scene, None, None).fog.is_none());
+        let fog = scene.add(
+            "Fog",
+            Content::Effect {
+                effect: Effect::Fog {
+                    color: None,
+                    height: 5.0,
+                    start_distance: 2.0,
+                },
+            },
+            None,
+        );
+        let fx = scene_effects(&scene, None, None).fog.expect("on");
+        assert!(fx.color_from_map);
+        assert_eq!((fx.height, fx.start_distance), (5.0, 2.0));
+        // Hidden, it is off, as a map's own starts.
+        scene.get_mut(fog).unwrap().visible = false;
+        assert!(scene_effects(&scene, None, None).fog.is_none());
+    }
     use crate::scene::{Effect, MapTime};
 
     fn table(name: &str) -> Arc<Image> {

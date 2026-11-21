@@ -1684,9 +1684,41 @@ impl Renderer {
         if let Some(pipes) = self.map.as_mut() {
             pipes.prepare(&self.device, map_target);
         }
+        // The Studio's fog over a map with fog data: the map's linear fog,
+        // from the scene's start, as `SunLightInfo.SetFog` and the Fog panel
+        // leave it; the map's colour when asked for.
+        let shown_fog = self
+            .map_scene
+            .as_ref()
+            .filter(|m| m.placement.shown)
+            .and_then(|m| m.light.fog);
+        let fx_resolved = env.effects.clone().map(|mut fx| {
+            if let (Some(f), Some(own)) = (fx.fog.as_mut(), shown_fog) {
+                f.mode = effects::FogMode::Linear {
+                    start: f.start_distance,
+                    end: own.end,
+                };
+                if f.color_from_map {
+                    f.color = own.color.map(effects::to_gamma);
+                }
+            }
+            fx
+        });
+        let scene_fog = fx_resolved.as_ref().and_then(|fx| fx.fog.clone());
         let map_frame = match (self.map.as_ref(), self.map_scene.as_ref().filter(|m| m.placement.shown)) {
             (Some(pipes), Some(gpu)) => {
-                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &env.map_lamps);
+                // The scene's Fog switches the map's own fog too, in its
+                // colour and from its start, to the map's end.
+                let map_fog = scene_fog.as_ref().and_then(|f| {
+                    let own = gpu.light.fog?;
+                    let [r, g, b, _] = material::linear([f.color[0], f.color[1], f.color[2], 1.0]);
+                    Some(map::Fog {
+                        color: [r, g, b],
+                        start: f.start_distance,
+                        end: own.end,
+                    })
+                });
+                let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &env.map_lamps, map_fog);
                 gpu.shadow_pass(pipes, &mut encoder, &frame);
                 Some((pipes, gpu, frame))
             }
@@ -1935,7 +1967,7 @@ impl Renderer {
         let hdr_views = fx_gpu
             .as_mut()
             .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT));
-        let fx_frame = env.effects.as_ref().map(|fx| effects::Frame {
+        let fx_frame = fx_resolved.as_ref().map(|fx| effects::Frame {
             fx,
             width,
             height,

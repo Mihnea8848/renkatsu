@@ -2072,6 +2072,14 @@ impl State {
                     blend: 0.0,
                 };
                 self.doc.add_under(effect.label(), Content::Effect { effect }, id);
+                // Its fog, off as a new CharaStudio scene leaves it.
+                let fog = crate::scene::Effect::Fog {
+                    color: None,
+                    height: 1.0,
+                    start_distance: 0.0,
+                };
+                let fog_id = self.doc.add_under(fog.label(), Content::Effect { effect: fog }, id);
+                self.doc.hide_now(fog_id);
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

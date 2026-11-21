@@ -805,10 +805,27 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             number(ui, "Intensity", intensity, 0.0, 1.0);
                             number(ui, "Blur", blur, 0.0, 1.0);
                         }
-                        Effect::Fog { color, start, end } => {
-                            color_row(ui, k, id, color);
-                            number(ui, "Start", start, 0.0, 1000.0);
-                            number(ui, "End", end, 0.0, 1000.0);
+                        Effect::Fog {
+                            color,
+                            height,
+                            start_distance,
+                        } => {
+                            row(ui, k, "Colour", None, |ui, rect| {
+                                let mut chosen = usize::from(color.is_some());
+                                widgets::combo(ui, k, rect, id.with("fog colour"), &mut chosen, &["Map's own", "Own"]);
+                                if chosen == 0 {
+                                    *color = None;
+                                } else if color.is_none() {
+                                    *color = Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]);
+                                }
+                            });
+                            if let Some(own) = color {
+                                row(ui, k, "", None, |ui, rect| {
+                                    widgets::color_field(ui, k, rect, id.with("fog own"), own);
+                                });
+                            }
+                            number(ui, "Height", height, 0.0, 50.0);
+                            number(ui, "Start", start_distance, 0.0, 50.0);
                         }
                         Effect::DepthOfField { focus, aperture } => {
                             number(ui, "Focus", focus, 0.0, 1000.0);

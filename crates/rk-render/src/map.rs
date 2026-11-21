@@ -1283,7 +1283,7 @@ impl MapPlacement {
 pub(crate) struct MapGpu {
     /// Where the map stands, set by `Renderer::place_map`.
     pub(crate) placement: MapPlacement,
-    light: MapLight,
+    pub(crate) light: MapLight,
     /// The lowest and highest corner of everything drawn.
     bounds: (Vec3, Vec3),
     vanish: Vec<VanishVolume>,
@@ -1693,6 +1693,7 @@ impl MapGpu {
         view_proj: Mat4,
         aspect: f32,
         lamps: &[crate::Lamp],
+        fog: Option<Fog>,
     ) -> MapFrame {
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
@@ -1701,7 +1702,10 @@ impl MapGpu {
         let camera = &self.placement.camera_in_map(world_camera);
         let view_proj = view_proj * self.placement.rigid();
         let l = &self.light;
-        let fog = l.fog.unwrap_or(Fog {
+        // The material fog the scene asks for, not the map's own: in
+        // CharaStudio the Fog tick box switches it.
+        let lit_fog = fog;
+        let fog = lit_fog.unwrap_or(Fog {
             color: [0.0; 3],
             start: 0.0,
             end: 1.0,
@@ -1718,7 +1722,7 @@ impl MapGpu {
             sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
             sh: l.ambient_sh,
             fog_color: [fog.color[0], fog.color[1], fog.color[2], 1.0],
-            fog_range: [fog.start, fog.end, 0.0, if l.fog.is_some() { 1.0 } else { 0.0 }],
+            fog_range: [fog.start, fog.end, 0.0, if lit_fog.is_some() { 1.0 } else { 0.0 }],
             indirect_spec: [
                 l.indirect_specular[0],
                 l.indirect_specular[1],
@@ -2099,7 +2103,7 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, gpu.far(camera));
         let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
-        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &[]);
+        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &[], gpu.light.fog);
 
         let size = wgpu::Extent3d {
             width,
