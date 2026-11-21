@@ -396,6 +396,8 @@ struct FrameReport {
     last: std::time::Instant,
     /// When each long frame started, in seconds, and how long it took.
     long: Vec<(f32, f32)>,
+    /// Every frame's time after the first seconds, which load the scene.
+    settled: Vec<f32>,
 }
 
 impl FrameReport {
@@ -405,6 +407,7 @@ impl FrameReport {
             start: now,
             last: now,
             long: Vec::new(),
+            settled: Vec::new(),
         }
     }
 
@@ -413,6 +416,9 @@ impl FrameReport {
         let gap = (now - self.last).as_secs_f32();
         if gap > 0.1 {
             self.long.push(((self.last - self.start).as_secs_f32(), gap));
+        }
+        if (self.last - self.start).as_secs_f32() > 8.0 {
+            self.settled.push(gap);
         }
         self.last = now;
     }
@@ -427,6 +433,20 @@ impl FrameReport {
             "long frames: {}, longest {longest:.2} s, together {sum:.2} s",
             self.long.len()
         );
+        // Frame times once the scene is in.
+        let mut times = self.settled.clone();
+        times.sort_by(f32::total_cmp);
+        if !times.is_empty() {
+            let mean = times.iter().sum::<f32>() / times.len() as f32;
+            let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
+            println!(
+                "settled frames: {}, mean {:.2} ms ({:.0} fps), 95% under {:.2} ms",
+                times.len(),
+                mean * 1000.0,
+                1.0 / mean,
+                p95 * 1000.0
+            );
+        }
     }
 }
 

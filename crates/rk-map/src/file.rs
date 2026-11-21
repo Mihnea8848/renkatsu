@@ -503,6 +503,7 @@ impl<'a> Tables<'a> {
             probes,
             vanish,
             camera_mask,
+            mirrors: _,
         } = scene;
         let mut o = Out::default();
         let MapLight {
@@ -1530,6 +1531,9 @@ pub fn read(path: &Path, time: TimeOfDay, compressed: bool) -> Result<MapScene> 
         probes,
         vanish,
         camera_mask,
+        // Not in the file yet: read from the game's bundle
+        // (`mirror::mirrors`).
+        mirrors: Vec::new(),
     })
 }
 
@@ -1754,6 +1758,7 @@ mod tests {
             probes: vec![probe.clone()],
             vanish: vanish.clone(),
             camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
+            mirrors: Vec::new(),
         };
         let faces = std::array::from_fn(|i| SkyTexture {
             image: (i != 2).then(|| albedo.clone()),
@@ -1782,6 +1787,7 @@ mod tests {
             probes: vec![probe],
             vanish,
             camera_mask: 1,
+            mirrors: Vec::new(),
         };
         vec![(TimeOfDay::Day, day), (TimeOfDay::Evening, evening)]
     }

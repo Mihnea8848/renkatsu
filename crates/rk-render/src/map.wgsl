@@ -27,7 +27,8 @@ struct Globals {
     // Lamps, as the character shaders take them (toon.wgsl), in the
     // map's own space.
     lamps: array<vec4<f32>, 24>,
-    // x: how many lamps
+    // x: how many lamps, y: how much of the map's baked and ambient light
+    // and reflections is kept (1 all, 0 none)
     lamp_info: vec4<f32>,
 }
 
@@ -200,6 +201,21 @@ struct VsIn {
     @location(4) color: vec4<f32>,
     @location(5) tangent: vec4<f32>,
     @location(6) uv1: vec2<f32>,
+    // The object's own matrix, by columns: from where its mesh was baked
+    // to where it stands. The identity for an object that never moves.
+    @location(7) model0: vec4<f32>,
+    @location(8) model1: vec4<f32>,
+    @location(9) model2: vec4<f32>,
+    @location(10) model3: vec4<f32>,
+}
+
+// `v` as long as `like`, or left alone when it has no length.
+fn as_long_as(v: vec3<f32>, like: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if len > 0.0 {
+        return v * (length(like) / len);
+    }
+    return v;
 }
 
 struct VsOut {
@@ -218,9 +234,23 @@ struct VsOut {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
-    out.world = v.pos;
-    out.normal = v.normal;
+    // Meshes are baked in the map's space; an object that moves is taken
+    // from there by its matrix. Normals turn by its cofactors (the
+    // inverse transpose, up to scale) and keep their length; the tangent
+    // turns with the surface, and a matrix that mirrors turns the
+    // binormal, as Unity's `unity_WorldTransformParams.w` does.
+    let c0 = v.model0.xyz;
+    let c1 = v.model1.xyz;
+    let c2 = v.model2.xyz;
+    let at = c0 * v.pos.x + c1 * v.pos.y + c2 * v.pos.z + v.model3.xyz;
+    let n1 = cross(c2, c0);
+    let turned = cross(c1, c2) * v.normal.x + n1 * v.normal.y + cross(c0, c1) * v.normal.z;
+    let normal = as_long_as(turned, v.normal);
+    let tangent = as_long_as(c0 * v.tangent.x + c1 * v.tangent.y + c2 * v.tangent.z, v.tangent.xyz);
+    let side = select(-1.0, 1.0, dot(c1, n1) >= 0.0);
+    out.clip = g.view_proj * vec4<f32>(at, 1.0);
+    out.world = at;
+    out.normal = normal;
     out.uv = v.uv;
     out.uv2 = v.uv2;
     out.color = v.color;
@@ -228,10 +258,10 @@ fn vs_main(v: VsIn) -> VsOut {
     // by the tangent's sign (which already holds the sign of a mirrored
     // object), and the quadratic part of the ambient light is worked out
     // here, from the vertex normal.
-    out.tangent = v.tangent.xyz;
-    out.binormal = cross(v.normal, v.tangent.xyz) * v.tangent.w;
+    out.tangent = tangent;
+    out.binormal = cross(normal, tangent) * (v.tangent.w * side);
     out.uv1 = v.uv1;
-    out.ambient_l2 = sh_l2(v.normal);
+    out.ambient_l2 = sh_l2(normal);
     return out;
 }
 
@@ -309,7 +339,7 @@ fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) 
     if (flags & F_NO_REFLECTIONS) == 0u {
         env = environment(r, world, rough);
     }
-    env = env * s.occlusion;
+    env = env * s.occlusion * g.lamp_info.y;
     let a = rough * rough;
     let nv = abs(dot(s.n, -s.eye));
     let surface_reduction = 1.0 / (a * a + 1.0);
@@ -481,6 +511,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         if !lightmapped {
             ambient = max(sh_l0l1(n) + in.ambient_l2, vec3<f32>(0.0));
         }
+        ambient *= g.lamp_info.y;
         let light = g.sun_color.rgb * shade * select(0.0, 1.0, sunlit);
         color = standard(s, in.world, light, ambient) + m.emission.rgb * glow;
     } else {
@@ -493,7 +524,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         if lightmapped {
             indirect = baked;
         }
-        let light = select(indirect + sun, vec3<f32>(1.0), m.params.z > 0.5);
+        indirect *= g.lamp_info.y;
+        // An unlit surface's texture holds its light: it is baked light too.
+        let light = select(indirect + sun, vec3<f32>(g.lamp_info.y), m.params.z > 0.5);
         color = base.rgb * light + m.emission.rgb * glow;
     }
     if g.fog_range.w > 0.5 {

@@ -102,6 +102,7 @@ fn build_time(b: &mut Builder, rows: &[crate::vanish::Row], time: TimeOfDay) -> 
     let mut reflection: Option<Reflection> = None;
     let mut lightmaps: Vec<Lightmap> = Vec::new();
     let mut probes: Vec<ReflectionProbe> = Vec::new();
+    let mut mirrors = Vec::new();
     // The bounds each object looks for its reflection probe with; `None`
     // for a renderer that uses none.
     let mut probe_bounds: Vec<Option<Bounds>> = Vec::new();
@@ -204,6 +205,7 @@ fn build_time(b: &mut Builder, rows: &[crate::vanish::Row], time: TimeOfDay) -> 
                 hidden.extend(t.visible.iter().map(|p| p.path_id).filter(|id| !now.contains(id)));
             }
         }
+        mirrors.extend(crate::mirror::of_file(b.game, loaded, file, &tree, &hidden, &now));
         for obj in sf.objects_of(unity::class::LIGHT) {
             if let Ok(o) = sf.read(obj) {
                 let light = Light::read(&o);
@@ -297,6 +299,7 @@ fn build_time(b: &mut Builder, rows: &[crate::vanish::Row], time: TimeOfDay) -> 
         light,
         probes,
         camera_mask: rk_render::map::STUDIO_CAMERA_MASK,
+        mirrors,
         vanish: volumes,
     })
 }
@@ -401,10 +404,10 @@ fn map_light(
 }
 
 /// The object hierarchy of one file.
-struct Tree<'a> {
-    transforms: &'a HashMap<i64, Transform>,
-    transform_of: &'a HashMap<i64, i64>,
-    objects: &'a HashMap<i64, GameObject>,
+pub(crate) struct Tree<'a> {
+    pub(crate) transforms: &'a HashMap<i64, Transform>,
+    pub(crate) transform_of: &'a HashMap<i64, i64>,
+    pub(crate) objects: &'a HashMap<i64, GameObject>,
 }
 
 /// The volume of the collider on a game object, in the world: a box
@@ -513,7 +516,7 @@ impl Tree<'_> {
     }
 
     /// The world matrix of a game object, through its parents.
-    fn world_of(&self, game_object: i64) -> Mat4 {
+    pub(crate) fn world_of(&self, game_object: i64) -> Mat4 {
         let mut m = Mat4::IDENTITY;
         let mut at = self.transform_of.get(&game_object).copied();
         let mut depth = 0;
@@ -534,7 +537,7 @@ impl Tree<'_> {
     /// Whether a game object shows: it and every parent active, and not
     /// one of the objects of another time of day.
     /// `on` are switched on whatever they are stored as.
-    fn shown(&self, game_object: i64, hidden: &HashSet<i64>, on: &HashSet<i64>) -> bool {
+    pub(crate) fn shown(&self, game_object: i64, hidden: &HashSet<i64>, on: &HashSet<i64>) -> bool {
         let mut go = Some(game_object);
         let mut depth = 0;
         while let Some(id) = go.filter(|_| depth < 256) {
@@ -681,8 +684,9 @@ impl Builder<'_> {
         let m = Material::read(&r.read().ok()?).ok()?;
         let shader = self.game.assets.shader_name(&r.file, m.shader).unwrap_or_default();
         let lower = shader.to_ascii_lowercase();
-        // Drawn later, by passes of their own.
-        if lower.starts_with("skybox/") || lower.contains("mirrorreflection") {
+        // Drawn by passes of their own: the sky, and a mirror's surface
+        // (see `mirror::of_file`).
+        if lower.starts_with("skybox/") || crate::mirror::is_mirror_shader(&shader) {
             *self.skipped.entry(format!("shader {shader}")).or_default() += 1;
             return None;
         }

@@ -27,6 +27,11 @@ struct VsIn {
     @location(2) uv: vec2<f32>,
     @location(3) uv2: vec2<f32>,
     @location(4) color: vec4<f32>,
+    // The object's own matrix, by columns, as in the map pass.
+    @location(7) model0: vec4<f32>,
+    @location(8) model1: vec4<f32>,
+    @location(9) model2: vec4<f32>,
+    @location(10) model3: vec4<f32>,
 }
 
 struct VsOut {
@@ -37,7 +42,8 @@ struct VsOut {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip = cascade.view_proj * vec4<f32>(v.pos, 1.0);
+    let at = v.model0.xyz * v.pos.x + v.model1.xyz * v.pos.y + v.model2.xyz * v.pos.z + v.model3.xyz;
+    out.clip = cascade.view_proj * vec4<f32>(at, 1.0);
     out.uv = v.uv;
     return out;
 }

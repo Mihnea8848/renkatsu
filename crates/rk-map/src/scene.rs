@@ -152,6 +152,53 @@ pub fn time_filters(game: &Game, bundle: &str) -> Result<Vec<(unity::TimeOfDay, 
         .collect())
 }
 
+/// A time of day's sun shafts: the time, their colour, and their sun.
+pub type TimeShafts = (unity::TimeOfDay, [f32; 3], Option<[f32; 3]>);
+
+/// Each time of day's sun shafts: their colour, and where the sun they
+/// come from stands in the map's space (`SunLightInfo` `sunShaftsColor`
+/// and `sunShaftsTransform`, as `SetSunShafts` hands them to the Studio
+/// camera); no place for a time without one.
+pub fn time_sun_shafts(game: &Game, bundle: &str) -> Result<Vec<TimeShafts>> {
+    let Some((sun, _, file)) = sun_light(game, bundle)? else {
+        return Ok(Vec::new());
+    };
+    let mut transforms = std::collections::HashMap::new();
+    for obj in file.sf.objects_of(class::TRANSFORM) {
+        if let Ok(t) = file.sf.read(obj).and_then(|o| rk_unityfs::objects::Transform::read(&o)) {
+            transforms.insert(obj.path_id, t);
+        }
+    }
+    let world_of = |start: i64| {
+        let mut m = glam::Mat4::IDENTITY;
+        let mut at = Some(start);
+        let mut depth = 0;
+        while let Some(id) = at.filter(|_| depth < 256) {
+            let t = transforms.get(&id)?;
+            let local = glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::from(t.scale),
+                glam::Quat::from_array(t.rotation),
+                glam::Vec3::from(t.position),
+            );
+            m = local * m;
+            at = (!t.father.is_null() && t.father.file_id == 0).then_some(t.father.path_id);
+            depth += 1;
+        }
+        Some(m.transform_point3(glam::Vec3::ZERO).to_array())
+    };
+    Ok(sun
+        .times
+        .iter()
+        .filter_map(|t| {
+            let caster = (!t.sun_shafts.is_null() && t.sun_shafts.file_id == 0)
+                .then(|| world_of(t.sun_shafts.path_id))
+                .flatten();
+            let [r, g, b, _] = t.sun_shafts_color;
+            Some((t.time?, [r, g, b], caster))
+        })
+        .collect())
+}
+
 /// The other bundles a map's scene reads from, by their paths under
 /// `abdata`: the bundles of the files its own files name, and theirs in
 /// turn. Unity's built-in resources are not bundles and are left out.
