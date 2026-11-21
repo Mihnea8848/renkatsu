@@ -174,7 +174,7 @@ pub fn time_sun_shafts(game: &Game, bundle: &str) -> Result<Vec<TimeShafts>> {
         let mut at = Some(start);
         let mut depth = 0;
         while let Some(id) = at.filter(|_| depth < 256) {
-            let Some(t) = transforms.get(&id) else { return None };
+            let t = transforms.get(&id)?;
             let local = glam::Mat4::from_scale_rotation_translation(
                 glam::Vec3::from(t.scale),
                 glam::Quat::from_array(t.rotation),
