@@ -1805,6 +1805,13 @@ impl Document {
         }
     }
 
+    /// Moves an object in the same step of the history as the one before.
+    pub fn move_now(&mut self, id: ObjectId, position: [f32; 3]) {
+        if let Some(object) = self.scene.get_mut(id) {
+            object.transform.position = position;
+        }
+    }
+
     /// Gives the scene the effects that follow its map, in the same step of
     /// the history as the one before.
     pub fn add_map_effects(&mut self) {
