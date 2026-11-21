@@ -436,6 +436,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 section_end(ui, k);
             }
         }
+        let mut reset_to: Option<[f32; 3]> = None;
         match &mut object.content {
             Content::Character {
                 card,
@@ -1020,6 +1021,26 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
+            Content::MapPiece { rest, .. } => {
+                if section(ui, k, st, 1, "Map piece") {
+                    row(ui, k, "Place", None, |ui, rect| {
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                        if widgets::flat_button(
+                            &mut child,
+                            k,
+                            Some(icon::ARROW_COUNTER_CLOCKWISE),
+                            "Reset to the map's place",
+                            false,
+                            false,
+                        )
+                        .clicked()
+                        {
+                            reset_to = Some(*rest);
+                        }
+                    });
+                    section_end(ui, k);
+                }
+            }
             Content::MapDoor { open, .. } => {
                 if section(ui, k, st, 1, "Door") {
                     row(ui, k, "Open", None, |ui, rect| {
@@ -1028,7 +1049,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Folder | Content::Item | Content::MapPiece { .. } => {
+            Content::Folder | Content::Item => {
                 if section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
                         widgets::value_box(ui, k, rect, &before.name)
@@ -1048,6 +1069,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
+        }
+        if let Some(rest) = reset_to {
+            object.transform.position = rest;
+            object.transform.rotation = [0.0; 3];
+            object.transform.scale = [1.0; 3];
         }
     });
     if let Content::Character { profile, .. } = &mut object.content {

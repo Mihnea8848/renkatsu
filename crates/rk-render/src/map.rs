@@ -1243,6 +1243,10 @@ struct ObjectGpu {
     parts: Vec<Part>,
 }
 
+/// A copy of an object drawn besides it: the object it is of, and where
+/// the copy stands (its bounds and middle).
+type Copy = (usize, ([f32; 3], [f32; 3]), Vec3);
+
 /// One submesh to draw this frame.
 struct Draw {
     buffers: usize,
@@ -1497,6 +1501,11 @@ pub(crate) struct MapGpu {
     matrices: wgpu::Buffer,
     /// The objects that stand elsewhere than they were baked.
     moved: Vec<usize>,
+    /// Copies of objects drawn besides them: each the object it is of,
+    /// its bounds and middle; their matrices follow the objects' in the
+    /// slots past them, in `copy_matrices`.
+    copies: Vec<Copy>,
+    copy_matrices: Option<wgpu::Buffer>,
     /// The bounds of everything as baked.
     rest_bounds: (Vec3, Vec3),
     buffers: Vec<(wgpu::Buffer, wgpu::Buffer)>,
@@ -1800,6 +1809,8 @@ impl MapGpu {
             object_of,
             matrices,
             moved: Vec::new(),
+            copies: Vec::new(),
+            copy_matrices: None,
             buffers,
             materials,
             lightmaps,
@@ -1826,10 +1837,48 @@ impl MapGpu {
         }
     }
 
-    /// The matrix of one object, as the vertex buffer a draw of it reads.
+    /// The matrix of one object, as the vertex buffer a draw of it reads;
+    /// slots past the objects are their copies'.
     fn matrix_of(&self, object: usize) -> wgpu::BufferSlice<'_> {
-        let at = object as u64 * MATRIX_BYTES;
-        self.matrices.slice(at..at + MATRIX_BYTES)
+        match (object.checked_sub(self.objects.len()), self.copy_matrices.as_ref()) {
+            (Some(copy), Some(copies)) => {
+                let at = copy as u64 * MATRIX_BYTES;
+                copies.slice(at..at + MATRIX_BYTES)
+            }
+            _ => {
+                let at = object as u64 * MATRIX_BYTES;
+                self.matrices.slice(at..at + MATRIX_BYTES)
+            }
+        }
+    }
+
+    /// Draws copies of objects besides them, each where its matrix puts the
+    /// object's baked mesh, in place of the copies it had.
+    fn set_copies(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, copies: &[(usize, Mat4)]) {
+        self.copies.clear();
+        let mut matrices = Vec::new();
+        for &(object, matrix) in copies {
+            let Some(o) = self.objects.get(object) else { continue };
+            let bounds = moved_bounds(&matrix, o.rest_bounds);
+            let middle = (Vec3::from(bounds.0) + Vec3::from(bounds.1)) / 2.0;
+            self.copies.push((object, bounds, middle));
+            matrices.push(matrix.to_cols_array());
+        }
+        if matrices.is_empty() {
+            return;
+        }
+        let bytes = (matrices.len() as u64) * MATRIX_BYTES;
+        if self.copy_matrices.as_ref().is_none_or(|b| b.size() < bytes) {
+            self.copy_matrices = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("map copies' matrices"),
+                size: bytes.next_power_of_two().max(MATRIX_BYTES * 8),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if let Some(buffer) = self.copy_matrices.as_ref() {
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&matrices));
+        }
     }
 
     /// Puts one object where `matrix` takes its baked mesh, with its
@@ -2074,7 +2123,21 @@ impl MapGpu {
         // The volumes the camera stands in hide what names them.
         let hide = self.placement.hide_walls;
         let inside: Vec<bool> = self.vanish.iter().map(|v| hide && v.contains(walls_from)).collect();
-        for (object, o) in self.objects.iter().enumerate() {
+        // The objects, then their copies, which are drawn as their object
+        // is but where their own matrix and bounds put them.
+        let copies = self
+            .copies
+            .iter()
+            .enumerate()
+            .map(|(c, &(of, bounds, middle))| (self.objects.len() + c, of, bounds, middle));
+        let objects = self
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (i, i, o.bounds, o.middle))
+            .chain(copies);
+        for (object, of, bounds, middle) in objects {
+            let o = &self.objects[of];
             if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
                 continue;
             }
@@ -2082,7 +2145,7 @@ impl MapGpu {
                 Some(mask) => o.layer.is_some_and(|l| mask & (1 << l) != 0),
                 None => o.on_camera,
             };
-            let seen = on_layers && in_view(&view_proj, o.bounds);
+            let seen = on_layers && in_view(&view_proj, bounds);
             if !seen {
                 culled += 1;
                 if !o.casts {
@@ -2090,7 +2153,7 @@ impl MapGpu {
                 }
             }
             let Some(buffers) = o.buffers else { continue };
-            let distance = o.middle.distance(camera.eye);
+            let distance = middle.distance(camera.eye);
             for p in &o.parts {
                 if rank[p.material] == usize::MAX {
                     rank[p.material] = ranked;
@@ -2105,7 +2168,7 @@ impl MapGpu {
                         material: p.material,
                         cutout: p.cutout,
                         cull: p.cull,
-                        bounds: o.bounds,
+                        bounds,
                     });
                 }
                 if seen {
@@ -2445,6 +2508,19 @@ impl Renderer {
             }
         }
         map.fit_bounds();
+    }
+
+    /// Draws copies of the map's objects besides them: each by its
+    /// object's place in `MapScene::objects`, with the matrix that takes
+    /// the object's baked mesh where the copy stands, in the map's own
+    /// space; in place of the copies drawn before.
+    pub fn set_map_copies(&mut self, copies: &[(usize, Mat4)]) {
+        let Some(map) = self.map_scene.as_mut() else { return };
+        let copies: Vec<(usize, Mat4)> = copies
+            .iter()
+            .filter_map(|&(index, m)| Some((map.object_of.get(index).copied().flatten()?, m)))
+            .collect();
+        map.set_copies(&self.device, &self.queue, &copies);
     }
 
     /// Puts every object of the map back where it was baked.

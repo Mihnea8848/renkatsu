@@ -400,6 +400,9 @@ pub struct State {
     pub rail: Rail,
     /// Every viewport overlay is hidden.
     pub overlays_hidden: bool,
+    /// The floating icons of lights, cameras and items are hidden (and
+    /// not picked in the viewport).
+    pub icons_hidden: bool,
     /// The viewport takes the place of all docked panels.
     pub maximised: bool,
     /// Index into `modes::TOOLS`.
@@ -850,6 +853,7 @@ impl State {
             palette_pinned: true,
             rail: Rail::Named,
             overlays_hidden: false,
+            icons_hidden: false,
             maximised: false,
             tool: 0,
             snap: true,
