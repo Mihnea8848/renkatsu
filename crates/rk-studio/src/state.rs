@@ -2071,30 +2071,8 @@ impl State {
             }
             None => {
                 let id = self.doc.add(&map.name, Content::map(file, time));
-                // The map's own colour filter, which follows its time of day.
-                let effect = crate::scene::Effect::ColorFilter {
-                    filter: None,
-                    blend: 0.0,
-                };
-                self.doc.add_under(effect.label(), Content::Effect { effect }, id);
-                // Its fog, off as a new CharaStudio scene leaves it.
-                let fog = crate::scene::Effect::Fog {
-                    color: None,
-                    height: 1.0,
-                    start_distance: 0.0,
-                };
-                let fog_id = self.doc.add_under(fog.label(), Content::Effect { effect: fog }, id);
-                self.doc.hide_now(fog_id);
-                // Its sun shafts, from its own sun, off as CharaStudio
-                // starts.
-                let shafts = crate::scene::Effect::SunShafts {
-                    threshold: [128.0 / 255.0; 3],
-                    color: None,
-                };
-                let shafts_id = self
-                    .doc
-                    .add_under(shafts.label(), Content::Effect { effect: shafts }, id);
-                self.doc.hide_now(shafts_id);
+                // The effects that follow the map, where the scene has none.
+                self.doc.add_map_effects();
                 if let Some(live) = self.live.as_mut() {
                     live.studio_camera();
                 }

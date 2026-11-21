@@ -1667,19 +1667,8 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> Stud
     use crate::scene::Effect;
     use rk_render::effects::{AmbientOcclusion, Bloom, ColorFilter, Vignette};
     let mut fx = StudioEffects::default();
-    // A shown map's own effects come first, so they win over the scene's.
-    let under_map = |o: &&crate::scene::Object| {
-        let mut at = o.parent;
-        while let Some(p) = at.and_then(|p| scene.get(p)) {
-            if matches!(p.content, Content::Map { .. }) {
-                return true;
-            }
-            at = p.parent;
-        }
-        false
-    };
-    let mut objects: Vec<_> = scene.objects().iter().filter(|o| scene.shown(o.id)).collect();
-    objects.sort_by_key(|o| !under_map(o));
+    // Of two shown effects of a kind, the first in the scene draws.
+    let objects: Vec<_> = scene.objects().iter().filter(|o| scene.shown(o.id)).collect();
     for object in objects {
         let Content::Effect { effect } = &object.content else {
             continue;
@@ -1793,7 +1782,7 @@ mod tests {
         scene.get_mut(fog).unwrap().visible = false;
         assert!(scene_effects(&scene, None, MapLook::default()).fog.is_none());
     }
-    use crate::scene::{Effect, MapTime};
+    use crate::scene::Effect;
 
     fn table(name: &str) -> Arc<Image> {
         Arc::new(Image {
@@ -1807,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn a_maps_own_filter_follows_its_time_and_wins_over_the_scenes() {
+    fn the_scenes_filter_is_the_maps_own_and_follows_its_time() {
         let filters: Filters = [(0, table("Lut_Amount")), (1, table("Lut_TimeSunset1"))].into();
         let mut scene = Scene::new();
         let lut = |scene: &Scene, map: Option<i32>| {
@@ -1822,26 +1811,38 @@ mod tests {
             .color
             .map(|c| c.lut.name.clone())
         };
-        // The scene's own: the first filter.
-        assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_Amount"));
-        // A map's own takes its time's filter, over the scene's.
-        let map = scene.add("Hallway", Content::map("Maps/a.rkmap".into(), MapTime::Evening), None);
+        // A new scene's filter is the map's own: Studio's first without a
+        // map, the time's with one.
+        assert_eq!(lut(&scene, None).as_deref(), Some("Lut_Amount"));
+        assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_TimeSunset1"));
+        // Of two shown filters, the first in the scene draws.
         let own = scene.add(
-            "Colour filter",
+            "Colour filter 2",
             Content::Effect {
                 effect: Effect::ColorFilter {
-                    filter: None,
+                    filter: Some(0),
                     blend: 0.0,
                 },
             },
             None,
         );
-        scene.get_mut(own).unwrap().parent = Some(map);
         assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_TimeSunset1"));
-        // Without the map's filter known yet, the first.
-        assert_eq!(lut(&scene, None).as_deref(), Some("Lut_Amount"));
-        // Hidden, the scene's is used again.
-        scene.get_mut(own).unwrap().visible = false;
+        // With the first hidden, the second.
+        let first = scene
+            .objects()
+            .iter()
+            .find(|o| {
+                o.id != own
+                    && matches!(
+                        o.content,
+                        Content::Effect {
+                            effect: Effect::ColorFilter { .. }
+                        }
+                    )
+            })
+            .unwrap()
+            .id;
+        scene.get_mut(first).unwrap().visible = false;
         assert_eq!(lut(&scene, Some(1)).as_deref(), Some("Lut_Amount"));
     }
 }

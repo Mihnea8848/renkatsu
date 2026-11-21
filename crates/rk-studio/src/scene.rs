@@ -634,8 +634,10 @@ impl Effect {
         let ao = rk_render::effects::AmbientOcclusion::default();
         let vignette = rk_render::effects::Vignette::default();
         [
+            // The map's own: Studio's first filter, none, while the scene
+            // has no map.
             Effect::ColorFilter {
-                filter: Some(0),
+                filter: None,
                 blend: 0.0,
             },
             Effect::Bloom {
@@ -910,6 +912,116 @@ impl Scene {
             {
                 *from_camera = false;
                 *angles = [0.0; 2];
+            }
+        }
+    }
+
+    /// Gives a scene with a map the effects that follow it, in the Effects
+    /// folder, where it has none of their kind: the colour filter, and the
+    /// fog and sun shafts hidden, as a new CharaStudio scene leaves them.
+    pub fn add_map_effects(&mut self) {
+        let folder = self.kind_folder(Kind::Effect);
+        let has = |scene: &Scene, same: &dyn Fn(&Effect) -> bool| {
+            scene
+                .objects
+                .iter()
+                .any(|o| matches!(&o.content, Content::Effect { effect } if same(effect)))
+        };
+        if !has(self, &|e| matches!(e, Effect::ColorFilter { .. })) {
+            let effect = Effect::ColorFilter {
+                filter: None,
+                blend: 0.0,
+            };
+            self.add(effect.label(), Content::Effect { effect }, folder);
+        }
+        if !has(self, &|e| matches!(e, Effect::Fog { .. })) {
+            let effect = Effect::Fog {
+                color: None,
+                height: 1.0,
+                start_distance: 0.0,
+            };
+            let id = self.add(effect.label(), Content::Effect { effect }, folder);
+            if let Some(o) = self.get_mut(id) {
+                o.visible = false;
+            }
+        }
+        if !has(self, &|e| matches!(e, Effect::SunShafts { .. })) {
+            let effect = Effect::SunShafts {
+                threshold: [128.0 / 255.0; 3],
+                color: None,
+            };
+            let id = self.add(effect.label(), Content::Effect { effect }, folder);
+            if let Some(o) = self.get_mut(id) {
+                o.visible = false;
+            }
+        }
+    }
+
+    /// Moves the effects scenes of Renkatsu 0.2.1 and older kept under
+    /// their map into the Effects folder. Where one moves next to a shown
+    /// effect of its kind, the map's won the picture: the other is hidden,
+    /// so that the scene looks as before.
+    pub fn gather_effects(&mut self) {
+        let under_map: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|o| matches!(o.content, Content::Effect { .. }))
+            .filter(|o| {
+                let mut at = o.parent;
+                while let Some(p) = at.and_then(|p| self.get(p)) {
+                    if matches!(p.content, Content::Map { .. }) {
+                        return true;
+                    }
+                    at = p.parent;
+                }
+                false
+            })
+            .map(|o| o.id)
+            .collect();
+        if under_map.is_empty() {
+            return;
+        }
+        let folder = self.kind_folder(Kind::Effect);
+        for id in under_map {
+            let shown = self.get(id).is_some_and(|o| o.visible);
+            let kind = match self.get(id).map(|o| &o.content) {
+                Some(Content::Effect { effect }) => std::mem::discriminant(effect),
+                _ => continue,
+            };
+            if shown {
+                // An untouched filter of the scene (Studio's first or the
+                // map's own, unblended) goes; any other is kept, hidden.
+                let untouched = |o: &Object| {
+                    matches!(
+                        o.content,
+                        Content::Effect {
+                            effect: Effect::ColorFilter {
+                                filter: None | Some(0),
+                                blend
+                            }
+                        } if blend == 0.0
+                    )
+                };
+                let moved_filter = matches!(
+                    self.get(id).map(|o| &o.content),
+                    Some(Content::Effect {
+                        effect: Effect::ColorFilter { .. }
+                    })
+                );
+                if moved_filter {
+                    self.objects.retain(|o| o.id == id || !untouched(o));
+                }
+                for other in &mut self.objects {
+                    if other.id != id
+                        && other.visible
+                        && matches!(&other.content, Content::Effect { effect } if std::mem::discriminant(effect) == kind)
+                    {
+                        other.visible = false;
+                    }
+                }
+            }
+            if let Some(o) = self.get_mut(id) {
+                o.parent = folder;
             }
         }
     }
@@ -1693,21 +1805,10 @@ impl Document {
         }
     }
 
-    /// Adds an object under another, as a map's own effects are, in the
-    /// same step of the history as the one before it.
-    pub fn add_under(&mut self, name: &str, content: Content, parent: ObjectId) -> ObjectId {
-        let id = self.scene.add(name, content, None);
-        if let Some(object) = self.scene.get_mut(id) {
-            object.parent = Some(parent);
-        }
-        id
-    }
-
-    /// Hides an object in the same step of the history as the one before.
-    pub fn hide_now(&mut self, id: ObjectId) {
-        if let Some(object) = self.scene.get_mut(id) {
-            object.visible = false;
-        }
+    /// Gives the scene the effects that follow its map, in the same step of
+    /// the history as the one before.
+    pub fn add_map_effects(&mut self) {
+        self.scene.add_map_effects();
     }
 
     /// Adds an object and selects it. A folder goes beside the selection;
@@ -1947,6 +2048,137 @@ mod tests {
         // From behind, it comes from behind the camera too.
         let behind = chara_light_direction([0.0; 2], Some((Vec3::new(0.0, 1.0, -4.0), Vec3::new(0.0, 1.0, 0.0))));
         assert!(behind.z < -0.5, "{behind}");
+    }
+
+    fn effects_in(scene: &Scene) -> Vec<(String, Option<String>, bool)> {
+        scene
+            .objects()
+            .iter()
+            .filter(|o| matches!(o.content, Content::Effect { .. }))
+            .map(|o| {
+                let parent = o.parent.and_then(|p| scene.get(p)).map(|p| p.name.clone());
+                (o.name.clone(), parent, o.visible)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_map_brings_its_effects_into_the_effects_folder() {
+        let mut scene = Scene::new();
+        scene.add(
+            "1F Hallway",
+            Content::map(PathBuf::from("Maps/1F Hallway.rkmap"), MapTime::Day),
+            None,
+        );
+        scene.add_map_effects();
+        let effects = effects_in(&scene);
+        assert!(
+            effects
+                .iter()
+                .all(|(_, parent, _)| parent.as_deref() == Some("Effects")),
+            "{effects:?}"
+        );
+        // One colour filter, the map's own; fog and shafts hidden.
+        let filters: Vec<_> = scene
+            .objects()
+            .iter()
+            .filter_map(|o| match o.content {
+                Content::Effect {
+                    effect: Effect::ColorFilter { filter, .. },
+                } => Some(filter),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filters, vec![None]);
+        assert!(effects.contains(&("Fog".to_owned(), Some("Effects".to_owned()), false)));
+        assert!(effects.contains(&("Sun shafts".to_owned(), Some("Effects".to_owned()), false)));
+        // A second time adds nothing.
+        let count = effects.len();
+        scene.add_map_effects();
+        assert_eq!(effects_in(&scene).len(), count);
+    }
+
+    #[test]
+    fn older_map_effects_move_to_the_effects_folder_and_keep_the_picture() {
+        let mut scene = Scene::new();
+        let map = scene.add(
+            "1F Hallway",
+            Content::map(PathBuf::from("Maps/1F Hallway.rkmap"), MapTime::Day),
+            None,
+        );
+        let own = Effect::ColorFilter {
+            filter: Some(3),
+            blend: 0.5,
+        };
+        let own = scene.add("Colour filter", Content::Effect { effect: own }, None);
+        scene.get_mut(own).unwrap().parent = Some(map);
+        let fog = Effect::Fog {
+            color: None,
+            height: 1.0,
+            start_distance: 0.0,
+        };
+        let fog = scene.add("Fog", Content::Effect { effect: fog }, None);
+        scene.get_mut(fog).unwrap().parent = Some(map);
+        scene.get_mut(fog).unwrap().visible = false;
+        scene.gather_effects();
+        let effects = effects_in(&scene);
+        assert!(
+            effects
+                .iter()
+                .all(|(_, parent, _)| parent.as_deref() == Some("Effects")),
+            "{effects:?}"
+        );
+        // The map's shown filter won before: it stays shown, the scene's
+        // own is hidden.
+        let filters: Vec<_> = scene
+            .objects()
+            .iter()
+            .filter_map(|o| match o.content {
+                Content::Effect {
+                    effect: Effect::ColorFilter { filter, .. },
+                } => Some((filter, o.visible)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filters, vec![(Some(3), true)]);
+        // A filter someone changed is kept, hidden.
+        let mut scene = Scene::new();
+        if let Some(Content::Effect {
+            effect: Effect::ColorFilter { filter, .. },
+        }) = scene.objects.iter_mut().map(|o| &mut o.content).find(|c| {
+            matches!(
+                c,
+                Content::Effect {
+                    effect: Effect::ColorFilter { .. }
+                }
+            )
+        }) {
+            *filter = Some(5);
+        }
+        let map = scene.add(
+            "1F Hallway",
+            Content::map(PathBuf::from("Maps/1F Hallway.rkmap"), MapTime::Day),
+            None,
+        );
+        let own = Effect::ColorFilter {
+            filter: None,
+            blend: 0.0,
+        };
+        let own = scene.add("Colour filter", Content::Effect { effect: own }, None);
+        scene.get_mut(own).unwrap().parent = Some(map);
+        scene.gather_effects();
+        let filters: Vec<_> = scene
+            .objects()
+            .iter()
+            .filter_map(|o| match o.content {
+                Content::Effect {
+                    effect: Effect::ColorFilter { filter, .. },
+                } => Some((filter, o.visible)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filters, vec![(Some(5), false), (None, true)]);
+        assert!(effects.contains(&("Fog".to_owned(), Some("Effects".to_owned()), false)));
     }
 
     #[test]
