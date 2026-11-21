@@ -131,6 +131,10 @@ pub struct Settings {
     /// Whose physics moves while the scene plays: hair, clothes, the body
     /// and accessories.
     pub physics: [bool; 4],
+    /// The map's moving objects play while the scene plays: its doors
+    /// swing when switched, its stage lights move.
+    #[serde(default = "yes")]
+    pub map_motion: bool,
     /// Cut-out edges, such as lashes and lace, are smoothed
     /// (alpha-to-coverage); the game draws them hard.
     pub smooth_edges: bool,
@@ -155,6 +159,7 @@ impl Default for Settings {
             show_news: true,
             show_inputs: false,
             physics: [true; 4],
+            map_motion: true,
             smooth_edges: true,
             snap_steps: SNAP_STEPS,
             keys: Default::default(),
@@ -226,6 +231,10 @@ impl Settings {
     }
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +254,7 @@ mod tests {
             show_news: false,
             show_inputs: true,
             physics: [true; 4],
+            map_motion: true,
             smooth_edges: false,
             snap_steps: [0.5, 45.0, 0.25, 2.0],
             keys: [("focus".to_owned(), vec!["Ctrl+F".to_owned()])].into(),

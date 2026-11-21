@@ -33,6 +33,7 @@ mod library;
 mod live;
 mod map_library;
 mod map_menu;
+mod map_pieces;
 mod maps;
 mod modes;
 mod mods;

@@ -386,7 +386,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     Some("A light has no size"),
                 ],
                 Content::Camera { .. } => [None, None, Some("A camera has no size")],
-                Content::Item => [None; 3],
+                Content::Item | Content::MapPiece { .. } => [None; 3],
+                Content::MapDoor { .. } => [Some("A door stays in its frame"); 3],
                 // CharaStudio moves and turns a map; it keeps its size.
                 Content::Map { .. } => [None, None, Some("A map keeps its size")],
                 _ => [Some("Not available yet"); 3],
@@ -933,6 +934,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 hide_walls,
                 light_intensity,
                 filter_decay,
+                ..
             } => {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
@@ -1018,7 +1020,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     section_end(ui, k);
                 }
             }
-            Content::Folder | Content::Item => {
+            Content::MapDoor { open, .. } => {
+                if section(ui, k, st, 1, "Door") {
+                    row(ui, k, "Open", None, |ui, rect| {
+                        widgets::checkbox(ui, k, rect, id.with("door open"), open, "");
+                    });
+                    section_end(ui, k);
+                }
+            }
+            Content::Folder | Content::Item | Content::MapPiece { .. } => {
                 if section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
                         widgets::value_box(ui, k, rect, &before.name)

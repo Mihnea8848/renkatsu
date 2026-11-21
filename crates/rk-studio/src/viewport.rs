@@ -1625,6 +1625,7 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 /// it back to rest when it is stopped.
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     st.settle_on_map();
+    st.list_map_pieces();
     let still = st.physics_still();
     let Some(live) = st.live.as_mut() else { return };
     live.hold_physics_still(&still);
@@ -1695,6 +1696,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     ];
     // The grid is drawn behind what this picture shows.
     live.keep_depth = st.gizmo.grid;
+    live.map_motion = st.settings.map_motion;
     match live.paint(st.doc.scene(), size, [0.22, 0.22, 0.23, 1.0]) {
         Ok(id) => {
             ui.painter().image(

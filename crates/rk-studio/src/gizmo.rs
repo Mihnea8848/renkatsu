@@ -535,6 +535,13 @@ fn icons(st: &State) -> Vec<(ObjectId, Kind, Vec3)> {
         .objects()
         .iter()
         .filter(|o| matches!(o.kind(), Kind::Light | Kind::Camera | Kind::Item | Kind::Map) && scene.shown(o.id))
+        // A map's pieces and doors are seen as themselves.
+        .filter(|o| {
+            !matches!(
+                o.content,
+                crate::scene::Content::MapPiece { .. } | crate::scene::Content::MapDoor { .. }
+            )
+        })
         .map(|o| (o.id, o.kind(), scene.world(o.id).w_axis.truncate()))
         .collect()
 }

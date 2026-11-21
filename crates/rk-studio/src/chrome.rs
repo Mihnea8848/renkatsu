@@ -755,6 +755,11 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
                             st.settings_changed = true;
                         }
                     }
+                    ui.separator();
+                    if widgets::check_item(ui, k, st.settings.map_motion, "Map objects", "").clicked() {
+                        st.settings.map_motion = !st.settings.map_motion;
+                        st.settings_changed = true;
+                    }
                 });
             }
         }
