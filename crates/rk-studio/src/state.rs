@@ -389,7 +389,7 @@ pub struct State {
     /// Index into `modes::MODES`.
     pub mode: usize,
     /// The active tool of each mode, counted through its sections.
-    pub mode_tool: [usize; 6],
+    pub mode_tool: [usize; 7],
     /// The Select mode's filter: only characters, items, or lights and
     /// cameras (as `Kind::Light`) are picked; none picks anything.
     pub pick_filter: Option<Kind>,
@@ -844,7 +844,7 @@ impl State {
             importer: None,
             log: Log::new(),
             mode: 0,
-            mode_tool: [0, 0, 1, 0, 0, 0],
+            mode_tool: [0, 0, 1, 0, 0, 0, 0],
             pick_filter: None,
             palette_open: false,
             palette_pinned: true,

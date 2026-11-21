@@ -51,7 +51,7 @@ pub fn pipeline_missing(pipeline: &Pipeline) -> String {
     format!("The {} ({}) is not available yet", pipeline.name, pipeline.short)
 }
 
-pub const MODES: [Mode; 6] = [
+pub const MODES: [Mode; 7] = [
     Mode {
         glyph: icon::CURSOR,
         name: "Select",
@@ -149,6 +149,12 @@ pub const MODES: [Mode; 6] = [
                 ],
             ),
         ],
+    },
+    // The map's own controls: its palette is drawn by map_menu.rs.
+    Mode {
+        glyph: icon::MAP_TRIFOLD,
+        name: "Map",
+        sections: &[],
     },
     Mode {
         glyph: icon::FILM_STRIP,

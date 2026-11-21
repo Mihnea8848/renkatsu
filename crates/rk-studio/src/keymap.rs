@@ -134,7 +134,7 @@ const fn def(action: Action, id: &'static str, name: &'static str, group: Group,
 
 /// Every action. Where two actions share a key, the first one listed
 /// gets it. The defaults follow Unity and Unreal, then Blender.
-pub const ACTIONS: [Def; 57] = [
+pub const ACTIONS: [Def; 58] = [
     def(
         Action::NewProject,
         "new-project",
@@ -264,8 +264,9 @@ pub const ACTIONS: [Def; 57] = [
     def(Action::Mode(1), "mode-character", "Character", Group::Modes, &["2"]),
     def(Action::Mode(2), "mode-pose", "Pose", Group::Modes, &["3"]),
     def(Action::Mode(3), "mode-light", "Light", Group::Modes, &["4"]),
-    def(Action::Mode(4), "mode-animate", "Animate", Group::Modes, &["5"]),
-    def(Action::Mode(5), "mode-bake", "Bake", Group::Modes, &["6"]),
+    def(Action::Mode(4), "mode-map", "Map", Group::Modes, &["5"]),
+    def(Action::Mode(5), "mode-animate", "Animate", Group::Modes, &["6"]),
+    def(Action::Mode(6), "mode-bake", "Bake", Group::Modes, &["7"]),
     def(Action::PlayPause, "play", "Play or pause", Group::Scene, &["Space"]),
     def(Action::Stop, "stop", "Stop", Group::Scene, &["Ctrl+Space"]),
     def(
