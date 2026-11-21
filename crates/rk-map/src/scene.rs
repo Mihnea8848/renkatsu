@@ -152,11 +152,14 @@ pub fn time_filters(game: &Game, bundle: &str) -> Result<Vec<(unity::TimeOfDay, 
         .collect())
 }
 
+/// A time of day's sun shafts: the time, their colour, and their sun.
+pub type TimeShafts = (unity::TimeOfDay, [f32; 3], Option<[f32; 3]>);
+
 /// Each time of day's sun shafts: their colour, and where the sun they
 /// come from stands in the map's space (`SunLightInfo` `sunShaftsColor`
 /// and `sunShaftsTransform`, as `SetSunShafts` hands them to the Studio
 /// camera); no place for a time without one.
-pub fn time_sun_shafts(game: &Game, bundle: &str) -> Result<Vec<(unity::TimeOfDay, [f32; 3], Option<[f32; 3]>)>> {
+pub fn time_sun_shafts(game: &Game, bundle: &str) -> Result<Vec<TimeShafts>> {
     let Some((sun, _, file)) = sun_light(game, bundle)? else {
         return Ok(Vec::new());
     };
