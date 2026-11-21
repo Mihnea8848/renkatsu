@@ -707,6 +707,8 @@ struct Globals {
     fog_color: [f32; 4],
     fog_range: [f32; 4],
     indirect_spec: [f32; 4],
+    lamps: [[f32; 4]; 24],
+    lamp_info: [f32; 4],
 }
 
 #[repr(C)]
@@ -1656,6 +1658,7 @@ impl MapGpu {
         camera: &Camera,
         view_proj: Mat4,
         aspect: f32,
+        lamps: &[crate::Lamp],
     ) -> MapFrame {
         // Everything of the map is worked out in its own space: the
         // camera is brought into it, and its points are put in the world
@@ -1688,6 +1691,24 @@ impl MapGpu {
                 l.indirect_specular[2],
                 0.0,
             ],
+            lamps: [[0.0; 4]; 24],
+            lamp_info: [0.0; 4],
+        };
+        // The lamps, brought into the map's space as the camera is.
+        let back = self.placement.rigid().inverse();
+        let local: Vec<crate::Lamp> = lamps
+            .iter()
+            .map(|l| crate::Lamp {
+                at: l.at.map(|p| back.transform_point3(Vec3::from(p)).to_array()),
+                dir: back.transform_vector3(Vec3::from(l.dir)).normalize_or_zero().to_array(),
+                ..*l
+            })
+            .collect();
+        let (lamp_rows, lamp_info) = crate::lamp_rows(&local, u32::MAX);
+        let globals = Globals {
+            lamps: lamp_rows,
+            lamp_info,
+            ..globals
         };
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
@@ -2027,7 +2048,7 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let proj = Mat4::perspective_lh(camera.fov_y_deg.to_radians(), aspect, 0.03, gpu.far(camera));
         let view_proj = proj * Mat4::look_at_lh(camera.eye, camera.target, Vec3::Y);
-        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect);
+        let frame = gpu.frame(&self.queue, pipes, camera, view_proj, aspect, &[]);
 
         let size = wgpu::Extent3d {
             width,
@@ -2162,7 +2183,7 @@ mod tests {
     fn the_uniforms_are_as_wide_as_the_shader_reads_them() {
         assert_eq!(std::mem::size_of::<MaterialUniform>(), 9 * 16);
         assert_eq!(std::mem::size_of::<ProbeUniform>(), 4 * 16);
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 13 * 16);
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 38 * 16);
         assert_eq!(std::mem::size_of::<Vertex>(), 80);
     }
 
