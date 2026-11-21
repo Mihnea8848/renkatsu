@@ -530,6 +530,9 @@ impl Drag {
 /// The objects that are picked by an icon, as they have no picture of
 /// their own, and where they are in the world.
 fn icons(st: &State) -> Vec<(ObjectId, Kind, Vec3)> {
+    if st.icons_hidden {
+        return Vec::new();
+    }
     let scene = st.doc.scene();
     scene
         .objects()
@@ -1006,9 +1009,15 @@ fn pick(st: &State, view: &View, pos: Pos2) -> Option<ObjectId> {
     }
     let (origin, dir) = view.ray(pos);
     let live = st.live.as_ref()?;
-    live.pick(st.doc.scene(), origin, dir)
-        .map(|(id, _)| id)
-        .filter(|id| pickable(st, *id))
+    let scene = st.doc.scene();
+    let character = live.pick(scene, origin, dir);
+    // The map in front: its piece or door, or nothing for a wall.
+    if let Some((owner, t)) = live.pick_map(scene, origin, dir) {
+        if character.is_none_or(|(_, far)| t < far) {
+            return owner.filter(|id| pickable(st, *id));
+        }
+    }
+    character.map(|(id, _)| id).filter(|id| pickable(st, *id))
 }
 
 /// Whether the Select mode's filter lets an object be picked: lights and

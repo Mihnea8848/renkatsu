@@ -102,6 +102,8 @@ pub enum Action {
     ViewportTools,
     ModeTools,
     ShowInputs,
+    /// The floating icons of lights, cameras and items in the viewport.
+    ObjectIcons,
     /// A direction to fly in, as `FLY` lists them.
     Fly(u8),
     /// A mode of the rail, by its place.
@@ -134,7 +136,7 @@ const fn def(action: Action, id: &'static str, name: &'static str, group: Group,
 
 /// Every action. Where two actions share a key, the first one listed
 /// gets it. The defaults follow Unity and Unreal, then Blender.
-pub const ACTIONS: [Def; 58] = [
+pub const ACTIONS: [Def; 59] = [
     def(
         Action::NewProject,
         "new-project",
@@ -254,6 +256,13 @@ pub const ACTIONS: [Def; 58] = [
     ),
     def(Action::ModeTools, "mode-tools", "Mode tools", Group::View, &["N"]),
     def(Action::ShowInputs, "show-inputs", "Show inputs", Group::View, &["F8"]),
+    def(
+        Action::ObjectIcons,
+        "object-icons",
+        "Object icons",
+        Group::View,
+        &["Ctrl+H"],
+    ),
     def(Action::Fly(0), "fly-forward", "Forward", Group::Fly, &["W"]),
     def(Action::Fly(1), "fly-back", "Back", Group::Fly, &["S"]),
     def(Action::Fly(2), "fly-left", "Left", Group::Fly, &["A"]),
@@ -742,6 +751,7 @@ impl State {
             }
             A::Maximise => self.maximised = !self.maximised,
             A::ViewportTools => self.overlays_hidden = !self.overlays_hidden,
+            A::ObjectIcons => self.icons_hidden = !self.icons_hidden,
             A::ModeTools => self.palette_open = !self.palette_open,
             A::ShowInputs => {
                 self.settings.show_inputs = !self.settings.show_inputs;

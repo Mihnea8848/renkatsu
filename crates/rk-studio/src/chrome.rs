@@ -598,11 +598,12 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
     ui.menu_button("Add", |ui| panels::add_items(ui, k, st));
     ui.menu_button("View", |ui| {
         let key = |action: Action| st.keys.text(action);
-        let (tools, maximise, palette, inputs) = (
+        let (tools, maximise, palette, inputs, icons) = (
             key(Action::ViewportTools),
             key(Action::Maximise),
             key(Action::ModeTools),
             key(Action::ShowInputs),
+            key(Action::ObjectIcons),
         );
         if widgets::check_item(ui, k, !st.overlays_hidden, "Viewport tools", &tools).clicked() {
             st.overlays_hidden = !st.overlays_hidden;
@@ -612,6 +613,9 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
         }
         if widgets::check_item(ui, k, st.settings.show_inputs, "Show inputs", &inputs).clicked() {
             st.act(Action::ShowInputs, ui.ctx());
+        }
+        if widgets::check_item(ui, k, !st.icons_hidden, "Object icons", &icons).clicked() {
+            st.icons_hidden = !st.icons_hidden;
         }
         ui.separator();
         if widgets::check_item(ui, k, st.palette_open, "Mode tools", &palette).clicked() {
