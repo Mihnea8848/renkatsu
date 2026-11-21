@@ -1343,12 +1343,14 @@ impl Live {
                 if let Content::Light {
                     from_camera,
                     angles,
+                    intensity,
                     shadows,
                     color,
                     ..
                 } = light.content
                 {
-                    env.light_intensity = scene.chara_light_strength(light.id);
+                    env.light_intensity = intensity;
+                    env.light_dim = scene.chara_light_dim(light.id);
                     env.light_color = color;
                     env.shadows.enabled = shadows;
                     // CharaStudio's rig, fixed in the scene or kept to
@@ -1477,22 +1479,23 @@ impl Live {
 
     /// A character light besides the main one, as the renderer takes it.
     fn other_light(&self, scene: &Scene, id: ObjectId) -> rk_render::OtherLight {
-        let (angles, follows, color) = match scene.get(id).map(|o| &o.content) {
+        let (angles, follows, color, intensity) = match scene.get(id).map(|o| &o.content) {
             Some(Content::Light {
                 angles,
                 from_camera,
                 color,
+                intensity,
                 ..
-            }) => (*angles, *from_camera, *color),
-            _ => ([0.0; 2], false, [1.0; 3]),
+            }) => (*angles, *from_camera, *color, *intensity),
+            _ => ([0.0; 2], false, [1.0; 3], 0.0),
         };
-        let intensity = scene.chara_light_strength(id);
         let camera = self.cam.orbit.camera();
         let follow = follows.then_some((camera.eye, camera.target));
         rk_render::OtherLight {
             dir: crate::scene::chara_light_direction(angles, follow).to_array(),
             color,
             intensity,
+            dim: scene.chara_light_dim(id),
         }
     }
 

@@ -331,6 +331,13 @@ struct Surface {
 // highlights and reflections off; their tier has box projection and probe
 // blending). `light` is the sun's colour after its shadow, `ambient` the
 // baked or ambient light on the surface.
+// How much of the map's sun shines at its Light intensity: it dims with
+// the rest of the map's light, but keeps a little, so that a ray of sun or
+// moon through a window still shows in a dark room.
+fn sun_share() -> f32 {
+    return mix(0.15, 1.0, g.lamp_info.y);
+}
+
 fn standard(s: Surface, world: vec3<f32>, light: vec3<f32>, ambient: vec3<f32>) -> vec3<f32> {
     let flags = m.flags.x;
     let rough = 1.0 - s.smoothness;
@@ -512,10 +519,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
             ambient = max(sh_l0l1(n) + in.ambient_l2, vec3<f32>(0.0));
         }
         ambient *= g.lamp_info.y;
-        let light = g.sun_color.rgb * shade * select(0.0, 1.0, sunlit);
-        color = standard(s, in.world, light, ambient) + m.emission.rgb * glow;
+        let light = g.sun_color.rgb * shade * select(0.0, 1.0, sunlit) * sun_share();
+        color = standard(s, in.world, light, ambient) + m.emission.rgb * glow * g.lamp_info.y;
     } else {
-        var sun = g.sun_color.rgb * facing * shade;
+        var sun = g.sun_color.rgb * facing * shade * sun_share();
         for (var k = 0u; k < u32(g.lamp_info.x); k++) {
             let lamp = lamp_at(in.world, k);
             sun += lamp[1] * max(dot(n, lamp[0]), 0.0);
@@ -527,7 +534,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         indirect *= g.lamp_info.y;
         // An unlit surface's texture holds its light: it is baked light too.
         let light = select(indirect + sun, vec3<f32>(g.lamp_info.y), m.params.z > 0.5);
-        color = base.rgb * light + m.emission.rgb * glow;
+        color = base.rgb * light + m.emission.rgb * glow * g.lamp_info.y;
     }
     if g.fog_range.w > 0.5 {
         let d = distance(in.world, g.eye.xyz);
