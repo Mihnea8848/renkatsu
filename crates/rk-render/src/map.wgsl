@@ -34,6 +34,13 @@ struct Globals {
 
 // The way towards lamp `k` from a point and the light it brings there:
 // Unity's falloff over its range and a spot's cone, as on characters.
+// Lamps are Renkatsu's own: on the map they shine half as strong again as
+// the shader's maths gives. In daylight a map's baked light is brighter
+// than a character's own shading and its light falls off sooner with the
+// angle than her toon edge, so the same lamp showed less on walls; twice
+// the strength matched daylight but outshone her in a dark room.
+const LAMP_GAIN: f32 = 1.5;
+
 fn lamp_at(world: vec3<f32>, k: u32) -> array<vec3<f32>, 2> {
     let place = g.lamps[k * 3u];
     let colour = g.lamps[k * 3u + 1u];
@@ -48,7 +55,7 @@ fn lamp_at(world: vec3<f32>, k: u32) -> array<vec3<f32>, 2> {
     if spot.w > -1.0 {
         atten *= smoothstep(spot.w, mix(spot.w, 1.0, 0.2), dot(-l, normalize(spot.xyz)));
     }
-    return array<vec3<f32>, 2>(l, colour.rgb * atten);
+    return array<vec3<f32>, 2>(l, colour.rgb * atten * LAMP_GAIN);
 }
 
 struct Material {
