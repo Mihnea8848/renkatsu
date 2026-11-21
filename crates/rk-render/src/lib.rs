@@ -159,6 +159,10 @@ struct Globals {
     lamps: [[f32; 4]; 24],
     /// x: how many lamps.
     lamp_info: [f32; 4],
+    /// Renkatsu's own fog for what is drawn after GlobalFog: its linear
+    /// colour, and its numbers, w 0 for none (toon.wgsl `fog_kept`).
+    fog_color: [f32; 4],
+    fog_own: [f32; 4],
 }
 
 /// The most lamps one mesh takes.
@@ -1350,6 +1354,8 @@ impl Renderer {
             light_color: light_color_global(env),
             lamps: [[0.0; 4]; 24],
             lamp_info: [0.0; 4],
+            fog_color: [0.0; 4],
+            fog_own: [0.0; 4],
         };
         let ramp = match &env.ramp {
             Some(image) => self.texture(image),
@@ -1704,7 +1710,7 @@ impl Renderer {
             .filter(|m| m.placement.shown)
             .and_then(|m| m.light.fog);
         let fx_resolved = env.effects.clone().map(|mut fx| {
-            if let (Some(f), Some(own)) = (fx.fog.as_mut(), shown_fog) {
+            if let (Some(f), Some(own)) = (fx.fog.as_mut().filter(|f| !f.own), shown_fog) {
                 f.mode = effects::FogMode::Linear {
                     start: f.start_distance,
                     end: own.end,
@@ -1800,7 +1806,7 @@ impl Renderer {
                 (Some(pipes), Some(gpu)) => {
                     // The scene's Fog switches the map's own fog too, in its
                     // colour and from its start, to the map's end.
-                    let map_fog = scene_fog.as_ref().and_then(|f| {
+                    let map_fog = scene_fog.as_ref().filter(|f| !f.own).and_then(|f| {
                         let own = gpu.light.fog?;
                         let [r, g, b, _] = material::linear([f.color[0], f.color[1], f.color[2], 1.0]);
                         Some(map::Fog {
@@ -1812,6 +1818,7 @@ impl Renderer {
                     let scene = map::SceneLight {
                         lamps: &env.map_lamps,
                         fog: map_fog,
+                        own_fog: scene_fog.as_ref().and_then(effects::own_fog_params),
                         baked: env.map_light_intensity,
                     };
                     let eye = map::MapEye {
@@ -2060,10 +2067,14 @@ impl Renderer {
                     }),
                 }
             };
-            let mut light_groups: HashMap<(DrawLight, u32), wgpu::BindGroup> = HashMap::new();
+            // What is drawn after GlobalFog (the see-through queues) takes
+            // Renkatsu's own fog in its shader, in a binding of its own.
+            let own_fog = scene_fog.as_ref().and_then(effects::own_fog_params).filter(|_| main);
+            let mut light_groups: HashMap<(DrawLight, u32, bool), wgpu::BindGroup> = HashMap::new();
             for item in &items {
-                let key = (item.light, item.lamps);
-                if key == (DrawLight::Main, 0) || light_groups.contains_key(&key) {
+                let after = own_fog.is_some() && item.queue > shadow::LAST_SOLID_QUEUE;
+                let key = (item.light, item.lamps, after);
+                if key == (DrawLight::Main, 0, false) || light_groups.contains_key(&key) {
                     continue;
                 }
                 let Some(mut globals) = light_globals(item.light) else {
@@ -2071,6 +2082,10 @@ impl Renderer {
                 };
                 (globals.lamps, globals.lamp_info) = lamp_rows(&env.lamps, item.lamps);
                 globals.lamp_info[1] = dim_of(item.light);
+                if let (true, Some((color, numbers))) = (after, own_fog) {
+                    globals.fog_color = color;
+                    globals.fog_own = numbers;
+                }
                 let shadowed = matches!(item.light, DrawLight::Main | DrawLight::Dark);
                 let view = if shadowed {
                     mask.as_ref().unwrap_or(&self.white)
@@ -2207,7 +2222,8 @@ impl Renderer {
                         current = Some(key);
                     }
                     pass.set_stencil_reference(item.stencil_ref);
-                    let group = light_groups.get(&(item.light, item.lamps));
+                    let after = own_fog.is_some() && item.queue > shadow::LAST_SOLID_QUEUE;
+                    let group = light_groups.get(&(item.light, item.lamps, after));
                     pass.set_bind_group(0, group.unwrap_or(&globals_bg), &[]);
                     let b = &batches[item.batch];
                     pass.set_vertex_buffer(0, b.vb.slice(..));
@@ -2851,8 +2867,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_the_shader() {
-        // WGSL: mat4x4 and forty-two vec4 for globals.
-        assert_eq!(std::mem::size_of::<Globals>(), 736);
+        // WGSL: mat4x4 and forty-four vec4 for globals.
+        assert_eq!(std::mem::size_of::<Globals>(), 768);
         // WGSL: five mat4x4 and five vec4 for the shadow mask.
         assert_eq!(std::mem::size_of::<ShadowUniform>(), 400);
         assert_eq!(std::mem::size_of::<Vertex>(), 88);
