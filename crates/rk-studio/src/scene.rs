@@ -688,6 +688,10 @@ pub enum Effect {
         /// in metres. None is no mist.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mist: Option<f32>,
+        /// How strongly lamps and the sun light Renkatsu's own fog around
+        /// them, 0 for not at all.
+        #[serde(default = "whole")]
+        glow: f32,
     },
     /// CharaStudio's depth of field: how wide the sharp band is around
     /// where the camera turns, 0 to 2, and how strong the blur, 0 to 1.
@@ -740,6 +744,7 @@ impl Effect {
                 start_distance: 0.0,
                 visibility: None,
                 mist: None,
+                glow: 1.0,
             },
             Effect::DepthOfField {
                 focal_size: dof_focal_size(),
@@ -1068,6 +1073,7 @@ impl Scene {
                 start_distance: 0.0,
                 visibility: None,
                 mist: None,
+                glow: 1.0,
             };
             let id = self.add(effect.label(), Content::Effect { effect }, folder);
             if let Some(o) = self.get_mut(id) {
@@ -2254,6 +2260,7 @@ mod tests {
             start_distance: 0.0,
             visibility: None,
             mist: None,
+            glow: 1.0,
         };
         let fog = scene.add("Fog", Content::Effect { effect: fog }, None);
         scene.get_mut(fog).unwrap().parent = Some(map);

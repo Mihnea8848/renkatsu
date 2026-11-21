@@ -54,6 +54,16 @@ struct Fx {
     shaft_threshold: vec4f,
     // The 4 by 4 random texture: cosine, sine and a ray offset.
     rand: array<vec4f, 16>,
+    // Lights glowing in Renkatsu's own fog: strength, how many lamps, the
+    // fog's density, 1 when on.
+    glow: vec4f,
+    glow_eye: vec4f,
+    // The way towards the sun (w 1 when there is one), and its colour.
+    glow_sun_dir: vec4f,
+    glow_sun: vec4f,
+    // Lamps as toon.wgsl takes them: place, colour times intensity and
+    // range, the way a spot shines and its cosine.
+    glow_lamps: array<vec4f, 24>,
 }
 
 @group(0) @binding(0) var<uniform> fx: Fx;
@@ -235,7 +245,68 @@ fn fs_fog(in: FxOut) -> @location(0) vec4f {
     }
     let ndc = vec2f(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let ray = fx.fog_ray_z.xyz + fx.fog_ray_x.xyz * ndc.x + fx.fog_ray_y.xyz * ndc.y;
-    return vec4f(fx.fog_color.rgb, 1.0 - fog_factor(ray * depth, depth));
+    let a = 1.0 - fog_factor(ray * depth, depth);
+    if fx.glow.w < 0.5 {
+        return vec4f(fx.fog_color.rgb, a);
+    }
+    // Premultiplied: the fog's colour as much as there is fog, and the
+    // light the fog gives back on top.
+    return vec4f(fx.fog_color.rgb * a + fog_glow(ray * depth, a), a);
+}
+
+// The light lamps and the sun give back from the fog on the way to a
+// point `way` from the camera, `a` the fog over it. A lamp's light is
+// gathered along the way inside its range: Unity's falloff 1 / (1 + 25 q),
+// q the squared distance over the squared range, is k2 / (k2 + d^2) with
+// k2 = range^2 / 25, whose sum along a line has a closed form. The fog in
+// front of the glow takes some of it, as fog takes the picture.
+fn fog_glow(way: vec3f, a: f32) -> vec3f {
+    let len = length(way);
+    let dir = way / max(len, 1e-4);
+    let eye = fx.glow_eye.xyz;
+    let density = fx.glow.z;
+    var light = vec3f(0.0);
+    for (var k = 0u; k < u32(fx.glow.y); k++) {
+        let place = fx.glow_lamps[k * 3u];
+        let colour = fx.glow_lamps[k * 3u + 1u];
+        let spot = fx.glow_lamps[k * 3u + 2u];
+        let to = place.xyz - eye;
+        let t0 = dot(to, dir);
+        let h2 = max(dot(to, to) - t0 * t0, 0.0);
+        let range = colour.w;
+        let chord = sqrt(max(range * range - h2, 0.0));
+        let ta = max(0.0, t0 - chord);
+        let tb = min(len, t0 + chord);
+        if tb <= ta {
+            continue;
+        }
+        let k2 = range * range / 25.0;
+        let h = sqrt(k2 + h2);
+        var gathered = k2 * (atan((tb - t0) / h) - atan((ta - t0) / h)) / h;
+        let nearest = clamp(t0, ta, tb);
+        if spot.w > -1.0 {
+            let along = dot(normalize(eye + dir * nearest - place.xyz), normalize(spot.xyz));
+            gathered *= smoothstep(spot.w, mix(spot.w, 1.0, 0.2), along);
+        }
+        let front = density * nearest;
+        // Fog scatters light mostly onwards: brightest looking towards the
+        // lamp, a halo (Henyey-Greenstein, g 0.6).
+        let towards = dot(dir, normalize(to));
+        light += colour.rgb * gathered * exp(-front * front) * scatter(towards, 0.6);
+    }
+    light *= density * fx.glow.x;
+    // The sun: fog towards it brighter.
+    if fx.glow_sun_dir.w > 0.5 {
+        light += fx.glow_sun.rgb * scatter(dot(dir, fx.glow_sun_dir.xyz), 0.7) * a * fx.glow.x;
+    }
+    return light;
+}
+
+// How much of the light fog sends on at an angle whose cosine is `c` from
+// where the light goes (Henyey-Greenstein), per steradian: 1 / (4 pi) for
+// fog that scatters every way alike.
+fn scatter(c: f32, g: f32) -> f32 {
+    return (1.0 - g * g) / (12.566371 * pow(1.0 + g * g - 2.0 * g * c, 1.5));
 }
 
 // ---- BloomAndFlares ----
