@@ -1732,17 +1732,20 @@ fn lamp_reach(i: VsOut, k: u32) -> vec3<f32> {
     return colour.rgb * atten * turn;
 }
 
-// The lamps' light on top of the character's own shading.
+// The lamps' light on top of the character's own shading, which shows as
+// much as the map's light lets it (lamp_info.y, 1 without a map): in a dark
+// room only the lamps show her.
 fn with_lamps(i: VsOut, c: vec4<f32>) -> vec4<f32> {
+    let own = c.rgb * g.lamp_info.y;
     let count = u32(g.lamp_info.x);
     if (count == 0u) {
-        return c;
+        return vec4<f32>(own, c.a);
     }
     var light = vec3<f32>(0.0);
     for (var k = 0u; k < count; k++) {
         light += lamp_reach(i, k);
     }
-    return vec4<f32>(c.rgb + c.rgb * light * 0.6, c.a);
+    return vec4<f32>(own + c.rgb * light * 0.6, c.a);
 }
 
 // The colour with the samples the alpha tests keep, for pipelines with
@@ -1827,13 +1830,14 @@ fn item_alpha_outline(i: VsOut) -> vec4<f32> {
 
 @fragment
 fn fs_outline(i: VsOut) -> @location(0) vec4<f32> {
-    return outline(i);
+    let c = outline(i);
+    return vec4<f32>(c.rgb * g.lamp_info.y, c.a);
 }
 
 @fragment
 fn fs_outline_covered(i: VsOut) -> Covered {
-    let color = outline(i);
-    return Covered(color, coverage);
+    let c = outline(i);
+    return Covered(vec4<f32>(c.rgb * g.lamp_info.y, c.a), coverage);
 }
 
 fn outline(i: VsOut) -> vec4<f32> {

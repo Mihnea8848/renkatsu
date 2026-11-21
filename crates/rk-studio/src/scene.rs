@@ -885,13 +885,20 @@ impl Scene {
             .unwrap_or(1.0)
     }
 
-    /// How strong a character light shines: its intensity, times the map's
-    /// Light intensity where it goes with the map.
+    /// How much of a character light's characters' own shading shows: the
+    /// map's Light intensity where the light goes with the map, else all.
+    pub fn chara_light_dim(&self, id: ObjectId) -> f32 {
+        match self.get(id).map(|o| &o.content) {
+            Some(Content::Light { with_map: true, .. }) => self.map_light(),
+            _ => 1.0,
+        }
+    }
+
+    /// How strong a character light shines: its intensity, as dim as the
+    /// map makes its characters.
     pub fn chara_light_strength(&self, id: ObjectId) -> f32 {
         match self.get(id).map(|o| &o.content) {
-            Some(Content::Light {
-                intensity, with_map, ..
-            }) => intensity * if *with_map { self.map_light() } else { 1.0 },
+            Some(Content::Light { intensity, .. }) => intensity * self.chara_light_dim(id),
             _ => 0.0,
         }
     }

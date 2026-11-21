@@ -214,6 +214,8 @@ pub struct OtherLight {
     /// Its colour as picked, 0 to 1 per channel.
     pub color: [f32; 3],
     pub intensity: f32,
+    /// How much of its characters' own shading shows, as `light_dim`.
+    pub dim: f32,
 }
 
 /// The light a mesh takes.
@@ -326,6 +328,10 @@ pub struct Environment {
     /// How much of the map's baked and ambient light and reflections is
     /// kept, 0 to 1: a room made darker for lamps to light.
     pub map_light_intensity: f32,
+    /// How much of the main light's characters' own shading shows, lamps
+    /// aside: the map's Light intensity where their light goes with the
+    /// map, 1 otherwise. Characters no light reaches take the map's.
+    pub light_dim: f32,
     /// The lamps each mesh takes, a bit each by their place in `lamps`,
     /// by its place in the draws; a mesh not listed takes them all.
     pub draw_lamps: Vec<u32>,
@@ -360,6 +366,7 @@ impl Default for Environment {
             lamps: Vec::new(),
             map_lamps: Vec::new(),
             map_light_intensity: 1.0,
+            light_dim: 1.0,
             draw_lamps: Vec::new(),
         }
     }
@@ -2016,7 +2023,13 @@ impl Renderer {
             };
             let main_globals = Globals {
                 shadow: [0.0, 0.0, if mask.is_some() { 1.0 } else { 0.0 }, 0.0],
+                lamp_info: [0.0, env.light_dim, 0.0, 0.0],
                 ..base
+            };
+            let dim_of = |light: DrawLight| match light {
+                DrawLight::Main => env.light_dim,
+                DrawLight::Other(i) => env.other_lights.get(i).map_or(1.0, |o| o.dim),
+                DrawLight::Dark => env.map_light_intensity,
             };
             let globals_bg = globals_group(self, main_globals, mask.as_ref().unwrap_or(&self.white));
             // The other lights, without shadows, and none at all: a mesh no
@@ -2057,6 +2070,7 @@ impl Renderer {
                     continue;
                 };
                 (globals.lamps, globals.lamp_info) = lamp_rows(&env.lamps, item.lamps);
+                globals.lamp_info[1] = dim_of(item.light);
                 let shadowed = matches!(item.light, DrawLight::Main | DrawLight::Dark);
                 let view = if shadowed {
                     mask.as_ref().unwrap_or(&self.white)
