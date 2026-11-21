@@ -1117,8 +1117,8 @@ const ICON_SMALLEST: f32 = 6.0;
 const ICON_NEAR: f32 = 4.0;
 /// The least distance between two icons' middles, in points: two closer
 /// than this are one. At most one icon for each square this wide, about
-/// twelve in a hundred points square, whatever their size.
-const ICON_ROOM: f32 = 28.0;
+/// six in a hundred points square, whatever their size.
+const ICON_ROOM: f32 = 40.0;
 
 /// The icons to draw and pick: sized by distance, faded behind what
 /// stands in front of them, and never crowded. Of icons that would
