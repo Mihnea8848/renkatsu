@@ -30,7 +30,35 @@ struct Globals {
     // x: how many lamps, y: how much of the map's baked and ambient light
     // and reflections is kept (1 all, 0 none)
     lamp_info: vec4<f32>,
+    // Renkatsu's own fog on blended surfaces, see `fog_kept`; w 0 for none.
+    fog_own: vec4<f32>,
 }
+
+// Renkatsu's own fog on what is drawn after GlobalFog (see-through
+// surfaces): how much of the colour is kept, by GlobalFog's maths for its
+// exponential squared distance fog and its height fog. `fog_own`: density, the
+// mist's top, half its height density, and 1 for distance fog plus 2 for
+// height fog (0 for none).
+fn fog_kept(world: vec3<f32>, eye: vec3<f32>, p: vec4<f32>) -> f32 {
+    let v = world - eye;
+    let len = length(v);
+    let flags = u32(p.w);
+    var way = 0.0;
+    if (flags & 1u) != 0u {
+        way += len;
+    }
+    if (flags & 2u) != 0u {
+        let over = eye.y - p.y;
+        let inside = select(0.0, 1.0, over <= 0.0);
+        let point_over = v.y + over;
+        let c1 = inside * (point_over + over);
+        let c2 = min((1.0 - 2.0 * inside) * point_over, 0.0);
+        way += -len * p.z * (c1 - c2 * c2 / abs(v.y + 1e-5));
+    }
+    let d = p.x * max(way, 0.0);
+    return clamp(exp(-d * d), 0.0, 1.0);
+}
+
 
 // The way towards lamp `k` from a point and the light it brings there:
 // Unity's falloff over its range and a spot's cone, as on characters.
@@ -547,6 +575,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         let d = distance(in.world, g.eye.xyz);
         let f = clamp((g.fog_range.y - d) / max(g.fog_range.y - g.fog_range.x, 1e-4), 0.0, 1.0);
         color = mix(g.fog_color.rgb, color, f);
+    }
+    // GlobalFog runs before the blended queue; these take the fog here.
+    if g.fog_own.w > 0.5 && m.params.y > 0.5 {
+        color = mix(g.fog_color.rgb, color, fog_kept(in.world, g.eye.xyz, g.fog_own));
     }
     return vec4<f32>(color, select(1.0, alpha, m.params.y > 0.5));
 }

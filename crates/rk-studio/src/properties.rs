@@ -815,7 +815,36 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             color,
                             height,
                             start_distance,
+                            visibility,
+                            mist,
                         } => {
+                            row(ui, k, "Preset", None, |ui, rect| {
+                                use crate::scene::FOG_PRESETS;
+                                let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+                                let same = |x: Option<f32>, y: Option<f32>| match (x, y) {
+                                    (Some(x), Some(y)) => near(x, y),
+                                    (x, y) => x.is_none() && y.is_none(),
+                                };
+                                let current = FOG_PRESETS.iter().position(|p| {
+                                    same(*visibility, p.visibility)
+                                        && same(*mist, p.mist)
+                                        && (p.visibility.is_none() || (*color == p.color && near(*height, p.height)))
+                                });
+                                let mut names: Vec<&str> = FOG_PRESETS.iter().map(|p| p.name).collect();
+                                names.push("Custom");
+                                let mut chosen = current.unwrap_or(FOG_PRESETS.len());
+                                let was = chosen;
+                                widgets::combo(ui, k, rect, id.with("fog preset"), &mut chosen, &names);
+                                if chosen != was {
+                                    if let Some(p) = FOG_PRESETS.get(chosen) {
+                                        *color = p.color;
+                                        *height = p.height;
+                                        *visibility = p.visibility;
+                                        *mist = p.mist;
+                                        *start_distance = 0.0;
+                                    }
+                                }
+                            });
                             row(ui, k, "Colour", None, |ui, rect| {
                                 let mut chosen = usize::from(color.is_some());
                                 widgets::combo(ui, k, rect, id.with("fog colour"), &mut chosen, &["Map's own", "Own"]);
@@ -830,8 +859,28 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                     widgets::color_field(ui, k, rect, id.with("fog own"), own);
                                 });
                             }
-                            number(ui, "Height", height, 0.0, 50.0);
-                            number(ui, "Start", start_distance, 0.0, 50.0);
+                            if visibility.is_none() && mist.is_none() {
+                                // CharaStudio's fog.
+                                number(ui, "Height", height, 0.0, 50.0);
+                                number(ui, "Start", start_distance, 0.0, 50.0);
+                            } else {
+                                let mut see = visibility.unwrap_or(1000.0);
+                                number(ui, "Visibility", &mut see, 0.5, 1000.0);
+                                *visibility = Some(see);
+                                row(ui, k, "Ground mist", None, |ui, rect| {
+                                    let mut on = mist.is_some();
+                                    widgets::checkbox(ui, k, rect, id.with("mist"), &mut on, "");
+                                    *mist = match (on, *mist) {
+                                        (true, None) => Some(6.0),
+                                        (false, _) => None,
+                                        (true, m) => m,
+                                    };
+                                });
+                                if let Some(m) = mist {
+                                    number(ui, "Mist height", height, 0.05, 10.0);
+                                    number(ui, "Mist visibility", m, 0.5, 1000.0);
+                                }
+                            }
                         }
                         Effect::DepthOfField { focal_size, aperture } => {
                             // CharaStudio's focal size and aperture.

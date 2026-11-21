@@ -565,6 +565,61 @@ fn shaft_threshold() -> [f32; 3] {
     [128.0 / 255.0; 3]
 }
 
+/// A starting point for the Fog's settings, which stay editable.
+pub struct FogPreset {
+    pub name: &'static str,
+    pub color: Option<[f32; 3]>,
+    pub height: f32,
+    pub visibility: Option<f32>,
+    pub mist: Option<f32>,
+}
+
+/// The Fog's presets: CharaStudio's own first, then Renkatsu's.
+pub const FOG_PRESETS: [FogPreset; 6] = [
+    FogPreset {
+        name: "Map's own",
+        color: None,
+        height: 1.0,
+        visibility: None,
+        mist: None,
+    },
+    FogPreset {
+        name: "Light haze",
+        color: Some([0.82, 0.84, 0.86]),
+        height: 1.0,
+        visibility: Some(150.0),
+        mist: None,
+    },
+    FogPreset {
+        name: "Rainy day",
+        color: Some([0.52, 0.56, 0.62]),
+        height: 1.0,
+        visibility: Some(40.0),
+        mist: None,
+    },
+    FogPreset {
+        name: "Thick fog",
+        color: Some([0.80, 0.82, 0.84]),
+        height: 1.0,
+        visibility: Some(12.0),
+        mist: None,
+    },
+    FogPreset {
+        name: "Morning mist",
+        color: Some([0.86, 0.88, 0.90]),
+        height: 0.8,
+        visibility: Some(200.0),
+        mist: Some(30.0),
+    },
+    FogPreset {
+        name: "Dark night",
+        color: Some([0.01, 0.012, 0.02]),
+        height: 1.0,
+        visibility: Some(5.0),
+        mist: None,
+    },
+];
+
 /// The top of a new Fog, as CharaStudio's panel starts.
 fn fog_height() -> f32 {
     1.0
@@ -620,10 +675,19 @@ pub enum Effect {
     Fog {
         #[serde(default)]
         color: Option<[f32; 3]>,
+        /// CharaStudio's fog top; with ground mist, how high the mist goes.
         #[serde(default = "fog_height")]
         height: f32,
         #[serde(default)]
         start_distance: f32,
+        /// Renkatsu's own fog: how far one sees, in metres, before things
+        /// are lost in it (95% hidden). None is CharaStudio's fog.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visibility: Option<f32>,
+        /// Ground mist under `height`: how far one sees in it at the floor,
+        /// in metres. None is no mist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mist: Option<f32>,
     },
     /// CharaStudio's depth of field: how wide the sharp band is around
     /// where the camera turns, 0 to 2, and how strong the blur, 0 to 1.
@@ -674,6 +738,8 @@ impl Effect {
                 color: Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]),
                 height: fog_height(),
                 start_distance: 0.0,
+                visibility: None,
+                mist: None,
             },
             Effect::DepthOfField {
                 focal_size: dof_focal_size(),
@@ -1000,6 +1066,8 @@ impl Scene {
                 color: None,
                 height: 1.0,
                 start_distance: 0.0,
+                visibility: None,
+                mist: None,
             };
             let id = self.add(effect.label(), Content::Effect { effect }, folder);
             if let Some(o) = self.get_mut(id) {
@@ -2184,6 +2252,8 @@ mod tests {
             color: None,
             height: 1.0,
             start_distance: 0.0,
+            visibility: None,
+            mist: None,
         };
         let fog = scene.add("Fog", Content::Effect { effect: fog }, None);
         scene.get_mut(fog).unwrap().parent = Some(map);

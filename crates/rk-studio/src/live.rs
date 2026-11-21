@@ -1660,6 +1660,48 @@ fn ray_meets_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
 
 /// The effects the scene's objects ask for: the first of each that shows.
 /// An effect no object asks for is off.
+/// Renkatsu's own fog on GlobalFog's maths: exponential squared distance
+/// fog, which keeps what is near clear and closes in towards
+/// `visibility` metres, where it hides 95%; and under `height` a ground
+/// mist in which one sees `mist` metres at the floor. GlobalFog's height
+/// fog thickens with the depth under its top, by its height density per
+/// metre.
+fn own_fog(
+    color: Option<[f32; 3]>,
+    height: f32,
+    visibility: Option<f32>,
+    mist: Option<f32>,
+) -> rk_render::effects::Fog {
+    // exp(-(density * way)^2) is 5% left where density * way is the root
+    // of 3.
+    let lost = 3.0f32.sqrt();
+    let first = rk_render::effects::Fog::default();
+    let top = height.max(0.05);
+    let see = visibility.map(|v| v.max(0.1));
+    let mist = mist.map(|m| m.max(0.1));
+    // At the floor a metre of the way counts 1 for the distance fog and
+    // height density times the top for the mist.
+    let (density, height_density) = match (see, mist) {
+        (Some(v), Some(m)) if m < v => (lost / v, (v / m - 1.0) / top),
+        (Some(v), _) => (lost / v, 0.0),
+        (None, Some(m)) => (lost / m, 1.0 / top),
+        (None, None) => (0.0, 0.0),
+    };
+    rk_render::effects::Fog {
+        color: color.unwrap_or(first.color),
+        color_from_map: color.is_none(),
+        height: top,
+        start_distance: 0.0,
+        height_density,
+        height_fog: height_density > 0.0,
+        distance_fog: see.is_some(),
+        radial: true,
+        mode: rk_render::effects::FogMode::ExponentialSquared { density },
+        own: true,
+        ..first
+    }
+}
+
 fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> StudioEffects {
     let map_filter = map.filter;
     use crate::scene::Effect;
@@ -1740,16 +1782,22 @@ fn scene_effects(scene: &Scene, filters: Option<&Filters>, map: MapLook) -> Stud
                 color,
                 height,
                 start_distance,
+                visibility,
+                mist,
             } if fx.fog.is_none() => {
-                // Without a map, the Studio scene's own fog mode; with a
-                // map that has fog, the renderer takes the map's.
                 let first = rk_render::effects::Fog::default();
-                fx.fog = Some(rk_render::effects::Fog {
-                    color: color.unwrap_or(first.color),
-                    color_from_map: color.is_none(),
-                    height,
-                    start_distance,
-                    ..first
+                fx.fog = Some(if visibility.is_none() && mist.is_none() {
+                    // Without a map, the Studio scene's own fog mode; with a
+                    // map that has fog, the renderer takes the map's.
+                    rk_render::effects::Fog {
+                        color: color.unwrap_or(first.color),
+                        color_from_map: color.is_none(),
+                        height,
+                        start_distance,
+                        ..first
+                    }
+                } else {
+                    own_fog(color, height, visibility, mist)
                 });
             }
             _ => {}
@@ -1773,6 +1821,8 @@ mod tests {
                     color: None,
                     height: 5.0,
                     start_distance: 2.0,
+                    visibility: None,
+                    mist: None,
                 },
             },
             None,
@@ -1795,6 +1845,22 @@ mod tests {
             srgb: false,
             repeat: false,
         })
+    }
+
+    #[test]
+    fn own_fog_hides_95_percent_at_its_visibility() {
+        use rk_render::effects::fog_factor;
+        let kept = |fog: &rk_render::effects::Fog, eye_y: f32, way: [f32; 3]| fog_factor(fog, eye_y, way, way[2]);
+        let fog = own_fog(None, 1.0, Some(12.0), None);
+        assert!((kept(&fog, 1.5, [0.0, 0.0, 12.0]) - 0.05).abs() < 0.01);
+        // Clearer than plain exponential fog half way.
+        assert!(kept(&fog, 1.5, [0.0, 0.0, 6.0]) > 0.4);
+        // In ground mist, one sees its own distance at the floor.
+        let mist = own_fog(None, 1.0, Some(200.0), Some(30.0));
+        let at_floor = kept(&mist, 0.0, [0.0, 0.0, 30.0]);
+        assert!((at_floor - 0.05).abs() < 0.02, "{at_floor}");
+        // Above the mist, far clearer.
+        assert!(kept(&mist, 3.0, [0.0, 0.0, 30.0]) > 0.9);
     }
 
     #[test]
