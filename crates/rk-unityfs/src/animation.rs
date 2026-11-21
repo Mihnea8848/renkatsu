@@ -377,6 +377,120 @@ fn items(value: Option<&UValue>) -> impl Iterator<Item = &UValue> {
         .map(|v| v.get("data").unwrap_or(v))
 }
 
+/// A transition out of a state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    /// The state it leads to, by its place in the layer's states, or
+    /// [`EXIT_STATE`] and above for the machine's way out.
+    pub destination: u32,
+    /// Whether it waits for `exit_time`, in passes of the state it leaves.
+    pub has_exit_time: bool,
+    pub exit_time: f32,
+    /// How long the two states blend: seconds with `fixed_duration`, else
+    /// passes of the state it leaves.
+    pub duration: f32,
+    pub fixed_duration: bool,
+    /// Where the next state starts, in passes.
+    pub offset: f32,
+    /// How many parameter conditions it waits for.
+    pub conditions: usize,
+}
+
+/// The first of the numbers a transition names instead of a state: the
+/// machine's entry, then its exit.
+pub const EXIT_STATE: u32 = 30000;
+
+/// A state with what its machine does around it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MachineState {
+    pub state: State,
+    pub tag: String,
+    /// CRC-32 of the float parameter the speed is multiplied by; one the
+    /// controller does not have means none.
+    pub speed_parameter: u32,
+    /// Where each pass starts, in passes.
+    pub cycle_offset: f32,
+    /// CRC-32 of the float parameter that gives the cycle offset instead.
+    pub cycle_offset_parameter: u32,
+    pub exits: Vec<Transition>,
+}
+
+/// One layer of a controller: a state machine and how its pose is put
+/// over the layers before it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layer {
+    /// The pose is added to the layers before (`m_LayerBlendingMode` 1)
+    /// instead of replacing them.
+    pub additive: bool,
+    /// The weight it starts with (`m_DefaultWeight`); the first layer
+    /// always counts in full.
+    pub weight: f32,
+    /// The state it starts in, by its place in `states`.
+    pub default_state: usize,
+    pub states: Vec<MachineState>,
+    /// How many transitions leave from any state.
+    pub any_state_transitions: usize,
+}
+
+/// One state of a machine, with `name_of` the text of a name's hash.
+fn read_state(state: &UValue, name_of: &dyn Fn(u32) -> String) -> State {
+    let int = |name: &str| state.get(name).and_then(UValue::as_i64).unwrap_or(0);
+    // The tree of the first motion set, the only one of a controller
+    // without synced layers.
+    let tree_index = state
+        .get("m_BlendTreeConstantIndexArray")
+        .and_then(UValue::as_array)
+        .and_then(|a| a.first())
+        .and_then(UValue::as_i64)
+        .unwrap_or(-1);
+    let tree = usize::try_from(tree_index)
+        .ok()
+        .and_then(|i| items(state.get("m_BlendTreeConstantArray")).nth(i));
+    let nodes = items(tree.and_then(|t| t.get("m_NodeArray")))
+        .map(|node| {
+            let int = |name: &str| node.get(name).and_then(UValue::as_i64).unwrap_or(0);
+            let children: Vec<usize> = node
+                .get("m_ChildIndices")
+                .and_then(UValue::as_array)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(UValue::as_i64)
+                .map(|c| c as usize)
+                .collect();
+            let blend = if children.is_empty() {
+                Blend::Clip(int("m_ClipID") as usize)
+            } else if int("m_BlendType") == 0 {
+                let at = floats(
+                    node.get("m_Blend1dData")
+                        .and_then(|d| d.get("data"))
+                        .and_then(|d| d.get("m_ChildThresholdArray")),
+                );
+                Blend::Simple1D {
+                    parameter: int("m_BlendEventID") as u32,
+                    children: children
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (*c, at.get(i).copied().unwrap_or(0.0)))
+                        .collect(),
+                }
+            } else {
+                Blend::Unknown { children }
+            };
+            BlendNode { blend }
+        })
+        .collect();
+    State {
+        name: name_of(int("m_NameID") as u32),
+        speed: state.get("m_Speed").and_then(UValue::as_f32).unwrap_or(1.0),
+        nodes,
+        transitions: state
+            .get("m_TransitionConstantArray")
+            .and_then(UValue::as_array)
+            .map_or(0, <[UValue]>::len),
+        loops: state.get("m_Loop").and_then(UValue::as_bool).unwrap_or(false),
+    }
+}
+
 impl AnimatorController {
     pub fn read(o: &UObject) -> Result<Self> {
         let controller = o
@@ -400,61 +514,7 @@ impl AnimatorController {
         let machine = items(controller.get("m_StateMachineArray")).nth(machine_index);
         let mut states = Vec::new();
         for state in items(machine.and_then(|m| m.get("m_StateConstantArray"))) {
-            let int = |name: &str| state.get(name).and_then(UValue::as_i64).unwrap_or(0);
-            // The tree of the first motion set, the only one of a controller
-            // without synced layers.
-            let tree_index = state
-                .get("m_BlendTreeConstantIndexArray")
-                .and_then(UValue::as_array)
-                .and_then(|a| a.first())
-                .and_then(UValue::as_i64)
-                .unwrap_or(-1);
-            let tree = usize::try_from(tree_index)
-                .ok()
-                .and_then(|i| items(state.get("m_BlendTreeConstantArray")).nth(i));
-            let nodes = items(tree.and_then(|t| t.get("m_NodeArray")))
-                .map(|node| {
-                    let int = |name: &str| node.get(name).and_then(UValue::as_i64).unwrap_or(0);
-                    let children: Vec<usize> = node
-                        .get("m_ChildIndices")
-                        .and_then(UValue::as_array)
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(UValue::as_i64)
-                        .map(|c| c as usize)
-                        .collect();
-                    let blend = if children.is_empty() {
-                        Blend::Clip(int("m_ClipID") as usize)
-                    } else if int("m_BlendType") == 0 {
-                        let at = floats(
-                            node.get("m_Blend1dData")
-                                .and_then(|d| d.get("data"))
-                                .and_then(|d| d.get("m_ChildThresholdArray")),
-                        );
-                        Blend::Simple1D {
-                            parameter: int("m_BlendEventID") as u32,
-                            children: children
-                                .iter()
-                                .enumerate()
-                                .map(|(i, c)| (*c, at.get(i).copied().unwrap_or(0.0)))
-                                .collect(),
-                        }
-                    } else {
-                        Blend::Unknown { children }
-                    };
-                    BlendNode { blend }
-                })
-                .collect();
-            states.push(State {
-                name: name_of(int("m_NameID") as u32),
-                speed: state.get("m_Speed").and_then(UValue::as_f32).unwrap_or(1.0),
-                nodes,
-                transitions: state
-                    .get("m_TransitionConstantArray")
-                    .and_then(UValue::as_array)
-                    .map_or(0, <[UValue]>::len),
-                loops: state.get("m_Loop").and_then(UValue::as_bool).unwrap_or(false),
-            });
+            states.push(read_state(state, &name_of));
         }
 
         // Parameters: the values table says where each one's default is.
@@ -487,6 +547,74 @@ impl AnimatorController {
                 .collect(),
             parameters,
         })
+    }
+
+    /// Every layer of a controller, read from the same object as
+    /// [`AnimatorController::read`].
+    pub fn layers(o: &UObject) -> Result<Vec<Layer>> {
+        let controller = o
+            .get("m_Controller")
+            .and_then(UValue::as_object)
+            .ok_or_else(|| missing("m_Controller"))?;
+        let names: std::collections::HashMap<u32, &str> = o
+            .array("m_TOS")
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|e| Some((e.get("first")?.as_i64()? as u32, e.get("second")?.as_str()?)))
+            .collect();
+        let name_of = |id: u32| names.get(&id).copied().unwrap_or_default().to_owned();
+        let mut layers = Vec::new();
+        for layer in items(controller.get("m_LayerArray")) {
+            let int = |name: &str| layer.get(name).and_then(UValue::as_i64);
+            let machine =
+                items(controller.get("m_StateMachineArray")).nth(int("m_StateMachineIndex").unwrap_or(0) as usize);
+            let field = |name: &str| machine.and_then(|m| m.get(name));
+            let states = items(field("m_StateConstantArray"))
+                .map(|state| {
+                    let int = |name: &str| state.get(name).and_then(UValue::as_i64).unwrap_or(0);
+                    let exits = items(state.get("m_TransitionConstantArray"))
+                        .map(|t| {
+                            let float = |name: &str| t.get(name).and_then(UValue::as_f32).unwrap_or(0.0);
+                            let flag = |name: &str| t.get(name).and_then(UValue::as_bool).unwrap_or(false);
+                            Transition {
+                                destination: t.get("m_DestinationState").and_then(UValue::as_i64).unwrap_or(0) as u32,
+                                has_exit_time: flag("m_HasExitTime"),
+                                exit_time: float("m_ExitTime"),
+                                duration: float("m_TransitionDuration"),
+                                fixed_duration: flag("m_HasFixedDuration"),
+                                offset: float("m_TransitionOffset"),
+                                conditions: t
+                                    .get("m_ConditionConstantArray")
+                                    .and_then(UValue::as_array)
+                                    .map_or(0, <[UValue]>::len),
+                            }
+                        })
+                        .collect();
+                    MachineState {
+                        state: read_state(state, &name_of),
+                        tag: name_of(int("m_TagID") as u32),
+                        speed_parameter: int("m_SpeedParamID") as u32,
+                        cycle_offset: state.get("m_CycleOffset").and_then(UValue::as_f32).unwrap_or(0.0),
+                        cycle_offset_parameter: int("m_CycleOffsetParamID") as u32,
+                        exits,
+                    }
+                })
+                .collect();
+            layers.push(Layer {
+                // The field's name keeps the cast its type was written with.
+                additive: int("(int&)m_LayerBlendingMode")
+                    .or(int("m_LayerBlendingMode"))
+                    .unwrap_or(0)
+                    == 1,
+                weight: layer.get("m_DefaultWeight").and_then(UValue::as_f32).unwrap_or(0.0),
+                default_state: field("m_DefaultState").and_then(UValue::as_i64).unwrap_or(0) as usize,
+                states,
+                any_state_transitions: field("m_AnyStateTransitionConstantArray")
+                    .and_then(UValue::as_array)
+                    .map_or(0, <[UValue]>::len),
+            });
+        }
+        Ok(layers)
     }
 
     pub fn state(&self, name: &str) -> Option<&State> {
@@ -960,6 +1088,101 @@ mod tests {
         };
         assert_eq!(single.weights(&|_| 0.3), [(4, 1.0)]);
         assert!(single.loops && !s.loops);
+    }
+
+    fn object(fields: Vec<(&str, UValue)>) -> UValue {
+        UValue::Object(Box::new(UObject {
+            ty: "".into(),
+            fields: fields.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+        }))
+    }
+
+    #[test]
+    fn layers_come_with_their_default_state_and_transitions() {
+        // The stage's centre spot: a first layer that waits and leaves,
+        // and an additive second one at full weight.
+        let transition = object(vec![
+            ("m_DestinationState", UValue::Int(30001)),
+            ("m_TransitionDuration", UValue::Float(0.25)),
+            ("m_TransitionOffset", UValue::Float(0.5)),
+            ("m_ExitTime", UValue::Float(81.0)),
+            ("m_HasExitTime", UValue::Bool(true)),
+            ("m_HasFixedDuration", UValue::Bool(true)),
+            ("m_ConditionConstantArray", UValue::Array(Vec::new())),
+        ]);
+        let state = |name: i64, tag: i64, exits: Vec<UValue>| {
+            object(vec![
+                ("m_NameID", UValue::Int(name)),
+                ("m_TagID", UValue::Int(tag)),
+                ("m_SpeedParamID", UValue::Int(7)),
+                ("m_CycleOffsetParamID", UValue::Int(8)),
+                ("m_Speed", UValue::Float(-1.0)),
+                ("m_CycleOffset", UValue::Float(0.25)),
+                ("m_TransitionConstantArray", UValue::Array(exits)),
+            ])
+        };
+        let machine = |default: i64, states: Vec<UValue>| {
+            object(vec![
+                ("m_StateConstantArray", UValue::Array(states)),
+                ("m_DefaultState", UValue::Int(default)),
+            ])
+        };
+        let layer = |machine: i64, mode: i64, weight: f64| {
+            object(vec![
+                ("m_StateMachineIndex", UValue::Int(machine)),
+                ("(int&)m_LayerBlendingMode", UValue::Int(mode)),
+                ("m_DefaultWeight", UValue::Float(weight)),
+            ])
+        };
+        let name = |id: i64, text: &str| object(vec![("first", UValue::Int(id)), ("second", UValue::Str(text.into()))]);
+        let controller = object(vec![
+            ("m_LayerArray", UValue::Array(vec![layer(0, 0, 0.0), layer(1, 1, 1.0)])),
+            (
+                "m_StateMachineArray",
+                UValue::Array(vec![
+                    machine(1, vec![state(1, 3, Vec::new()), state(2, 0, vec![transition])]),
+                    machine(0, vec![state(1, 0, Vec::new())]),
+                ]),
+            ),
+        ]);
+        let UValue::Object(o) = object(vec![
+            (
+                "m_TOS",
+                UValue::Array(vec![name(1, "001"), name(2, "002"), name(3, "stop")]),
+            ),
+            ("m_Controller", controller),
+        ]) else {
+            unreachable!()
+        };
+        let layers = AnimatorController::layers(&o).unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            (layers[0].additive, layers[0].default_state, layers[0].states.len()),
+            (false, 1, 2)
+        );
+        assert_eq!(
+            (layers[1].additive, layers[1].weight, layers[1].states.len()),
+            (true, 1.0, 1)
+        );
+        let first = &layers[0].states[0];
+        assert_eq!((first.state.name.as_str(), first.tag.as_str()), ("001", "stop"));
+        assert_eq!((first.speed_parameter, first.cycle_offset_parameter), (7, 8));
+        assert_eq!((first.state.speed, first.cycle_offset), (-1.0, 0.25));
+        let second = &layers[0].states[1];
+        assert_eq!(second.state.name, "002");
+        assert_eq!(
+            second.exits,
+            vec![Transition {
+                destination: 30001,
+                has_exit_time: true,
+                exit_time: 81.0,
+                duration: 0.25,
+                fixed_duration: true,
+                offset: 0.5,
+                conditions: 0,
+            }]
+        );
+        assert!(second.exits[0].destination >= EXIT_STATE);
     }
 
     #[test]

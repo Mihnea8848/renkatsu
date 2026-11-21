@@ -750,6 +750,44 @@ impl Target {
 /// The vertex layout of `Vertex`.
 const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32x4, 6 => Float32x2];
 
+/// An object's own matrix, one a draw: its four columns.
+const OBJECT_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4];
+
+/// The bytes of one object's matrix in `MapGpu::matrices`.
+const MATRIX_BYTES: u64 = std::mem::size_of::<[f32; 16]>() as u64;
+
+/// The two vertex buffers of a map's draw: the mesh, and the matrix of
+/// the object it belongs to.
+fn vertex_buffers() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: MATRIX_BYTES,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &OBJECT_ATTRIBUTES,
+        }),
+    ]
+}
+
+/// The box around a box moved by `matrix`.
+fn moved_bounds(matrix: &Mat4, (min, max): ([f32; 3], [f32; 3])) -> ([f32; 3], [f32; 3]) {
+    let (min, max) = (Vec3::from(min), Vec3::from(max));
+    if !(min.cmple(max).all()) {
+        return (min.to_array(), max.to_array());
+    }
+    let centre = matrix.transform_point3((min + max) * 0.5);
+    let half = (max - min) * 0.5;
+    let reach = matrix.x_axis.truncate().abs() * half.x
+        + matrix.y_axis.truncate().abs() * half.y
+        + matrix.z_axis.truncate().abs() * half.z;
+    ((centre - reach).to_array(), (centre + reach).to_array())
+}
+
 /// The map pass's pipelines, made the first time a map is set.
 pub(crate) struct Pipelines {
     globals: wgpu::BindGroupLayout,
@@ -998,11 +1036,7 @@ impl Pipelines {
                         module: &shadow_shader,
                         entry_point: Some("vs_main"),
                         compilation_options: Default::default(),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &ATTRIBUTES,
-                        })],
+                        buffers: &vertex_buffers(),
                     },
                     fragment: cutout.then(|| wgpu::FragmentState {
                         module: &shadow_shader,
@@ -1108,11 +1142,7 @@ impl Pipelines {
                         module: &self.shader,
                         entry_point: Some("vs_main"),
                         compilation_options: Default::default(),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &ATTRIBUTES,
-                        })],
+                        buffers: &vertex_buffers(),
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &self.shader,
@@ -1190,8 +1220,11 @@ struct ObjectGpu {
     /// object that is never seen and casts no shadow, which is not
     /// uploaded.
     buffers: Option<usize>,
+    /// Where it is now, its matrix counted in.
     bounds: ([f32; 3], [f32; 3]),
     middle: Vec3,
+    /// Where its mesh was baked.
+    rest_bounds: ([f32; 3], [f32; 3]),
     vanish: Vec<usize>,
     /// On a layer the camera draws, and not shadows only.
     on_camera: bool,
@@ -1210,6 +1243,8 @@ struct ObjectGpu {
 /// One submesh to draw this frame.
 struct Draw {
     buffers: usize,
+    /// The object it is of, for its matrix.
+    object: usize,
     lightmap: usize,
     reflection: usize,
     first: u32,
@@ -1234,6 +1269,7 @@ const NO_MIRROR: usize = usize::MAX;
 /// A submesh casting the sun's shadow this frame.
 struct Caster {
     buffers: usize,
+    object: usize,
     first: u32,
     count: u32,
     material: usize,
@@ -1441,6 +1477,16 @@ pub(crate) struct MapGpu {
     bounds: (Vec3, Vec3),
     vanish: Vec<VanishVolume>,
     objects: Vec<ObjectGpu>,
+    /// Where each object of the scene is in `objects`; `None` for one
+    /// without a mesh.
+    object_of: Vec<Option<usize>>,
+    /// Every object's own matrix, in the order of `objects`: the identity
+    /// until `Renderer::set_map_object_matrices` moves one.
+    matrices: wgpu::Buffer,
+    /// The objects that stand elsewhere than they were baked.
+    moved: Vec<usize>,
+    /// The bounds of everything as baked.
+    rest_bounds: (Vec3, Vec3),
     buffers: Vec<(wgpu::Buffer, wgpu::Buffer)>,
     materials: Vec<wgpu::BindGroup>,
     lightmaps: Vec<wgpu::BindGroup>,
@@ -1652,11 +1698,14 @@ impl MapGpu {
         // the camera: which of them a frame draws, it decides itself.
         let mut buffers: Vec<(wgpu::Buffer, wgpu::Buffer)> = Vec::new();
         let mut objects = Vec::new();
+        let mut object_of = Vec::with_capacity(map.objects.len());
         for o in &map.objects {
             let mesh = &o.mesh;
             if mesh.positions.is_empty() || mesh.indices.is_empty() {
+                object_of.push(None);
                 continue;
             }
+            object_of.push(Some(objects.len()));
             let on_camera = map.seen(o);
             let sunlit = o.layer < 32 && l.sun_mask & (1 << o.layer) != 0;
             let casts = shadowed && sunlit && o.casts_shadows;
@@ -1664,6 +1713,7 @@ impl MapGpu {
                 buffers: None,
                 bounds: mesh.bounds,
                 middle: (Vec3::from(mesh.bounds.0) + Vec3::from(mesh.bounds.1)) * 0.5,
+                rest_bounds: mesh.bounds,
                 vanish: o.vanish.clone(),
                 on_camera,
                 layer: (!o.shadows_only && o.layer < 32).then_some(o.layer),
@@ -1723,12 +1773,21 @@ impl MapGpu {
             }
             objects.push(object);
         }
+        let matrices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("map object matrices"),
+            contents: bytemuck::cast_slice(&vec![Mat4::IDENTITY.to_cols_array(); objects.len().max(1)]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
         let mut gpu = MapGpu {
             placement: MapPlacement::default(),
             light: l.clone(),
             bounds: map.bounds(),
+            rest_bounds: map.bounds(),
             vanish: map.vanish.clone(),
             objects,
+            object_of,
+            matrices,
+            moved: Vec::new(),
             buffers,
             materials,
             lightmaps,
@@ -1753,6 +1812,48 @@ impl MapGpu {
             let view = MapView::new(device, pipes, &self.atlas, shadowed, self.sky_views.as_ref());
             self.views.push(view);
         }
+    }
+
+    /// The matrix of one object, as the vertex buffer a draw of it reads.
+    fn matrix_of(&self, object: usize) -> wgpu::BufferSlice<'_> {
+        let at = object as u64 * MATRIX_BYTES;
+        self.matrices.slice(at..at + MATRIX_BYTES)
+    }
+
+    /// Puts one object where `matrix` takes its baked mesh, with its
+    /// bounds.
+    fn move_object(&mut self, queue: &wgpu::Queue, object: usize, matrix: Mat4) {
+        let o = &mut self.objects[object];
+        let rest = matrix == Mat4::IDENTITY;
+        o.bounds = if rest {
+            o.rest_bounds
+        } else {
+            moved_bounds(&matrix, o.rest_bounds)
+        };
+        o.middle = (Vec3::from(o.bounds.0) + Vec3::from(o.bounds.1)) * 0.5;
+        queue.write_buffer(
+            &self.matrices,
+            object as u64 * MATRIX_BYTES,
+            bytemuck::cast_slice(&matrix.to_cols_array()),
+        );
+        self.moved.retain(|m| *m != object);
+        if !rest {
+            self.moved.push(object);
+        }
+    }
+
+    /// The bounds of everything, moved objects where they are now: the
+    /// sun's shadow and the far plane reach them.
+    fn fit_bounds(&mut self) {
+        let (mut min, mut max) = self.rest_bounds;
+        for o in self.moved.iter().map(|m| &self.objects[*m]) {
+            let (lo, hi) = (Vec3::from(o.bounds.0), Vec3::from(o.bounds.1));
+            if lo.cmple(hi).all() && lo.is_finite() && hi.is_finite() {
+                min = min.min(lo);
+                max = max.max(hi);
+            }
+        }
+        self.bounds = (min, max);
     }
 
     pub(crate) fn has_mirrors(&self) -> bool {
@@ -1946,7 +2047,7 @@ impl MapGpu {
         // The volumes the camera stands in hide what names them.
         let hide = self.placement.hide_walls;
         let inside: Vec<bool> = self.vanish.iter().map(|v| hide && v.contains(walls_from)).collect();
-        for o in &self.objects {
+        for (object, o) in self.objects.iter().enumerate() {
             if o.vanish.iter().any(|v| inside.get(*v).copied().unwrap_or(false)) {
                 continue;
             }
@@ -1971,6 +2072,7 @@ impl MapGpu {
                 if p.caster {
                     casters.push(Caster {
                         buffers,
+                        object,
                         first: p.first,
                         count: p.count,
                         material: p.material,
@@ -1981,6 +2083,7 @@ impl MapGpu {
                 if seen {
                     draws.push(Draw {
                         buffers,
+                        object,
                         lightmap: o.lightmap,
                         reflection: o.reflection,
                         first: p.first,
@@ -2010,6 +2113,7 @@ impl MapGpu {
                 pipes.mirror.write(queue, m, view_proj, eye.screen);
                 draws.push(Draw {
                     buffers: 0,
+                    object: 0,
                     lightmap: 0,
                     reflection: 0,
                     first: 0,
@@ -2076,6 +2180,7 @@ impl MapGpu {
                 pass.set_bind_group(1, &self.materials[c.material], &[]);
                 let (v, i) = &self.buffers[c.buffers];
                 pass.set_vertex_buffer(0, v.slice(..));
+                pass.set_vertex_buffer(1, self.matrix_of(c.object));
                 pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
             }
@@ -2092,6 +2197,7 @@ impl MapGpu {
             pass.set_bind_group(1, &self.materials[d.material], &[]);
             let (v, i) = &self.buffers[d.buffers];
             pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_vertex_buffer(1, self.matrix_of(d.object));
             pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
         }
@@ -2154,6 +2260,7 @@ impl MapGpu {
             pass.set_bind_group(3, &self.reflections[d.reflection], &[]);
             let (vb, ib) = &self.buffers[d.buffers];
             pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_vertex_buffer(1, self.matrix_of(d.object));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
         }
@@ -2264,6 +2371,39 @@ impl Renderer {
         if let Some(map) = self.map_scene.as_mut() {
             map.placement = placement;
         }
+    }
+
+    /// Puts objects of the map that `set_map` uploaded elsewhere than
+    /// their meshes were baked: each by its place in `MapScene::objects`,
+    /// with the matrix that takes its baked mesh, in the map's own space,
+    /// to where it stands now (`world now * inverse(world when baked)`).
+    /// An object keeps its matrix until it is given another; the identity
+    /// puts it back. The camera's passes, the sun's shadow, the depth
+    /// texture and the mirrors' views all draw it there, and it is culled
+    /// by its moved bounds. Cheap: one small write per object. A new
+    /// `set_map` starts with every object as baked.
+    pub fn set_map_object_matrices(&mut self, matrices: &[(usize, Mat4)]) {
+        let Some(map) = self.map_scene.as_mut() else { return };
+        for &(index, matrix) in matrices {
+            if let Some(object) = map.object_of.get(index).copied().flatten() {
+                map.move_object(&self.queue, object, matrix);
+            }
+        }
+        map.fit_bounds();
+    }
+
+    /// Puts every object of the map back where it was baked.
+    pub fn reset_map_object_matrices(&mut self) {
+        let Some(map) = self.map_scene.as_mut() else { return };
+        for object in std::mem::take(&mut map.moved) {
+            map.move_object(&self.queue, object, Mat4::IDENTITY);
+        }
+        map.fit_bounds();
+    }
+
+    /// How many objects of the map stand elsewhere than they were baked.
+    pub fn map_objects_moved(&self) -> usize {
+        self.map_scene.as_ref().map_or(0, |m| m.moved.len())
     }
 
     /// Gives the map that `set_map` uploaded its mirrors, in place of
@@ -2438,6 +2578,20 @@ mod tests {
         )
         .validate(&module)
         .expect("validates");
+    }
+
+    #[test]
+    fn bounds_follow_an_object_s_matrix() {
+        let rest = ([1.0, 0.0, -0.5], [3.0, 2.0, 0.5]);
+        assert_eq!(moved_bounds(&Mat4::IDENTITY, rest), rest);
+        // A quarter turn about Y, then two units up: x goes to -z.
+        let m = Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0)) * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let (lo, hi) = moved_bounds(&m, rest);
+        assert!(Vec3::from(lo).abs_diff_eq(Vec3::new(-0.5, 2.0, -3.0), 1e-5), "{lo:?}");
+        assert!(Vec3::from(hi).abs_diff_eq(Vec3::new(0.5, 4.0, -1.0), 1e-5), "{hi:?}");
+        // The box of nothing stays as it is.
+        let none = ([f32::MAX; 3], [f32::MIN; 3]);
+        assert_eq!(moved_bounds(&m, none), none);
     }
 
     #[test]

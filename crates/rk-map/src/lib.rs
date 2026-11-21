@@ -8,6 +8,7 @@ pub mod build;
 pub mod file;
 pub mod list;
 pub mod mirror;
+pub mod motion;
 pub mod names;
 pub mod scene;
 pub mod sky;

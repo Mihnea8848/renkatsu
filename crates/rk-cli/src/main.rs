@@ -412,6 +412,27 @@ enum MapCmd {
         /// camera, at the capture's size.
         #[arg(long)]
         capture: Option<PathBuf>,
+        /// Pose what the map's Animators move, this many seconds after
+        /// the map loaded. Without it, everything is drawn as baked.
+        #[arg(long)]
+        motion: Option<f32>,
+        /// Where the camera stands, in place of the view's: x,y,z.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        eye: Vec<f32>,
+        /// What the camera looks at, with --eye: x,y,z.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        target: Vec<f32>,
+    },
+    /// Show a map's Animators and the objects they move.
+    Motion {
+        /// The map's number, level or name.
+        map: String,
+        /// day, evening or night.
+        #[arg(long, default_value = "day")]
+        time: String,
+        /// Also print where the moved objects stand at these seconds.
+        #[arg(long, value_delimiter = ',')]
+        at: Vec<f32>,
     },
 }
 
@@ -621,6 +642,9 @@ fn main() -> Result<()> {
                     fog,
                     sky,
                     capture,
+                    motion,
+                    eye,
+                    target,
                 },
         } => map::render(
             &map,
@@ -632,8 +656,16 @@ fn main() -> Result<()> {
                 fog,
                 sky,
                 capture: capture.as_deref(),
+                motion,
+                look: match (eye.as_slice(), target.as_slice()) {
+                    ([a, b, c], [x, y, z]) => Some(([*a, *b, *c], [*x, *y, *z])),
+                    _ => None,
+                },
             },
         ),
+        Cmd::Map {
+            cmd: MapCmd::Motion { map, time, at },
+        } => map::motion(&map, &time, &at),
         Cmd::Bundle {
             cmd: BundleCmd::Ls { path, class },
         } => bundle::ls(&path, class),

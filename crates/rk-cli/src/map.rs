@@ -354,11 +354,87 @@ pub fn scene(game: &Game, which: &str, time: &str, bc: bool) -> Result<rk_render
     Ok(scene)
 }
 
+/// Prints a map's Animators: what each plays, what it drives, and which
+/// of the map's objects it moves. With `at`, also where those objects
+/// stand at each of these seconds.
+pub fn motion(which: &str, time: &str, at: &[f32]) -> Result<()> {
+    let time = time_of_day(time)?;
+    let game = Game::open_user(&[])?;
+    let maps = list::read(&game, true);
+    let m = find(&maps, which)?;
+    let mut motion = rk_map::motion::read(&game, &m.bundle)?;
+    let (scene, _) = rk_map::build::build(&game, &m.bundle, time, false, None)?;
+    let places = rk_map::motion::places(&scene);
+    let found = motion.bind(&places);
+    println!(
+        "{} {}: {} Animators, {} moving renderers, {found} of them objects of the map",
+        m.number,
+        m.level,
+        motion.animators.len(),
+        motion.parts.len()
+    );
+    for a in &motion.animators {
+        let bound: Vec<usize> = a.parts.iter().filter_map(|p| motion.parts[*p].object).collect();
+        println!(
+            "{}\n  controller {:?}{}; {} transform curve sets, {} other curves, {} unbound; moves {} renderers ({} in the map, {} lightmapped), {} skinned",
+            a.object,
+            a.controller,
+            a.idle.map(|why| format!(" ({why})")).unwrap_or_default(),
+            a.transform_tracks,
+            a.other_curves,
+            a.unbound,
+            a.parts.len(),
+            bound.len(),
+            bound.iter().filter(|i| places[**i].lightmapped).count(),
+            a.skinned
+        );
+        for (i, l) in a.layers.iter().enumerate() {
+            println!(
+                "  layer {i}: {}weight {}, starts in state {}, {} states, {} transitions on parameters",
+                if l.additive { "additive, " } else { "" },
+                l.weight,
+                l.default_state,
+                l.states.len(),
+                l.conditional
+            );
+            for (j, s) in l.states.iter().enumerate() {
+                let clip = match &s.clip {
+                    Some((name, seconds, loops)) => {
+                        format!("{name:?} {seconds:.3} s{}", if *loops { " looping" } else { "" })
+                    }
+                    None => "no motion".to_owned(),
+                };
+                println!(
+                    "    {j} {:?} tag {:?} speed {} offset {}: {clip}; exits {:?}",
+                    s.name, s.tag, s.speed, s.cycle_offset, s.exits
+                );
+            }
+        }
+    }
+    for &seconds in at {
+        println!("at {seconds} s:");
+        for (object, matrix) in motion.pose(seconds) {
+            let (scale, turn, to) = matrix.to_scale_rotation_translation();
+            let (axis, angle) = turn.to_axis_angle();
+            println!(
+                "  {object} {:?}: moved {to:.3}, turned {:.2} deg about {axis:.2}, scaled {scale:.3}",
+                places[object].name,
+                angle.to_degrees()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Switches of `render`.
 pub struct RenderOptions<'a> {
     pub fog: bool,
     pub sky: bool,
     pub capture: Option<&'a std::path::Path>,
+    /// Pose what the map's Animators move, this many seconds in.
+    pub motion: Option<f32>,
+    /// The camera's place and what it looks at, in place of the view's.
+    pub look: Option<([f32; 3], [f32; 3])>,
 }
 
 /// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
@@ -376,7 +452,13 @@ pub fn render(
     size: (u32, u32),
     options: RenderOptions<'_>,
 ) -> Result<()> {
-    let RenderOptions { fog, sky, capture } = options;
+    let RenderOptions {
+        fog,
+        sky,
+        capture,
+        motion,
+        look,
+    } = options;
     use glam::Vec3;
     let time = time_of_day(time)?;
     let path = std::path::Path::new(which);
@@ -386,7 +468,7 @@ pub fn render(
         && path.is_file();
     let mut renderer = rk_render::Renderer::new()?;
     let started;
-    let (label, mut scene, skipped) = if from_file {
+    let (label, mut scene, skipped, moving) = if from_file {
         // A map file needs no game.
         let meta = rk_map::file::meta(path)?;
         started = std::time::Instant::now();
@@ -402,6 +484,7 @@ pub fn render(
             format!("{} {}", meta.number, meta.level),
             scene,
             rk_map::build::Skipped::new(),
+            None,
         )
     } else {
         let game = Game::open_user(&[])?;
@@ -414,8 +497,15 @@ pub fn render(
         // the table.
         let vanish = rk_map::vanish::table(&game, &m.vanish_bundle, &m.vanish_file).filter(|_| capture.is_none());
         let (scene, skipped) = rk_map::build::build(&game, &m.bundle, time, renderer.supports_bc(), vanish.as_deref())?;
-        (format!("{} {}", m.number, m.level), scene, skipped)
+        let moving = match motion {
+            Some(_) => Some(rk_map::motion::read(&game, &m.bundle)?),
+            None => None,
+        };
+        (format!("{} {}", m.number, m.level), scene, skipped, moving)
     };
+    if motion.is_some() && moving.is_none() {
+        return Err(anyhow!("--motion reads the map's bundle: name the map, not a map file"));
+    }
     let built = started.elapsed();
     // CharaStudio's camera draws no Unity skybox: it clears to black and
     // shows the map's own sky dome. The scene's skybox is drawn when asked
@@ -495,6 +585,14 @@ pub fn render(
         None => None,
     };
     let camera = match view {
+        _ if look.is_some() => {
+            let (eye, target) = look.expect("checked");
+            rk_render::Camera {
+                eye: Vec3::from(eye),
+                target: Vec3::from(target),
+                fov_y_deg: 60.0,
+            }
+        }
         _ if recorded.is_some() => recorded.expect("checked"),
         // Within the map at eye height, from one side looking across.
         "inside" => {
@@ -522,7 +620,16 @@ pub fn render(
         "bounds {min:.1} to {max:.1}; camera {:.1} looking at {:.1}",
         camera.eye, camera.target
     );
-    let rgba = renderer.render_map(&scene, &camera, size.0, size.1)?;
+    renderer.set_map(Some(&scene));
+    if let (Some(mut moving), Some(seconds)) = (moving, motion) {
+        let found = moving.bind(&rk_map::motion::places(&scene));
+        renderer.set_map_object_matrices(&moving.pose(seconds));
+        println!(
+            "motion at {seconds} s: {found} of {} moving renderers are objects of the map",
+            moving.parts.len()
+        );
+    }
+    let rgba = renderer.draw_map(&camera, size.0, size.1)?;
     rk_render::save_png(out, size.0, size.1, &rgba)?;
     let mut textures: Vec<&std::sync::Arc<rk_render::map::MapImage>> = scene
         .objects
