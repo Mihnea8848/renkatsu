@@ -672,6 +672,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 on_map,
                 on_characters,
                 groups,
+                with_map,
             } => {
                 if section(ui, k, st, 1, "Light") {
                     row(ui, k, "Type", None, |ui, rect| {
@@ -716,8 +717,31 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         });
                     }
                     row(ui, k, "Intensity", None, |ui, rect| {
-                        widgets::number(ui, k, rect, id.with("intensity"), intensity, Marker::None, true, FINE);
+                        // A character light's link to the map's Light
+                        // intensity sits at the end of its row.
+                        let link = (*light == LightKind::Character).then(|| {
+                            Rect::from_min_size(Pos2::new(rect.right() - k.field(), rect.top()), Vec2::splat(k.field()))
+                        });
+                        let field = match link {
+                            Some(cell) => Rect::from_min_max(rect.min, Pos2::new(cell.left() - 4.0, rect.bottom())),
+                            None => rect,
+                        };
+                        widgets::number(ui, k, field, id.with("intensity"), intensity, Marker::None, true, FINE);
                         *intensity = intensity.clamp(0.0, 8.0);
+                        if let Some(cell) = link {
+                            let resp = ui
+                                .interact(cell, id.with("with map"), egui::Sense::click())
+                                .on_hover_text("Adjust with map light");
+                            let glyph = if *with_map {
+                                icon::LINK_SIMPLE
+                            } else {
+                                icon::LINK_SIMPLE_BREAK
+                            };
+                            widgets::icon_cell(ui, k, cell, &resp, glyph, *with_map);
+                            if resp.clicked() {
+                                *with_map = !*with_map;
+                            }
+                        }
                     });
                     if matches!(light, LightKind::Point | LightKind::Spot) {
                         row(ui, k, "Range", None, |ui, rect| {

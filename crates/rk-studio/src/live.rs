@@ -1329,10 +1329,6 @@ impl Live {
     fn environment(&self, scene: &Scene, background: [f64; 4]) -> Environment {
         let map = self.map.shown;
         let mut effects = scene_effects(scene, self.filters.as_ref(), self.map_look(scene));
-        let baked = scene.objects().iter().find_map(|o| match &o.content {
-            Content::Map { light_intensity, .. } if scene.shown(o.id) => Some(*light_intensity),
-            _ => None,
-        });
         effects.backdrop = (!map).then_some(background);
         let mut env = Environment {
             ramp: self.actors.first().and_then(|a| a.chara.ramp.clone()),
@@ -1341,19 +1337,18 @@ impl Live {
             alpha_to_coverage: self.smooth_edges,
             ..Default::default()
         };
-        env.map_light_intensity = baked.unwrap_or(1.0);
+        env.map_light_intensity = scene.map_light();
         match scene.key_light() {
             Some(light) => {
                 if let Content::Light {
                     from_camera,
                     angles,
-                    intensity,
                     shadows,
                     color,
                     ..
                 } = light.content
                 {
-                    env.light_intensity = intensity;
+                    env.light_intensity = scene.chara_light_strength(light.id);
                     env.light_color = color;
                     env.shadows.enabled = shadows;
                     // CharaStudio's rig, fixed in the scene or kept to
@@ -1482,16 +1477,16 @@ impl Live {
 
     /// A character light besides the main one, as the renderer takes it.
     fn other_light(&self, scene: &Scene, id: ObjectId) -> rk_render::OtherLight {
-        let (angles, follows, color, intensity) = match scene.get(id).map(|o| &o.content) {
+        let (angles, follows, color) = match scene.get(id).map(|o| &o.content) {
             Some(Content::Light {
                 angles,
                 from_camera,
                 color,
-                intensity,
                 ..
-            }) => (*angles, *from_camera, *color, *intensity),
-            _ => ([0.0; 2], false, [1.0; 3], 0.0),
+            }) => (*angles, *from_camera, *color),
+            _ => ([0.0; 2], false, [1.0; 3]),
         };
+        let intensity = scene.chara_light_strength(id);
         let camera = self.cam.orbit.camera();
         let follow = follows.then_some((camera.eye, camera.target));
         rk_render::OtherLight {

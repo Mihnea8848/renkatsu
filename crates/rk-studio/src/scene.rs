@@ -285,6 +285,10 @@ pub enum Content {
         /// every group.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         groups: Option<Vec<String>>,
+        /// A character light grows dim with the map's Light intensity, so
+        /// that a dark room darkens its characters too.
+        #[serde(default = "yes")]
+        with_map: bool,
     },
     /// A post-processing effect on the whole picture.
     Effect {
@@ -383,6 +387,7 @@ impl Content {
             on_map: true,
             on_characters: true,
             groups: None,
+            with_map: true,
         }
     }
 
@@ -406,6 +411,7 @@ impl Content {
                 on_map: true,
                 on_characters: true,
                 groups: None,
+                with_map: false,
             },
             other => other,
         }
@@ -868,6 +874,28 @@ impl Scene {
     /// The character light a character takes: of the shown character
     /// lights that light its light group, the brightest, as Unity picks
     /// a main light; none when no light reaches it.
+    /// The shown map's Light intensity, or 1 without a map.
+    pub fn map_light(&self) -> f32 {
+        self.objects
+            .iter()
+            .find_map(|o| match &o.content {
+                Content::Map { light_intensity, .. } if self.shown(o.id) => Some(*light_intensity),
+                _ => None,
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// How strong a character light shines: its intensity, times the map's
+    /// Light intensity where it goes with the map.
+    pub fn chara_light_strength(&self, id: ObjectId) -> f32 {
+        match self.get(id).map(|o| &o.content) {
+            Some(Content::Light {
+                intensity, with_map, ..
+            }) => intensity * if *with_map { self.map_light() } else { 1.0 },
+            _ => 0.0,
+        }
+    }
+
     pub fn chara_light_of(&self, character: ObjectId) -> Option<ObjectId> {
         let group = match self.get(character).map(|o| &o.content) {
             Some(Content::Character { light_group, .. }) => light_group.as_deref().unwrap_or(EVERYONE),
@@ -877,11 +905,10 @@ impl Scene {
             Content::Light {
                 light: LightKind::Character,
                 groups,
-                intensity,
                 color,
                 ..
             } if groups.as_ref().is_none_or(|list| list.iter().any(|g| g == group)) => {
-                Some(intensity * color.iter().copied().fold(0.0, f32::max))
+                Some(self.chara_light_strength(o.id) * color.iter().copied().fold(0.0, f32::max))
             }
             _ => None,
         };
@@ -2186,6 +2213,31 @@ mod tests {
             .collect();
         assert_eq!(filters, vec![(Some(5), false), (None, true)]);
         assert!(effects.contains(&("Fog".to_owned(), Some("Effects".to_owned()), false)));
+    }
+
+    #[test]
+    fn character_lights_dim_with_the_map_unless_unlinked() {
+        let mut scene = Scene::new();
+        let key = scene.key_light().unwrap().id;
+        assert_eq!(scene.chara_light_strength(key), 0.85);
+        let map = scene.add(
+            "Hallway",
+            Content::map(PathBuf::from("Maps/a.rkmap"), MapTime::Night),
+            None,
+        );
+        if let Content::Map { light_intensity, .. } = &mut scene.get_mut(map).unwrap().content {
+            *light_intensity = 0.2;
+        }
+        assert!((scene.chara_light_strength(key) - 0.17).abs() < 1e-6);
+        if let Content::Light { with_map, .. } = &mut scene.get_mut(key).unwrap().content {
+            *with_map = false;
+        }
+        assert_eq!(scene.chara_light_strength(key), 0.85);
+        // A lamp is the light of a dark room: it does not follow.
+        assert!(matches!(
+            Content::light_of(LightKind::Point),
+            Content::Light { with_map: false, .. }
+        ));
     }
 
     #[test]
