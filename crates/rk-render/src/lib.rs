@@ -1973,9 +1973,13 @@ impl Renderer {
                 .take()
                 .unwrap_or_else(|| effects::Gpu::new(&self.device, COLOR_FORMAT, DEPTH_FORMAT, SAMPLES))
         });
+        let shaft_divisor = fx_resolved
+            .as_ref()
+            .and_then(|fx| fx.shafts.as_ref())
+            .map_or(2, |s| s.divisor);
         let hdr_views = fx_gpu
             .as_mut()
-            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT));
+            .map(|gpu| gpu.hdr_targets(&self.device, width, height, SAMPLES, COLOR_FORMAT, shaft_divisor));
         let fx_frame = fx_resolved.as_ref().map(|fx| effects::Frame {
             fx,
             width,
@@ -1985,6 +1989,7 @@ impl Renderer {
             far,
             eye: camera.eye,
             forward: camera.forward(),
+            focus: (camera.target - camera.eye).dot(camera.forward()),
             depth: &depth_texture,
             scene_depth: &depth_only,
             white: &self.white,

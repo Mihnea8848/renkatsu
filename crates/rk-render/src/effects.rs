@@ -3,13 +3,15 @@
 
 //! CharaStudio's screen effects.
 //!
-//! The Studio camera carries, in this order, Amplify Occlusion,
-//! BloomAndFlares, Amplify Color and VignetteAndChromaticAberration. The
+//! The Studio camera carries, in this order, GlobalFog, Amplify Occlusion,
+//! BloomAndFlares, Amplify Color, SunShafts, VignetteAndChromaticAberration
+//! and DepthOfField. The
 //! values here are the ones the Studio scene stores for those components
 //! (`CharaStudio_Data/level1`) with what `Studio.SceneInfo.Init` and
 //! `SystemButtonCtrl` write over them. The camera is HDR, so everything up
-//! to Amplify Color works on unclamped linear colour. The shader side is
-//! `effects.wgsl`.
+//! to Amplify Color works on unclamped linear colour, and what follows it
+//! on eight bit targets (`[ImageEffectTransformsToLDR]`). The shader side
+//! is `effects.wgsl`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -165,6 +167,107 @@ impl Default for Fog {
     }
 }
 
+/// DepthOfField (`UnityStandardAssets.ImageEffects.DepthOfField`) as the
+/// Studio camera carries it (`CharaStudio_Data/level1`, MonoBehaviour
+/// 8968): disc blur, high sample count, not high resolution, near blur on.
+/// CharaStudio's panel writes `focal_size` and `aperture`
+/// (`SystemButtonCtrl.DOFInfo`); the rest never changes in the Studio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DepthOfField {
+    /// `focalSize`, 0 to 2: how far around the focus stays sharp.
+    pub focal_size: f32,
+    /// `aperture`, 0 to 1.
+    pub aperture: f32,
+    /// The eye depth of the point in focus. The component's
+    /// `focalTransform` is the camera's `CameraTarget`, which
+    /// `Studio.CameraControl` keeps on the point the camera orbits; `None`
+    /// takes the frame camera's target.
+    pub focus: Option<f32>,
+    /// `maxBlurSize`.
+    pub max_blur_size: f32,
+    /// `nearBlur`: what is in front of the focus blurs over it.
+    pub near_blur: bool,
+    /// `foregroundOverlap`.
+    pub foreground_overlap: f32,
+    /// The Studio camera's far plane, which depths are measured in.
+    pub camera_far: f32,
+}
+
+impl Default for DepthOfField {
+    fn default() -> Self {
+        Self {
+            // SceneInfo.Init: depthFocalSize, depthAperture.
+            focal_size: 0.95,
+            aperture: 0.6,
+            focus: None,
+            max_blur_size: 2.0,
+            near_blur: true,
+            foreground_overlap: 2.0,
+            camera_far: 1000.0,
+        }
+    }
+}
+
+/// `SunShafts.ShaftsScreenBlendMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaftBlend {
+    Screen,
+    Add,
+}
+
+/// SunShafts (`UnityStandardAssets.ImageEffects.SunShafts`) as the Studio
+/// camera carries it (`CharaStudio_Data/level1`, MonoBehaviour 8970):
+/// normal resolution, Add, two blur iterations, blur radius 3, intensity
+/// 2.2, largest radius 0.5, with the depth texture. CharaStudio's panel
+/// writes the two colours and the caster (`SystemButtonCtrl.SunShaftsInfo`,
+/// `SetSunCaster`); a map with a `SunLightInfo` sets the colour and the
+/// caster of its time of day (`SunLightInfo.Info.SetSunShafts`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SunShafts {
+    /// `sunThreshold`, as the colour is stored: the shader compares it
+    /// with the linear picture as it is (`SetVector`).
+    pub threshold: [f32; 3],
+    /// `sunColor`, as stored (`SetVector`).
+    pub color: [f32; 3],
+    /// `sunTransform.position`, in the world. `None` is the component
+    /// without a caster: the middle of the screen.
+    pub caster: Option<Vec3>,
+    /// What `resolution` divides the frame by: 4 (Low), 2 (Normal), 1
+    /// (High).
+    pub divisor: u32,
+    pub blend: ShaftBlend,
+    /// `radialBlurIterations`, 1 to 4.
+    pub iterations: u32,
+    /// `sunShaftBlurRadius`.
+    pub blur_radius: f32,
+    /// `sunShaftIntensity`.
+    pub intensity: f32,
+    /// `maxRadius`, in screen heights and widths alike.
+    pub max_radius: f32,
+    /// The Studio camera's far plane: rays start where the depth is past
+    /// 0.99 of it.
+    pub camera_far: f32,
+}
+
+impl Default for SunShafts {
+    fn default() -> Self {
+        Self {
+            // SceneInfo.Init: sunThresholdColor (128, 128, 128), sunColor
+            // (255, 255, 255), sunCaster -1.
+            threshold: [128.0 / 255.0; 3],
+            color: [1.0; 3],
+            caster: None,
+            divisor: 2,
+            blend: ShaftBlend::Add,
+            iterations: 2,
+            blur_radius: 3.0,
+            intensity: 2.2,
+            max_radius: 0.5,
+            camera_far: 1000.0,
+        }
+    }
+}
+
 /// The screen effects of a CharaStudio scene. `None` switches one off.
 #[derive(Debug, Clone, Default)]
 pub struct StudioEffects {
@@ -174,6 +277,10 @@ pub struct StudioEffects {
     pub vignette: Option<Vignette>,
     /// GlobalFog. Off in a new scene.
     pub fog: Option<Fog>,
+    /// SunShafts. Off in a new scene.
+    pub shafts: Option<SunShafts>,
+    /// DepthOfField. Off in a new scene.
+    pub dof: Option<DepthOfField>,
     /// A plain colour (sRGB) for the parts of the picture where nothing
     /// was drawn, kept out of the effects: the editor's grey when the
     /// scene has no map. `None` puts the effects on the whole picture, as
@@ -195,6 +302,8 @@ impl StudioEffects {
             }),
             vignette: Some(Vignette::default()),
             fog: None,
+            shafts: None,
+            dof: None,
             backdrop: None,
         }
     }
@@ -414,6 +523,176 @@ pub fn fog_rays(forward: Vec3, fov_y_deg: f32, aspect: f32) -> [Vec3; 3] {
     [right * tan * aspect, up * tan, forward]
 }
 
+/// A point of the world as `Camera.WorldToViewportPoint` gives it: across
+/// and up the screen from 0 to 1, and the depth along the view.
+pub fn viewport_point(point: Vec3, eye: Vec3, forward: Vec3, fov_y_deg: f32, aspect: f32) -> [f32; 3] {
+    let [x, y, z] = fog_rays(forward, fov_y_deg, aspect);
+    let v = point - eye;
+    let depth = v.dot(z);
+    if depth.abs() <= 1.0e-7 {
+        return [0.0; 3];
+    }
+    let ndc = |axis: Vec3| v.dot(axis) / (axis.length_squared() * depth);
+    [ndc(x) * 0.5 + 0.5, ndc(y) * 0.5 + 0.5, depth]
+}
+
+/// `_SunPosition.xyz` as `SunShafts.OnRenderImage` sets it: the caster on
+/// the screen, or the middle of the screen without one.
+pub fn shaft_sun(shafts: &SunShafts, eye: Vec3, forward: Vec3, fov_y_deg: f32, aspect: f32) -> [f32; 3] {
+    match shafts.caster {
+        Some(p) => viewport_point(p, eye, forward, fov_y_deg, aspect),
+        None => [0.5, 0.5, 0.0],
+    }
+}
+
+/// `_SunColor`: the shaft colour times the intensity, and nothing with
+/// the caster behind the camera.
+pub fn shaft_color(shafts: &SunShafts, sun_depth: f32) -> [f32; 3] {
+    if sun_depth >= 0.0 {
+        shafts.color.map(|c| c * shafts.intensity)
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// `_BlurRadius4.x` of each radial blur, in the order the component runs
+/// them: two per iteration, each reaching further.
+pub fn shaft_radii(shafts: &SunShafts) -> Vec<f32> {
+    let r = shafts.blur_radius;
+    let mut radius = r * 0.001_302_083_4;
+    let mut out = Vec::new();
+    for i in 0..shafts.iterations.clamp(1, 4) {
+        let i = i as f32;
+        out.push(radius);
+        radius = r * ((i * 2.0 + 1.0) * 6.0) / 768.0;
+        out.push(radius);
+        radius = r * ((i * 2.0 + 2.0) * 6.0) / 768.0;
+    }
+    out
+}
+
+/// What a pixel gives the rays (Hidden/SunShaftsComposite, pass 2,
+/// program 6): how far its colour is over the threshold, by how near the
+/// caster it is, and only where the depth is the sky's. `sun` and `uv`
+/// are viewport points, `depth01` the depth over the far plane.
+pub fn shaft_mask(shafts: &SunShafts, sun: [f32; 3], uv: [f32; 2], rgb: [f32; 3], depth01: f32) -> f32 {
+    if depth01 <= 0.99 {
+        return 0.0;
+    }
+    let distance = ((sun[0] - uv[0]).powi(2) + (sun[1] - uv[1]).powi(2)).sqrt();
+    let near = (shafts.max_radius - distance).clamp(0.0, 1.0);
+    let over: f32 = (0..3).map(|i| (rgb[i] - shafts.threshold[i]).max(0.0)).sum();
+    over * near
+}
+
+/// The rays over the picture (Hidden/SunShaftsComposite, pass 4 for Add
+/// and pass 0 for Screen; programs 4 and 5). `rays` is the blurred mask.
+pub fn shaft_blend(shafts: &SunShafts, sun_depth: f32, picture: [f32; 3], rays: f32) -> [f32; 3] {
+    let color = shaft_color(shafts, sun_depth);
+    [0, 1, 2].map(|i| {
+        let ray = (rays * color[i]).clamp(0.0, 1.0);
+        match shafts.blend {
+            ShaftBlend::Add => picture[i] + ray,
+            ShaftBlend::Screen => 1.0 - (1.0 - picture[i]) * (1.0 - ray),
+        }
+    })
+}
+
+/// `_CurveParams` as `DepthOfField.OnRenderImage` sets it: 1, the focal
+/// size, the aperture term and the focus distance over the far plane.
+/// `focus` is the eye depth of the point in focus.
+pub fn dof_curve_params(dof: &DepthOfField, focus: f32) -> [f32; 4] {
+    // An aperture of 1 divides by zero in the component. The largest
+    // float gives the same picture: everything off the focus at full blur.
+    let aperture = (1.0 / (1.0 - dof.aperture.max(0.0)) - 1.0).min(f32::MAX);
+    [1.0, dof.focal_size.clamp(0.0, 2.0), aperture, focus / dof.camera_far]
+}
+
+/// The circle of confusion of a depth, 0 sharp to 1 (Hidden/Dof/
+/// DepthOfFieldHdr, pass 0, program 16). Depths are over the far plane.
+pub fn dof_coc(curve: [f32; 4], depth01: f32) -> f32 {
+    ((depth01 - curve[3]).abs() * curve[2] / (depth01 + 1.0e-5) - curve[1])
+        .max(0.0)
+        .min(curve[0])
+}
+
+/// The circle of confusion in front of the focus alone (pass 4, program
+/// 20), which near blur spreads over what is behind.
+pub fn dof_coc_front(curve: [f32; 4], depth01: f32) -> f32 {
+    ((curve[3] - depth01) * curve[2] / (depth01 + 1.0e-5) - curve[1])
+        .max(0.0)
+        .min(curve[0])
+}
+
+fn smooth01(x: f32) -> f32 {
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// The weight of a tap of the foreground's blur before its place in the
+/// kernel (pass 2, program 15): taps with a larger circle than the
+/// centre's count in full, smaller ones fade out.
+pub fn dof_spread_weight(tap: f32, centre: f32) -> f32 {
+    smooth01(((tap - centre + 0.5) * 2.0).clamp(0.0, 1.0))
+}
+
+/// The weight of a tap of the disc blur (programs 18 and 4): full when
+/// the tap's circle is at least `reach`, none 0.265 under it.
+pub fn dof_disc_weight(tap: f32, reach: f32) -> f32 {
+    smooth01(((tap - reach + 0.265) * 3.773_585).clamp(0.0, 1.0))
+}
+
+/// How much of the half size blur the last pass takes for a circle of
+/// confusion (pass 18, program 4): none to 0.65, all from 0.85.
+pub fn dof_low_blend(coc: f32) -> f32 {
+    smooth01(((coc - 0.65) * 4.999_999).clamp(0.0, 1.0))
+}
+
+/// The blur widths the component hands its passes for a frame `width`
+/// pixels wide: `_Offsets` of the foreground's blur, of the disc blur
+/// (`.zw`) and of the last pass.
+pub fn dof_widths(dof: &DepthOfField, width: u32) -> (f32, [f32; 2], f32) {
+    let blur = dof.max_blur_size.max(0.1);
+    let half = (width >> 1).max(1);
+    (
+        blur * dof.foreground_overlap,
+        [0.1, blur],
+        width as f32 / half as f32 * blur,
+    )
+}
+
+/// The disc of Hidden/Dof/DepthOfFieldHdr's blurs: 28 offsets and their
+/// lengths, the immediate constants of programs 18 and 4.
+pub const DOF_DISC: [[f32; 3]; 28] = [
+    [0.62463, 0.54337, 0.8279],
+    [-0.13414, -0.94488, 0.95435],
+    [0.38772, -0.43475, 0.58253],
+    [0.12126, -0.19282, 0.22778],
+    [-0.20388, 0.11133, 0.2323],
+    [0.83114, -0.29218, 0.881],
+    [0.10759, -0.57839, 0.58831],
+    [0.28285, 0.79036, 0.83945],
+    [-0.36622, 0.39516, 0.53876],
+    [0.75591, 0.21916, 0.78704],
+    [-0.5261, 0.02386, 0.52664],
+    [-0.88216, -0.24471, 0.91547],
+    [-0.48888, -0.2933, 0.57011],
+    [0.44014, -0.08558, 0.44838],
+    [0.21179, 0.51373, 0.55567],
+    [0.05483, 0.95701, 0.95858],
+    [-0.59001, -0.70509, 0.91938],
+    [-0.80065, 0.24631, 0.83768],
+    [-0.19424, -0.18402, 0.26757],
+    [-0.43667, 0.76751, 0.88304],
+    [0.21666, 0.11602, 0.24577],
+    [0.15696, -0.856, 0.87027],
+    [-0.75821, 0.58363, 0.95682],
+    [0.99284, -0.02904, 0.99327],
+    [-0.22234, -0.57907, 0.62029],
+    [0.55052, -0.66984, 0.86704],
+    [0.46431, 0.28115, 0.5428],
+    [-0.07214, 0.60554, 0.60982],
+];
+
 /// `Fx` in `effects.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -433,6 +712,10 @@ struct FxUniform {
     fog_ray_x: [f32; 4],
     fog_ray_y: [f32; 4],
     fog_ray_z: [f32; 4],
+    dof: [f32; 4],
+    shaft_sun: [f32; 4],
+    shaft_color: [f32; 4],
+    shaft_threshold: [f32; 4],
     rand: [[f32; 4]; 16],
 }
 
@@ -447,6 +730,8 @@ pub(crate) struct Frame<'a> {
     /// Where the camera is and where it looks, in the world.
     pub eye: Vec3,
     pub forward: Vec3,
+    /// The eye depth of the point the camera looks at.
+    pub focus: f32,
     /// The camera's depth texture.
     pub depth: &'a wgpu::TextureView,
     /// The depth aspect of the main pass's multisampled depth, which tells
@@ -470,6 +755,12 @@ impl Frame<'_> {
         let fog_flags = u8::from(fog.distance_fog) | u8::from(fog.radial) << 1 | u8::from(fog.height_fog) << 2;
         // A colour, which Unity hands to shaders linearised.
         let fog_color = crate::material::linear([fog.color[0], fog.color[1], fog.color[2], 1.0]);
+        let dof = self.fx.dof.clone().unwrap_or_default();
+        let [_, focal_size, aperture, focus] = dof_curve_params(&dof, dof.focus.unwrap_or(self.focus));
+        let shafts = self.fx.shafts.clone().unwrap_or_default();
+        let sun = shaft_sun(&shafts, self.eye, self.forward, self.fov_y_deg, w / h);
+        let [sr, sg, sb] = shaft_color(&shafts, sun[2]);
+        let screen = if shafts.blend == ShaftBlend::Screen { 1.0 } else { 0.0 };
         FxUniform {
             size: [w, h, 1.0 / w, 1.0 / h],
             src: [0.0; 4],
@@ -504,6 +795,12 @@ impl Frame<'_> {
             fog_ray_x: [ray_x.x, ray_x.y, ray_x.z, self.eye.y],
             fog_ray_y: [ray_y.x, ray_y.y, ray_y.z, 0.0],
             fog_ray_z: [ray_z.x, ray_z.y, ray_z.z, fog.camera_near],
+            dof: [focal_size, aperture, focus, dof.camera_far],
+            // The viewport counts rows from the bottom, the passes' UV
+            // from the top.
+            shaft_sun: [sun[0], 1.0 - sun[1], shafts.max_radius, shafts.camera_far],
+            shaft_color: [sr, sg, sb, screen],
+            shaft_threshold: [shafts.threshold[0], shafts.threshold[1], shafts.threshold[2], 0.0],
             rand: random_data(),
         }
     }
@@ -516,13 +813,18 @@ const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 struct Targets {
     size: [u32; 2],
+    shaft_divisor: u32,
     hdr_msaa: wgpu::TextureView,
     hdr: wgpu::TextureView,
     ao: [wgpu::TextureView; 2],
     half: wgpu::TextureView,
     quarter: [wgpu::TextureView; 3],
-    ldr: wgpu::TextureView,
+    /// The picture after Amplify Color, which the later effects hand to
+    /// each other.
+    ldr: [wgpu::TextureView; 2],
     ldr_half: [wgpu::TextureView; 2],
+    /// The sun shafts' buffers, the frame over the resolution's divisor.
+    shafts: [wgpu::TextureView; 2],
     /// The finished effects, before the backdrop goes under them.
     done: wgpu::TextureView,
 }
@@ -584,6 +886,7 @@ impl Gpu {
                     count: None,
                 },
                 texture(5, float),
+                texture(6, float),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -631,6 +934,15 @@ impl Gpu {
             ("fs_down4", ldr_format),
             ("fs_blur", ldr_format),
             ("fs_vignette", ldr_format),
+            ("fs_shaft_mask", ldr_format),
+            ("fs_shaft_blur", ldr_format),
+            ("fs_shaft_blend", ldr_format),
+            ("fs_dof_front", ldr_format),
+            ("fs_dof_spread", ldr_format),
+            ("fs_dof_coc", ldr_format),
+            ("fs_dof_half", ldr_format),
+            ("fs_dof_disc", ldr_format),
+            ("fs_dof_apply", ldr_format),
         ] {
             pipelines.insert((entry, format), make(entry, format.into(), None, 1));
         }
@@ -758,6 +1070,7 @@ impl Gpu {
 
     /// Makes the frame's targets when the size changed, and returns the
     /// multisampled HDR target with the texture it resolves to.
+    /// `shaft_divisor` is `SunShafts::divisor`.
     pub fn hdr_targets(
         &mut self,
         device: &wgpu::Device,
@@ -765,8 +1078,14 @@ impl Gpu {
         height: u32,
         samples: u32,
         ldr_format: wgpu::TextureFormat,
+        shaft_divisor: u32,
     ) -> (wgpu::TextureView, wgpu::TextureView) {
-        if self.targets.as_ref().is_none_or(|t| t.size != [width, height]) {
+        let shaft_divisor = shaft_divisor.max(1);
+        if self
+            .targets
+            .as_ref()
+            .is_none_or(|t| t.size != [width, height] || t.shaft_divisor != shaft_divisor)
+        {
             let make = |w: u32, h: u32, format, count| {
                 device
                     .create_texture(&wgpu::TextureDescriptor {
@@ -794,13 +1113,15 @@ impl Gpu {
             let (hw, hh, qw, qh) = (width / 2, height / 2, width / 4, height / 4);
             self.targets = Some(Targets {
                 size: [width, height],
+                shaft_divisor,
                 hdr_msaa: make(width, height, HDR_FORMAT, samples),
                 hdr: make(width, height, HDR_FORMAT, 1),
                 ao: std::array::from_fn(|_| make(width, height, AO_FORMAT, 1)),
                 half: make(hw, hh, HDR_FORMAT, 1),
                 quarter: std::array::from_fn(|_| make(qw, qh, HDR_FORMAT, 1)),
-                ldr: make(width, height, ldr_format, 1),
+                ldr: std::array::from_fn(|_| make(width, height, ldr_format, 1)),
                 ldr_half: std::array::from_fn(|_| make(hw, hh, ldr_format, 1)),
+                shafts: std::array::from_fn(|_| make(width / shaft_divisor, height / shaft_divisor, ldr_format, 1)),
                 done: make(width, height, ldr_format, 1),
             });
         }
@@ -815,6 +1136,7 @@ impl Gpu {
         uniform: FxUniform,
         a: &wgpu::TextureView,
         b: &wgpu::TextureView,
+        c: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("effects"),
@@ -850,6 +1172,10 @@ impl Gpu {
                     binding: 5,
                     resource: view(f.lut.unwrap_or(f.white)),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: view(c),
+                },
             ],
         })
     }
@@ -868,7 +1194,23 @@ impl Gpu {
         a: &wgpu::TextureView,
         b: &wgpu::TextureView,
     ) {
-        let group = self.group(device, f, uniform, a, b);
+        self.pass3(device, encoder, f, entry, format, target, uniform, [a, b, f.white]);
+    }
+
+    /// `pass` with a third texture.
+    #[allow(clippy::too_many_arguments)]
+    fn pass3(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        f: &Frame,
+        entry: &'static str,
+        format: wgpu::TextureFormat,
+        target: &wgpu::TextureView,
+        uniform: FxUniform,
+        [a, b, c]: [&wgpu::TextureView; 3],
+    ) {
+        let group = self.group(device, f, uniform, a, b, c);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(entry),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -934,7 +1276,7 @@ impl Gpu {
             &t.ao[1],
             f.white,
         );
-        Some((&self.ao_apply, self.group(device, f, base, &t.ao[0], f.white)))
+        Some((&self.ao_apply, self.group(device, f, base, &t.ao[0], f.white, f.white)))
     }
 
     /// The pipeline and bind group that lay GlobalFog over the camera's
@@ -942,7 +1284,10 @@ impl Gpu {
     /// (`[ImageEffectOpaque]`); `None` when fog is off.
     pub fn fog(&self, device: &wgpu::Device, f: &Frame) -> Option<(&wgpu::RenderPipeline, wgpu::BindGroup)> {
         f.fx.fog.as_ref()?;
-        Some((&self.fog_apply, self.group(device, f, f.uniform(), f.white, f.white)))
+        Some((
+            &self.fog_apply,
+            self.group(device, f, f.uniform(), f.white, f.white, f.white),
+        ))
     }
 
     /// Runs bloom, the colour table and the vignette on the resolved HDR
@@ -1028,50 +1373,176 @@ impl Gpu {
             f.white
         };
 
-        let Some(vignette) = &f.fx.vignette else {
-            self.pass(device, encoder, f, "fs_color", ldr_format, out, base, &t.hdr, bloom);
-            self.under(device, encoder, f, target);
-            return;
-        };
-        self.pass(device, encoder, f, "fs_color", ldr_format, &t.ldr, base, &t.hdr, bloom);
-        let [a, b] = &t.ldr_half;
-        self.pass(
-            device,
-            encoder,
-            f,
-            "fs_down4",
-            ldr_format,
-            a,
-            with(full, [0.0; 2]),
-            &t.ldr,
-            f.white,
-        );
-        let [down, across] = vignette_steps(vignette, aspect);
-        for _ in 0..2 {
+        // The effects after Amplify Color, in the camera's order. Each
+        // reads the picture the one before left and the last writes `out`.
+        let mut later =
+            usize::from(f.fx.shafts.is_some()) + usize::from(f.fx.vignette.is_some()) + usize::from(f.fx.dof.is_some());
+        let mut current = 0;
+        let first = if later == 0 { out } else { &t.ldr[0] };
+        self.pass(device, encoder, f, "fs_color", ldr_format, first, base, &t.hdr, bloom);
+
+        if let Some(shafts) = &f.fx.shafts {
+            later -= 1;
+            let to = if later == 0 { out } else { &t.ldr[1 - current] };
+            let (sw, sh) = (f.width / t.shaft_divisor, f.height / t.shaft_divisor);
+            let [a, b] = &t.shafts;
+            let picture = &t.ldr[current];
             self.pass(
                 device,
                 encoder,
                 f,
-                "fs_blur",
+                "fs_shaft_mask",
                 ldr_format,
-                b,
-                with(half, down),
                 a,
+                with(texel(sw, sh), [0.0; 2]),
+                picture,
+                f.white,
+            );
+            let (mut from, mut into) = (a, b);
+            for radius in shaft_radii(shafts) {
+                self.pass(
+                    device,
+                    encoder,
+                    f,
+                    "fs_shaft_blur",
+                    ldr_format,
+                    into,
+                    with(texel(sw, sh), [radius; 2]),
+                    from,
+                    f.white,
+                );
+                std::mem::swap(&mut from, &mut into);
+            }
+            self.pass(
+                device,
+                encoder,
+                f,
+                "fs_shaft_blend",
+                ldr_format,
+                to,
+                base,
+                picture,
+                from,
+            );
+            current = 1 - current;
+        }
+
+        if let Some(vignette) = &f.fx.vignette {
+            later -= 1;
+            let to = if later == 0 { out } else { &t.ldr[1 - current] };
+            let picture = &t.ldr[current];
+            let [a, b] = &t.ldr_half;
+            self.pass(
+                device,
+                encoder,
+                f,
+                "fs_down4",
+                ldr_format,
+                a,
+                with(full, [0.0; 2]),
+                picture,
+                f.white,
+            );
+            let [down, across] = vignette_steps(vignette, aspect);
+            for _ in 0..2 {
+                self.pass(
+                    device,
+                    encoder,
+                    f,
+                    "fs_blur",
+                    ldr_format,
+                    b,
+                    with(half, down),
+                    a,
+                    f.white,
+                );
+                self.pass(
+                    device,
+                    encoder,
+                    f,
+                    "fs_blur",
+                    ldr_format,
+                    a,
+                    with(half, across),
+                    b,
+                    f.white,
+                );
+            }
+            self.pass(device, encoder, f, "fs_vignette", ldr_format, to, base, picture, a);
+            current = 1 - current;
+        }
+
+        if let Some(dof) = &f.fx.dof {
+            let picture = &t.ldr[current];
+            let circles = &t.ldr[1 - current];
+            let [a, b] = &t.ldr_half;
+            let (overlap, disc, last) = dof_widths(dof, f.width);
+            // WriteCoc: the circles of what is in front, spread down and
+            // across, then every pixel's circle into the picture's alpha.
+            if dof.near_blur {
+                self.pass(
+                    device,
+                    encoder,
+                    f,
+                    "fs_dof_front",
+                    ldr_format,
+                    a,
+                    base,
+                    f.white,
+                    f.white,
+                );
+                let down = with(half, [0.0, overlap * half[1]]);
+                let across = with(half, [overlap * half[0], 0.0]);
+                self.pass(device, encoder, f, "fs_dof_spread", ldr_format, b, down, a, f.white);
+                self.pass(device, encoder, f, "fs_dof_spread", ldr_format, a, across, b, f.white);
+            }
+            let near = if dof.near_blur { 1.0 } else { 0.0 };
+            self.pass(
+                device,
+                encoder,
+                f,
+                "fs_dof_coc",
+                ldr_format,
+                circles,
+                with(full, [near, 0.0]),
+                picture,
+                a,
+            );
+            // The picture at half size, its disc blur, and the two put
+            // together.
+            self.pass(
+                device,
+                encoder,
+                f,
+                "fs_dof_half",
+                ldr_format,
+                a,
+                with(full, [0.0; 2]),
+                circles,
                 f.white,
             );
             self.pass(
                 device,
                 encoder,
                 f,
-                "fs_blur",
+                "fs_dof_disc",
                 ldr_format,
-                a,
-                with(half, across),
                 b,
+                with(half, disc),
+                a,
                 f.white,
+            );
+            self.pass3(
+                device,
+                encoder,
+                f,
+                "fs_dof_apply",
+                ldr_format,
+                out,
+                with(full, [0.0, last]),
+                [circles, b, picture],
             );
         }
-        self.pass(device, encoder, f, "fs_vignette", ldr_format, out, base, &t.ldr, a);
         self.under(device, encoder, f, target);
     }
 
@@ -1174,8 +1645,9 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader() {
-        // Eight vectors, the fog's seven and the sixteen random pixels.
-        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 7 + 16) * 16);
+        // Eight vectors, the fog's seven, one for the depth of field, the
+        // sun shafts' three and the sixteen random pixels.
+        assert_eq!(std::mem::size_of::<FxUniform>(), (8 + 7 + 1 + 3 + 16) * 16);
     }
 
     #[test]
@@ -1554,5 +2026,193 @@ mod tests {
             assert_eq!(filter_color(&filter(3.0), c), filter_color(&neutral, c));
             assert_eq!(filter_color(&filter(-1.0), c), filter_color(&filter(0.0), c));
         }
+    }
+    #[test]
+    fn depth_of_field_is_the_studio_cameras_component() {
+        let fx = StudioEffects::studio(None);
+        assert!(fx.dof.is_none() && fx.shafts.is_none(), "off in a new scene");
+        let dof = DepthOfField::default();
+        assert_eq!((dof.focal_size, dof.aperture), (0.95, 0.6));
+        assert_eq!(
+            (dof.max_blur_size, dof.foreground_overlap, dof.near_blur),
+            (2.0, 2.0, true)
+        );
+        // _CurveParams: 1, focalSize, 1 / (1 - aperture) - 1, distance / far.
+        let curve = dof_curve_params(&dof, 5.0);
+        assert_eq!((curve[0], curve[1]), (1.0, 0.95));
+        assert!(
+            (curve[2] - 1.5).abs() < 1e-6 && (curve[3] - 0.005).abs() < 1e-9,
+            "{curve:?}"
+        );
+        // The component clamps the focal size and the aperture.
+        let wide = DepthOfField {
+            focal_size: 3.0,
+            aperture: -1.0,
+            ..dof.clone()
+        };
+        assert_eq!(dof_curve_params(&wide, 5.0)[1..3], [2.0, 0.0]);
+        // _Offsets: maxBlurSize * foregroundOverlap, (0.1, maxBlurSize), and
+        // the frame's width over the half buffer's times maxBlurSize.
+        assert_eq!(dof_widths(&dof, 1280), (4.0, [0.1, 2.0], 4.0));
+        assert_eq!(dof_widths(&dof, 1281).2, 1281.0 / 640.0 * 2.0);
+        let thin = DepthOfField {
+            max_blur_size: 0.0,
+            ..dof
+        };
+        assert_eq!(dof_widths(&thin, 1280).1, [0.1, 0.1]);
+    }
+
+    #[test]
+    fn circle_of_confusion_follows_the_shader() {
+        let dof = DepthOfField::default();
+        let curve = dof_curve_params(&dof, 5.0);
+        // In focus, and anywhere the focal size still covers.
+        assert_eq!(dof_coc(curve, 0.005), 0.0);
+        assert_eq!(dof_coc(curve, 0.01), 0.0);
+        // Ten times the focus distance: 0.045 * 1.5 / 0.05001 - 0.95.
+        assert!(
+            (dof_coc(curve, 0.05) - 0.399_73).abs() < 1e-4,
+            "{}",
+            dof_coc(curve, 0.05)
+        );
+        // Behind the focus the circle never passes the aperture term less
+        // the focal size.
+        assert!((dof_coc(curve, 1.0) - (1.5 * 0.995 / 1.00001 - 0.95)).abs() < 1e-5);
+        // Close to the camera it reaches the cap.
+        assert_eq!(dof_coc(curve, 0.001), 1.0);
+        assert_eq!(dof_coc_front(curve, 0.001), 1.0);
+        assert!((dof_coc_front(curve, 0.003) - dof_coc(curve, 0.003)).abs() < 1e-7);
+        assert_eq!(dof_coc_front(curve, 0.05), 0.0);
+        // An aperture of 1: sharp only at the focus itself.
+        let open = dof_curve_params(&DepthOfField { aperture: 1.0, ..dof }, 5.0);
+        assert!(open[2].is_finite());
+        assert_eq!(dof_coc(open, 0.005), 0.0);
+        assert_eq!(dof_coc(open, 0.0051), 1.0);
+    }
+
+    #[test]
+    fn depth_of_field_weights_follow_the_shader() {
+        assert_eq!(dof_spread_weight(0.3, 0.3), 1.0);
+        assert_eq!(dof_spread_weight(0.9, 0.3), 1.0);
+        assert_eq!(dof_spread_weight(0.05, 0.3), 0.5);
+        assert_eq!(dof_spread_weight(0.0, 0.5), 0.0);
+        assert!((dof_disc_weight(0.4, 0.4) - 1.0).abs() < 1e-5);
+        assert_eq!(dof_disc_weight(0.1, 0.4), 0.0);
+        assert!((dof_disc_weight(0.4 - 0.1325, 0.4) - 0.5).abs() < 1e-5);
+        assert_eq!(dof_low_blend(0.65), 0.0);
+        assert!((dof_low_blend(0.75) - 0.5).abs() < 1e-5);
+        assert!((dof_low_blend(0.85) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn disc_is_the_shaders_and_the_same_on_both_sides() {
+        let wgsl = include_str!("effects.wgsl");
+        for [x, y, z] in DOF_DISC {
+            assert!(((x * x + y * y).sqrt() - z).abs() < 2e-5, "{x} {y} {z}");
+            assert!(wgsl.contains(&format!("vec3f({x}, {y}, {z}),")), "{x} {y} {z}");
+        }
+        assert_eq!(wgsl.matches("    vec3f(").count(), DOF_DISC.len());
+    }
+
+    #[test]
+    fn sun_shafts_are_the_studio_cameras_component() {
+        let shafts = SunShafts::default();
+        assert!((shafts.threshold[0] - 0.501_960_8).abs() < 1e-6);
+        assert_eq!(
+            (shafts.divisor, shafts.blend, shafts.iterations),
+            (2, ShaftBlend::Add, 2)
+        );
+        assert_eq!(
+            (shafts.blur_radius, shafts.intensity, shafts.max_radius),
+            (3.0, 2.2, 0.5)
+        );
+        // sunShaftBlurRadius / 768, then 6, 12 and 18 times that.
+        let radii = shaft_radii(&shafts);
+        let want = [3.0 / 768.0, 18.0 / 768.0, 36.0 / 768.0, 54.0 / 768.0];
+        assert_eq!(radii.len(), 4);
+        for (r, w) in radii.iter().zip(want) {
+            assert!((r - w).abs() < 1e-7, "{radii:?}");
+        }
+        // radialBlurIterations is kept within 1 to 4.
+        let many = SunShafts {
+            iterations: 9,
+            ..shafts.clone()
+        };
+        assert_eq!(shaft_radii(&many).len(), 8);
+        let none = SunShafts {
+            iterations: 0,
+            ..shafts
+        };
+        assert_eq!(shaft_radii(&none).len(), 2);
+    }
+
+    #[test]
+    fn caster_lands_where_the_camera_shows_it() {
+        let eye = Vec3::new(1.0, 2.0, -6.0);
+        let target = Vec3::new(0.5, 1.0, 0.0);
+        let forward = (target - eye).normalize();
+        let (fov, aspect) = (23.0f32, 16.0 / 9.0);
+        let point = Vec3::new(-0.4, 2.2, 3.0);
+        let clip = glam::Mat4::perspective_lh(fov.to_radians(), aspect, 0.1, 100.0)
+            * glam::Mat4::look_at_lh(eye, target, Vec3::Y)
+            * point.extend(1.0);
+        let got = viewport_point(point, eye, forward, fov, aspect);
+        assert!((got[0] - (clip.x / clip.w * 0.5 + 0.5)).abs() < 1e-5, "{got:?}");
+        assert!((got[1] - (clip.y / clip.w * 0.5 + 0.5)).abs() < 1e-5, "{got:?}");
+        assert!((got[2] - clip.w).abs() < 1e-4, "{got:?}");
+        // The point the camera looks at is the middle, its distance away.
+        let middle = viewport_point(target, eye, forward, fov, aspect);
+        assert!((middle[0] - 0.5).abs() < 1e-6 && (middle[1] - 0.5).abs() < 1e-6);
+        assert!((middle[2] - (target - eye).length()).abs() < 1e-5);
+        // Behind the camera the depth is negative, which puts the rays out.
+        let shafts = SunShafts {
+            caster: Some(eye - forward * 3.0),
+            ..Default::default()
+        };
+        let sun = shaft_sun(&shafts, eye, forward, fov, aspect);
+        assert!(sun[2] < 0.0);
+        assert_eq!(shaft_color(&shafts, sun[2]), [0.0; 3]);
+        // No caster: the middle of the screen at depth zero, rays on.
+        let free = SunShafts::default();
+        assert_eq!(shaft_sun(&free, eye, forward, fov, aspect), [0.5, 0.5, 0.0]);
+        assert_eq!(shaft_color(&free, 0.0), [2.2; 3]);
+    }
+
+    #[test]
+    fn rays_start_at_bright_sky_near_the_caster() {
+        let shafts = SunShafts::default();
+        let sun = [0.5, 0.75, 10.0];
+        let white = [1.0; 3];
+        // Each channel is 1 - 128/255 over the threshold; at the caster the
+        // distance term is maxRadius.
+        let over = 3.0 * (1.0 - 128.0 / 255.0);
+        assert!((shaft_mask(&shafts, sun, [0.5, 0.75], white, 1.0) - over * 0.5).abs() < 1e-6);
+        assert!((shaft_mask(&shafts, sun, [0.5, 0.5], white, 1.0) - over * 0.25).abs() < 1e-6);
+        assert_eq!(shaft_mask(&shafts, sun, [0.5, 0.2], white, 1.0), 0.0);
+        // Anything drawn nearer than 0.99 of the far plane gives nothing.
+        assert_eq!(shaft_mask(&shafts, sun, [0.5, 0.75], white, 0.99), 0.0);
+        assert_eq!(shaft_mask(&shafts, sun, [0.5, 0.75], [0.5; 3], 1.0), 0.0);
+        // Only the channels over the threshold count.
+        let red = shaft_mask(&shafts, sun, [0.5, 0.75], [1.0, 0.2, 0.2], 1.0);
+        assert!((red - over / 3.0 * 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rays_go_over_the_picture_by_the_blend_mode() {
+        let add = SunShafts {
+            color: [1.0, 0.5, 0.0],
+            ..Default::default()
+        };
+        // sat(rays * colour * 2.2) added.
+        let got = shaft_blend(&add, 1.0, [0.2, 0.2, 0.2], 0.25);
+        assert!((got[0] - 0.75).abs() < 1e-6 && (got[1] - 0.475).abs() < 1e-6 && got[2] == 0.2);
+        assert!((shaft_blend(&add, 1.0, [0.2; 3], 5.0)[0] - 1.2).abs() < 1e-6);
+        let screen = SunShafts {
+            blend: ShaftBlend::Screen,
+            ..add.clone()
+        };
+        let got = shaft_blend(&screen, 1.0, [0.2, 0.2, 0.2], 0.25);
+        assert!((got[0] - (1.0 - 0.8 * 0.45)).abs() < 1e-6 && (got[2] - 0.2).abs() < 1e-6);
+        assert_eq!(shaft_blend(&add, -1.0, [0.2; 3], 5.0), [0.2; 3]);
     }
 }
