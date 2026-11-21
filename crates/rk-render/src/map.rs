@@ -1275,6 +1275,8 @@ struct Caster {
     material: usize,
     cutout: bool,
     cull: bool,
+    /// The object's bounds, which say which cascades it can reach.
+    bounds: ([f32; 3], [f32; 3]),
 }
 
 /// What one frame of an uploaded map draws, from `MapGpu::frame`.
@@ -1283,6 +1285,10 @@ pub(crate) struct MapFrame {
     view: usize,
     draws: Vec<Draw>,
     casters: Vec<Caster>,
+    /// The cascades' views, in the order of the atlas tiles.
+    cascades: Vec<Mat4>,
+    /// The solid draws in the order the camera's depth takes them.
+    depth_order: Vec<usize>,
     /// Whether the sun's shadow atlas is drawn this frame.
     shadows: bool,
 }
@@ -2078,6 +2084,7 @@ impl MapGpu {
                         material: p.material,
                         cutout: p.cutout,
                         cull: p.cull,
+                        bounds: o.bounds,
                     });
                 }
                 if seen {
@@ -2139,11 +2146,23 @@ impl MapGpu {
                 }
             })
         });
+        // Depth only, the nearest surface stays whatever the order: the
+        // casters and the camera's depth go by pipeline and material, so
+        // that each is set once.
+        casters.sort_by_key(|c| (c.cutout, c.cull, c.material, c.buffers, c.object));
+        let solid = draws.iter().take_while(|d| d.blend == 0).count();
+        let mut depth_order: Vec<usize> = (0..solid).collect();
+        depth_order.sort_by_key(|&i| {
+            let d = &draws[i];
+            (d.cutout, d.cull, d.material, d.buffers, d.object)
+        });
         MapFrame {
             view: eye.view,
             draws,
             casters,
             shadows: !cascades.is_empty(),
+            cascades,
+            depth_order,
         }
     }
 
@@ -2153,7 +2172,7 @@ impl MapGpu {
         if !frame.shadows {
             return;
         }
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("map shadow"),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -2167,7 +2186,7 @@ impl MapGpu {
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
-        });
+        }));
         let tile = (SHADOW_ATLAS / 2) as f32;
         for (i, (_, group)) in self.views[frame.view].cascades.iter().enumerate() {
             let [ox, oy] = crate::shadow::atlas_origin(i);
@@ -2175,9 +2194,20 @@ impl MapGpu {
             pass.set_viewport(x, y, tile, tile, 0.0, 1.0);
             pass.set_scissor_rect(x as u32, y as u32, tile as u32, tile as u32);
             pass.set_bind_group(0, group, &[]);
+            let cascade = frame.cascades.get(i);
+            // A solid caster has no fragment program: any material set will
+            // do for it.
+            let mut material_set = false;
             for c in &frame.casters {
+                // What lies outside the cascade's box would be clipped.
+                if cascade.is_some_and(|vp| !in_view(vp, c.bounds)) {
+                    continue;
+                }
                 pass.set_pipeline(&pipes.casters[&(c.cutout, c.cull)]);
-                pass.set_bind_group(1, &self.materials[c.material], &[]);
+                if c.cutout || !material_set {
+                    pass.set_bind_group(1, &self.materials[c.material], &[]);
+                    material_set = true;
+                }
                 let (v, i) = &self.buffers[c.buffers];
                 pass.set_vertex_buffer(0, v.slice(..));
                 pass.set_vertex_buffer(1, self.matrix_of(c.object));
@@ -2190,11 +2220,15 @@ impl MapGpu {
     /// Draws the opaque and cut-out surfaces of `frame` into the camera's
     /// depth texture, which the screen effects and the characters' shadow
     /// mask read: one camera, one depth, as Unity draws it.
-    pub(crate) fn draw_depth(&self, pipes: &Pipelines, pass: &mut wgpu::RenderPass<'_>, frame: &MapFrame) {
+    pub(crate) fn draw_depth(&self, pipes: &Pipelines, pass: &mut crate::pass::Pass<'_>, frame: &MapFrame) {
         pass.set_bind_group(0, &self.views[frame.view].depth_view.1, &[]);
-        for d in frame.draws.iter().take_while(|d| d.blend == 0) {
+        let mut material_set = false;
+        for d in frame.depth_order.iter().map(|&i| &frame.draws[i]) {
             pass.set_pipeline(&pipes.depth[&(d.cutout, d.cull)]);
-            pass.set_bind_group(1, &self.materials[d.material], &[]);
+            if d.cutout || !material_set {
+                pass.set_bind_group(1, &self.materials[d.material], &[]);
+                material_set = true;
+            }
             let (v, i) = &self.buffers[d.buffers];
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_vertex_buffer(1, self.matrix_of(d.object));
@@ -2210,7 +2244,7 @@ impl MapGpu {
         &self,
         pipes: &Pipelines,
         target: Target,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut crate::pass::Pass<'_>,
         frame: &MapFrame,
     ) {
         let view = &self.views[frame.view];
@@ -2228,7 +2262,7 @@ impl MapGpu {
         &self,
         pipes: &Pipelines,
         target: Target,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut crate::pass::Pass<'_>,
         frame: &MapFrame,
     ) {
         let view = &self.views[frame.view];
@@ -2241,7 +2275,7 @@ impl MapGpu {
         &self,
         pipes: &Pipelines,
         target: Target,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut crate::pass::Pass<'_>,
         view: &MapView,
         draws: impl Iterator<Item = &'a Draw>,
     ) {
@@ -2493,7 +2527,7 @@ impl Renderer {
         gpu.shadow_pass(pipes, &mut encoder, &frame);
         {
             let bg = gpu.background();
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("map"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &msaa,
@@ -2520,7 +2554,7 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
-            });
+            }));
             gpu.draw_solid(pipes, Target::OWN, &mut pass, &frame);
             gpu.draw_blended(pipes, Target::OWN, &mut pass, &frame);
         }
