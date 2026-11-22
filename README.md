@@ -47,7 +47,7 @@ attempt at one.
 
 ## Status
 
-The latest version is 0.2.1, on the
+The latest version is 0.2.2, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 - 0.1.0 covered character import. Renkatsu builds a character from a card the
@@ -88,6 +88,10 @@ The latest version is 0.2.1, on the
   the news.
 - 0.2.1 offers Starter Content: Maps, so the 42 maps of CharaStudio's list
   work without Koikatsu.
+- 0.2.2 lights maps and characters together: lamps that cast shadows,
+  characters shading the map, CharaStudio's colour filters, fog, depth of
+  field, sun shafts and mirrors. A map's furniture can be moved and its doors
+  opened, and night scenes darken the map for lamps to light.
 - Next: posing by hand (FK and IK), then baked characters.
 
 ## Renkatsu Studio
