@@ -402,6 +402,8 @@ pub struct Renderer {
     pub(crate) lamp_atlas: wgpu::TextureView,
     /// The lamps' shadow tiles' matrices in the world.
     lamp_buf: wgpu::Buffer,
+    /// The key of what the map's sun shadow atlas holds, while it holds it.
+    sun_drawn: std::cell::Cell<Option<u64>>,
     /// A depth texel in the atlas's place while the atlas is drawn.
     lamp_stand_in: wgpu::TextureView,
     globals_layout: wgpu::BindGroupLayout,
@@ -1037,6 +1039,7 @@ impl Renderer {
             sampler_shadow,
             lamp_atlas,
             lamp_buf,
+            sun_drawn: std::cell::Cell::new(None),
             lamp_stand_in,
             globals_layout,
             material_layout,
@@ -1537,6 +1540,10 @@ impl Renderer {
         let mut seen: HashMap<usize, u32> = HashMap::new();
         // The skinning pass of each mesh: its bind group and vertex count.
         let mut skins = Vec::new();
+        // What the characters' shadows depend on, hashed: their meshes,
+        // poses and shapes. A mesh uploaded this frame counts as a change.
+        let mut posed = std::hash::DefaultHasher::new();
+        let mut fresh = false;
         let outlined = |i: usize| env.highlight.as_ref().is_some_and(|h| h.draws.contains(&i));
         for (draw_index, d) in draws.iter().enumerate() {
             let mesh = &d.renderer.mesh;
@@ -1551,6 +1558,14 @@ impl Renderer {
             *n += 1;
             let shaped = matches!(d.base_positions, std::borrow::Cow::Owned(_));
             let pose = skin_pose(d);
+            {
+                use std::hash::Hasher;
+                posed.write_usize(ptr);
+                posed.write(&pose);
+                if shaped {
+                    posed.write(bytemuck::cast_slice(&d.base_positions[..]));
+                }
+            }
             let kept = self.meshes.get(&key).is_some_and(|m| {
                 m.vb.size() == (count * std::mem::size_of::<Vertex>()) as u64 && m.pose.size() == pose.len() as u64
             });
@@ -1565,6 +1580,7 @@ impl Renderer {
                 self.queue.write_buffer(&m.pose, 0, &pose);
                 m.used = frame;
             } else {
+                fresh = true;
                 // The vertices start unskinned; the skinning pass writes the
                 // posed position, normal and tangent of each over them.
                 let verts: Vec<Vertex> = (0..count)
@@ -1892,6 +1908,16 @@ impl Renderer {
         });
         let main_base = base;
         let mut lamps_drawn = false;
+        // The characters' part of the sun shadow's key, with the bias they
+        // cast with.
+        let casters_key = {
+            use std::hash::Hasher;
+            let set = &env.shadows;
+            posed.write(bytemuck::cast_slice(&[set.bias, set.normal_bias]));
+            posed.write_u8(u8::from(set.soft));
+            posed.write_usize(casters.len());
+            (!fresh).then(|| posed.finish())
+        };
         for plan in &plans {
             let main = plan.mirror.is_none();
             // The characters are on the Chara layer.
@@ -1942,8 +1968,22 @@ impl Renderer {
                         mask: plan.mirror.map(|(_, mask)| mask),
                     };
                     let frame = gpu.frame(&self.queue, pipes, &eye, main_camera, scene);
-                    gpu.shadow_pass(pipes, &mut encoder, &frame);
-                    if charas {
+                    // The atlas is kept while nothing it shows has changed:
+                    // the same cascades, sun, map objects and characters.
+                    let key = casters_key.map(|c| {
+                        use std::hash::Hasher;
+                        let mut h = std::hash::DefaultHasher::new();
+                        h.write_u64(c);
+                        h.write_u64(gpu.sun_key(&frame));
+                        h.write_u8(u8::from(charas));
+                        h.finish()
+                    });
+                    let kept = key.is_some() && self.sun_drawn.get() == key;
+                    self.sun_drawn.set(key);
+                    if !kept {
+                        gpu.shadow_pass(pipes, &mut encoder, &frame);
+                    }
+                    if charas && !kept {
                         // The characters cast into the sun's shadow too, so
                         // they shade the map where the sun reaches it.
                         let sun = gpu.sun_dir();

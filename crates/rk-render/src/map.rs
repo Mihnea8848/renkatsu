@@ -350,6 +350,17 @@ impl MapMesh {
 
 /// Whether a box lies at least partly inside the view of `view_proj`: it
 /// is out when all its corners are behind one of the view's planes.
+/// A hash of objects' matrices as the renderer is given them.
+fn hash_matrices(matrices: &[(usize, Mat4)]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::hash::DefaultHasher::new();
+    for (index, m) in matrices {
+        h.write_usize(*index);
+        h.write(bytemuck::cast_slice(&m.to_cols_array()));
+    }
+    h.finish()
+}
+
 fn in_view(view_proj: &Mat4, (min, max): ([f32; 3], [f32; 3])) -> bool {
     let rows = [view_proj.row(0), view_proj.row(1), view_proj.row(2), view_proj.row(3)];
     // Left, right, bottom, top, near (depth 0 to 1), far.
@@ -1511,6 +1522,11 @@ pub(crate) struct SceneLight<'a> {
 pub(crate) struct MapGpu {
     /// Where the map stands, set by `Renderer::place_map`.
     pub(crate) placement: MapPlacement,
+    /// Counts the changes of where the map's objects and copies stand, for
+    /// the sun's shadow to be drawn again only after one.
+    moves: u64,
+    /// What the objects' matrices and the copies were given last, hashed.
+    given: (u64, u64),
     pub(crate) light: MapLight,
     /// The lowest and highest corner of everything drawn.
     bounds: (Vec3, Vec3),
@@ -1866,6 +1882,8 @@ impl MapGpu {
         });
         let mut gpu = MapGpu {
             placement: MapPlacement::default(),
+            moves: 0,
+            given: (0, 0),
             light: l.clone(),
             bounds: map.bounds(),
             rest_bounds: map.bounds(),
@@ -2426,6 +2444,21 @@ impl MapGpu {
         }
     }
 
+    /// What the sun's shadow of `frame` depends on in the map: its cascades,
+    /// the sun and where the objects stand. The same key, the same atlas.
+    pub(crate) fn sun_key(&self, frame: &MapFrame) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::hash::DefaultHasher::new();
+        for vp in &frame.cascades {
+            h.write(bytemuck::cast_slice(&vp.to_cols_array()));
+        }
+        h.write(bytemuck::cast_slice(&self.light.sun_dir));
+        h.write(bytemuck::cast_slice(&self.placement.root.to_cols_array()));
+        h.write_u64(self.moves);
+        h.write_usize(frame.casters.len());
+        h.finish()
+    }
+
     /// Opens the sun's shadow atlas again after the map's own casters, for
     /// the characters to cast into the map's shadow: `draw` is called once
     /// per cascade with the pass on that cascade's tile and the cascade's
@@ -2602,6 +2635,7 @@ impl Renderer {
     /// a frame only writes the camera's numbers and picks what to draw.
     /// While a map is set, the characters are lit from its sun.
     pub fn set_map(&mut self, map: Option<&MapScene>) {
+        self.sun_drawn.set(None);
         // The old map's memory goes before the new one's comes; where it
         // stood stays for the next.
         let placement = self.map_scene.take().map(|m| m.placement).unwrap_or_default();
@@ -2696,6 +2730,9 @@ impl Renderer {
     /// and says how it shows. Cheap: nothing is uploaded again.
     pub fn place_map(&mut self, placement: MapPlacement) {
         if let Some(map) = self.map_scene.as_mut() {
+            if map.placement.root != placement.root {
+                map.moves += 1;
+            }
             map.placement = placement;
         }
     }
@@ -2711,6 +2748,11 @@ impl Renderer {
     /// `set_map` starts with every object as baked.
     pub fn set_map_object_matrices(&mut self, matrices: &[(usize, Mat4)]) {
         let Some(map) = self.map_scene.as_mut() else { return };
+        let given = hash_matrices(matrices);
+        if given != map.given.0 {
+            map.given.0 = given;
+            map.moves += 1;
+        }
         for &(index, matrix) in matrices {
             if let Some(object) = map.object_of.get(index).copied().flatten() {
                 map.move_object(&self.queue, object, matrix);
@@ -2725,6 +2767,11 @@ impl Renderer {
     /// space; in place of the copies drawn before.
     pub fn set_map_copies(&mut self, copies: &[(usize, Mat4)]) {
         let Some(map) = self.map_scene.as_mut() else { return };
+        let given = hash_matrices(copies);
+        if given != map.given.1 {
+            map.given.1 = given;
+            map.moves += 1;
+        }
         let copies: Vec<(usize, Mat4)> = copies
             .iter()
             .filter_map(|&(index, m)| Some((map.object_of.get(index).copied().flatten()?, m)))
@@ -2735,6 +2782,8 @@ impl Renderer {
     /// Puts every object of the map back where it was baked.
     pub fn reset_map_object_matrices(&mut self) {
         let Some(map) = self.map_scene.as_mut() else { return };
+        map.moves += 1;
+        map.given = (0, 0);
         for object in std::mem::take(&mut map.moved) {
             map.move_object(&self.queue, object, Mat4::IDENTITY);
         }
