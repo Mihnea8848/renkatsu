@@ -605,6 +605,9 @@ pub struct Live {
     pub map_motion: bool,
     /// The camera was framed on a character once.
     framed: bool,
+    /// The first framing was looked at against the map's walls and
+    /// furniture: it is turned to see past them once.
+    pub view_checked: bool,
     /// The colour tables of Studio's colour filters, once they were looked
     /// for in the game; empty when the game has none.
     filters: Option<Filters>,
@@ -667,6 +670,7 @@ impl Live {
             keep_depth: false,
             map_motion: true,
             framed: false,
+            view_checked: true,
             filters: None,
             poses: Poses::default(),
             map: MapState::default(),
@@ -689,6 +693,7 @@ impl Live {
             self.cam.forget(focus.object);
         }
         self.framed = false;
+        self.view_checked = false;
         self.filters = None;
         if let Some(pending) = self.map.pending.take() {
             pending.handle.progress.cancel();
@@ -928,6 +933,7 @@ impl Live {
                         home.distance = subject.distance;
                         self.cam.rehome(home, Some(subject));
                         self.framed = true;
+                        self.view_checked = false;
                     }
                     // The build it replaces, of another recipe, goes now.
                     let before = self.actors.len();
@@ -1563,6 +1569,11 @@ impl Live {
 
     /// Whether a map is shown that things can be dropped on, so that the
     /// ground at height 0 is not.
+    /// Whether the camera has framed a character since the scene opened.
+    pub fn framed(&self) -> bool {
+        self.framed
+    }
+
     pub fn on_map(&self) -> bool {
         self.map_ground(&[]).is_some()
     }

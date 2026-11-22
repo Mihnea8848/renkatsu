@@ -2062,6 +2062,41 @@ impl State {
         }
     }
 
+    /// Turns the camera's first framing of an opened scene to the nearest
+    /// side from which the map's walls and furniture do not hide the
+    /// character, once the map's meshes are there. A desk between her and
+    /// the camera would otherwise fill the view.
+    pub fn clear_start_view(&mut self) {
+        let Some(live) = self.live.as_ref() else { return };
+        if live.view_checked || !live.framed() {
+            return;
+        }
+        let has_map = self.doc.scene().objects().iter().any(|o| o.kind() == Kind::Map);
+        if has_map && !live.on_map() {
+            return;
+        }
+        let (home, focus) = live.cam.home();
+        let turned = match focus {
+            Some(_) if has_map => {
+                let scene = self.doc.scene();
+                let characters = scene
+                    .objects()
+                    .iter()
+                    .filter(|o| o.kind() == Kind::Character)
+                    .map(|o| o.id)
+                    .collect();
+                let surface = live.surface(scene, characters);
+                clear_side(home, &surface)
+            }
+            _ => None,
+        };
+        let live = self.live.as_mut().expect("looked at above");
+        live.view_checked = true;
+        if let Some(orbit) = turned {
+            live.cam.rehome(orbit, focus);
+        }
+    }
+
     /// Opens the Maps library, to add a map to the scene.
     pub fn open_map_library(&mut self) {
         self.map_library = Some(crate::map_library::Shelf::open(self, true));
@@ -2206,6 +2241,36 @@ impl State {
             self.palette_open = true;
         }
     }
+}
+
+/// The view nearest to `orbit`, turned around its target, from which
+/// nothing stands between the character and the camera: from her middle
+/// and her knees if a side allows, else from her middle. `None` when
+/// `orbit` is as clear as any side, or no side is.
+fn clear_side(orbit: crate::camera::Orbit, surface: &dyn crate::surface::Surface) -> Option<crate::camera::Orbit> {
+    let open_from = |o: &crate::camera::Orbit, drop: f32| {
+        let from = o.target - glam::Vec3::Y * drop;
+        let to = o.camera().eye - from;
+        let length = to.length();
+        surface.meet(from, to / length).is_none_or(|far| far >= length - 0.05)
+    };
+    // Both ways round, a twelfth of a turn at a time.
+    let sides = || {
+        std::iter::once(orbit).chain(
+            (1..=6)
+                .flat_map(|k| [k as f32, -(k as f32)])
+                .map(|k| crate::camera::Orbit {
+                    yaw: orbit.yaw + k * std::f32::consts::TAU / 12.0,
+                    ..orbit
+                }),
+        )
+    };
+    for drops in [&[0.0, 0.45][..], &[0.0][..]] {
+        if let Some(side) = sides().find(|o| drops.iter().all(|d| open_from(o, *d))) {
+            return (side != orbit).then_some(side);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

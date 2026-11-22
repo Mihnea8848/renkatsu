@@ -1688,6 +1688,7 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
 /// it back to rest when it is stopped.
 fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     st.settle_on_map();
+    st.clear_start_view();
     st.list_map_pieces();
     let still = st.physics_still();
     let Some(live) = st.live.as_mut() else { return };
