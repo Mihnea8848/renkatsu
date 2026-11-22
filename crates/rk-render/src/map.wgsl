@@ -83,7 +83,7 @@ fn lamp_at(world: vec3<f32>, k: u32) -> array<vec3<f32>, 2> {
     if spot.w > -1.0 {
         atten *= smoothstep(spot.w, mix(spot.w, 1.0, 0.2), dot(-l, normalize(spot.xyz)));
     }
-    return array<vec3<f32>, 2>(l, colour.rgb * atten * LAMP_GAIN);
+    return array<vec3<f32>, 2>(l, colour.rgb * atten * LAMP_GAIN * lamp_shadow(k, world));
 }
 
 struct Material {
@@ -138,6 +138,65 @@ struct Shadow {
 @group(0) @binding(2) var shadow_atlas: texture_depth_2d;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
 
+// The lamps' shadow tiles: world to clip each, then one over the atlas's
+// width and height.
+struct LampShadow {
+    view_proj: array<mat4x4<f32>, 12>,
+    params: vec4<f32>,
+}
+@group(0) @binding(4) var lamp_atlas: texture_depth_2d;
+@group(0) @binding(5) var<uniform> ls: LampShadow;
+
+// How much of a lamp that casts shadows reaches `world`: its slot from the
+// place's last number, the cube side (or the spot's one view) facing the
+// point, then nine comparisons in its tile of the lamps' atlas. The point
+// steps towards the lamp by about a texel there, against shading itself.
+fn lamp_shadow(k: u32, world: vec3<f32>) -> f32 {
+    let place = g.lamps[k * 3u];
+    let slot = i32(round((place.w - 1.0) * 0.5)) - 1;
+    if slot < 0 {
+        return 1.0;
+    }
+    let spot = g.lamps[k * 3u + 2u];
+    let d = world - place.xyz;
+    var face = 0;
+    if spot.w <= -1.0 {
+        let a = abs(d);
+        if a.x >= a.y && a.x >= a.z {
+            face = select(1, 0, d.x > 0.0);
+        } else if a.y >= a.z {
+            face = select(3, 2, d.y > 0.0);
+        } else {
+            face = select(5, 4, d.z > 0.0);
+        }
+    }
+    let tile = slot * 6 + face;
+    let dist = length(d);
+    let at = world - d / max(dist, 1e-4) * (0.02 + dist * 0.006);
+    let clip = ls.view_proj[tile] * vec4<f32>(at, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
+    let p = clip.xyz / clip.w;
+    if abs(p.x) > 1.0 || abs(p.y) > 1.0 || p.z < 0.0 || p.z > 1.0 {
+        return 1.0;
+    }
+    let size = vec2<f32>(0.25, 1.0 / 3.0);
+    let cell = vec2<f32>(f32(tile % 4), f32(tile / 4)) * size;
+    let uv = cell + (p.xy * vec2<f32>(0.5, -0.5) + 0.5) * size;
+    // Kept inside the tile, off its neighbours.
+    let lo = cell + ls.params.xy * 1.5;
+    let hi = cell + size - ls.params.xy * 1.5;
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let tap = clamp(uv + vec2<f32>(f32(x), f32(y)) * ls.params.xy, lo, hi);
+            lit += textureSampleCompareLevel(lamp_atlas, shadow_sampler, tap, p.z);
+        }
+    }
+    return lit / 9.0;
+}
+
 // The constant and linear part of the ambient light arriving at a surface
 // facing `n` (Unity's SHEvalLinearL0L1).
 fn sh_l0l1(n: vec3<f32>) -> vec3<f32> {
@@ -174,11 +233,17 @@ fn sun_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
     // Off the surface by a texel and a half, against the surface shadowing
     // itself.
     let p = sh.to_atlas[c] * vec4<f32>(world + n * sh.texel_world[c] * 1.5, 1.0);
+    // The depth bias is one texel of the cascade, as a distance along the
+    // rays: the depth row's length is the depth of one metre. A fixed depth
+    // would grow with the map's size and lift the shadow of whatever
+    // stands on the ground.
+    let m = sh.to_atlas[c];
+    let bias = sh.texel_world[c] * length(vec3<f32>(m[0].z, m[1].z, m[2].z));
     var lit = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let at = p.xy + vec2<f32>(f32(x), f32(y)) * sh.params.z;
-            lit += textureSampleCompareLevel(shadow_atlas, shadow_sampler, at, p.z - 0.0005);
+            lit += textureSampleCompareLevel(shadow_atlas, shadow_sampler, at, p.z - bias);
         }
     }
     lit = lit / 9.0;
