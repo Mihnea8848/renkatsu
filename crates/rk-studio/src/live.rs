@@ -1488,6 +1488,22 @@ impl Live {
         out
     }
 
+    /// The map's objects and the copies of them that the scene objects in
+    /// `ids` are drawn as: a piece's first scene object is its object, the
+    /// others its copies; a door is the objects its Animator moves.
+    fn outlined_map(&self, scene: &Scene, ids: &[ObjectId]) -> (Vec<usize>, Vec<usize>) {
+        let mut objects = Vec::new();
+        let mut copies = Vec::new();
+        for id in ids {
+            if let Some(c) = self.map.copies.iter().position(|(_, _, owner)| owner == id) {
+                copies.push(c);
+                continue;
+            }
+            objects.extend(self.map_objects_of(scene, &[*id]));
+        }
+        (objects, copies)
+    }
+
     /// The map's objects a door's Animator moves.
     fn door_objects(&self, door: &str) -> Vec<usize> {
         let Some((_, motion)) = self.map.motion.as_ref() else {
@@ -1740,9 +1756,19 @@ impl Live {
             env.draw_lamps.resize(from, u32::MAX);
             env.draw_lamps.resize(draws.len(), mask);
         }
-        if let Some(o) = self.outline.as_ref().filter(|_| !outlined.is_empty()) {
+        // Selected map pieces and doors are outlined too: the map's objects
+        // and the copies drawn for duplicates.
+        let (map_objects, map_copies) = self
+            .outline
+            .as_ref()
+            .map(|o| self.outlined_map(scene, &o.objects))
+            .unwrap_or_default();
+        let any = !outlined.is_empty() || !map_objects.is_empty() || !map_copies.is_empty();
+        if let Some(o) = self.outline.as_ref().filter(|_| any) {
             env.highlight = Some(rk_render::highlight::Highlight {
                 draws: outlined,
+                map_objects,
+                map_copies,
                 color: o.color,
                 width: o.width,
             });

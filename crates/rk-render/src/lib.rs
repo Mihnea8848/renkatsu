@@ -2244,7 +2244,10 @@ impl Renderer {
             // The selection's outline, over the finished picture: the outlined
             // meshes' depth alone, then the pixels around it. A mesh without a
             // depth pass of its own is drawn as solid, culled at the back.
-            if let Some(h) = env.highlight.as_ref().filter(|h| main && !h.draws.is_empty()) {
+            let outlines = |h: &&highlight::Highlight| {
+                !h.draws.is_empty() || !h.map_objects.is_empty() || !h.map_copies.is_empty()
+            };
+            if let Some(h) = env.highlight.as_ref().filter(|h| main && outlines(h)) {
                 let targets = self.targets.as_ref().expect("made above");
                 {
                     let group = globals_group(self, base, &self.white);
@@ -2261,6 +2264,10 @@ impl Renderer {
                         pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
                         pass.set_bind_group(1, &binds[c.bind], &[]);
                         pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                    }
+                    // The map's outlined pieces, with its own depth view.
+                    if let Some((pipes, gpu, frame)) = &map_frame {
+                        gpu.draw_highlight(pipes, &mut pass, frame, &h.map_objects, &h.map_copies);
                     }
                 }
                 let outline = self

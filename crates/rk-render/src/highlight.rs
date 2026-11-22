@@ -13,6 +13,11 @@ use wgpu::util::DeviceExt;
 pub struct Highlight {
     /// The places of the outlined meshes in the draw list.
     pub draws: Vec<usize>,
+    /// The outlined objects of the map, by their place in
+    /// `MapScene::objects`, and copies of them, by their place in the list
+    /// `Renderer::set_map_copies` was given.
+    pub map_objects: Vec<usize>,
+    pub map_copies: Vec<usize>,
     /// The outline's colour, straight (not premultiplied) and linear.
     pub color: [f32; 4],
     /// The outline's width in pixels.

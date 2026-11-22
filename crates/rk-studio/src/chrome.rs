@@ -614,7 +614,7 @@ fn menus(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Panel>, res
         if widgets::check_item(ui, k, st.settings.show_inputs, "Show inputs", &inputs).clicked() {
             st.act(Action::ShowInputs, ui.ctx());
         }
-        if widgets::check_item(ui, k, !st.icons_hidden, "Object icons", &icons).clicked() {
+        if widgets::check_item(ui, k, !st.icons_hidden, "Light and camera icons", &icons).clicked() {
             st.icons_hidden = !st.icons_hidden;
         }
         ui.separator();
