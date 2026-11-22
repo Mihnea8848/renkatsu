@@ -532,8 +532,8 @@ impl Drag {
     }
 }
 
-/// The objects that are picked by an icon, as they have no picture of
-/// their own, and where they are in the world.
+/// The objects that are picked by an icon, as they have no body of their
+/// own, and where they are in the world.
 fn icons(st: &State) -> Vec<(ObjectId, Kind, Vec3)> {
     if st.icons_hidden {
         return Vec::new();
@@ -542,14 +542,9 @@ fn icons(st: &State) -> Vec<(ObjectId, Kind, Vec3)> {
     scene
         .objects()
         .iter()
-        .filter(|o| matches!(o.kind(), Kind::Light | Kind::Camera | Kind::Item | Kind::Map) && scene.shown(o.id))
-        // A map's pieces and doors are seen as themselves.
-        .filter(|o| {
-            !matches!(
-                o.content,
-                crate::scene::Content::MapPiece { .. } | crate::scene::Content::MapDoor { .. }
-            )
-        })
+        // Only what has no body to click on: lights and cameras. Items,
+        // map pieces and the map are seen as themselves, and picked there.
+        .filter(|o| matches!(o.kind(), Kind::Light | Kind::Camera) && scene.shown(o.id))
         .map(|o| (o.id, o.kind(), scene.world(o.id).w_axis.truncate()))
         .collect()
 }

@@ -45,12 +45,28 @@ pub fn floor_below(point: Vec3, surfaces: &[&dyn Surface], ground: Option<f32>) 
 /// a step up or down counting double: a floor beside a table wins over
 /// the table's top.
 pub fn stand_spot(point: Vec3, to_camera: Vec3, surface: &dyn Surface) -> Option<Vec3> {
-    // Near and fine first; a map whose floor is far from its origin gets a
-    // coarser look further out and further down.
-    search(point, to_camera, surface, 0.25, 12.0, 20.0).or_else(|| search(point, to_camera, surface, 2.0, 60.0, 200.0))
+    // Near and fine; a map whose floor is far from its origin, or whose
+    // near floors are walled in, gets a coarser look further out and down.
+    let near = search(point, to_camera, surface, 0.25, 12.0, 20.0);
+    if near.is_some_and(|(score, _)| score == 0.0) {
+        return near.map(|(_, spot)| spot);
+    }
+    let far = search(point, to_camera, surface, 2.0, 60.0, 200.0);
+    [near, far]
+        .into_iter()
+        .flatten()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, spot)| spot)
 }
 
-fn search(point: Vec3, to_camera: Vec3, surface: &dyn Surface, step: f32, reach: f32, depth: f32) -> Option<Vec3> {
+fn search(
+    point: Vec3,
+    to_camera: Vec3,
+    surface: &dyn Surface,
+    step: f32,
+    reach: f32,
+    depth: f32,
+) -> Option<(f32, Vec3)> {
     let mut best: Option<(f32, Vec3)> = None;
     let mut ring = 0u32;
     loop {
@@ -72,18 +88,25 @@ fn search(point: Vec3, to_camera: Vec3, surface: &dyn Surface, step: f32, reach:
             let across = Vec3::new(side.z, 0.0, -side.x);
             let column = point + (side * cos + across * sin) * r;
             for floor in floors(column, depth, surface) {
-                let score = r + 2.0 * (floor.y - point.y).abs();
+                // A metre down, or a metre short of a full view, weighs as
+                // three metres further out; a metre up as eight, so that a
+                // walled-in floor beats the roof over it.
+                let rise = floor.y - point.y;
+                let score = r + if rise > 0.0 { 8.0 * rise } else { -3.0 * rise };
                 if best.is_some_and(|(b, _)| score >= b) {
                     continue;
                 }
-                if room_at(floor, to_camera, surface) {
-                    best = Some((score, floor));
+                if let Some(short) = room_at(floor, to_camera, surface) {
+                    let score = score + 3.0 * short;
+                    if best.is_none_or(|(b, _)| score < b) {
+                        best = Some((score, floor));
+                    }
                 }
             }
         }
         ring += 1;
     }
-    best.map(|(_, spot)| spot)
+    best
 }
 
 /// The floors of a column through `at`, top down, from ten metres above it
@@ -103,32 +126,43 @@ fn floors(at: Vec3, depth: f32, surface: &dyn Surface) -> Vec<Vec3> {
     found
 }
 
-/// Whether a character fits on `floor` and the camera sees her.
-fn room_at(floor: Vec3, to_camera: Vec3, surface: &dyn Surface) -> bool {
+/// Whether a character fits on `floor` with the camera's side open, and
+/// how many metres short of a full view that side is: a small room's
+/// floor still beats the roof over it, a roomy spot beats both.
+fn room_at(floor: Vec3, to_camera: Vec3, surface: &dyn Surface) -> Option<f32> {
     const HEAD: f32 = 1.8;
     const ELBOWS: f32 = 0.25;
     // CharaStudio's narrow lens frames a character from about five metres.
     const SIGHT: f32 = 6.0;
+    // Less open than this, the camera would stand at her nose.
+    const NEAREST: f32 = 1.0;
     let open = |from: Vec3, dir: Vec3, reach: f32| surface.meet(from, dir).is_none_or(|far| far > reach);
     let up = floor + Vec3::Y * 0.05;
     if !open(up, Vec3::Y, HEAD) {
-        return false;
+        return None;
     }
     // Nothing between the chest and the feet: not at a table's edge.
     let chest = floor + Vec3::Y * 1.2;
     let down = surface.meet(chest, Vec3::NEG_Y);
     if down.is_none_or(|far| (chest.y - far - floor.y).abs() > 0.02) {
-        return false;
+        return None;
     }
     let round = [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z];
     for height in [0.3, 1.2] {
         let at = floor + Vec3::Y * height;
         if !round.iter().all(|dir| open(at, *dir, ELBOWS)) {
-            return false;
+            return None;
         }
     }
     let to_camera = to_camera.normalize_or(Vec3::Z);
-    open(floor + Vec3::Y * 1.2, to_camera, SIGHT)
+    // From the chest and both shoulders: half of her behind a corner is
+    // not a view.
+    let across = Vec3::new(to_camera.z, 0.0, -to_camera.x).normalize_or(Vec3::X) * 0.3;
+    let sight = [Vec3::ZERO, across, -across]
+        .iter()
+        .map(|side| surface.meet(chest + *side, to_camera).unwrap_or(SIGHT))
+        .fold(SIGHT, f32::min);
+    (sight >= NEAREST).then_some(SIGHT - sight)
 }
 
 #[cfg(test)]
@@ -180,6 +214,26 @@ mod tests {
         ];
         let spot = stand_spot(Vec3::ZERO, Vec3::Z, &Boxes(walls)).unwrap();
         assert!(spot.z > 0.6, "{spot}");
+    }
+
+    #[test]
+    fn a_character_in_a_small_room_stands_on_its_floor_not_its_roof() {
+        // A room of 4 by 3 m, 3 m high, with a flat roof on top and no
+        // floor outside: nowhere inside is six metres open toward the
+        // camera, the roof is.
+        let walls = vec![
+            (Vec3::new(-2.0, -0.1, -1.5), Vec3::new(2.0, 0.0, 1.5)),
+            (Vec3::new(-2.0, 0.0, -1.5), Vec3::new(-1.9, 3.0, 1.5)),
+            (Vec3::new(1.9, 0.0, -1.5), Vec3::new(2.0, 3.0, 1.5)),
+            (Vec3::new(-2.0, 0.0, -1.5), Vec3::new(2.0, 3.0, -1.4)),
+            (Vec3::new(-2.0, 0.0, 1.4), Vec3::new(2.0, 3.0, 1.5)),
+            (Vec3::new(-2.0, 3.0, -1.5), Vec3::new(2.0, 3.5, 1.5)),
+        ];
+        let spot = stand_spot(Vec3::ZERO, Vec3::Z, &Boxes(walls)).unwrap();
+        assert!(
+            spot.y.abs() < 1e-3 && spot.x.abs() < 1.9 && spot.z.abs() < 1.4,
+            "{spot}"
+        );
     }
 
     #[test]

@@ -235,7 +235,22 @@ pub struct ViewCamera {
     pub speed: f32,
     /// A movement key was pressed during this hold of the right button.
     exploring: bool,
+    /// The two lenses, vertical fields of view in degrees: one for moving
+    /// around, wider, and one for looking at what is focused or framed.
+    pub lenses: [f32; 2],
+    /// The camera framed something (a focus, or a group with Frame) and
+    /// looks at it through the framing lens until it is moved freely.
+    framing: bool,
 }
+
+/// The lens the Studio frames characters with, which framing distances
+/// are worked out for.
+pub const FRAMING_LENS: f32 = 23.0;
+/// The lenses at first: wider for moving around, CharaStudio's for
+/// framing.
+pub const LENSES: [f32; 2] = [50.0, FRAMING_LENS];
+/// How narrow and how wide a lens can be, in degrees.
+pub const LENS_RANGE: (f32, f32) = (10.0, 100.0);
 
 impl ViewCamera {
     pub fn new(orbit: Orbit, focus: Option<Focus>) -> ViewCamera {
@@ -247,7 +262,46 @@ impl ViewCamera {
             focus,
             speed: 1.0,
             exploring: false,
+            lenses: LENSES,
+            framing: focus.is_some(),
         }
+    }
+
+    /// Which lens the camera looks through now: 1 while it frames
+    /// something, 0 while it moves around.
+    pub fn lens_in_use(&self) -> usize {
+        usize::from(self.framing || self.focus.is_some())
+    }
+
+    /// The distance a framing worked out for the Studio's lens takes
+    /// through the framing lens, so that it fills the view as much.
+    fn through_framing_lens(&self, distance: f32) -> f32 {
+        let lens = self.lenses[1].clamp(LENS_RANGE.0, LENS_RANGE.1);
+        distance * (FRAMING_LENS.to_radians() / 2.0).tan() / (lens.to_radians() / 2.0).tan()
+    }
+
+    /// Eases the lens toward the one in use when no glide carries it: a
+    /// quarter of a second, about.
+    pub fn ease_lens(&mut self, dt: f32) {
+        if self.glide.is_some() {
+            return;
+        }
+        let want = self.lenses[self.lens_in_use()];
+        let gap = want - self.orbit.fov_y_deg;
+        if gap.abs() < 0.01 {
+            self.orbit.fov_y_deg = want;
+            return;
+        }
+        self.orbit.fov_y_deg += gap * (1.0 - (-dt.max(0.0) / 0.08).exp());
+    }
+
+    /// Widens or narrows the lens in use by a turn of the wheel, at once.
+    pub fn scroll_lens(&mut self, wheel: f32) {
+        let i = self.lens_in_use();
+        let lens = (self.lenses[i] - wheel * 0.05).clamp(LENS_RANGE.0, LENS_RANGE.1);
+        self.lenses[i] = lens;
+        self.cancel_glide();
+        self.orbit.fov_y_deg = lens;
     }
 
     /// Sends the camera to another view: it eases there over the glide
@@ -299,9 +353,11 @@ impl ViewCamera {
     /// Focuses on an object and frames it, keeping the direction of view.
     pub fn focus_on(&mut self, focus: Focus) {
         self.focus = Some(focus);
+        self.framing = true;
         let mut to = self.destination();
         to.target = focus.center;
-        to.distance = focus.distance;
+        to.distance = self.through_framing_lens(focus.distance);
+        to.fov_y_deg = self.lenses[1];
         self.glide_to(to);
     }
 
@@ -309,9 +365,11 @@ impl ViewCamera {
     /// direction of view and focusing on nothing.
     pub fn frame(&mut self, center: Vec3, distance: f32) {
         self.focus = None;
+        self.framing = true;
         let mut to = self.destination();
         to.target = center;
-        to.distance = distance;
+        to.distance = self.through_framing_lens(distance);
+        to.fov_y_deg = self.lenses[1];
         self.glide_to(to);
     }
 
@@ -337,6 +395,8 @@ impl ViewCamera {
     pub fn rehome(&mut self, orbit: Orbit, focus: Option<Focus>) {
         self.home = (orbit, focus);
         self.focus = focus;
+        // A starting framing looks through the framing lens.
+        self.framing = true;
         self.glide_to(orbit);
     }
 
@@ -388,11 +448,18 @@ impl ViewCamera {
     /// Lets go of the focused object; the view stays as it is.
     pub fn release(&mut self) {
         self.focus = None;
+        self.framing = false;
+    }
+
+    /// The view to go back to, and what it focuses on.
+    pub fn home(&self) -> (Orbit, Option<Focus>) {
+        self.home
     }
 
     /// Back to the framing and the focus the viewport started with.
     pub fn reset(&mut self) {
         self.focus = self.home.1;
+        self.framing = true;
         self.glide_to(self.home.0);
     }
 
@@ -422,6 +489,7 @@ impl ViewCamera {
         if along != Vec3::ZERO {
             self.exploring = true;
             self.focus = None;
+            self.framing = false;
         }
         match (self.right_drag(), self.focus) {
             (RightDrag::Orbit, Some(focus)) => {
@@ -512,6 +580,36 @@ mod tests {
         // The tests of where the camera goes do not wait for it.
         cam.glide_time = 0.0;
         cam
+    }
+
+    #[test]
+    fn moving_widens_to_the_moving_lens_and_framing_narrows_back() {
+        let mut cam = focused();
+        cam.orbit.fov_y_deg = FRAMING_LENS;
+        assert_eq!(cam.lens_in_use(), 1);
+        // Let go of the focus: the wide lens, reached within half a second.
+        cam.release();
+        assert_eq!(cam.lens_in_use(), 0);
+        for _ in 0..25 {
+            cam.ease_lens(1.0 / 60.0);
+        }
+        assert!((cam.orbit.fov_y_deg - LENSES[0]).abs() < 0.5, "{}", cam.orbit.fov_y_deg);
+        // The wheel with Alt changes only the lens in use.
+        cam.scroll_lens(100.0);
+        assert!((cam.lenses[0] - (LENSES[0] - 5.0)).abs() < 1e-4);
+        assert_eq!(cam.lenses[1], FRAMING_LENS);
+        // Framing again goes back to the framing lens, from as far as the
+        // Studio's framing worked out, the lens being the same.
+        let focus = Focus {
+            object: ObjectId(7),
+            center: Vec3::new(2.0, 1.0, 0.0),
+            distance: 4.0,
+        };
+        cam.focus_on(focus);
+        cam.advance(1.0);
+        assert_eq!(cam.lens_in_use(), 1);
+        assert!((cam.orbit.fov_y_deg - FRAMING_LENS).abs() < 1e-4);
+        assert!((cam.orbit.distance - 4.0).abs() < 1e-4);
     }
 
     #[test]

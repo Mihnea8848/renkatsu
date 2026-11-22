@@ -37,6 +37,7 @@ fn mouse_rows() -> Vec<(&'static str, Vec<Vec<Cap>>)> {
             vec![vec![M(Mouse::Right), Cap::Symbol(icon::ARROW_FAT_UP, "Shift")]],
         ),
         ("Fly speed", vec![vec![M(Mouse::Right), M(Mouse::Wheel)]]),
+        ("Field of view", vec![vec![key("Alt"), M(Mouse::Wheel)]]),
     ]
 }
 
