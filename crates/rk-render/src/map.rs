@@ -927,6 +927,18 @@ impl Pipelines {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // The lamps' shadow atlas and its tiles in the map's space.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                uniform(5, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let cascade = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1384,6 +1396,7 @@ impl MapView {
         atlas: &wgpu::TextureView,
         shadowed: bool,
         sky: Option<&SkyViews>,
+        (lamp_atlas, lamp_buf): (&wgpu::TextureView, &wgpu::Buffer),
     ) -> MapView {
         let uniform_buf = |label, size: usize| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -1444,6 +1457,14 @@ impl MapView {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&pipes.compare),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(lamp_atlas),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: lamp_buf.as_entire_binding(),
                 },
             ],
         });
@@ -1517,6 +1538,12 @@ pub(crate) struct MapGpu {
     /// The sun's shadow atlas; one texel when the sun casts none. The
     /// views draw it one after the other.
     atlas: wgpu::TextureView,
+    /// The renderer's lamp shadow atlas, which the views read.
+    lamp_atlas: wgpu::TextureView,
+    /// The lamps' shadow tiles in the map's space, for its surfaces.
+    lamp_buf: wgpu::Buffer,
+    /// One per tile of the lamps' atlas, for the map's casters.
+    lamp_tiles: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     /// The camera's view, then one per mirror.
     views: Vec<MapView>,
     /// The sky's textures, for the views made later.
@@ -1530,6 +1557,7 @@ impl MapGpu {
     /// Uploads `map`. `views` holds the view of each of its images by the
     /// image's address, `sky_cube` the sky's cubemap and `cubes` the
     /// reflections' cubemaps, the scene's first.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
         pipes: &Pipelines,
@@ -1538,6 +1566,7 @@ impl MapGpu {
         white: &wgpu::TextureView,
         sky_cube: Option<&wgpu::TextureView>,
         cubes: &[wgpu::TextureView],
+        lamp_atlas: &wgpu::TextureView,
     ) -> MapGpu {
         let l = &map.light;
         let view_of = |image: &Arc<MapImage>| views.get(&(Arc::as_ptr(image) as usize)).cloned();
@@ -1570,7 +1599,41 @@ impl MapGpu {
                 std::array::from_fn(|i| face(i).unwrap_or_else(|| white.clone())),
             )
         });
-        let main_view = MapView::new(device, pipes, &atlas, shadowed, sky_views.as_ref());
+        // The lamps' shadow tiles as the map's casters and surfaces take
+        // them: in the map's own space.
+        let lamp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("map lamp shadows"),
+            size: std::mem::size_of::<crate::lamp_shadow::LampShadowUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lamp_tiles = (0..crate::lamp_shadow::SLOTS * crate::lamp_shadow::FACES)
+            .map(|_| {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("map lamp shadow tile"),
+                    size: std::mem::size_of::<[f32; 16]>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("map lamp shadow tile"),
+                    layout: &pipes.cascade,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    }],
+                });
+                (buf, group)
+            })
+            .collect();
+        let main_view = MapView::new(
+            device,
+            pipes,
+            &atlas,
+            shadowed,
+            sky_views.as_ref(),
+            (lamp_atlas, &lamp_buf),
+        );
 
         // The lightmaps' bind groups: the first for objects without one.
         let lightmap_group = |info: [f32; 4], light: &wgpu::TextureView, direction: &wgpu::TextureView| {
@@ -1818,6 +1881,9 @@ impl MapGpu {
             lightmaps,
             reflections,
             atlas,
+            lamp_atlas: lamp_atlas.clone(),
+            lamp_buf,
+            lamp_tiles,
             views: vec![main_view],
             sky_views,
             camera_mask: map.camera_mask,
@@ -1834,7 +1900,14 @@ impl MapGpu {
         self.views.truncate(1);
         let shadowed = self.light.shadows.is_some();
         for _ in mirrors {
-            let view = MapView::new(device, pipes, &self.atlas, shadowed, self.sky_views.as_ref());
+            let view = MapView::new(
+                device,
+                pipes,
+                &self.atlas,
+                shadowed,
+                self.sky_views.as_ref(),
+                (&self.lamp_atlas, &self.lamp_buf),
+            );
             self.views.push(view);
         }
     }
@@ -2303,6 +2376,56 @@ impl MapGpu {
         }
     }
 
+    /// Writes the lamps' shadow tiles for the map's casters and surfaces,
+    /// taken into the map's own space.
+    pub(crate) fn write_lamp_tiles(
+        &self,
+        queue: &wgpu::Queue,
+        slots: &[Option<crate::Lamp>; crate::lamp_shadow::SLOTS],
+    ) {
+        let root = self.placement.rigid();
+        let u = crate::lamp_shadow::uniform(slots, root);
+        queue.write_buffer(&self.lamp_buf, 0, bytemuck::bytes_of(&u));
+        for (m, (buf, _)) in u.view_proj.iter().zip(&self.lamp_tiles) {
+            queue.write_buffer(buf, 0, bytemuck::cast_slice(m));
+        }
+    }
+
+    /// Draws the map's shadow casters within reach of one lamp's view into
+    /// its tile of the lamps' atlas; `view_proj` is the tile's, in the
+    /// world.
+    pub(crate) fn draw_lamp_casters(
+        &self,
+        pipes: &Pipelines,
+        pass: &mut crate::pass::Pass<'_>,
+        frame: &MapFrame,
+        tile: usize,
+        view_proj: Mat4,
+    ) {
+        let Some((_, group)) = self.lamp_tiles.get(tile) else {
+            return;
+        };
+        let vp = view_proj * self.placement.rigid();
+        pass.set_bind_group(0, group, &[]);
+        // The characters' draws between tiles leave their own materials.
+        let mut material_set = false;
+        for c in &frame.casters {
+            if !in_view(&vp, c.bounds) {
+                continue;
+            }
+            pass.set_pipeline(&pipes.casters[&(c.cutout, c.cull)]);
+            if c.cutout || !material_set {
+                pass.set_bind_group(1, &self.materials[c.material], &[]);
+                material_set = true;
+            }
+            let (v, i) = &self.buffers[c.buffers];
+            pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_vertex_buffer(1, self.matrix_of(c.object));
+            pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+        }
+    }
+
     /// Opens the sun's shadow atlas again after the map's own casters, for
     /// the characters to cast into the map's shadow: `draw` is called once
     /// per cascade with the pass on that cascade's tile and the cascade's
@@ -2555,7 +2678,16 @@ impl Renderer {
         .map(|c| Arc::as_ptr(c) as usize)
         .collect();
         pipes.sky.keep_cubes(&kept);
-        let mut gpu = MapGpu::new(&self.device, pipes, map, &views, &self.white, sky_cube.as_ref(), &cubes);
+        let mut gpu = MapGpu::new(
+            &self.device,
+            pipes,
+            map,
+            &views,
+            &self.white,
+            sky_cube.as_ref(),
+            &cubes,
+            &self.lamp_atlas,
+        );
         gpu.placement = placement;
         self.map_scene = Some(gpu);
     }

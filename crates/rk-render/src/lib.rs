@@ -6,6 +6,7 @@
 
 pub mod effects;
 pub mod highlight;
+pub mod lamp_shadow;
 pub mod map;
 pub mod material;
 pub mod mirror;
@@ -186,6 +187,9 @@ pub struct Lamp {
     pub range: f32,
     /// A spot's full cone in degrees; none for a point or directional lamp.
     pub spot_angle: Option<f32>,
+    /// Its place among the lamps that cast shadows (`lamp_shadow::SLOTS`
+    /// at most); none when it casts none. A directional lamp casts none.
+    pub shadow: Option<u8>,
 }
 
 /// The lamps' rows as the shaders take them, those of `mask` alone.
@@ -197,8 +201,14 @@ pub(crate) fn lamp_rows(lamps: &[Lamp], mask: u32) -> ([[f32; 4]; 24], [f32; 4])
             continue;
         }
         let [r, g, b, _] = material::linear([l.color[0], l.color[1], l.color[2], 1.0]);
+        // A point or spot lamp that casts shadows says its slot in the
+        // place's last number: 1 casts none, 3 the first slot, 5 the next.
+        let slot = l
+            .shadow
+            .filter(|s| usize::from(*s) < lamp_shadow::SLOTS)
+            .map_or(0.0, |s| f32::from(s) + 1.0);
         let place = match l.at {
-            Some([x, y, z]) => [x, y, z, 1.0],
+            Some([x, y, z]) => [x, y, z, 1.0 + 2.0 * slot],
             None => [l.dir[0], l.dir[1], l.dir[2], 0.0],
         };
         let cone = l.spot_angle.map_or(-1.0, |a| (a.to_radians() / 2.0).cos());
@@ -388,6 +398,12 @@ pub struct Renderer {
     mask_pipeline: wgpu::RenderPipeline,
     mask_layout: wgpu::BindGroupLayout,
     sampler_shadow: wgpu::Sampler,
+    /// The lamps' shadow atlas, `lamp_shadow::ATLAS` texels.
+    pub(crate) lamp_atlas: wgpu::TextureView,
+    /// The lamps' shadow tiles' matrices in the world.
+    lamp_buf: wgpu::Buffer,
+    /// A depth texel in the atlas's place while the atlas is drawn.
+    lamp_stand_in: wgpu::TextureView,
     globals_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     sampler_repeat: wgpu::Sampler,
@@ -807,7 +823,74 @@ impl Renderer {
                 texture_entry(1, wgpu::ShaderStages::FRAGMENT),
                 sampler_entry(2),
                 texture_entry(3, wgpu::ShaderStages::FRAGMENT),
+                // The lamps' shadows: their atlas, a comparing sampler and
+                // the tiles' matrices.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
+        });
+        // The lamps' shadow atlas and its tiles' matrices.
+        let lamp_atlas = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("lamp shadow atlas"),
+                size: wgpu::Extent3d {
+                    width: lamp_shadow::ATLAS[0],
+                    height: lamp_shadow::ATLAS[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: lamp_shadow::FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let lamp_stand_in = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("lamp shadow stand-in"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: lamp_shadow::FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let lamp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lamp shadows"),
+            size: std::mem::size_of::<lamp_shadow::LampShadowUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let depth_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -952,6 +1035,9 @@ impl Renderer {
             mask_pipeline,
             mask_layout,
             sampler_shadow,
+            lamp_atlas,
+            lamp_buf,
+            lamp_stand_in,
             globals_layout,
             material_layout,
             sampler_repeat,
@@ -1367,7 +1453,8 @@ impl Renderer {
             .and_then(|fx| fx.color.as_ref())
             .map(|c| self.texture(&c.lut));
         // One set of globals per view the meshes are drawn from.
-        let globals_group = |r: &Self, globals: Globals, mask: &wgpu::TextureView| {
+        // With the lamps' atlas, or for the pass that draws it, a stand-in.
+        let group_with = |r: &Self, globals: Globals, mask: &wgpu::TextureView, lamps: &wgpu::TextureView| {
             let buf = r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("globals"),
                 contents: bytemuck::bytes_of(&globals),
@@ -1393,9 +1480,23 @@ impl Renderer {
                         binding: 3,
                         resource: wgpu::BindingResource::TextureView(mask),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(lamps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&r.sampler_shadow),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: r.lamp_buf.as_entire_binding(),
+                    },
                 ],
             })
         };
+        let globals_group =
+            |r: &Self, globals: Globals, mask: &wgpu::TextureView| group_with(r, globals, mask, &r.lamp_atlas);
 
         struct Batch {
             vb: wgpu::Buffer,
@@ -1663,7 +1764,17 @@ impl Renderer {
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
         }
-        if cast || occlude {
+        // The lamps that cast shadows, by slot.
+        let lamp_slots = lamp_shadow::by_slot(env.lamps.iter().chain(&env.map_lamps));
+        let lamp_shadows = lamp_slots.iter().any(Option::is_some);
+        if lamp_shadows {
+            self.queue.write_buffer(
+                &self.lamp_buf,
+                0,
+                bytemuck::bytes_of(&lamp_shadow::uniform(&lamp_slots, Mat4::IDENTITY)),
+            );
+        }
+        if cast || occlude || lamp_shadows {
             for depth_texture in [false, true] {
                 for cull_back in [false, true] {
                     let key = CasterKey {
@@ -1780,6 +1891,7 @@ impl Renderer {
             targets: self.targets.clone().expect("made above"),
         });
         let main_base = base;
+        let mut lamps_drawn = false;
         for plan in &plans {
             let main = plan.mirror.is_none();
             // The characters are on the Chara layer.
@@ -1870,6 +1982,67 @@ impl Renderer {
                 }
                 _ => None,
             };
+            // The lamps' shadows, once a frame, before any view reads them:
+            // the map's casters and the characters from each lamp.
+            if lamp_shadows && !lamps_drawn {
+                lamps_drawn = true;
+                if let Some((_, gpu, _)) = &map_frame {
+                    gpu.write_lamp_tiles(&self.queue, &lamp_slots);
+                }
+                let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("lamp shadows"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.lamp_atlas,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }));
+                let side = lamp_shadow::TILE;
+                for (slot, lamp) in lamp_slots.iter().enumerate() {
+                    let Some(lamp) = lamp else { continue };
+                    for (face, vp) in lamp_shadow::views(lamp).into_iter().enumerate() {
+                        let tile = lamp_shadow::tile(slot, face);
+                        let [x, y] = lamp_shadow::origin(tile);
+                        pass.set_viewport(x as f32, y as f32, side as f32, side as f32, 0.0, 1.0);
+                        pass.set_scissor_rect(x, y, side, side);
+                        if let Some((pipes, gpu, frame)) = &map_frame {
+                            gpu.draw_lamp_casters(pipes, &mut pass, frame, tile, vp);
+                        }
+                        if !charas {
+                            continue;
+                        }
+                        let globals = Globals {
+                            view_proj: vp.to_cols_array(),
+                            light_dir: [-lamp.dir[0], -lamp.dir[1], -lamp.dir[2], 0.0],
+                            // No light bias: the receivers step towards the
+                            // lamp instead.
+                            shadow: [0.0, 0.0, 0.0, 0.0],
+                            ..base
+                        };
+                        pass.set_bind_group(0, &group_with(self, globals, &self.white, &self.lamp_stand_in), &[]);
+                        for c in &casters {
+                            let Some(cull_back) = c.role.shadow_map else { continue };
+                            let key = CasterKey {
+                                depth_texture: true,
+                                cull_back,
+                            };
+                            pass.set_pipeline(&self.caster_pipelines[&key]);
+                            let b: &Batch = &batches[c.batch];
+                            pass.set_vertex_buffer(0, b.vb.slice(..));
+                            pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_bind_group(1, &binds[c.bind], &[]);
+                            pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                        }
+                    }
+                }
+            }
             fn depth_pass(view: &wgpu::TextureView) -> wgpu::RenderPassDescriptor<'_> {
                 wgpu::RenderPassDescriptor {
                     label: Some("shadow caster"),
@@ -2536,6 +2709,7 @@ mod tests {
             intensity: 2.0,
             range: 3.0,
             spot_angle: None,
+            shadow: None,
         };
         let spot = Lamp {
             spot_angle: Some(60.0),
