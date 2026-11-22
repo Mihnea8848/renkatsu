@@ -102,7 +102,7 @@ pub enum Action {
     ViewportTools,
     ModeTools,
     ShowInputs,
-    /// The floating icons of lights, cameras and items in the viewport.
+    /// The floating icons of lights and cameras in the viewport.
     ObjectIcons,
     /// A direction to fly in, as `FLY` lists them.
     Fly(u8),
@@ -259,7 +259,7 @@ pub const ACTIONS: [Def; 59] = [
     def(
         Action::ObjectIcons,
         "object-icons",
-        "Object icons",
+        "Light and camera icons",
         Group::View,
         &["Ctrl+H"],
     ),

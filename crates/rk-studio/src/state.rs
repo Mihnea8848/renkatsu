@@ -400,7 +400,7 @@ pub struct State {
     pub rail: Rail,
     /// Every viewport overlay is hidden.
     pub overlays_hidden: bool,
-    /// The floating icons of lights, cameras and items are hidden (and
+    /// The floating icons of lights and cameras are hidden (and
     /// not picked in the viewport).
     pub icons_hidden: bool,
     /// The viewport takes the place of all docked panels.

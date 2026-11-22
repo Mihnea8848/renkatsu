@@ -2321,6 +2321,41 @@ impl MapGpu {
         }
     }
 
+    /// Draws the surfaces of the objects in `objects` and the copies in
+    /// `copies` (as `Renderer::set_map_copies` numbers them) into the
+    /// selection outline's depth, with the camera's depth view.
+    pub(crate) fn draw_highlight(
+        &self,
+        pipes: &Pipelines,
+        pass: &mut crate::pass::Pass<'_>,
+        frame: &MapFrame,
+        objects: &[usize],
+        copies: &[usize],
+    ) {
+        let wanted: Vec<usize> = objects
+            .iter()
+            .filter_map(|i| self.object_of.get(*i).copied().flatten())
+            .chain(copies.iter().map(|c| self.objects.len() + c))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        pass.set_bind_group(0, &self.views[frame.view].depth_view.1, &[]);
+        for d in frame
+            .draws
+            .iter()
+            .filter(|d| d.mirror == NO_MIRROR && wanted.contains(&d.object))
+        {
+            pass.set_pipeline(&pipes.depth[&(d.cutout, d.cull)]);
+            pass.set_bind_group(1, &self.materials[d.material], &[]);
+            let (v, i) = &self.buffers[d.buffers];
+            pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_vertex_buffer(1, self.matrix_of(d.object));
+            pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
+        }
+    }
+
     /// Draws the opaque and cut-out surfaces of `frame`, then the sky where
     /// the depth buffer is still open, as Unity orders a frame. Leaves the
     /// map's globals in bind group 0.
