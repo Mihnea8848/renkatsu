@@ -86,6 +86,16 @@ fn fogged(i: VsOut, c: vec4<f32>) -> vec4<f32> {
 // _ShadowMapTexture): 1 lit, down to one minus the shadow strength.
 @group(0) @binding(3) var shadow_mask_tex: texture_2d<f32>;
 
+// The lamps' shadow tiles: world to clip each, then one over the atlas's
+// width and height.
+struct LampShadow {
+    view_proj: array<mat4x4<f32>, 12>,
+    params: vec4<f32>,
+}
+@group(0) @binding(4) var lamp_atlas: texture_depth_2d;
+@group(0) @binding(5) var lamp_compare: sampler_comparison;
+@group(0) @binding(6) var<uniform> ls: LampShadow;
+
 const KIND_ITEM: u32 = 1u;
 const KIND_SKIN: u32 = 2u;
 const KIND_HAIR: u32 = 3u;
@@ -1765,8 +1775,63 @@ fn lamp_reach(i: VsOut, k: u32) -> vec3<f32> {
     let ndl = dot(normalize(i.normal), normalize(to_lamp));
     // A soft toon edge: a lit side and a shadow, with a smooth border.
     let turn = smoothstep(-0.05, 0.35, ndl);
-    return colour.rgb * atten * turn;
+    var shade = 1.0;
+    if (place.w > 0.5 && atten * turn > 0.0) {
+        shade = lamp_shadow(k, i.world);
+    }
+    return colour.rgb * atten * turn * shade;
 }
+
+// How much of a lamp that casts shadows reaches `world`: its slot from the
+// place's last number, the cube side (or the spot's one view) facing the
+// point, then nine comparisons in its tile of the lamps' atlas. The point
+// steps towards the lamp by about a texel there, against shading itself.
+fn lamp_shadow(k: u32, world: vec3<f32>) -> f32 {
+    let place = g.lamps[k * 3u];
+    let slot = i32(round((place.w - 1.0) * 0.5)) - 1;
+    if slot < 0 {
+        return 1.0;
+    }
+    let spot = g.lamps[k * 3u + 2u];
+    let d = world - place.xyz;
+    var face = 0;
+    if spot.w <= -1.0 {
+        let a = abs(d);
+        if a.x >= a.y && a.x >= a.z {
+            face = select(1, 0, d.x > 0.0);
+        } else if a.y >= a.z {
+            face = select(3, 2, d.y > 0.0);
+        } else {
+            face = select(5, 4, d.z > 0.0);
+        }
+    }
+    let tile = slot * 6 + face;
+    let dist = length(d);
+    let at = world - d / max(dist, 1e-4) * (0.02 + dist * 0.006);
+    let clip = ls.view_proj[tile] * vec4<f32>(at, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
+    let p = clip.xyz / clip.w;
+    if abs(p.x) > 1.0 || abs(p.y) > 1.0 || p.z < 0.0 || p.z > 1.0 {
+        return 1.0;
+    }
+    let size = vec2<f32>(0.25, 1.0 / 3.0);
+    let cell = vec2<f32>(f32(tile % 4), f32(tile / 4)) * size;
+    let uv = cell + (p.xy * vec2<f32>(0.5, -0.5) + 0.5) * size;
+    // Kept inside the tile, off its neighbours.
+    let lo = cell + ls.params.xy * 1.5;
+    let hi = cell + size - ls.params.xy * 1.5;
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let tap = clamp(uv + vec2<f32>(f32(x), f32(y)) * ls.params.xy, lo, hi);
+            lit += textureSampleCompareLevel(lamp_atlas, lamp_compare, tap, p.z);
+        }
+    }
+    return lit / 9.0;
+}
+
 
 // The lamps' light on top of the character's own shading, which shows as
 // much as the map's light lets it (lamp_info.y, 1 without a map): in a dark
