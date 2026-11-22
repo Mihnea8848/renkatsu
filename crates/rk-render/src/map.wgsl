@@ -174,11 +174,17 @@ fn sun_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
     // Off the surface by a texel and a half, against the surface shadowing
     // itself.
     let p = sh.to_atlas[c] * vec4<f32>(world + n * sh.texel_world[c] * 1.5, 1.0);
+    // The depth bias is one texel of the cascade, as a distance along the
+    // rays: the depth row's length is the depth of one metre. A fixed depth
+    // would grow with the map's size and lift the shadow of whatever
+    // stands on the ground.
+    let m = sh.to_atlas[c];
+    let bias = sh.texel_world[c] * length(vec3<f32>(m[0].z, m[1].z, m[2].z));
     var lit = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let at = p.xy + vec2<f32>(f32(x), f32(y)) * sh.params.z;
-            lit += textureSampleCompareLevel(shadow_atlas, shadow_sampler, at, p.z - 0.0005);
+            lit += textureSampleCompareLevel(shadow_atlas, shadow_sampler, at, p.z - bias);
         }
     }
     lit = lit / 9.0;

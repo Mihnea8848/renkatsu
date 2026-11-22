@@ -19,6 +19,8 @@ const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The side of the shadow atlas, four cascades of half that side each.
 const SHADOW_ATLAS: u32 = 4096;
+/// The side of one cascade's tile in the atlas.
+pub(crate) const SHADOW_TILE: u32 = SHADOW_ATLAS / 2;
 const SAMPLES: u32 = 4;
 
 /// How a material's surface is drawn, as Unity's Standard shader's
@@ -2298,6 +2300,46 @@ impl MapGpu {
                 pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
             }
+        }
+    }
+
+    /// Opens the sun's shadow atlas again after the map's own casters, for
+    /// the characters to cast into the map's shadow: `draw` is called once
+    /// per cascade with the pass on that cascade's tile and the cascade's
+    /// world to clip matrix. Nothing happens while the sun casts no shadow.
+    pub(crate) fn cast_into_sun(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &MapFrame,
+        mut draw: impl FnMut(&mut crate::pass::Pass<'_>, Mat4),
+    ) {
+        if !frame.shadows {
+            return;
+        }
+        let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("characters in the map's shadow"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.atlas,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }));
+        // The cascades are in the map's own space.
+        let to_map = self.placement.rigid().inverse();
+        let tile = SHADOW_TILE as f32;
+        for (i, vp) in frame.cascades.iter().enumerate() {
+            let [ox, oy] = crate::shadow::atlas_origin(i);
+            let (x, y) = (ox * SHADOW_ATLAS as f32, oy * SHADOW_ATLAS as f32);
+            pass.set_viewport(x, y, tile, tile, 0.0, 1.0);
+            pass.set_scissor_rect(x as u32, y as u32, tile as u32, tile as u32);
+            draw(&mut pass, *vp * to_map);
         }
     }
 

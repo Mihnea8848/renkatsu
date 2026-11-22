@@ -1831,6 +1831,41 @@ impl Renderer {
                     };
                     let frame = gpu.frame(&self.queue, pipes, &eye, main_camera, scene);
                     gpu.shadow_pass(pipes, &mut encoder, &frame);
+                    if charas {
+                        // The characters cast into the sun's shadow too, so
+                        // they shade the map where the sun reaches it.
+                        let sun = gpu.sun_dir();
+                        let set = &env.shadows;
+                        gpu.cast_into_sun(&mut encoder, &frame, |pass, vp| {
+                            let (depth_range, texel) = shadow::ortho_scales(vp, map::SHADOW_TILE);
+                            let globals = Globals {
+                                view_proj: vp.to_cols_array(),
+                                light_dir: [sun[0], sun[1], sun[2], 0.0],
+                                shadow: [
+                                    shadow::caster_bias(set.bias, depth_range),
+                                    1.0,
+                                    0.0,
+                                    shadow::caster_normal_bias(set.normal_bias, set.soft, [texel, texel]),
+                                ],
+                                ..base
+                            };
+                            pass.set_bind_group(0, &globals_group(self, globals, &self.white), &[]);
+                            for c in &casters {
+                                let Some(cull_back) = c.role.shadow_map else { continue };
+                                // The atlas has the camera depth's format.
+                                let key = CasterKey {
+                                    depth_texture: true,
+                                    cull_back,
+                                };
+                                pass.set_pipeline(&self.caster_pipelines[&key]);
+                                let b: &Batch = &batches[c.batch];
+                                pass.set_vertex_buffer(0, b.vb.slice(..));
+                                pass.set_index_buffer(b.ib.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.set_bind_group(1, &binds[c.bind], &[]);
+                                pass.draw_indexed(c.first..c.first + c.count, 0, 0..1);
+                            }
+                        });
+                    }
                     Some((pipes, gpu, frame))
                 }
                 _ => None,

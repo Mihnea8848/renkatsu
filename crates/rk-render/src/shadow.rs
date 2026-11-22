@@ -403,6 +403,15 @@ pub fn world_to_shadow(cascade_view_proj: Mat4, cascade: usize) -> Mat4 {
     to_atlas * cascade_view_proj
 }
 
+/// The depth an orthographic cascade covers and the side of one texel of
+/// its tile, in the units of the space `view_proj` takes: the lengths of its
+/// depth and x rows are clip units per unit of that space.
+pub fn ortho_scales(view_proj: Mat4, tile: u32) -> (f32, f32) {
+    let depth_range = 1.0 / view_proj.row(2).truncate().length().max(1e-12);
+    let texel = 2.0 / view_proj.row(0).truncate().length().max(1e-12) / tile as f32;
+    (depth_range, texel)
+}
+
 /// What the caster's vertex shader adds to clip depth
 /// (`unity_LightShadowBias.x`). The engine multiplies the light's bias by the
 /// cascade projection's depth scale (0x140214938), which makes the bias a
@@ -482,6 +491,25 @@ pub fn pcf_axis(frac: f32) -> ([f32; 3], [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ortho_scales_reads_depth_and_texel_from_the_matrix() {
+        let light = light_view(Vec3::new(-0.5, 0.4, -0.7));
+        // 20 wide, 300 deep, on a tile of 2000 texels.
+        let vp = Mat4::orthographic_lh(-10.0, 10.0, -10.0, 10.0, -100.0, 200.0) * light;
+        let (depth, texel) = ortho_scales(vp, 2000);
+        assert!((depth - 300.0).abs() < 1e-2, "{depth}");
+        assert!((texel - 0.01).abs() < 1e-6, "{texel}");
+        // A map moved and turned in the world keeps both.
+        let root = Mat4::from_rotation_translation(glam::Quat::from_rotation_y(1.1), Vec3::new(3.0, -2.0, 7.0));
+        let (depth_w, texel_w) = ortho_scales(vp * root.inverse(), 2000);
+        assert!((depth_w - depth).abs() < 1e-2 && (texel_w - texel).abs() < 1e-6);
+        // And a point of the world lands where its place in the map does.
+        let in_map = Vec3::new(1.0, 0.5, -3.0);
+        let a = vp.project_point3(in_map);
+        let b = (vp * root.inverse()).project_point3(root.transform_point3(in_map));
+        assert!((a - b).length() < 1e-4, "{a} {b}");
+    }
 
     fn near(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
