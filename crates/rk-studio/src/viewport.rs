@@ -143,6 +143,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     }
     crate::keymap::inputs(ui, k, st, at);
     speed_meter(ui, k, st, full);
+    lens_meter(ui, k, st, full);
     ui.allocate_rect(full, Sense::hover());
 }
 
@@ -1302,7 +1303,7 @@ pub fn frame_all(st: &mut State) {
         .filter_map(|o| subject(st, o.id))
         .collect();
     let Some(live) = st.live.as_mut() else { return };
-    if let Some(group) = enclose(&all, live.cam.orbit.fov_y_deg) {
+    if let Some(group) = enclose(&all, crate::camera::FRAMING_LENS) {
         live.cam.frame(group.center, group.distance);
     }
 }
@@ -1329,7 +1330,7 @@ pub fn subject(st: &State, id: ObjectId) -> Option<Focus> {
                 .into_iter()
                 .filter_map(|c| subject(st, c))
                 .collect();
-            let mut group = enclose(&inside, live.cam.orbit.fov_y_deg)?;
+            let mut group = enclose(&inside, crate::camera::FRAMING_LENS)?;
             group.object = id;
             Some(group)
         }
@@ -1478,6 +1479,68 @@ const METER_FADE: f64 = 0.5;
 
 /// The fly speed as a small meter at the bottom of the viewport, shown
 /// when the speed changes and fading away a moment later.
+/// The lens in use, as it was just widened or narrowed with Alt and the
+/// wheel: its field of view on a track from the narrowest to the widest,
+/// fading away as the speed's does.
+fn lens_meter(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
+    let (Some(shown), Some(live)) = (st.lens_shown, st.live.as_ref()) else {
+        return;
+    };
+    let age = ui.input(|i| i.time) - shown;
+    if age >= METER_HOLD + METER_FADE {
+        st.lens_shown = None;
+        return;
+    }
+    let alpha = (1.0 - (age - METER_HOLD) / METER_FADE).clamp(0.0, 1.0) as f32;
+    ui.ctx().request_repaint();
+    let h = k.d.row + 6.0;
+    let rect = Rect::from_center_size(
+        Pos2::new(full.center().x.round(), full.bottom() - 8.0 - h / 2.0),
+        Vec2::new(176.0, h),
+    );
+    let fade = |c: Color32| c.gamma_multiply(alpha);
+    let p = ui.painter();
+    p.rect_filled(rect, k.radius(), fade(glass(k)));
+    p.rect_stroke(
+        rect,
+        k.radius(),
+        Stroke::new(1.0, fade(Theme::glass(k.t.hover, 110))),
+        StrokeKind::Inside,
+    );
+    let y = rect.center().y;
+    glyph(
+        p,
+        k,
+        Pos2::new(rect.left() + 16.0, y),
+        icon::APERTURE,
+        16.0,
+        fade(k.t.text),
+    );
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 32.0, y - 1.5),
+        Pos2::new(rect.right() - 52.0, y + 1.5),
+    );
+    p.rect_filled(track, 1.0, fade(k.t.control));
+    let (lo, hi) = crate::camera::LENS_RANGE;
+    let lens = live.cam.lenses[live.cam.lens_in_use()];
+    let at = |deg: f32| track.left() + track.width() * ((deg - lo) / (hi - lo)).clamp(0.0, 1.0);
+    p.rect_filled(
+        Rect::from_min_max(track.min, Pos2::new(at(lens), track.bottom())),
+        1.0,
+        fade(k.t.select_bright),
+    );
+    // A notch at the lens it started as.
+    let first = crate::camera::LENSES[live.cam.lens_in_use()];
+    hair_v(p, at(first).round(), y - 4.0, y + 4.0, fade(k.t.text_dim));
+    p.text(
+        Pos2::new(rect.right() - 10.0, y),
+        Align2::RIGHT_CENTER,
+        format!("{lens:.0}°"),
+        k.bold(k.d.text),
+        fade(k.t.text_bright),
+    );
+}
+
 fn speed_meter(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     let (Some(shown), Some(live)) = (st.speed_shown, st.live.as_ref()) else {
         return;
@@ -1688,6 +1751,14 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     if live.cam.advance(dt) {
         ui.ctx().request_repaint();
     }
+    // The lens of the moment, eased to: wide while moving, the framing
+    // lens on what is focused.
+    live.cam.lenses = st.settings.lenses;
+    let before = live.cam.orbit.fov_y_deg;
+    live.cam.ease_lens(dt);
+    if live.cam.orbit.fov_y_deg != before {
+        ui.ctx().request_repaint();
+    }
     st.last_playback = st.playback;
     let ppp = ui.ctx().pixels_per_point();
     let size = [
@@ -1801,7 +1872,15 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
         cam.right_released();
     }
     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-    if scroll != 0.0 && right {
+    if scroll != 0.0 && alt && scene.hovered() {
+        // Alt and the wheel widen or narrow the lens in use.
+        cam.lenses = st.settings.lenses;
+        cam.scroll_lens(scroll);
+        st.settings.lenses = cam.lenses;
+        st.settings_changed = true;
+        st.lens_shown = Some(ui.input(|i| i.time));
+        st.speed_shown = None;
+    } else if scroll != 0.0 && right {
         cam.scroll_speed(scroll);
         st.speed_shown = Some(ui.input(|i| i.time));
     } else if scroll != 0.0 && scene.hovered() {

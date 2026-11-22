@@ -141,6 +141,10 @@ pub struct Settings {
     /// The steps snapping goes by: move in metres, rotate in degrees,
     /// scale, and the grid's size in metres.
     pub snap_steps: [f32; 4],
+    /// The viewport camera's lenses, fields of view in degrees: for moving
+    /// around, and for what is focused or framed.
+    #[serde(default = "lenses")]
+    pub lenses: [f32; 2],
     /// The keys the user changed, by the action's name; see `keymap`.
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
 }
@@ -162,6 +166,7 @@ impl Default for Settings {
             map_motion: true,
             smooth_edges: true,
             snap_steps: SNAP_STEPS,
+            lenses: crate::camera::LENSES,
             keys: Default::default(),
         }
     }
@@ -231,6 +236,10 @@ impl Settings {
     }
 }
 
+fn lenses() -> [f32; 2] {
+    crate::camera::LENSES
+}
+
 fn yes() -> bool {
     true
 }
@@ -257,6 +266,7 @@ mod tests {
             map_motion: true,
             smooth_edges: false,
             snap_steps: [0.5, 45.0, 0.25, 2.0],
+            lenses: crate::camera::LENSES,
             keys: [("focus".to_owned(), vec!["Ctrl+F".to_owned()])].into(),
         };
         s.opened_at(
