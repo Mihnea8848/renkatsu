@@ -303,6 +303,8 @@ pub struct State {
     /// When the fly speed last changed, in egui's seconds, for the meter
     /// that shows it and fades away.
     pub speed_shown: Option<f64>,
+    /// When the lens last changed (Alt and the wheel), for its meter.
+    pub lens_shown: Option<f64>,
     /// The project that is open; `Project::none()` while the project
     /// selector shows.
     pub project: Project,
@@ -808,6 +810,7 @@ impl State {
             map_scroll: None,
             map_pictures: crate::map_library::Pictures::default(),
             speed_shown: None,
+            lens_shown: None,
             library: Library::new(&project),
             project,
             selector: None,
