@@ -451,6 +451,11 @@ impl ViewCamera {
         self.framing = false;
     }
 
+    /// The view to go back to, and what it focuses on.
+    pub fn home(&self) -> (Orbit, Option<Focus>) {
+        self.home
+    }
+
     /// Back to the framing and the focus the viewport started with.
     pub fn reset(&mut self) {
         self.focus = self.home.1;
