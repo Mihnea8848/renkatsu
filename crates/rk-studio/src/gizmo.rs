@@ -1180,6 +1180,81 @@ fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown>
 }
 
 /// Draws the shown icons, the far under the near.
+/// The reach of each selected lamp, as Unreal shows it: three circles of
+/// a point lamp's range, a spot's cone out to its range, and an arrow
+/// along the way a directional lamp shines. Thin lines in the lamp's
+/// colour, lightened so a dark one still shows.
+fn draw_lamp_reach(p: &egui::Painter, st: &State, view: &View) {
+    use crate::scene::{Content, LightKind};
+    let scene = st.doc.scene();
+    for o in scene.objects() {
+        let Content::Light {
+            light,
+            range,
+            spot_angle,
+            color,
+            ..
+        } = &o.content
+        else {
+            continue;
+        };
+        if *light == LightKind::Character || !st.doc.is_selected(o.id) || !scene.shown(o.id) {
+            continue;
+        }
+        let (_, turn, at) = scene.world(o.id).to_scale_rotation_translation();
+        // A light shines along its forward axis.
+        let shines = (turn * Vec3::Z).normalize_or(Vec3::NEG_Y);
+        let (u, w) = shines.any_orthonormal_pair();
+        let light_up = |v: f32| ((0.5 + 0.5 * v.clamp(0.0, 1.0)) * 255.0) as u8;
+        let tint = Color32::from_rgba_unmultiplied(light_up(color[0]), light_up(color[1]), light_up(color[2]), 210);
+        let stroke = Stroke::new(1.0, tint);
+        let segment = |a: Vec3, b: Vec3| {
+            if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+                p.line_segment([a, b], stroke);
+            }
+        };
+        let round = |k: usize, n: usize| {
+            let (sin, cos) = (k as f32 / n as f32 * TAU).sin_cos();
+            (cos, sin)
+        };
+        let circle = |centre: Vec3, x: Vec3, y: Vec3, radius: f32| {
+            const SIDES: usize = 64;
+            for k in 0..SIDES {
+                let (c0, s0) = round(k, SIDES);
+                let (c1, s1) = round(k + 1, SIDES);
+                segment(centre + (x * c0 + y * s0) * radius, centre + (x * c1 + y * s1) * radius);
+            }
+        };
+        match light {
+            LightKind::Point => {
+                for (x, y) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
+                    circle(at, x, y, *range);
+                }
+            }
+            LightKind::Spot => {
+                let half = (spot_angle * 0.5).clamp(0.5, 89.5).to_radians();
+                let end = at + shines * (range * half.cos());
+                let radius = range * half.sin();
+                circle(end, u, w, radius);
+                for k in 0..8 {
+                    let (c, s) = round(k, 8);
+                    segment(at, end + (u * c + w * s) * radius);
+                }
+            }
+            LightKind::Directional => {
+                let tip = at + shines * 1.5;
+                segment(at, tip);
+                for k in 0..4 {
+                    let (c, s) = round(k, 4);
+                    segment(tip, tip - shines * 0.3 + (u * c + w * s) * 0.12);
+                }
+                circle(at, u, w, 0.25);
+            }
+            LightKind::Character => {}
+        }
+    }
+}
+
 fn draw_icons(p: &egui::Painter, k: &Look, st: &State, shown: &[Shown]) {
     let mut order: Vec<&Shown> = shown.iter().collect();
     order.sort_by(|a, b| a.size.total_cmp(&b.size));
@@ -1211,6 +1286,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
         }
     }
 
+    draw_lamp_reach(&p, st, &view);
     let pointer = ui.ctx().pointer_hover_pos();
     let shown = shown_icons(st, &view, pointer);
     draw_icons(&p, k, st, &shown);
