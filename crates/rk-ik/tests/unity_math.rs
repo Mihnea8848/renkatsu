@@ -97,6 +97,16 @@ fn the_port_answers_as_unity_does() {
         ]
         .concat()
     }));
-    let shown: Vec<&String> = wrong.iter().take(20).collect();
+    // How many differ in each function, then the first few of each.
+    let mut by_name: std::collections::BTreeMap<&str, Vec<&String>> = Default::default();
+    for w in &wrong {
+        by_name.entry(w.split(' ').next().unwrap_or("")).or_default().push(w);
+    }
+    let shown: Vec<String> = by_name
+        .iter()
+        .flat_map(|(name, all)| {
+            std::iter::once(format!("{name}: {} differ", all.len())).chain(all.iter().take(4).map(|w| (*w).clone()))
+        })
+        .collect();
     assert!(wrong.is_empty(), "{} cases differ from Unity:\n{shown:#?}", wrong.len());
 }

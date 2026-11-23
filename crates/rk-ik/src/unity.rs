@@ -7,13 +7,18 @@
 //! Two kinds:
 //! - Managed (C# in `UnityEngine.dll`): read from the game's own copy and
 //!   followed step by step. `Mathf` rounds through doubles
-//!   (`(float)Math.Sqrt(f)`), and so do these.
+//!   (`(float)Math.Sqrt(f)`), and so do these. The game's Mono also works
+//!   out float sums in double and rounds them only where they are kept or
+//!   handed on: a dot product is three products summed in double, then
+//!   rounded (`wide_dot`). Unity's answers show it.
 //! - Native (`INTERNAL_CALL_`): `LookRotation`, `FromToRotation`,
 //!   `AngleAxis`, `Inverse`, `Lerp` and `Slerp` of rotations, and
 //!   `Vector3.OrthoNormalize`. Their code is in the engine and cannot be
 //!   read; they are written as the engine's maths library is known to work
 //!   and checked against the engine's own answers, which the capture
-//!   plugin's `unitymath` key writes (`tests/unity_math.rs`).
+//!   plugin's `unitymath` key writes (`tests/unity_math.rs`): all of them
+//!   agree within 1e-6, and the half turn for opposite vectors was read
+//!   from those answers.
 //!
 //! Vectors and rotations are glam's types; their own operators are not
 //! used where Unity computes differently.
@@ -80,7 +85,13 @@ pub const DEG2RAD: f32 = 0.017453292;
 
 /// `Vector3.Dot`.
 pub fn dot(a: Vec3, b: Vec3) -> f32 {
-    a.x * b.x + a.y * b.y + a.z * b.z
+    wide_dot(a, b) as f32
+}
+
+/// Three products summed as Unity's Mono sums them: in double, rounded
+/// only where the result is kept.
+fn wide_dot(a: Vec3, b: Vec3) -> f64 {
+    f64::from(a.x) * f64::from(b.x) + f64::from(a.y) * f64::from(b.y) + f64::from(a.z) * f64::from(b.z)
 }
 
 /// `Vector3.Cross`.
@@ -90,12 +101,12 @@ pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
 
 /// `Vector3.magnitude`.
 pub fn magnitude(v: Vec3) -> f32 {
-    sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+    sqrt(wide_dot(v, v) as f32)
 }
 
 /// `Vector3.sqrMagnitude`.
 pub fn sqr_magnitude(v: Vec3) -> f32 {
-    v.x * v.x + v.y * v.y + v.z * v.z
+    wide_dot(v, v) as f32
 }
 
 /// `Vector3.Normalize` and `.normalized`: zero below a length of 1e-5.
@@ -117,7 +128,7 @@ pub fn lerp(a: Vec3, b: Vec3, t: f32) -> Vec3 {
 /// `Vector3.Distance`.
 pub fn distance(a: Vec3, b: Vec3) -> f32 {
     let v = Vec3::new(a.x - b.x, a.y - b.y, a.z - b.z);
-    sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+    sqrt(wide_dot(v, v) as f32)
 }
 
 /// `Vector3.Project`. Below the smallest float it is zero (`Mathf.Epsilon`,
@@ -224,11 +235,13 @@ fn from_to_matrix(from: Vec3, to: Vec3) -> Mat3 {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     }
     if e < -1.0 + E {
-        // Nearly opposite: half a turn about a vector square to `from`;
-        // which one the engine picks is checked by the fixtures.
-        let mut left = Vec3::new(0.0, from.z, -from.y);
+        // Nearly opposite: half a turn about the world's X axis made
+        // square to `from`, or about Y when `from` lies along X; read from
+        // Unity's answers.
+        let square = |a: Vec3| cross(from, cross(a, from));
+        let mut left = square(Vec3::X);
         if dot(left, left) < E {
-            left = Vec3::new(-from.z, 0.0, from.x);
+            left = square(Vec3::Y);
         }
         let invlen = 1.0 / dot(left, left).sqrt();
         let l = Vec3::new(left.x * invlen, left.y * invlen, left.z * invlen);
