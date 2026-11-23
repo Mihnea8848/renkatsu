@@ -1268,13 +1268,20 @@ fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, 
             .unwrap_or_default();
         let off = waiting.or(name.is_none().then_some("No bone chosen"));
         row(ui, k, "Bone", off, |ui, rect| {
+            let shown = name
+                .as_deref()
+                .map_or_else(|| "None".to_owned(), crate::bones::pose_label);
             label(
                 ui.painter(),
                 k,
                 Pos2::new(rect.left() + 4.0, rect.center().y),
-                name.as_deref().unwrap_or("None"),
+                &shown,
                 k.t.text,
             );
+            if let Some(raw) = name.as_deref().filter(|raw| *raw != shown) {
+                ui.interact(rect, ui_id.with("bone name"), Sense::hover())
+                    .on_hover_text(raw);
+            }
         });
         // The turn over the animation, in Unity's angles. A trace of
         // rounding is no turn, not a minus zero.
@@ -1282,21 +1289,31 @@ fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, 
         let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
         let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
         let mut angles = shown;
-        row(ui, k, "Rotation", off, |ui, rect| {
-            vec3(ui, k, rect, ui_id.with("rotation"), &mut angles, 0.5);
-        });
         let mut reset = false;
-        row(ui, k, "", off, |ui, rect| {
-            let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
-            reset = widgets::flat_button(
-                &mut child,
-                k,
-                Some(icon::ARROW_COUNTER_CLOCKWISE),
-                "Reset",
-                false,
-                false,
-            )
-            .clicked();
+        let turned = edit.rot != glam::Quat::IDENTITY;
+        row(ui, k, "Rotation", off, |ui, rect| {
+            // The angles, and at their end a way back to the animation's
+            // turn while the bone is turned by hand.
+            let side = rect.height();
+            let fields = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+            vec3(ui, k, fields, ui_id.with("rotation"), &mut angles, 0.5);
+            if turned {
+                let button = Rect::from_min_size(Pos2::new(fields.right() + 4.0, rect.top()), Vec2::splat(side));
+                let resp = ui
+                    .interact(button, ui_id.with("reset"), Sense::click())
+                    .on_hover_text("Reset");
+                let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                ui.painter().rect_filled(button, k.radius(), fill);
+                glyph(
+                    ui.painter(),
+                    k,
+                    button.center(),
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    14.0,
+                    k.t.text,
+                );
+                reset = resp.clicked();
+            }
         });
         if let Some(name) = name.filter(|_| reset || angles != shown) {
             let rot = if reset {

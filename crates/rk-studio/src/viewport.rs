@@ -1018,14 +1018,20 @@ fn map_mode(mode: usize) -> bool {
     MODES.get(mode).is_some_and(|m| m.name == "Map")
 }
 
-/// The palette's width: the Map mode's rows need more room than tools.
+/// The palette's width: the Map mode's rows need more room than tools,
+/// and so do the Pose mode's switches in two columns.
 fn palette_width(mode: usize, tools: f32) -> f32 {
     if map_mode(mode) {
         crate::map_menu::WIDTH
+    } else if MODES.get(mode).is_some_and(|m| m.name == "Pose") {
+        POSE_PALETTE_WIDTH
     } else {
         tools
     }
 }
+
+/// The Pose palette's width.
+const POSE_PALETTE_WIDTH: f32 = 260.0;
 
 /// Height the palette needs for a mode's tools, with the FK parts under
 /// Forward kinematics while the selected character's FK is on.
@@ -1036,11 +1042,14 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     }
     let sections = MODES[mode].sections;
     let mut rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
-    if MODES[mode].name == "Pose" && fk_layer(st).is_some_and(|l| l.fk_on) {
-        rows += rk_chara::bone_info::Part::ALL.len();
+    if MODES[mode].name == "Pose" && st.fk_open && fk_layer(st).is_some() {
+        rows += FK_PART_ROWS;
     }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
+
+/// The rows the FK parts take in the Pose palette, two to a row.
+const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len().div_ceil(2);
 
 /// The pose layer of the selected character, when a character is selected.
 fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
@@ -1151,35 +1160,19 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     continue;
                 }
                 if *name == "Forward kinematics" {
-                    // CharaStudio's FK switch for the selected character,
-                    // with its parts under it while it is on.
-                    let layer = fk_layer(st);
-                    let on = layer.as_ref().is_some_and(|l| l.fk_on);
-                    let resp = widgets::tool_row(ui, k, row, id, g, name, on);
-                    if resp.clicked() && layer.is_some() {
-                        edit_fk_layer(st, |l| l.fk_on = !on);
-                    }
+                    fk_category(ui, k, st, row, id, g, name);
                     y += palette_row(k);
                     index += 1;
-                    if let Some(layer) = layer.filter(|l| l.fk_on) {
-                        for part in rk_chara::bone_info::Part::ALL {
-                            let row = Rect::from_min_size(
-                                Pos2::new(rect.left() + 22.0, y + 1.0),
-                                Vec2::new(rect.width() - 28.0, palette_row(k) - 2.0),
+                    if st.fk_open {
+                        if let Some(layer) = fk_layer(st) {
+                            fk_parts(
+                                ui,
+                                k,
+                                st,
+                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
+                                &layer,
                             );
-                            let id = ui.id().with(("fk part", part.label()));
-                            let on = layer.fk_parts.contains(&part);
-                            let g = if on { icon::DOT } else { icon::DOT_OUTLINE };
-                            if widgets::tool_row(ui, k, row, id, g, part.label(), on).clicked() {
-                                edit_fk_layer(st, |l| {
-                                    if on {
-                                        l.fk_parts.retain(|p| *p != part);
-                                    } else {
-                                        l.fk_parts.push(part);
-                                    }
-                                });
-                            }
-                            y += palette_row(k);
+                            y += FK_PART_ROWS as f32 * palette_row(k);
                         }
                     }
                     continue;
@@ -1219,6 +1212,77 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             }
             y += palette_row(k);
             index += 1;
+        }
+    }
+}
+
+/// A category of the Pose palette that is switched on and opened: an
+/// arrow that opens or closes it, its name, and a box that switches it for
+/// the selected character. Switching it on opens it, off closes it.
+fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
+    let layer = fk_layer(st);
+    let on = layer.as_ref().is_some_and(|l| l.fk_on);
+    let resp = ui.interact(row, id, Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(row, 2.0, k.t.control);
+    }
+    let y = row.center().y;
+    let arrow = if st.fk_open {
+        icon::CARET_DOWN
+    } else {
+        icon::CARET_RIGHT
+    };
+    glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
+    let tint = if on { k.t.text_bright } else { k.t.text };
+    glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
+    widgets::label(p, k, Pos2::new(row.left() + 38.0, y), name, tint);
+    let side = 14.0;
+    let box_rect = Rect::from_min_size(
+        Pos2::new(row.right() - side - 8.0, row.top()),
+        Vec2::new(side + 8.0, row.height()),
+    );
+    let mut ticked = on;
+    if layer.is_some() {
+        widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
+    }
+    if ticked != on {
+        edit_fk_layer(st, |l| l.fk_on = ticked);
+        st.fk_open = ticked;
+    } else if resp.clicked() {
+        st.fk_open = !st.fk_open;
+    }
+}
+
+/// The FK parts as boxes to tick, two to a row, under the category.
+fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
+    let half = (area.width() - 44.0) / 2.0;
+    for (i, part) in rk_chara::bone_info::Part::ALL.into_iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(
+                area.left() + 32.0 + (i % 2) as f32 * half,
+                area.top() + (i / 2) as f32 * palette_row(k),
+            ),
+            Vec2::new(half, palette_row(k)),
+        );
+        let mut on = layer.fk_parts.contains(&part);
+        let was = on;
+        widgets::checkbox(
+            ui,
+            k,
+            cell,
+            ui.id().with(("fk part", part.label())),
+            &mut on,
+            part.label(),
+        );
+        if on != was {
+            edit_fk_layer(st, |l| {
+                if on {
+                    l.fk_parts.push(part);
+                } else {
+                    l.fk_parts.retain(|p| *p != part);
+                }
+            });
         }
     }
 }

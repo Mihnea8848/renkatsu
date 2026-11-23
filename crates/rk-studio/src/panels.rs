@@ -427,7 +427,7 @@ fn rows(st: &State) -> Vec<Row> {
             glyph: icon::BONE,
             label: "Bone",
             color: Kind::Character.color(),
-            name: name.to_owned(),
+            name: crate::bones::pose_label(name),
             visible: true,
             shown: scene.shown(id),
             parent: false,
@@ -510,6 +510,11 @@ fn skeleton_row(ui: &mut Ui, k: &Look, st: &State, row: &Row, skeleton: &Skeleto
     glyph(p, k, Pos2::new(x + 24.0, y), row.glyph, 14.0, faint);
     widgets::label(p, k, Pos2::new(x + 36.0, y), &row.name, text);
     if let Skeleton::Bone(id, name) = skeleton {
+        let resp = if row.name != *name {
+            resp.on_hover_text(name)
+        } else {
+            resp
+        };
         if resp.clicked() {
             acts.push(Act::Bone(*id, name.clone()));
         }

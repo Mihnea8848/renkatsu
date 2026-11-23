@@ -310,6 +310,9 @@ pub struct State {
     pub sun_turning: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
+    /// Whether Forward kinematics is open in the Pose palette, showing its
+    /// parts.
+    pub fk_open: bool,
     /// Characters whose skeleton is unfolded in the Outliner.
     pub skeleton_open: HashSet<ObjectId>,
     /// The project that is open; `Project::none()` while the project
@@ -820,6 +823,7 @@ impl State {
             lens_shown: None,
             sun_turning: false,
             pose_bone: None,
+            fk_open: false,
             skeleton_open: HashSet::new(),
             library: Library::new(&project),
             project,

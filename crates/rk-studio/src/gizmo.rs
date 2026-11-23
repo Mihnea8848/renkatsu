@@ -1345,8 +1345,8 @@ fn draw_bone_lines(p: &egui::Painter, st: &State) {
 /// seen), clearer under the pointer and for the bone chosen. In the layer
 /// near balls hide far ones, and each is shaded towards its rim.
 fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
-    const RINGS: usize = 8;
-    const SIDES: usize = 14;
+    const RINGS: usize = 10;
+    const SIDES: usize = 18;
     let hot = pointer
         .and_then(|pos| ball_at(st, pos))
         .map(|b| (b.character, b.bone.clone()));
@@ -1356,12 +1356,17 @@ fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
         let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
         let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
         let (grey, alpha) = if lit || on { (1.0, 0.85) } else { (0.75, 0.3) };
+        // A light from the camera's side and a little above, so that each
+        // ball reads as a sphere: lit in front, darker at its rim.
+        let light = ((view.eye - b.world).normalize_or(Vec3::Z) + Vec3::Y * 0.7).normalize();
         let point = |ring: usize, side: usize| {
             let (sa, ca) = (ring as f32 / RINGS as f32 * std::f32::consts::PI).sin_cos();
             let (sb, cb) = (side as f32 / SIDES as f32 * TAU).sin_cos();
             let n = Vec3::new(sa * cb, ca, sa * sb);
             let p = b.world + n * b.size;
-            [p.x, p.y, p.z, n.x, n.y, n.z, grey, grey, grey, alpha]
+            let lit = n.dot(light).max(0.0);
+            let shade = grey * (0.55 + 0.45 * lit) + 0.12 * lit.powi(16);
+            [p.x, p.y, p.z, n.x, n.y, n.z, shade, shade, shade, alpha]
         };
         // Only the half that faces the camera: seen through, the far half
         // would show as stripes.

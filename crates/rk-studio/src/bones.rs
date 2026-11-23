@@ -29,6 +29,75 @@ pub fn label(bone: &str) -> &str {
         .map_or(bone, |(_, label)| label)
 }
 
+/// The name a joint is shown under while posing: the side, then the part,
+/// for the body's joints and fingers ("Left upper arm", "Right index
+/// finger 2"); the skeleton's own name for any other bone.
+pub fn pose_label(bone: &str) -> String {
+    let Some(rest) = bone
+        .get(5..)
+        .filter(|_| bone.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("cf_j_")))
+    else {
+        return bone.to_owned();
+    };
+    let (part, side) = match rest.rsplit_once('_') {
+        Some((part, "L")) => (part, "Left "),
+        Some((part, "R")) => (part, "Right "),
+        _ => (rest, ""),
+    };
+    let named = match part {
+        "root" => "Root",
+        "hips" => "Hips",
+        "waist01" => "Waist",
+        "waist02" => "Lower waist",
+        "spine01" => "Spine",
+        "spine02" => "Upper spine",
+        "spine03" => "Chest",
+        "neck" => "Neck",
+        "head" => "Head",
+        "shoulder" => "Shoulder",
+        "arm00" => "Upper arm",
+        "forearm01" => "Forearm",
+        "hand" => "Hand",
+        "thigh00" => "Thigh",
+        "leg01" => "Knee",
+        "leg03" => "Ankle",
+        "foot" => "Foot",
+        "toes" => "Toes",
+        _ => {
+            // Fingers: a name and a joint number, 01 at the hand.
+            let fingers = [
+                ("thumb", "thumb"),
+                ("index", "index finger"),
+                ("middle", "middle finger"),
+                ("ring", "ring finger"),
+                ("little", "little finger"),
+            ];
+            for (key, finger) in fingers {
+                if let Some(n) = part.strip_prefix(key).and_then(|n| n.parse::<u32>().ok()) {
+                    let name = format!("{finger} {n}");
+                    return if side.is_empty() {
+                        capitalised(&name)
+                    } else {
+                        format!("{side}{name}")
+                    };
+                }
+            }
+            return bone.to_owned();
+        }
+    };
+    if side.is_empty() {
+        named.to_owned()
+    } else {
+        format!("{side}{}", named.to_lowercase())
+    }
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
 /// The main bones as menu items, with the chosen one marked. Returns the
 /// bone that was clicked.
 pub fn main_items(ui: &mut Ui, k: &Look, chosen: Option<&str>) -> Option<&'static str> {
@@ -89,5 +158,19 @@ mod tests {
     fn main_bones_have_readable_names() {
         assert_eq!(label("cf_j_hand_L"), "Left hand");
         assert_eq!(label("cf_j_thumb01_L"), "cf_j_thumb01_L");
+    }
+}
+
+#[cfg(test)]
+mod pose_label_tests {
+    use super::pose_label;
+
+    #[test]
+    fn joints_read_as_side_then_part() {
+        assert_eq!(pose_label("cf_j_arm00_L"), "Left upper arm");
+        assert_eq!(pose_label("cf_j_spine03"), "Chest");
+        assert_eq!(pose_label("cf_j_index02_R"), "Right index finger 2");
+        assert_eq!(pose_label("cf_j_backsk_C_01"), "cf_j_backsk_C_01");
+        assert_eq!(pose_label("cm_J_dan101_00"), "cm_J_dan101_00");
     }
 }

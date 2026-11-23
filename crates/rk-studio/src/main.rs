@@ -668,6 +668,7 @@ impl Studio {
         if let Some(bone) = &cli.pose_bone {
             state.pose_bone = Some(bone.clone());
             state.property_tab = 2;
+            state.fk_open = true;
         }
         state.doc.selected = match cli.select.as_deref() {
             None => first,
