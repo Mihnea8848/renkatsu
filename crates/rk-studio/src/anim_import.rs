@@ -749,6 +749,7 @@ fn preview_content(st: &State) -> Option<Content> {
             clothes: *clothes,
             liquid: *liquid,
             liquid_clothes: *liquid_clothes,
+            game_skirts: Vec::new(),
             animation: None,
             pose_layer: None,
             profile: None,

@@ -28,6 +28,7 @@ pub struct Args<'a> {
     pub censor: bool,
     pub no_physics: bool,
     pub colliders: Option<&'a str>,
+    pub game_skirts: bool,
     pub list: bool,
     /// Draw the light's real-time shadows.
     pub shadows: bool,
@@ -132,6 +133,7 @@ pub fn render(a: Args) -> Result<()> {
         censor: a.censor,
         physics: !a.no_physics,
         collider_switches: a.colliders.map(collider_switches).transpose()?,
+        advanced_skirts: !a.game_skirts,
         ..Default::default()
     };
     let mut chara = rk_chara::build(&game, &card, &opts)?;
@@ -175,11 +177,9 @@ pub fn render(a: Args) -> Result<()> {
         let phase = motion.phase(a.time, false);
         // The frame as the game shows it: the animation, then the physics.
         if !a.no_physics {
-            for _ in 0..opts.settle_frames {
-                chara.physics.begin_frame(&mut chara.scene);
-                chara.animate(&bound, phase, &states);
-                chara.physics.end_frame(&mut chara.scene, opts.frame_time);
-            }
+            chara.settle_pose(opts.settle_frames, opts.frame_time, |c| {
+                c.animate(&bound, phase, &states)
+            });
         } else {
             chara.animate(&bound, phase, &states);
         }

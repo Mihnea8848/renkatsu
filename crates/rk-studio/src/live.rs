@@ -452,6 +452,7 @@ impl Actor {
             clothes,
             liquid,
             liquid_clothes,
+            game_skirts,
             animation: pose,
             pose_layer,
             ..
@@ -467,6 +468,13 @@ impl Actor {
         if states != self.clothes {
             self.chara.set_clothes(&states);
             self.clothes = states;
+            again = true;
+        }
+
+        // Advanced Skirt Physics goes by the outfit; a switch settles the
+        // skirts again.
+        let advanced = !game_skirts.contains(&self.recipe.outfit);
+        if self.chara.physics.set_advanced(advanced) {
             again = true;
         }
 
@@ -559,8 +567,12 @@ impl Actor {
             return self.place(world, false);
         }
         // Nothing plays: the character is posed once and holds still.
+        // Advanced Skirt Physics moves into the new pose from this one.
+        let mut from: Vec<Trs> = self.chara.scene.nodes.iter().map(|n| n.local).collect();
         self.back_to_rest();
         self.place(world, false);
+        let top = self.chara.top;
+        from[top] = self.chara.scene.nodes[top].local;
         self.chara.refresh_heels(&states);
         let motion = self.playing.is_some() && phase.is_some();
         if motion || !self.edits.is_empty() {
@@ -570,9 +582,11 @@ impl Actor {
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
-                for _ in 0..rk_chara::physics::SETTLE_FRAMES {
+                for frame in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
                     self.pose_frame(phase, &states);
+                    let amount = (frame + 1) as f32 / (rk_chara::physics::EASE_FRAMES + 1) as f32;
+                    self.chara.physics.ease(&mut self.chara.scene, &from, amount);
                     self.chara
                         .physics
                         .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);

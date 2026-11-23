@@ -237,6 +237,10 @@ pub enum Content {
         /// game.
         #[serde(default = "yes")]
         liquid_clothes: bool,
+        /// The outfits whose skirts move exactly as in CharaStudio; the
+        /// others use Advanced Skirt Physics.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        game_skirts: Vec<usize>,
         /// The animation the character plays or the pose it holds; none
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
@@ -419,6 +423,7 @@ impl Content {
             clothes: [0; 9],
             liquid: [0; rk_chara::siru::PARTS],
             liquid_clothes: true,
+            game_skirts: Vec::new(),
             animation: None,
             pose_layer: None,
             profile: None,
@@ -3261,6 +3266,25 @@ mod tests {
         let text = toml::to_string(doc.scene()).unwrap();
         assert!(text.contains("nickname = \"Annie\""), "{text}");
         assert!(text.contains("name = \"Jazz\""), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, edited.content);
+    }
+
+    #[test]
+    fn game_skirts_are_saved_per_outfit() {
+        let (mut doc, [_, anna, ..]) = cast();
+        // Advanced Skirt Physics is on unless an outfit is listed, and an
+        // empty list is not written.
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(!text.contains("game_skirts"), "{text}");
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        let Content::Character { game_skirts, .. } = &mut edited.content else {
+            panic!("Anna is a character");
+        };
+        *game_skirts = vec![2];
+        assert!(doc.edit(edited.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("game_skirts = [2]"), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(back.get(anna).unwrap().content, edited.content);
     }

@@ -89,6 +89,9 @@ pub struct BuildOptions {
     /// The Colliders plugin's three switches as Studio's character panel
     /// sets them; `None` takes the ones the card was saved with.
     pub collider_switches: Option<crate::colliders::Settings>,
+    /// Advanced Skirt Physics: Renkatsu's own pass that keeps legs, arms
+    /// and the floor out of skirts. Off moves them exactly as the game.
+    pub advanced_skirts: bool,
     /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
     /// and turns the lower legs, feet and toes.
     pub stiletto: bool,
@@ -121,6 +124,7 @@ impl Default for BuildOptions {
             uncensor_selector: true,
             colliders: true,
             collider_switches: None,
+            advanced_skirts: true,
             stiletto: true,
         }
     }
@@ -2814,6 +2818,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut physics = b.read_physics(top, &bones, &bone_edits, &dbde_edits, collider_plugin);
     if opts.physics {
         physics.start(&mut b.scene);
+        // Advanced Skirt Physics is fitted to the body as built.
+        physics.fit_cloth(&b.scene, &bones, opts.advanced_skirts);
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
     }
@@ -2902,6 +2908,21 @@ impl Character {
         }
         if let Some(heels) = &self.heels {
             heels.apply(&mut self.scene, &self.bones);
+        }
+    }
+
+    /// Lets the physics settle on a new pose for `frames` frames of `dt`
+    /// seconds, as the game's frames do: `pose` writes the pose each frame.
+    /// With Advanced Skirt Physics on, the pose is reached over the first
+    /// `EASE_FRAMES` frames from where the bones were before.
+    pub fn settle_pose(&mut self, frames: u32, dt: f32, mut pose: impl FnMut(&mut Character)) {
+        let from: Vec<crate::scene::Trs> = self.scene.nodes.iter().map(|n| n.local).collect();
+        for frame in 0..frames {
+            self.physics.begin_frame(&mut self.scene);
+            pose(self);
+            let amount = (frame + 1) as f32 / (crate::physics::EASE_FRAMES + 1) as f32;
+            self.physics.ease(&mut self.scene, &from, amount);
+            self.physics.end_frame(&mut self.scene, dt);
         }
     }
 

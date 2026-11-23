@@ -23,6 +23,9 @@ const AXES: [&str; 3] = ["X", "Y", "Z"];
 /// the liquid on the skin and the clothes now, and the rest of the game's
 /// H-time effects later.
 const H_PAGE: &str = "H Effects";
+/// Renkatsu's own improvements on the game, such as Advanced Skirt
+/// Physics.
+const RENKATSU_PAGE: &str = "Renkatsu";
 
 /// How far a number moves per point of drag: positions and scales, then
 /// angles in degrees.
@@ -75,8 +78,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // then who it is. A card whose profile could not be read still has
     // the first two.
     let pages: &[&str] = match &shown {
-        Some(_) => &["Scene", "Animation", "Profile", H_PAGE],
-        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Profile", H_PAGE, RENKATSU_PAGE],
+        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE, RENKATSU_PAGE],
         None => &[],
     };
     // The page that holds what the body shows in an H scene, which is of
@@ -177,6 +180,30 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
+        // Renkatsu's own improvements on the game.
+        if page_name == RENKATSU_PAGE {
+            let Content::Character {
+                outfit, game_skirts, ..
+            } = &mut object.content
+            else {
+                return;
+            };
+            if section(ui, k, st, 18, "Physics") {
+                // Per outfit: the ones listed move as in CharaStudio.
+                let mut advanced = !game_skirts.contains(outfit);
+                row(ui, k, "Skirts", None, |ui, rect| {
+                    widgets::checkbox(ui, k, rect, ui.id().with("advanced skirts"), &mut advanced, "Advanced");
+                });
+                if advanced {
+                    game_skirts.retain(|o| o != outfit);
+                } else if !game_skirts.contains(outfit) {
+                    game_skirts.push(*outfit);
+                    game_skirts.sort_unstable();
+                }
+                section_end(ui, k);
+            }
+            return;
+        }
         // Who the character is, what she likes and what she is like in
         // bed, as sections of one page, and a way back to the card's.
         if let (Some(p), "Profile") = (shown.as_mut(), page_name) {

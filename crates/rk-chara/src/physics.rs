@@ -22,6 +22,9 @@ use rk_unityfs::{PPtr, UObject};
 pub const SETTLE_FRAMES: u32 = 90;
 /// Frame time assumed for settling: display refresh at 60 Hz.
 pub const FRAME_TIME: f32 = 1.0 / 60.0;
+/// Frames of a settle over which Advanced Skirt Physics moves into a new
+/// pose (`Physics::ease`).
+pub const EASE_FRAMES: u32 = 30;
 
 // ---------------------------------------------------------------------------
 // Unity transform semantics on scene nodes.
@@ -163,6 +166,8 @@ impl Curve {
         }
     }
 }
+
+pub mod cloth;
 
 // ---------------------------------------------------------------------------
 // DynamicBoneCollider.
@@ -1806,6 +1811,11 @@ pub struct Physics {
     /// Whether each of `bones` sat on an object that was active when last
     /// looked at; a component of a hidden object does not run.
     active: Vec<bool>,
+    /// Advanced Skirt Physics (`cloth`), once fitted to the character.
+    cloth: Option<cloth::Cloth>,
+    /// Whether it runs; off leaves the skirts exactly as the game moves
+    /// them.
+    advanced: bool,
 }
 
 impl Physics {
@@ -1926,16 +1936,78 @@ impl Physics {
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
         self.follow_objects(scene);
         let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i) && self.shown(i)).collect();
-        for (b, moves) in self.bones.iter_mut().zip(moving) {
+        let cloth = self.cloth.as_mut().filter(|_| self.advanced);
+        if let Some(cloth) = cloth {
+            cloth.begin(scene, &self.bones);
+        }
+        let mut live = vec![false; self.bones.len()];
+        for ((b, moves), live) in self.bones.iter_mut().zip(moving).zip(&mut live) {
             if !moves {
                 continue;
             }
             match b {
-                Bone::Dynamic(d) if d.running() => d.late_update(scene, &self.colliders, dt),
+                Bone::Dynamic(d) if d.running() => {
+                    d.late_update(scene, &self.colliders, dt);
+                    *live = true;
+                }
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),
                 Bone::Ver02(d) if d.running() => d.late_update(scene, &self.colliders, dt),
                 _ => {}
             }
+        }
+        if let Some(cloth) = self.cloth.as_ref().filter(|_| self.advanced) {
+            cloth.solve(scene, &mut self.bones, &live);
+        }
+    }
+
+    /// Fits Advanced Skirt Physics to the character as it is now, which
+    /// should be the pose it was built in, and switches it `on` or off.
+    pub fn fit_cloth(&mut self, scene: &Scene, names: &std::collections::HashMap<String, usize>, on: bool) {
+        self.cloth = Some(cloth::Cloth::build(scene, names, &self.bones));
+        self.advanced = on;
+    }
+
+    /// Whether Advanced Skirt Physics runs.
+    pub fn advanced(&self) -> bool {
+        self.advanced && self.cloth.is_some()
+    }
+
+    /// Switches Advanced Skirt Physics on or off; true when that changed
+    /// anything, so that the skirts are to settle again.
+    pub fn set_advanced(&mut self, on: bool) -> bool {
+        let was = self.advanced();
+        self.advanced = on;
+        self.advanced() != was
+    }
+
+    /// With Advanced Skirt Physics on, a new pose is reached over
+    /// `EASE_FRAMES` frames of the settle instead of in one jump, so that
+    /// a leg moving into a skirt pushes it instead of passing through it.
+    /// Call after the pose was written: every bone the physics does not
+    /// drive goes from `from` towards it by `amount`, from 0 to 1.
+    pub fn ease(&self, scene: &mut Scene, from: &[crate::scene::Trs], amount: f32) {
+        if !self.advanced() || amount >= 1.0 {
+            return;
+        }
+        let mut driven = vec![false; scene.nodes.len()];
+        for b in &self.bones {
+            let ps = match b {
+                Bone::Dynamic(d) => &d.particles,
+                Bone::Ver01(d) => &d.particles,
+                Bone::Ver02(d) => &d.particles,
+            };
+            for n in ps.iter().filter_map(|p| p.node) {
+                driven[n] = true;
+            }
+        }
+        for ((node, f), driven) in scene.nodes.iter_mut().zip(from).zip(driven) {
+            if driven {
+                continue;
+            }
+            let l = &mut node.local;
+            l.pos = f.pos.lerp(l.pos, amount);
+            l.rot = f.rot.slerp(l.rot, amount);
+            l.scale = f.scale.lerp(l.scale, amount);
         }
     }
 

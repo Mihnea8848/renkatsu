@@ -96,6 +96,10 @@ enum Cmd {
         /// Without it the card's own setting counts.
         #[arg(long)]
         colliders: Option<String>,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics.
+        #[arg(long)]
+        game_skirts: bool,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -247,6 +251,10 @@ enum Cmd {
         /// Smooth the edges of cut-out surfaces with alpha to coverage.
         #[arg(long)]
         alpha_to_coverage: bool,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics.
+        #[arg(long)]
+        game_skirts: bool,
     },
     /// The maps CharaStudio lists and what their scenes hold.
     Map {
@@ -551,7 +559,8 @@ fn main() -> Result<()> {
             only,
             studio,
             alpha_to_coverage,
-        } => capture_check::check(&dir, &out, &only, studio, alpha_to_coverage),
+            game_skirts,
+        } => capture_check::check(&dir, &out, &only, studio, alpha_to_coverage, game_skirts),
         Cmd::Compare {
             cards,
             count,
@@ -574,6 +583,7 @@ fn main() -> Result<()> {
             censor,
             no_physics,
             colliders,
+            game_skirts,
             list,
             no_shadows,
             clothes,
@@ -602,6 +612,7 @@ fn main() -> Result<()> {
             censor,
             no_physics,
             colliders: colliders.as_deref(),
+            game_skirts,
             list,
             shadows: !no_shadows,
             clothes: clothes.as_deref(),

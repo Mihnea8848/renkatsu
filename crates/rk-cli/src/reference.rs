@@ -479,11 +479,9 @@ fn pose_as_captured(
     let states = case.clothes;
     let held = motion.phase(pose.time, false);
     if opts.physics {
-        for _ in 0..opts.settle_frames {
-            chara.physics.begin_frame(&mut chara.scene);
-            chara.animate(&bound, held, &states);
-            chara.physics.end_frame(&mut chara.scene, opts.frame_time);
-        }
+        chara.settle_pose(opts.settle_frames, opts.frame_time, |c| {
+            c.animate(&bound, held, &states)
+        });
     } else {
         chara.animate(&bound, held, &states);
     }
