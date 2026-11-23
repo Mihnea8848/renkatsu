@@ -1183,6 +1183,9 @@ struct Ball {
     radius: f32,
     /// Where the bone above it that shows is, for the line between them.
     parent: Option<Pos2>,
+    /// Where it is in the world, and its radius there.
+    world: Vec3,
+    size: f32,
 }
 
 /// A ball's radius in the world, and the least and most it shows at.
@@ -1207,6 +1210,8 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
                 continue;
             }
             let radius = (edge - at).length().clamp(BALL_SMALLEST, BALL_LARGEST);
+            // The world's size of a point of the screen at the ball.
+            let per_point = 2.0 * depth * (view.fov * 0.5).tan() / view.rect.height().max(1.0);
             out.push((
                 depth,
                 Ball {
@@ -1215,6 +1220,8 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
                     at,
                     radius,
                     parent: parent.and_then(|p| view.screen(p)),
+                    world,
+                    size: radius * per_point,
                 },
             ));
         }
@@ -1232,29 +1239,56 @@ fn ball_at(st: &State, pos: Pos2) -> Option<&Ball> {
         .find(|b| b.at.distance(pos) <= b.radius + 2.0)
 }
 
-/// Draws the balls as CharaStudio's guide does, see-through white spheres
-/// (three quarters white, a quarter seen), clearer under the pointer and
-/// for the bone chosen, with a thin line from each to the bone above it.
-fn draw_balls(p: &egui::Painter, st: &State, pointer: Option<Pos2>) {
-    let hot = pointer
-        .and_then(|pos| ball_at(st, pos))
-        .map(|b| (b.character, b.bone.clone()));
-    let chosen = st.pose_bone.as_deref();
+/// Draws the lines between the balls, from each to the bone above it.
+fn draw_bone_lines(p: &egui::Painter, st: &State) {
     let line = Stroke::new(1.0, Color32::from_white_alpha(60));
     for b in &st.gizmo.balls {
         if let Some(parent) = b.parent {
             p.line_segment([parent, b.at], line);
         }
     }
+}
+
+/// The balls as solid spheres for the gizmo's layer, as CharaStudio's
+/// guide draws them: see-through white (three quarters white, a quarter
+/// seen), clearer under the pointer and for the bone chosen. In the layer
+/// near balls hide far ones, and each is shaded towards its rim.
+fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
+    const RINGS: usize = 8;
+    const SIDES: usize = 14;
+    let hot = pointer
+        .and_then(|pos| ball_at(st, pos))
+        .map(|b| (b.character, b.bone.clone()));
+    let chosen = st.pose_bone.as_deref();
+    let mut mesh = Mesh::default();
     for b in &st.gizmo.balls {
         let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
         let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
-        let alpha = if lit || on { 190 } else { 64 };
-        p.circle_filled(b.at, b.radius, Color32::from_rgba_unmultiplied(191, 191, 191, alpha));
-        // A brighter spot up and to the left, as light on a sphere.
-        let spot = b.at + Vec2::new(-0.3, -0.3) * b.radius;
-        p.circle_filled(spot, b.radius * 0.4, Color32::from_white_alpha(alpha / 2));
+        let (grey, alpha) = if lit || on { (1.0, 0.85) } else { (0.75, 0.3) };
+        let point = |ring: usize, side: usize| {
+            let (sa, ca) = (ring as f32 / RINGS as f32 * std::f32::consts::PI).sin_cos();
+            let (sb, cb) = (side as f32 / SIDES as f32 * TAU).sin_cos();
+            let n = Vec3::new(sa * cb, ca, sa * sb);
+            let p = b.world + n * b.size;
+            [p.x, p.y, p.z, n.x, n.y, n.z, grey, grey, grey, alpha]
+        };
+        // Only the half that faces the camera: seen through, the far half
+        // would show as stripes.
+        let facing = |v: &Vertex| {
+            let (p, n) = (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]));
+            n.dot(view.eye - p) > 0.0
+        };
+        for ring in 0..RINGS {
+            for side in 0..SIDES {
+                let (a, c) = (point(ring, side), point(ring, side + 1));
+                let (d, e) = (point(ring + 1, side), point(ring + 1, side + 1));
+                if [&a, &c, &d, &e].into_iter().any(facing) {
+                    mesh.solid.extend([a, d, c, c, d, e]);
+                }
+            }
+        }
     }
+    mesh
 }
 
 /// An icon as the viewport shows it this frame: for its object and the
@@ -1501,7 +1535,8 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     };
     let shown = shown_icons(st, &view, pointer);
     draw_icons(&p, k, st, &view, &shown);
-    draw_balls(&p, st, pointer);
+    draw_bone_lines(&p, st);
+    let mut balls_left = ball_mesh(st, &view, pointer);
     st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {
@@ -1512,7 +1547,8 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     if let Some(at) = shown {
         let drag = st.gizmo.drag.as_ref();
         let hot = drag.map(|d| d.handle).or(st.gizmo.hover);
-        let mesh = build(drag.map_or(tool, |d| d.tool), &at, &view, hot, drag);
+        let mut mesh = build(drag.map_or(tool, |d| d.tool), &at, &view, hot, drag);
+        mesh.solid.append(&mut balls_left.solid);
         let readout = drag.and_then(|d| {
             // Beside the spoke of a dial, or below the pivot.
             let place = match (d.tool, d.amount, d.handle) {
@@ -1541,6 +1577,14 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
             let chip = Rect::from_center_size(place, Vec2::new(size + 14.0, k.d.text + 11.0));
             p.rect_filled(chip, k.radius(), Theme::glass(k.t.well, 230));
             p.text(chip.center(), Align2::CENTER_CENTER, text, font, k.t.text_bright);
+        }
+    }
+
+    // The balls by themselves when no gizmo shows.
+    if !balls_left.solid.is_empty() {
+        if let Some(live) = st.live.as_mut() {
+            let id = live.paint_gizmo(pixels, view.view_proj, &balls_left);
+            p.image(id, full, whole, Color32::WHITE);
         }
     }
 
