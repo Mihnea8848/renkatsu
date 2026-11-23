@@ -1112,7 +1112,7 @@ fn list_pane(ui: &mut Ui, k: &Look, w: &mut Importer, area: Rect, reading: bool,
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     let caption = if all_chosen { "Choose none" } else { "Choose all shown" };
-    if widgets::flat_button(&mut right, k, Some(icon::CHECKS), caption, false, false).clicked() {
+    if widgets::flat_button(&mut right, k, None, caption, false, false).clicked() {
         for i in &shown {
             if all_chosen {
                 w.chosen.remove(i);

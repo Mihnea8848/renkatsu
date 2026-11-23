@@ -1435,7 +1435,7 @@ pub fn options(ui: &mut Ui, k: &Look, st: &mut State) {
         }
     });
     bar_divider(ui, k);
-    if flat_button(ui, k, Some(icon::MAGNET), "Snap", false, st.snap)
+    if flat_button(ui, k, None, "Snap", false, st.snap)
         .on_hover_text(st.keys.tip("Snap", Action::ToggleSnap))
         .clicked()
     {
@@ -1460,9 +1460,7 @@ pub fn options(ui: &mut Ui, k: &Look, st: &mut State) {
     let tip = st.keys.tip("Snap to floor", Action::DropToSurface);
     let any = st.doc.selected.is_some();
     let drop = ui
-        .add_enabled_ui(any, |ui| {
-            flat_button(ui, k, Some(icon::ARROW_LINE_DOWN), "Snap to floor", false, false)
-        })
+        .add_enabled_ui(any, |ui| flat_button(ui, k, None, "Snap to floor", false, false))
         .inner;
     if drop.on_hover_text(&tip).on_disabled_hover_text(&tip).clicked() {
         st.run(crate::state::Command::SnapToFloor);

@@ -7,7 +7,6 @@
 use crate::state::{Look, State};
 use crate::widgets::{self, flat_button};
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
-use egui_phosphor::regular as icon;
 
 const WIDTH: f32 = 360.0;
 const REPOSITORY: &str = "https://github.com/Mihnea8848/renkatsu";
@@ -57,10 +56,10 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if flat_button(ui, k, Some(icon::GITHUB_LOGO), "GitHub", false, false).clicked() {
+            if flat_button(ui, k, None, "GitHub", false, false).clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(REPOSITORY));
             }
-            if flat_button(ui, k, Some(icon::SCROLL), "Licence", false, false).clicked() {
+            if flat_button(ui, k, None, "Licence", false, false).clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(LICENCE));
             }
         });

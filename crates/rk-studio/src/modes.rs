@@ -194,11 +194,6 @@ pub const MODES: [Mode; 7] = [
     },
 ];
 
-/// Modes that do not exist yet, shown greyed at the end of the rail:
-/// playing the scene as a game, in first or third person, and playing
-/// Ren'Py scripts.
-pub const LATER: [Entry; 2] = [(icon::GAME_CONTROLLER, "Game"), (icon::BOOK_OPEN_TEXT, "Story")];
-
 /// The transform tools of the floating strip: icon, name, and a key held
 /// for it that the keymap does not list.
 pub const TOOLS: [(&str, &str, &str); 6] = [
