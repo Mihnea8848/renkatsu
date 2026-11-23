@@ -560,7 +560,10 @@ fn skin_base(d: &DrawMesh) -> Vec<[f32; 4]> {
         .flat_map(|i| {
             let p = d.base_positions[i];
             let n = d.base_normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
-            let t = mesh.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+            let t = match &d.base_tangents {
+                Some(tangents) => tangents[i],
+                None => mesh.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
+            };
             [[p[0], p[1], p[2], 1.0], [n[0], n[1], n[2], 0.0], t]
         })
         .collect()

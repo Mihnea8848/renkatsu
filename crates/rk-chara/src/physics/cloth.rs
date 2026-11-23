@@ -43,14 +43,14 @@ const GATHER_MARGIN: f32 = 0.3;
 
 /// A triangle of `Obstacles` in the world, with the box around it.
 #[derive(Debug, Clone, Copy)]
-struct Triangle {
-    corners: [Vec3; 3],
+pub(super) struct Triangle {
+    pub(super) corners: [Vec3; 3],
     lo: Vec3,
     hi: Vec3,
 }
 
 impl Triangle {
-    fn new(corners: [Vec3; 3]) -> Self {
+    pub(super) fn new(corners: [Vec3; 3]) -> Self {
         let [a, b, c] = corners;
         Self {
             corners,
@@ -63,11 +63,34 @@ impl Triangle {
 /// The triangles near one skirt, kept while the skirt stays in the box
 /// they were gathered for and the obstacles are the same.
 #[derive(Debug, Clone, Default)]
-struct Nearby {
+pub(super) struct Nearby {
     from: usize,
     lo: Vec3,
     hi: Vec3,
-    triangles: Vec<Triangle>,
+    pub(super) triangles: Vec<Triangle>,
+}
+
+impl Nearby {
+    /// Gathers the triangles of `obstacles` again when the box from `lo`
+    /// to `hi` left the one they were gathered for, or they changed.
+    pub(super) fn refresh(&mut self, obstacles: Option<&Arc<Obstacles>>, lo: Vec3, hi: Vec3) {
+        let Some(obstacles) = obstacles else {
+            *self = Nearby::default();
+            return;
+        };
+        let from = Arc::as_ptr(obstacles) as usize;
+        let inside = self.lo.cmple(lo).all() && self.hi.cmpge(hi).all();
+        if self.from != from || !inside {
+            let grow = Vec3::splat(GATHER_MARGIN);
+            *self = Nearby {
+                from,
+                lo: lo - grow,
+                hi: hi + grow,
+                triangles: Vec::new(),
+            };
+            obstacles.gather(self.lo, self.hi, &mut self.triangles);
+        }
+    }
 }
 
 /// The triangles around a character that its skirts rest on, other than
@@ -91,7 +114,7 @@ pub struct Obstacle {
 impl Obstacles {
     /// The triangles, in the world, of every mesh that may reach into the
     /// box from `lo` to `hi`.
-    fn gather(&self, lo: Vec3, hi: Vec3, out: &mut Vec<Triangle>) {
+    pub(super) fn gather(&self, lo: Vec3, hi: Vec3, out: &mut Vec<Triangle>) {
         for piece in &self.pieces {
             if piece.world.determinant().abs() < 1e-12 {
                 continue;
@@ -156,7 +179,7 @@ fn segment_meets(p: Vec3, q: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 /// Keeps each segment of a chain, from the root down, on the side of the
 /// surfaces its upper end is on: a lower end that went through a surface
 /// is put back onto it, a little off, where it went through.
-fn rest_on(chain: &mut [Vec3], triangles: &[Triangle]) {
+pub(super) fn rest_on(chain: &mut [Vec3], triangles: &[Triangle]) {
     for i in 1..chain.len() {
         for _ in 0..SURFACE_ROUNDS {
             let (p, q) = (chain[i - 1], chain[i]);
@@ -196,19 +219,21 @@ pub struct Capsule {
     pub fb: f32,
     /// Whether the skirt's chains collide with it, or only its vertices.
     pub chains: bool,
+    /// Whether the cloth net collides with it: everything but the hands.
+    pub net: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct WorldCapsule {
-    a: Vec3,
-    b: Vec3,
-    ra: f32,
-    rb: f32,
+pub(super) struct WorldCapsule {
+    pub(super) a: Vec3,
+    pub(super) b: Vec3,
+    pub(super) ra: f32,
+    pub(super) rb: f32,
 }
 
 impl WorldCapsule {
     /// The box around the capsule.
-    fn bounds(&self) -> (Vec3, Vec3) {
+    pub(super) fn bounds(&self) -> (Vec3, Vec3) {
         let r = Vec3::splat(self.ra.max(self.rb));
         (self.a.min(self.b) - r, self.a.max(self.b) + r)
     }
@@ -233,6 +258,11 @@ pub struct Cloth {
     /// The skirts' moving bones, by node, for the push-out of their
     /// vertices.
     skirt: Arc<Vec<bool>>,
+    /// The cloth nets, and the ring each was built from.
+    nets: Vec<super::net::Net>,
+    net_rings: Vec<usize>,
+    /// The garments' vertices bound to the nets.
+    bindings: Arc<Vec<super::net::Binding>>,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -299,6 +329,19 @@ impl Cloth {
                 }
             }
         }
+        // The cloth nets; `RK_CLOTH_NET=0` leaves them out, to compare
+        // with the chains alone while the net is a prototype.
+        let mut nets = Vec::new();
+        let mut net_rings = Vec::new();
+        if std::env::var("RK_CLOTH_NET").as_deref() != Ok("0") {
+            for (i, ring) in rings.iter().enumerate() {
+                if let Some(net) = super::net::Net::build(scene, bones, ring) {
+                    nets.push(net);
+                    net_rings.push(i);
+                }
+            }
+        }
+        let bindings = Arc::new(super::net::bind(scene, &nets));
         Self {
             capsules,
             floor: names.get("cf_j_root").copied(),
@@ -306,6 +349,60 @@ impl Cloth {
             nearby: Vec::new(),
             skirt: Arc::new(skirt),
             rings,
+            nets,
+            net_rings,
+            bindings,
+        }
+    }
+
+    /// Moves the cloth nets on by `dt` seconds after the chains moved;
+    /// `live` says which bones ran.
+    pub(super) fn step_nets(&mut self, scene: &Scene, live: &[bool], obstacles: Option<&Arc<Obstacles>>, dt: f32) {
+        if self.nets.is_empty() {
+            return;
+        }
+        // The thickness the vertices are pushed out of, but not the hands:
+        // a hand on the lap would hold a whole panel up.
+        let capsules: Vec<WorldCapsule> = self
+            .capsules
+            .iter()
+            .filter(|c| c.net)
+            .map(|c| {
+                let m = world(scene, c.node);
+                let s = m.x_axis.truncate().length();
+                WorldCapsule {
+                    a: m.transform_point3(c.a),
+                    b: m.transform_point3(c.b),
+                    ra: c.fa * s,
+                    rb: c.fb * s,
+                }
+            })
+            .collect();
+        let mapped = obstacles.is_some_and(|o| !o.pieces.is_empty());
+        let floor = self.floor.filter(|_| !mapped).map(|n| {
+            let m = world(scene, n);
+            (m.w_axis.truncate(), m.y_axis.truncate().normalize_or_zero())
+        });
+        for (net, &ring) in self.nets.iter_mut().zip(&self.net_rings) {
+            let active = self.rings[ring].iter().all(|&b| live.get(b).copied().unwrap_or(false));
+            net.step(scene, active, &capsules, floor, obstacles, dt);
+        }
+    }
+
+    /// The nets for drawing, when there are any.
+    pub(super) fn draw(&self) -> Option<super::net::ClothDraw> {
+        (!self.nets.is_empty()).then(|| super::net::ClothDraw::from_nets(&self.nets, &self.bindings))
+    }
+
+    /// Starts the nets again on their targets.
+    pub(super) fn reset_nets(&mut self) {
+        self.nets.iter_mut().for_each(super::net::Net::reset);
+    }
+
+    /// Moves the nets with the character.
+    pub(super) fn carry(&mut self, moved: Mat4) {
+        for net in &mut self.nets {
+            net.carry(moved);
         }
     }
 
@@ -419,24 +516,7 @@ impl Cloth {
                 })
                 .copied()
                 .collect();
-            match obstacles {
-                Some(obstacles) => {
-                    let (want_lo, want_hi) = (lo - Vec3::splat(margin), hi + Vec3::splat(margin));
-                    let from = std::sync::Arc::as_ptr(obstacles) as usize;
-                    let inside = nearby.lo.cmple(want_lo).all() && nearby.hi.cmpge(want_hi).all();
-                    if nearby.from != from || !inside {
-                        let grow = Vec3::splat(GATHER_MARGIN);
-                        *nearby = Nearby {
-                            from,
-                            lo: want_lo - grow,
-                            hi: want_hi + grow,
-                            triangles: Vec::new(),
-                        };
-                        obstacles.gather(nearby.lo, nearby.hi, &mut nearby.triangles);
-                    }
-                }
-                None => *nearby = Nearby::default(),
-            }
+            nearby.refresh(obstacles, lo - Vec3::splat(margin), hi + Vec3::splat(margin));
             let triangles = &nearby.triangles;
             if capsules.is_empty() && floor.is_none() && triangles.is_empty() {
                 continue;
@@ -540,7 +620,7 @@ fn closest(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> (f32, f32) {
     (s, t)
 }
 
-fn point_capsule(p: &mut Vec3, cap: &WorldCapsule) {
+pub(super) fn point_capsule(p: &mut Vec3, cap: &WorldCapsule) {
     let axis = cap.b - cap.a;
     let len2 = axis.length_squared();
     let t = if len2 > 0.0 {
@@ -656,6 +736,7 @@ pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> 
                     (c.fa, c.fb) = (c.ra, c.rb);
                 }
                 c.chains = !VERTICES_ONLY.iter().any(|j| scene.nodes[from].name.starts_with(j));
+                c.net = !scene.nodes[from].name.starts_with("cf_j_hand");
             }
             out.extend(fitted);
         }
@@ -685,6 +766,7 @@ fn fit_ball(scene: &Scene, verts: &[Vec3], at: usize) -> Vec<Capsule> {
         fa: tenth / scale,
         fb: tenth / scale,
         chains: true,
+        net: true,
     }]
 }
 
@@ -733,6 +815,7 @@ fn fit_bone(scene: &Scene, verts: &[Vec3], from: usize, to: usize, stations: usi
                 fa: radii[k].1 / scale,
                 fb: radii[k + 1].1 / scale,
                 chains: true,
+                net: true,
             }
         })
         .collect()

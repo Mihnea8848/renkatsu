@@ -168,6 +168,7 @@ impl Curve {
 }
 
 pub mod cloth;
+pub mod net;
 
 // ---------------------------------------------------------------------------
 // DynamicBoneCollider.
@@ -1959,10 +1960,15 @@ impl Physics {
         }
         if let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) {
             cloth.solve(scene, &mut self.bones, &live, self.obstacles.as_ref());
+            cloth.step_nets(scene, &live, self.obstacles.as_ref(), dt);
         }
         // The vertices between the skirt's bones, after skinning.
         scene.push_out = match &self.cloth {
             Some(cloth) if self.advanced => cloth.push_out(self.has_obstacles()),
+            _ => None,
+        };
+        scene.cloth = match &self.cloth {
+            Some(cloth) if self.advanced => cloth.draw(),
             _ => None,
         };
     }
@@ -2062,6 +2068,9 @@ impl Physics {
         for b in &mut self.bones {
             b.reset(scene);
         }
+        if let Some(cloth) = &mut self.cloth {
+            cloth.reset_nets();
+        }
     }
 
     /// Moves every particle with the character when it is placed somewhere
@@ -2084,6 +2093,9 @@ impl Physics {
                 Bone::Ver01(d) => carry(&mut d.particles, &mut d.object_prev),
                 Bone::Ver02(d) => carry(&mut d.particles, &mut d.object_prev),
             }
+        }
+        if let Some(cloth) = &mut self.cloth {
+            cloth.carry(moved);
         }
     }
 }
