@@ -794,6 +794,10 @@ impl Live {
     pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3, Option<Vec3>)>> {
         use rk_chara::bone_info::Part;
         let actor = self.actors.iter().find(|a| a.id == id)?;
+        // Only while the character's FK is on, as CharaStudio shows them.
+        if !actor.layer.as_ref().is_some_and(|l| l.fk_on) {
+            return None;
+        }
         let scene = &actor.chara.scene;
         let (world, active) = scene.world();
         let shown: Vec<&rk_chara::bone_info::FkBone> = actor

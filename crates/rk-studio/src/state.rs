@@ -308,10 +308,10 @@ pub struct State {
     /// The sun is being turned with its shortcut held: one step of the
     /// history until it is let go, though no button is down.
     pub sun_turning: bool,
-    /// The bone the Pose page shows, by name, and the text its bone list
-    /// is searched by.
+    /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
-    pub pose_search: String,
+    /// Characters whose skeleton is unfolded in the Outliner.
+    pub skeleton_open: HashSet<ObjectId>,
     /// The project that is open; `Project::none()` while the project
     /// selector shows.
     pub project: Project,
@@ -820,7 +820,7 @@ impl State {
             lens_shown: None,
             sun_turning: false,
             pose_bone: None,
-            pose_search: String::new(),
+            skeleton_open: HashSet::new(),
             library: Library::new(&project),
             project,
             selector: None,

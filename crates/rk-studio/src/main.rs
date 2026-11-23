@@ -689,6 +689,9 @@ impl Studio {
                 )
             }
         };
+        if let (Some(_), Some(id)) = (&cli.pose_bone, state.doc.selected) {
+            state.skeleton_open.insert(id);
+        }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
                 .iter()

@@ -20,21 +20,29 @@ use std::collections::BTreeMap;
 /// One character's edits.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
+    /// Whether the bones are posed by hand (FK) at all, as CharaStudio's
+    /// FK switch: off by default, the edits kept but not applied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fk_on: bool,
     /// Edited bones by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fk: BTreeMap<String, BoneEdit>,
 }
 
 impl Layer {
-    /// Whether the layer changes nothing.
+    /// Whether the layer holds nothing: FK off and no edits kept.
     pub fn is_empty(&self) -> bool {
-        self.fk.values().all(BoneEdit::is_identity)
+        !self.fk_on && self.fk.values().all(BoneEdit::is_identity)
     }
 
-    /// The edits with the nodes of their bones in `scene`, found by name
-    /// below `from` (the first in depth-first order, as the game's
-    /// `FindLoop` finds them); bones the character lacks are left out.
+    /// The edits to apply, with the nodes of their bones in `scene`, found
+    /// by name below `from` (the first in depth-first order, as the game's
+    /// `FindLoop` finds them); none while FK is off, and bones the
+    /// character lacks are left out.
     pub fn resolve(&self, scene: &Scene, from: usize) -> Vec<(usize, BoneEdit)> {
+        if !self.fk_on {
+            return Vec::new();
+        }
         self.fk
             .iter()
             .filter(|(_, e)| !e.is_identity())
@@ -164,6 +172,9 @@ mod tests {
         };
         layer.fk.insert("cf_j_arm00_L".into(), turn);
         layer.fk.insert("cf_j_tail".into(), turn);
+        // Kept but not applied while FK is off.
+        assert!(layer.resolve(&scene, root).is_empty() && !layer.is_empty());
+        layer.fk_on = true;
         let edits = layer.resolve(&scene, root);
         assert_eq!(edits, vec![(arm, turn)]);
         apply(&mut scene, &edits);

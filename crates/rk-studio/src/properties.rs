@@ -1236,13 +1236,30 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     }
 }
 
-/// The Pose page: the bone chosen in the list, with its turn over the
-/// animation and a way back, then the character's bones to choose from.
+/// The Pose page: CharaStudio's FK switch, off at first, and while it is
+/// on the bone chosen (on its ball or in the Outliner) with its turn over
+/// the animation and a way back.
 fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     let Content::Character { pose_layer, .. } = content else {
         return;
     };
     let ui_id = ui.id().with("pose");
+    let mut fk_on = pose_layer.as_ref().is_some_and(|l| l.fk_on);
+    if section(ui, k, st, 17, "Kinematics") {
+        row(ui, k, "FK", None, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("fk"), &mut fk_on, "On");
+        });
+        section_end(ui, k);
+    }
+    if fk_on != pose_layer.as_ref().is_some_and(|l| l.fk_on) {
+        pose_layer.get_or_insert_with(Default::default).fk_on = fk_on;
+        if pose_layer.as_ref().is_some_and(|l| l.is_empty()) {
+            *pose_layer = None;
+        }
+    }
+    if !fk_on {
+        return;
+    }
     let joints = st.live.as_ref().and_then(|l| l.joints(id));
     let waiting = joints.is_none().then_some("The character is not built");
     if section(ui, k, st, 16, "Bone") {
@@ -1264,9 +1281,9 @@ fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, 
                 k.t.text,
             );
         });
-        // The turn over the animation, in Unity's angles.
+        // The turn over the animation, in Unity's angles. A trace of
+        // rounding is no turn, not a minus zero.
         let (y, x, z) = edit.rot.to_euler(glam::EulerRot::YXZ);
-        // A trace of rounding is no turn, not a minus zero.
         let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
         let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
         let mut angles = shown;
@@ -1299,68 +1316,7 @@ fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, 
             } else {
                 layer.fk.insert(name, edit);
             }
-            if layer.is_empty() {
-                *pose_layer = None;
-            }
         }
-        section_end(ui, k);
-    }
-    if section(ui, k, st, 17, "Bones") {
-        let Some(joints) = joints else {
-            row(ui, k, "Bones", waiting, |_, _| {});
-            section_end(ui, k);
-            return;
-        };
-        ui.add_space(4.0);
-        let w = ui.available_width() - 16.0;
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            widgets::search(ui, k, &mut st.pose_search, "Search", w);
-        });
-        ui.add_space(4.0);
-        let needle = st.pose_search.to_lowercase();
-        let edited = |name: &str| {
-            pose_layer
-                .as_ref()
-                .is_some_and(|l| l.fk.get(name).is_some_and(|e| !e.is_identity()))
-        };
-        let t = &k.t;
-        egui::ScrollArea::vertical()
-            .id_salt(ui_id.with("bones"))
-            .max_height(320.0)
-            .show(ui, |ui| {
-                for (depth, name) in joints
-                    .iter()
-                    .filter(|(_, n)| needle.is_empty() || n.to_lowercase().contains(&needle))
-                {
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-                    let on = st.pose_bone.as_deref() == Some(name.as_str());
-                    let p = ui.painter();
-                    if on {
-                        p.rect_filled(rect, 0.0, t.select);
-                    } else if resp.hovered() {
-                        p.rect_filled(rect, 0.0, t.hover);
-                    }
-                    let indent = if needle.is_empty() { *depth as f32 * 10.0 } else { 0.0 };
-                    let colour = if edited(name) {
-                        t.accent
-                    } else if on {
-                        t.text_bright
-                    } else {
-                        t.text
-                    };
-                    label(
-                        p,
-                        k,
-                        Pos2::new(rect.left() + 10.0 + indent, rect.center().y),
-                        name,
-                        colour,
-                    );
-                    if resp.clicked() {
-                        st.pose_bone = Some(name.clone());
-                    }
-                }
-            });
         section_end(ui, k);
     }
 }
