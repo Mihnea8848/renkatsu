@@ -12,27 +12,64 @@
 //! bone), the shift is added, the scale multiplies. Plain values, so that
 //! keys over time can drive them later.
 
+use crate::bone_info::Part;
 use crate::scene::{Scene, Trs};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// One character's edits.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     /// Whether the bones are posed by hand (FK) at all, as CharaStudio's
     /// FK switch: off by default, the edits kept but not applied.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fk_on: bool,
+    /// The FK parts switched on, as CharaStudio's: a bone of its FK table
+    /// takes its edit only while one of its parts is on. Bones outside the
+    /// table take theirs whenever FK is on.
+    #[serde(default = "start_parts", skip_serializing_if = "is_start_parts")]
+    pub fk_parts: Vec<Part>,
     /// Edited bones by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fk: BTreeMap<String, BoneEdit>,
 }
 
+impl Default for Layer {
+    fn default() -> Self {
+        Layer {
+            fk_on: false,
+            fk_parts: start_parts(),
+            fk: BTreeMap::new(),
+        }
+    }
+}
+
+fn start_parts() -> Vec<Part> {
+    Part::START.to_vec()
+}
+
+// serde's `skip_serializing_if` hands it the field as it is.
+#[allow(clippy::ptr_arg)]
+fn is_start_parts(parts: &Vec<Part>) -> bool {
+    let mut sorted = parts.clone();
+    sorted.sort();
+    let mut start = start_parts();
+    start.sort();
+    sorted == start
+}
+
 impl Layer {
-    /// Whether the layer holds nothing: FK off and no edits kept.
+    /// Whether the layer holds nothing: FK off, its parts as they start and
+    /// no edits kept.
     pub fn is_empty(&self) -> bool {
-        !self.fk_on && self.fk.values().all(BoneEdit::is_identity)
+        !self.fk_on && is_start_parts(&self.fk_parts) && self.fk.values().all(BoneEdit::is_identity)
+    }
+
+    /// Whether a bone of the FK table, in `parts`, takes its edit: one of
+    /// its parts is on.
+    pub fn part_on(&self, parts: &[Part]) -> bool {
+        parts.iter().any(|p| self.fk_parts.contains(p))
     }
 
     /// The edits to apply, with the nodes of their bones in `scene`, found
@@ -40,12 +77,25 @@ impl Layer {
     /// `FindLoop` finds them); none while FK is off, and bones the
     /// character lacks are left out.
     pub fn resolve(&self, scene: &Scene, from: usize) -> Vec<(usize, BoneEdit)> {
+        self.resolve_parts(scene, from, |_| None)
+    }
+
+    /// As `resolve`, leaving out the bones of FK parts that are off:
+    /// `parts_of` gives the parts of a bone of the FK table by name, none
+    /// for a bone outside it.
+    pub fn resolve_parts(
+        &self,
+        scene: &Scene,
+        from: usize,
+        parts_of: impl Fn(&str) -> Option<Vec<Part>>,
+    ) -> Vec<(usize, BoneEdit)> {
         if !self.fk_on {
             return Vec::new();
         }
         self.fk
             .iter()
             .filter(|(_, e)| !e.is_identity())
+            .filter(|(name, _)| parts_of(name).is_none_or(|parts| self.part_on(&parts)))
             .filter_map(|(name, e)| Some((scene.find(from, name)?, *e)))
             .collect()
     }
@@ -158,6 +208,45 @@ mod tests {
         let back: Layer = toml::from_str(&text).unwrap();
         assert_eq!(back, layer);
         assert!(!back.is_empty());
+    }
+
+    #[test]
+    fn a_bone_takes_its_edit_only_while_one_of_its_parts_is_on() {
+        let mut scene = Scene::default();
+        let root = scene.add_node("cf_j_root", None, Trs::default());
+        let hair = scene.add_node("cf_j_hair01", Some(root), Trs::default());
+        let arm = scene.add_node("cf_j_arm00_L", Some(root), Trs::default());
+        let other = scene.add_node("cf_j_tang", Some(root), Trs::default());
+        let mut layer = Layer {
+            fk_on: true,
+            ..Default::default()
+        };
+        let turn = BoneEdit {
+            rot: Quat::from_rotation_z(0.4),
+            ..Default::default()
+        };
+        for name in ["cf_j_hair01", "cf_j_arm00_L", "cf_j_tang"] {
+            layer.fk.insert(name.into(), turn);
+        }
+        let parts_of = |name: &str| match name {
+            "cf_j_hair01" => Some(vec![Part::Hair]),
+            "cf_j_arm00_L" => Some(vec![Part::Body]),
+            _ => None,
+        };
+        // Hair starts off; the body is on; a bone outside the table follows FK.
+        let nodes = |l: &Layer| {
+            l.resolve_parts(&scene, root, parts_of)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(nodes(&layer), vec![arm, other]);
+        layer.fk_parts.push(Part::Hair);
+        assert_eq!(nodes(&layer).len(), 3);
+        assert!(nodes(&layer).contains(&hair));
+        // The parts as they start are not written.
+        assert!(!toml::to_string(&Layer::default()).unwrap().contains("fk_parts"));
+        assert!(toml::to_string(&layer).unwrap().contains("hair"));
     }
 
     #[test]

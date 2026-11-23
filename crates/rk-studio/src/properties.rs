@@ -1244,16 +1244,38 @@ fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, 
         return;
     };
     let ui_id = ui.id().with("pose");
+    use rk_chara::bone_info::Part;
     let mut fk_on = pose_layer.as_ref().is_some_and(|l| l.fk_on);
+    let parts_before = pose_layer
+        .as_ref()
+        .map_or_else(|| Part::START.to_vec(), |l| l.fk_parts.clone());
+    let mut parts = parts_before.clone();
     if section(ui, k, st, 17, "Kinematics") {
         row(ui, k, "FK", None, |ui, rect| {
             widgets::checkbox(ui, k, rect, ui_id.with("fk"), &mut fk_on, "On");
         });
+        // CharaStudio's FK parts: a part's bones show and take their edits
+        // while it is on.
+        if fk_on {
+            for part in Part::ALL {
+                row(ui, k, part.label(), None, |ui, rect| {
+                    let mut on = parts.contains(&part);
+                    widgets::checkbox(ui, k, rect, ui_id.with(("part", part.label())), &mut on, "");
+                    if on && !parts.contains(&part) {
+                        parts.push(part);
+                    } else if !on {
+                        parts.retain(|p| *p != part);
+                    }
+                });
+            }
+        }
         section_end(ui, k);
     }
-    if fk_on != pose_layer.as_ref().is_some_and(|l| l.fk_on) {
-        pose_layer.get_or_insert_with(Default::default).fk_on = fk_on;
-        if pose_layer.as_ref().is_some_and(|l| l.is_empty()) {
+    if fk_on != pose_layer.as_ref().is_some_and(|l| l.fk_on) || parts != parts_before {
+        let layer = pose_layer.get_or_insert_with(Default::default);
+        layer.fk_on = fk_on;
+        layer.fk_parts = parts;
+        if layer.is_empty() {
             *pose_layer = None;
         }
     }

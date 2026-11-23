@@ -75,7 +75,8 @@ pub mod flags {
 
 /// The seven FK parts CharaStudio switches on and off, in its order
 /// (`FKCtrl.parts`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Part {
     Hair,
     Neck,
@@ -96,6 +97,10 @@ impl Part {
         Part::LeftHand,
         Part::Skirt,
     ];
+
+    /// The parts FK starts with switched on, as CharaStudio's
+    /// `activeFK`: the neck and the body.
+    pub const START: [Part; 2] = [Part::Neck, Part::Body];
 
     pub fn flags(self) -> u16 {
         match self {

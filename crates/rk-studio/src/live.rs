@@ -525,7 +525,13 @@ impl Actor {
         let layer = pose_layer.as_deref().filter(|l| !l.is_empty());
         if layer != self.layer.as_ref() {
             self.layer = layer.cloned();
-            self.edits = layer.map_or_else(Vec::new, |l| l.resolve(&self.chara.scene, self.chara.top));
+            // A bone of CharaStudio's FK table takes its edit while one of
+            // its parts is on.
+            let fk = &self.fk;
+            let parts_of = |name: &str| fk.iter().find(|b| b.info.bone == name).map(|b| b.info.parts());
+            self.edits = layer.map_or_else(Vec::new, |l| {
+                l.resolve_parts(&self.chara.scene, self.chara.top, parts_of)
+            });
             self.back_to_rest();
             again = true;
         }
@@ -804,21 +810,17 @@ impl Live {
     /// Each comes with the place of the nearest bone above it that shows
     /// too, for the line between them.
     pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3, Option<Vec3>)>> {
-        use rk_chara::bone_info::Part;
         let actor = self.actors.iter().find(|a| a.id == id)?;
         // Only while the character's FK is on, as CharaStudio shows them.
-        if !actor.layer.as_ref().is_some_and(|l| l.fk_on) {
-            return None;
-        }
+        let layer = actor.layer.as_ref().filter(|l| l.fk_on)?;
         let scene = &actor.chara.scene;
         let (world, active) = scene.world();
         let shown: Vec<&rk_chara::bone_info::FkBone> = actor
             .fk
             .iter()
             .filter(|b| active.get(b.node).copied().unwrap_or(false))
-            // CharaStudio's FK starts with the body and the neck on; the
-            // other parts show once they can be switched on.
-            .filter(|b| b.info.parts().iter().any(|p| matches!(p, Part::Body | Part::Neck)))
+            // The bones of the parts switched on.
+            .filter(|b| layer.part_on(&b.info.parts()))
             .collect();
         let at = |node: usize| world[node].w_axis.truncate();
         Some(
