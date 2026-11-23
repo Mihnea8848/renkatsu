@@ -1202,20 +1202,25 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
 fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     let t = &k.t;
     let line_height = k.d.row + 4.0;
-    let widths: Vec<f32> = pages
+    // Tabs that are a little too wide for one line close up first; the
+    // ones that still do not fit go on the next, rather than off the edge
+    // of the panel.
+    let room = ui.available_width() - 16.0;
+    let text: Vec<f32> = pages
         .iter()
-        .map(|name| widgets::text_width(ui, name, k.font()).ceil() + 18.0)
+        .map(|name| widgets::text_width(ui, name, k.font()).ceil())
         .collect();
-    // Tabs that do not fit on one line go on the next, rather than off
-    // the edge of the panel.
-    let room = ui.available_width() - 8.0;
-    let mut lines = 1;
-    let mut used = 0.0;
+    let gap = ((room - text.iter().sum::<f32>()) / pages.len().max(1) as f32).clamp(8.0, 18.0);
+    let widths: Vec<f32> = text.iter().map(|w| w + gap).collect();
+    // Where each tab goes: its line and its left edge.
+    let mut place = Vec::with_capacity(widths.len());
+    let (mut lines, mut used) = (1, 0.0);
     for w in &widths {
         if used + w > room && used > 0.0 {
             lines += 1;
             used = 0.0;
         }
+        place.push((lines - 1, used));
         used += w;
     }
     let (rect, _) = ui.allocate_exact_size(
@@ -1223,14 +1228,10 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
         Sense::hover(),
     );
     hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
-    let mut x = rect.left() + 8.0;
-    let mut top = rect.top();
     for (i, name) in pages.iter().enumerate() {
         let w = widths[i];
-        if x + w > rect.left() + 8.0 + room && x > rect.left() + 8.0 {
-            x = rect.left() + 8.0;
-            top += line_height;
-        }
+        let (line, left) = place[i];
+        let (x, top) = (rect.left() + 8.0 + left, rect.top() + line_height * line as f32);
         let tab = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + w, top + line_height));
         let resp = ui.interact(tab, ui.id().with(("property page", i)), Sense::click());
         if resp.clicked() {
@@ -1257,7 +1258,6 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
             );
             p.rect_filled(line, 0.0, t.select);
         }
-        x += w;
     }
 }
 
