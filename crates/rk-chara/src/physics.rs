@@ -1757,6 +1757,25 @@ impl Bone {
             }
         }
     }
+
+    /// The object the component sits on and whether the component itself
+    /// is switched on.
+    fn component(&self) -> (usize, bool) {
+        match self {
+            Bone::Dynamic(d) => (d.def.node, d.def.enabled),
+            Bone::Ver01(d) => (d.def.node, d.def.enabled),
+            Bone::Ver02(d) => (d.def.node, d.def.enabled),
+        }
+    }
+
+    /// `OnDisable`: the bones go back to their rest transforms.
+    fn init_transforms(&self, scene: &mut Scene) {
+        match self {
+            Bone::Dynamic(d) => d.init_transforms(scene),
+            Bone::Ver01(d) => d.init_transforms(scene),
+            Bone::Ver02(d) => d.init_transforms(scene),
+        }
+    }
 }
 
 /// What a physics component came with, so that a kind can be switched
@@ -1784,6 +1803,9 @@ pub struct Physics {
     pub belongs: Vec<Belongs>,
     /// The kinds that hold still at their rest pose instead of moving.
     still: Vec<Belongs>,
+    /// Whether each of `bones` sat on an object that was active when last
+    /// looked at; a component of a hidden object does not run.
+    active: Vec<bool>,
 }
 
 impl Physics {
@@ -1797,6 +1819,42 @@ impl Physics {
                 Bone::Ver02(d) => d.start(scene),
             }
         }
+        self.active = self
+            .bones
+            .iter()
+            .map(|b| active_in_hierarchy(scene, b.component().0))
+            .collect();
+    }
+
+    /// What Unity does when an object with a component is switched off or
+    /// on, as clothes are by their states and accessories by theirs:
+    /// `OnDisable` puts the component's bones back to their rest
+    /// transforms, and `OnEnable` starts its particles again from where
+    /// the bones are (`ResetParticlesPosition`). A component on an object
+    /// that is off runs neither `Update` nor `LateUpdate`.
+    pub fn follow_objects(&mut self, scene: &mut Scene) {
+        self.active.resize(self.bones.len(), true);
+        for (b, was) in self.bones.iter_mut().zip(self.active.iter_mut()) {
+            let (node, enabled) = b.component();
+            let now = active_in_hierarchy(scene, node);
+            if now == *was {
+                continue;
+            }
+            *was = now;
+            if !enabled {
+                continue;
+            }
+            if now {
+                b.reset(scene);
+            } else {
+                b.init_transforms(scene);
+            }
+        }
+    }
+
+    /// Whether the bone at `i` sits on an object that is on.
+    fn shown(&self, i: usize) -> bool {
+        self.active.get(i).copied().unwrap_or(true)
     }
 
     /// What `ChaControl.LateUpdateForce` does once the body shape is set:
@@ -1825,8 +1883,12 @@ impl Physics {
     /// The first half of a frame, the components' `Update`: the bones go
     /// back to where they were loaded. An animation writes its bones
     /// after this and before `end_frame`, as Unity's Animator does.
-    pub fn begin_frame(&self, scene: &mut Scene) {
+    pub fn begin_frame(&mut self, scene: &mut Scene) {
+        self.follow_objects(scene);
         for (i, b) in self.bones.iter().enumerate() {
+            if !self.shown(i) {
+                continue;
+            }
             let moves = self.moves(i);
             match b {
                 Bone::Dynamic(d) if d.running() => d.init_transforms(scene),
@@ -1862,7 +1924,8 @@ impl Physics {
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
-        let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i)).collect();
+        self.follow_objects(scene);
+        let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i) && self.shown(i)).collect();
         for (b, moves) in self.bones.iter_mut().zip(moving) {
             if !moves {
                 continue;
@@ -2156,6 +2219,37 @@ mod tests {
             "{:?} {placed:?}",
             position(&scene, b)
         );
+    }
+
+    #[test]
+    fn a_hidden_object_stops_its_physics() {
+        // A skirt on a clothing object that is switched off, as a bottom
+        // in state 3 is: `OnDisable` puts its bones back to rest and it
+        // stays there; switched on, it starts again from the bones.
+        let mut scene = Scene::default();
+        let clothes = scene.add_node("ct_clothesBot", None, Trs::default());
+        let bones = chain(&mut scene, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -0.1, 0.0), 3);
+        let mut physics = dynamic(DynamicBoneDef {
+            node: clothes,
+            root: Some(bones[0]),
+            force: Vec3::new(0.01, 0.0, 0.0),
+            ..Default::default()
+        });
+        let rest = position(&scene, bones[2]);
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 30, FRAME_TIME);
+        assert!(position(&scene, bones[2]).x > 0.01);
+
+        scene.nodes[clothes].active = false;
+        physics.settle(&mut scene, 30, FRAME_TIME);
+        assert!(close(position(&scene, bones[2]), rest, 1e-5));
+
+        // On again: the first frame starts from the bones at rest, so the
+        // chain has only begun to swing.
+        scene.nodes[clothes].active = true;
+        physics.step(&mut scene, FRAME_TIME);
+        let x = position(&scene, bones[2]).x;
+        assert!(x > 0.0 && x < 0.01, "{x}");
     }
 
     #[test]

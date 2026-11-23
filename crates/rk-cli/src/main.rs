@@ -91,6 +91,11 @@ enum Cmd {
         /// Keep hair, skirts and the bust in their rest pose.
         #[arg(long)]
         no_physics: bool,
+        /// The Colliders plugin's switches as Studio's character panel sets
+        /// them: the ones to switch on, such as `floor,skirt`, or `none`.
+        /// Without it the card's own setting counts.
+        #[arg(long)]
+        colliders: Option<String>,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -568,6 +573,7 @@ fn main() -> Result<()> {
             son,
             censor,
             no_physics,
+            colliders,
             list,
             no_shadows,
             clothes,
@@ -595,6 +601,7 @@ fn main() -> Result<()> {
             son,
             censor,
             no_physics,
+            colliders: colliders.as_deref(),
             list,
             shadows: !no_shadows,
             clothes: clothes.as_deref(),

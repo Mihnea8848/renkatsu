@@ -114,12 +114,13 @@ fn include(list: &mut Vec<usize>, collider: usize) {
     }
 }
 
-/// What the plugin does to one `DynamicBone`.
-pub fn dynamic_bone(def: &mut DynamicBoneDef, scene: &Scene, settings: Settings, added: &Added) {
+/// What the plugin does to one `DynamicBone`. `object` is the name of the
+/// object it sits on, as the game names it.
+pub fn dynamic_bone(def: &mut DynamicBoneDef, scene: &Scene, object: &str, settings: Settings, added: &Added) {
     if let (true, Some(floor)) = (settings.floor, added.floor) {
         include(&mut def.colliders, floor);
     }
-    if scene.nodes[def.node].name != "ct_clothesBot" {
+    if object != "ct_clothesBot" {
         return;
     }
     if settings.skirt {
@@ -241,27 +242,34 @@ mod tests {
         };
 
         let mut d = def(bot, front, 0);
-        dynamic_bone(&mut d, &s, on(), &added);
+        dynamic_bone(&mut d, &s, "ct_clothesBot", on(), &added);
         assert_eq!(d.colliders, vec![7, 0, 2, 3, 4]);
         assert_eq!(d.freeze_axis, 1);
         // Applying twice adds nothing.
-        dynamic_bone(&mut d, &s, on(), &added);
+        dynamic_bone(&mut d, &s, "ct_clothesBot", on(), &added);
         assert_eq!(d.colliders.len(), 5);
 
         let mut d = def(bot, side, 2);
-        dynamic_bone(&mut d, &s, on(), &added);
+        dynamic_bone(&mut d, &s, "ct_clothesBot", on(), &added);
         assert_eq!(d.freeze_axis, 2);
 
         let mut d = def(hair, front, 1);
-        dynamic_bone(&mut d, &s, on(), &added);
+        dynamic_bone(&mut d, &s, "ct_hairB", on(), &added);
         assert_eq!(d.colliders, vec![7, 0]);
         assert_eq!(d.freeze_axis, 1);
 
         // Off: only the front chain's axis is touched.
         let mut d = def(bot, front, 1);
-        dynamic_bone(&mut d, &s, Settings::default(), &added);
+        dynamic_bone(&mut d, &s, "ct_clothesBot", Settings::default(), &added);
         assert_eq!(d.colliders, vec![7]);
         assert_eq!(d.freeze_axis, 0);
+
+        // The plugin goes by the name the game gives a loaded bottom, not
+        // the prefab's own: a one-piece dress (a top) gets only the floor.
+        let mut d = def(bot, front, 1);
+        dynamic_bone(&mut d, &s, "ct_clothesTop", on(), &added);
+        assert_eq!(d.colliders, vec![7, 0]);
+        assert_eq!(d.freeze_axis, 1);
     }
 
     #[test]

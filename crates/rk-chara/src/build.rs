@@ -86,6 +86,9 @@ pub struct BuildOptions {
     /// Run the Colliders plugin: floor, arm and leg colliders where the
     /// card switches them on, and its changes to skirts and the bust.
     pub colliders: bool,
+    /// The Colliders plugin's three switches as Studio's character panel
+    /// sets them; `None` takes the ones the card was saved with.
+    pub collider_switches: Option<crate::colliders::Settings>,
     /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
     /// and turns the lower legs, feet and toes.
     pub stiletto: bool,
@@ -117,6 +120,7 @@ impl Default for BuildOptions {
             accessory_states: true,
             uncensor_selector: true,
             colliders: true,
+            collider_switches: None,
             stiletto: true,
         }
     }
@@ -184,6 +188,9 @@ struct PhysicsSource {
     belongs: crate::physics::Belongs,
     /// The prefab's top object, where paths to DynamicBone roots start.
     root: usize,
+    /// The name `LoadCharaFbxData` gives the top object (`ct_clothesBot`
+    /// and so on), where it renames it; plugins look for that name.
+    object: Option<&'static str>,
 }
 
 impl<'g> Builder<'g> {
@@ -252,6 +259,7 @@ impl<'g> Builder<'g> {
             slot: None,
             root: inst.root,
             belongs,
+            object: None,
         });
     }
 
@@ -649,7 +657,11 @@ impl<'g> Builder<'g> {
                             def.colliders = body_colliders.clone();
                         }
                         if let Some((settings, _, added)) = &plugin {
-                            crate::colliders::dynamic_bone(&mut def, scene, *settings, added);
+                            let object = match source.object {
+                                Some(name) if *node == source.root => name,
+                                _ => scene.nodes[*node].name.as_str(),
+                            };
+                            crate::colliders::dynamic_bone(&mut def, scene, object, *settings, added);
                         }
                         if let (Some(slot), Some(root)) = (source.slot, def.root) {
                             crate::dynamic_bone_editor::apply(edits, slot, &scene.nodes[root].name, &mut def);
@@ -2421,6 +2433,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     // The game copies DynamicBone roots onto the body
                     // skeleton for tops and bottoms only.
                     b.physics_source(inst, true, i < 2, true, crate::physics::Belongs::Clothes);
+                    if let Some(source) = b.physics_sources.last_mut() {
+                        source.object = Some(crate::overlays::MAIN_IDS[i]);
+                    }
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
                     rig.add_piece(&b.scene, i, inst);
                     let sources = compose::color_sources(None);
@@ -2534,6 +2549,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                                 b.clothing_blend_shape(&inst, &blend_shapes, outfit, sub.category, 0);
                             }
                             b.physics_source(&inst, true, true, true, crate::physics::Belongs::Clothes);
+                            if let Some(source) = b.physics_sources.last_mut() {
+                                source.object = Some(crate::overlays::SUB_IDS[k]);
+                            }
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             rig.add_part(&b.scene, k, &inst);
                             // A sailor top's liquid goes on its one part,
@@ -2783,7 +2801,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             .get(crate::colliders::BREAST_SIZE)
             .copied()
             .unwrap_or(0.0);
-        (crate::colliders::read(&card.ext), bust)
+        let switches = opts
+            .collider_switches
+            .unwrap_or_else(|| crate::colliders::read(&card.ext));
+        (switches, bust)
     });
     let dbde_edits = if opts.dbde {
         crate::dbde::for_outfit(&card.ext, outfit)
@@ -2825,8 +2846,11 @@ impl Character {
     /// objects each state shows, the masks under the top, and the heels,
     /// which come off with the shoes. Bones the heels moved are put back
     /// as they were first, so an animation is to be applied again after.
+    /// The physics of a piece that comes off stops and its bones go back
+    /// to rest, as Unity's `OnDisable` does when the game hides it.
     pub fn set_clothes(&mut self, states: &crate::clothes_state::States) {
         self.clothes.apply(&mut self.scene, states);
+        self.physics.follow_objects(&mut self.scene);
         if let Some(heels) = &self.heels {
             heels.reset(&mut self.scene);
         }

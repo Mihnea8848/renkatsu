@@ -27,6 +27,7 @@ pub struct Args<'a> {
     pub son: bool,
     pub censor: bool,
     pub no_physics: bool,
+    pub colliders: Option<&'a str>,
     pub list: bool,
     /// Draw the light's real-time shadows.
     pub shadows: bool,
@@ -76,6 +77,20 @@ fn parse_liquid(text: &str) -> Result<rk_chara::siru::Levels> {
 }
 
 /// A colour written as `r,g,b`, each from 0 to 1.
+/// `floor,skirt` and the like as the Colliders plugin's switches.
+fn collider_switches(text: &str) -> Result<rk_chara::colliders::Settings> {
+    let mut s = rk_chara::colliders::Settings::default();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty() && *p != "none") {
+        match part {
+            "floor" => s.floor = true,
+            "skirt" => s.skirt = true,
+            "breast" => s.breast = true,
+            _ => anyhow::bail!("`{part}`: the switches are floor, skirt and breast"),
+        }
+    }
+    Ok(s)
+}
+
 fn colour(text: &str) -> Result<[f64; 4]> {
     let [r, g, b] = point(text)?;
     anyhow::ensure!(
@@ -116,6 +131,7 @@ pub fn render(a: Args) -> Result<()> {
         visible_son: a.son.then_some(true),
         censor: a.censor,
         physics: !a.no_physics,
+        collider_switches: a.colliders.map(collider_switches).transpose()?,
         ..Default::default()
     };
     let mut chara = rk_chara::build(&game, &card, &opts)?;
