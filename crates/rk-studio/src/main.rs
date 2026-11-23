@@ -155,6 +155,9 @@ struct Cli {
     /// Start on this page of Properties, by its place, to picture it.
     #[arg(long, hide = true)]
     property_tab: Option<usize>,
+    /// Show the sun's dome as Ctrl+L shows it, to picture it.
+    #[arg(long, hide = true)]
+    sun_preview: bool,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -695,6 +698,7 @@ impl Studio {
                 )
             }
         };
+        state.sun_preview = cli.sun_preview;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }

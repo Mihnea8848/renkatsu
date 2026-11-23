@@ -308,6 +308,8 @@ pub struct State {
     /// The sun is being turned with its shortcut held: one step of the
     /// history until it is let go, though no button is down.
     pub sun_turning: bool,
+    /// The sun's dome shows without the key held, for pictures.
+    pub sun_preview: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
@@ -825,6 +827,7 @@ impl State {
             speed_shown: None,
             lens_shown: None,
             sun_turning: false,
+            sun_preview: false,
             pose_bone: None,
             fk_open: false,
             animator_search: String::new(),

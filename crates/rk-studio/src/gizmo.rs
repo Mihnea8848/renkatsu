@@ -1475,6 +1475,88 @@ fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown>
 }
 
 /// Draws the shown icons, the far under the near.
+/// The sun's dome's radius, in parts of the view's height.
+const DOME: f32 = 0.2;
+
+/// The sun as Unreal shows it while it is turned (Ctrl+L): a wire half
+/// dome around where the camera looks, its horizon and two arcs over the
+/// top, with an arrow from the middle to the sun and its angles below.
+fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View, camera: &rk_render::Camera) {
+    let scene = st.doc.scene();
+    let sun = scene.objects().iter().find_map(|o| match &o.content {
+        crate::scene::Content::Map { sun, .. } => Some(*sun),
+        _ => None,
+    });
+    let Some(sun) = sun else { return };
+    let [heading, elevation] = sun.unwrap_or_else(|| crate::map_menu::own_sun(st));
+    let towards = crate::scene::sun_towards([heading, elevation]);
+    let centre = camera.target;
+    // Its radius a fifth of the view's height.
+    let radius = view.unit_at(centre) * view.rect.height() * DOME;
+    let point = |dir: Vec3| view.screen(centre + dir * radius);
+    let line = |a: Vec3, b: Vec3, stroke: Stroke| {
+        if let (Some(a), Some(b)) = (point(a), point(b)) {
+            p.line_segment([a, b], stroke);
+        }
+    };
+    let faint = Stroke::new(1.0, Color32::from_white_alpha(75));
+    let firm = Stroke::new(1.5, Color32::from_white_alpha(150));
+    const SIDES: usize = 64;
+    // The horizon, and rings at 30 and 60 degrees up.
+    for (up, stroke) in [(0.0f32, firm), (30.0, faint), (60.0, faint)] {
+        let (sin_up, cos_up) = up.to_radians().sin_cos();
+        for i in 0..SIDES {
+            let at = |i: usize| {
+                let (s, c) = (i as f32 / SIDES as f32 * TAU).sin_cos();
+                Vec3::new(c * cos_up, sin_up, s * cos_up)
+            };
+            line(at(i), at(i + 1), stroke);
+        }
+    }
+    // Two arcs over the top, along the axes.
+    for across in [Vec3::X, Vec3::Z] {
+        for i in 0..SIDES / 2 {
+            let at = |i: usize| {
+                let (s, c) = (i as f32 / SIDES as f32 * TAU).sin_cos();
+                across * c + Vec3::Y * s
+            };
+            line(at(i), at(i + 1), faint);
+        }
+    }
+    // The arrow to the sun, and the sun where it meets the dome.
+    let sun_colour = Color32::from_rgb(255, 208, 92);
+    let arrow = Stroke::new(2.0, sun_colour);
+    line(Vec3::ZERO, towards * 0.92, arrow);
+    if let (Some(tip), Some(back)) = (point(towards * 0.92), point(towards * 0.78)) {
+        let d = (tip - back).normalized();
+        let side = Vec2::new(-d.y, d.x) * 6.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![tip + d * 4.0, back + side, back - side],
+            sun_colour,
+            Stroke::NONE,
+        ));
+    }
+    if let Some(at) = point(towards) {
+        p.circle_filled(at, 6.0, sun_colour);
+        p.circle_stroke(at, 9.0, Stroke::new(1.0, sun_colour.gamma_multiply(0.5)));
+    }
+    // Its shadow on the horizon, for where it stands round.
+    let flat = Vec3::new(towards.x, 0.0, towards.z).normalize_or_zero();
+    if flat != Vec3::ZERO {
+        line(Vec3::ZERO, flat, faint);
+        line(flat, towards, faint);
+    }
+    // Just under the dome's front.
+    if let Some(below) = point(Vec3::ZERO).map(|c| c + Vec2::new(0.0, view.rect.height() * DOME * 0.5 + 18.0)) {
+        let text = format!("{heading:.0}°  ·  {elevation:.0}° up");
+        let font = k.bold(k.d.text);
+        let size = widgets::text_width(ui, &text, font.clone());
+        let chip = Rect::from_center_size(below, Vec2::new(size + 14.0, k.d.text + 10.0));
+        p.rect_filled(chip, k.radius(), Theme::glass(k.t.well, 230));
+        p.text(chip.center(), Align2::CENTER_CENTER, text, font, k.t.text_bright);
+    }
+}
+
 /// The reach of each selected lamp, as Unreal shows it: three circles of
 /// a point lamp's range, a spot's cone out to its range, and an arrow
 /// along the way a directional lamp shines. Thin lines in the lamp's
@@ -1623,6 +1705,9 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     }
 
     draw_lamp_reach(&p, st, &view);
+    if st.sun_turning || st.sun_preview {
+        draw_sun_dome(ui, &p, k, st, &view, &camera);
+    }
     let pointer = ui.ctx().pointer_hover_pos();
     st.gizmo.balls = if tool == crate::viewport::POSE_TOOL {
         balls(st, &view)
