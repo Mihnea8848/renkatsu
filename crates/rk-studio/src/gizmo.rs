@@ -1031,7 +1031,7 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
     if pose && scene.clicked_by(PointerButton::Primary) && !alt {
         if let Some(ball) = pos.and_then(|pos| ball_at(st, pos)).cloned() {
             st.pose_bone = Some(ball.bone);
-            st.property_tab = 2;
+            st.property_tab = 1;
             st.doc.selected = Some(ball.character);
             return true;
         }

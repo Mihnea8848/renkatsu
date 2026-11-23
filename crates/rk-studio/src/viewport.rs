@@ -1019,7 +1019,7 @@ fn map_mode(mode: usize) -> bool {
 }
 
 /// The palette's width: the Map mode's rows need more room than tools,
-/// and so do the Pose mode's switches in two columns.
+/// and the Pose mode's categories a box at their end.
 fn palette_width(mode: usize, tools: f32) -> f32 {
     if map_mode(mode) {
         crate::map_menu::WIDTH
@@ -1031,7 +1031,7 @@ fn palette_width(mode: usize, tools: f32) -> f32 {
 }
 
 /// The Pose palette's width.
-const POSE_PALETTE_WIDTH: f32 = 260.0;
+const POSE_PALETTE_WIDTH: f32 = 220.0;
 
 /// Height the palette needs for a mode's tools, with the FK parts under
 /// Forward kinematics while the selected character's FK is on.
@@ -1048,8 +1048,8 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
-/// The rows the FK parts take in the Pose palette, two to a row.
-const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len().div_ceil(2);
+/// The rows the FK parts take in the Pose palette, one each.
+const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len();
 
 /// The pose layer of the selected character, when a character is selected.
 fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
@@ -1255,16 +1255,13 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
     }
 }
 
-/// The FK parts as boxes to tick, two to a row, under the category.
+/// The FK parts as boxes to tick, one to a row, under the category's
+/// name.
 fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
-    let half = (area.width() - 44.0) / 2.0;
     for (i, part) in rk_chara::bone_info::Part::ALL.into_iter().enumerate() {
         let cell = Rect::from_min_size(
-            Pos2::new(
-                area.left() + 32.0 + (i % 2) as f32 * half,
-                area.top() + (i / 2) as f32 * palette_row(k),
-            ),
-            Vec2::new(half, palette_row(k)),
+            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
         );
         let mut on = layer.fk_parts.contains(&part);
         let was = on;

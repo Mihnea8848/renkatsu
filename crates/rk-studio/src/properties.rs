@@ -74,20 +74,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // A character's pages: the scene's own values, then what it plays,
     // then who it is. A card whose profile could not be read still has
     // the first two.
-    let all: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Animation", "Pose", "Profile", H_PAGE],
-        Some(_) => &["Scene", "Animation", "Pose", "Profile", "Likes", "H Traits", H_PAGE],
-        None if kind == Kind::Character => &["Scene", "Animation", "Pose", H_PAGE],
+    let pages: &[&str] = match &shown {
+        Some(p) if p.male => &["Scene", "Animation", "Profile", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits", H_PAGE],
+        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
         None => &[],
     };
-    // The Pose page is there while the character is posed by hand (FK,
-    // switched in the Pose mode's palette).
-    let fk_on = matches!(
-        &object.content,
-        Content::Character { pose_layer: Some(l), .. } if l.fk_on
-    );
-    let pages: Vec<&str> = all.iter().copied().filter(|p| *p != "Pose" || fk_on).collect();
-    let pages = pages.as_slice();
     // The page that holds what the body shows in an H scene, which is of
     // the scene and not of the card, so every character has it.
     let h_page = pages.iter().position(|&p| p == H_PAGE);
@@ -186,10 +178,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
-        if page_name == "Pose" {
-            pose_page(ui, k, st, object.id, &mut object.content);
-            return;
-        }
         let profile_page_index = match page_name {
             "Profile" => Some(1),
             "Likes" => Some(2),
@@ -372,6 +360,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 section_end(ui, k);
             }
+            // The pose made by hand over the animation, while she is posed
+            // by hand.
+            pose_sections(ui, k, st, object.id, &mut object.content);
             return;
         }
         // A character light is turned by its angles alone.
@@ -1244,10 +1235,10 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     }
 }
 
-/// The Pose page, while the character is posed by hand: the bone chosen
-/// (on its ball or in the Outliner) with its turn over the animation and a
-/// way back.
-fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
+/// The Animation page's sections of the pose made by hand, while the
+/// character is posed by hand: the bone chosen (on its ball or in the
+/// Animator) with its turn over the animation and a way back.
+fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     let Content::Character { pose_layer, .. } = content else {
         return;
     };

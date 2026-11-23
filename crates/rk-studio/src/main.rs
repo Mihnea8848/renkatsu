@@ -668,7 +668,7 @@ impl Studio {
             .map(|o| o.id);
         if let Some(bone) = &cli.pose_bone {
             state.pose_bone = Some(bone.clone());
-            state.property_tab = 2;
+            state.property_tab = 1;
             state.fk_open = true;
             state.show_animator = true;
         }
