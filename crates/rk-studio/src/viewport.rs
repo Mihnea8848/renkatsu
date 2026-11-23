@@ -1177,6 +1177,18 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     }
                     continue;
                 }
+                if *name == "Mirror pose" || *name == "Copy to other side" {
+                    // A copy takes the bone chosen and what hangs from it.
+                    let copy = *name == "Copy to other side";
+                    let ready = fk_layer(st).is_some_and(|l| l.fk_on) && (!copy || st.pose_bone.is_some());
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() && ready {
+                        mirror(st, copy);
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 // Only the Select mode's rows are states; the others act.
                 let on = st.mode == 0 && st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
@@ -1255,6 +1267,30 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
     }
 }
 
+/// Mirrors the selected character's pose by hand, or with `copy` copies
+/// the chosen bone and the bones below it to the other side, as one step
+/// of the history.
+pub fn mirror(st: &mut State, copy: bool) {
+    let Some(id) = st.doc.selected else { return };
+    let bone = st.pose_bone.clone().filter(|_| copy);
+    let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) else {
+        return;
+    };
+    edit_fk_layer(st, |l| {
+        for (name, rot) in found {
+            let edit = rk_chara::pose::BoneEdit {
+                rot,
+                ..l.fk.get(&name).copied().unwrap_or_default()
+            };
+            if edit.is_identity() {
+                l.fk.remove(&name);
+            } else {
+                l.fk.insert(name, edit);
+            }
+        }
+    });
+}
+
 /// The FK parts as boxes to tick, one to a row, under the category's
 /// name.
 fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
@@ -1286,14 +1322,13 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 24] = [
+const LATER_TOOLS: [&str; 23] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
     "Inverse kinematics",
-    "Mirror pose",
     "Load pose",
     "Save pose",
     "Reset pose",

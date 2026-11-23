@@ -108,6 +108,7 @@ pub const MODES: [Mode; 7] = [
                     (icon::BONE, "Forward kinematics"),
                     (icon::TARGET, "Inverse kinematics"),
                     (icon::FLIP_HORIZONTAL, "Mirror pose"),
+                    (icon::COPY_SIMPLE, "Copy to other side"),
                 ],
             ),
             (

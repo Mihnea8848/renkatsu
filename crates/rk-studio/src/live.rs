@@ -876,6 +876,49 @@ impl Live {
         )
     }
 
+    /// The edits that mirror a character's pose by hand: with `bone` the
+    /// bone and the FK bones below it onto their twins on the other side,
+    /// without it every FK bone of the parts that are on onto its twin (a
+    /// bone in the middle onto itself). By bone name.
+    pub fn mirror_edits(&self, id: ObjectId, bone: Option<&str>) -> Option<Vec<(String, Quat)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor.layer.as_ref()?;
+        let scene = &actor.chara.scene;
+        let top = actor.chara.top;
+        let below = |node: usize, of: usize| {
+            let mut at = Some(node);
+            while let Some(n) = at {
+                if n == of {
+                    return true;
+                }
+                at = scene.nodes[n].parent;
+            }
+            false
+        };
+        let from = match bone {
+            Some(name) => Some(scene.find(top, name)?),
+            None => None,
+        };
+        let pairs: Vec<(usize, usize)> = actor
+            .fk
+            .iter()
+            .filter(|b| layer.part_on(&b.info.parts()))
+            .filter(|b| from.is_none_or(|f| below(b.node, f)))
+            .filter_map(|b| {
+                let twin = scene.find(top, &rk_chara::pose::twin_name(&b.info.bone))?;
+                // A copy goes to the other side only.
+                (from.is_none() || twin != b.node).then_some((b.node, twin))
+            })
+            .collect();
+        let found = rk_chara::pose::mirrored(scene, &actor.rest, top, &actor.edits, &pairs);
+        Some(
+            found
+                .into_iter()
+                .map(|(n, rot)| (scene.nodes[n].name.clone(), rot))
+                .collect(),
+        )
+    }
+
     /// Where a built character's bone is and how it is turned: its place
     /// and turn in the world, its parent's turn in the world and its own
     /// turn in its parent, for the Pose tool's gizmo.

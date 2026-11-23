@@ -310,6 +310,9 @@ pub struct State {
     pub sun_turning: bool,
     /// The sun's dome shows without the key held, for pictures.
     pub sun_preview: bool,
+    /// Mirror the selected character's pose once she is built, for
+    /// pictures.
+    pub mirror_pending: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
@@ -828,6 +831,7 @@ impl State {
             lens_shown: None,
             sun_turning: false,
             sun_preview: false,
+            mirror_pending: false,
             pose_bone: None,
             fk_open: false,
             animator_search: String::new(),

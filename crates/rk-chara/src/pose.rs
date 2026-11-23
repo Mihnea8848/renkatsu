@@ -167,6 +167,85 @@ pub fn apply(scene: &mut Scene, edits: &[(usize, BoneEdit)]) {
     }
 }
 
+/// The name of a bone's twin on the other side (`_L` and `_R` swapped),
+/// or the bone itself when it lies in the middle.
+pub fn twin_name(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix("_L") {
+        format!("{stem}_R")
+    } else if let Some(stem) = name.strip_suffix("_R") {
+        format!("{stem}_L")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// A turn reflected across the character's middle (the plane x = 0 of its
+/// own space): about the reflected axis, by the same angle.
+pub fn reflect(q: Quat) -> Quat {
+    Quat::from_xyzw(q.x, -q.y, -q.z, q.w)
+}
+
+/// The edits that mirror bones onto others: for each `(source, target)`,
+/// the target turns away from its rest pose as the source does, reflected
+/// across the character's middle. Everything is in the space of `top`, the
+/// character's root, and goes through the rest pose (`rest`, each node's
+/// local transform as built), so it holds however the two sides' bones are
+/// laid. The edits are over the bones' poses of the frame without their
+/// edits (`applied`, the edits the bones carry now), parents first.
+pub fn mirrored(
+    scene: &Scene,
+    rest: &[Trs],
+    top: usize,
+    applied: &[(usize, BoneEdit)],
+    pairs: &[(usize, usize)],
+) -> Vec<(usize, Quat)> {
+    let (world, _) = scene.world();
+    let turn_of = |n: usize| world[n].to_scale_rotation_translation().1;
+    let top_turn = turn_of(top).inverse();
+    // Turns in the character's own space: as posed now, and at rest.
+    let posed = |n: usize| (top_turn * turn_of(n)).normalize();
+    let at_rest = |mut n: usize| {
+        let mut q = Quat::IDENTITY;
+        while n != top {
+            q = rest[n].rot * q;
+            match scene.nodes[n].parent {
+                Some(p) => n = p,
+                None => break,
+            }
+        }
+        q.normalize()
+    };
+    let depth = |mut n: usize| {
+        let mut d = 0;
+        while let Some(p) = scene.nodes[n].parent {
+            d += 1;
+            n = p;
+        }
+        d
+    };
+    let mut order: Vec<(usize, usize)> = pairs.to_vec();
+    order.sort_by_key(|(_, t)| depth(*t));
+    let mut now: std::collections::HashMap<usize, Quat> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (source, target) in order {
+        let away = posed(source) * at_rest(source).inverse();
+        let wanted = (reflect(away) * at_rest(target)).normalize();
+        let parent = match scene.nodes[target].parent {
+            Some(p) if p != top => now.get(&p).copied().unwrap_or_else(|| posed(p)),
+            _ => Quat::IDENTITY,
+        };
+        let local = (parent.inverse() * wanted).normalize();
+        let edit = applied
+            .iter()
+            .find(|(n, _)| *n == target)
+            .map_or(Quat::IDENTITY, |(_, e)| e.rot);
+        let base = scene.nodes[target].local.rot * edit.inverse();
+        out.push((target, (base.inverse() * local).normalize()));
+        now.insert(target, wanted);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +326,111 @@ mod tests {
         // The parts as they start are not written.
         assert!(!toml::to_string(&Layer::default()).unwrap().contains("fk_parts"));
         assert!(toml::to_string(&layer).unwrap().contains("hair"));
+    }
+
+    /// A small body whose two arms mirror each other at rest, as a
+    /// character's do: the arms' turns reflected, their hands' places too.
+    fn body() -> (Scene, Vec<Trs>, [usize; 5]) {
+        let mut scene = Scene::default();
+        let root = scene.add_node("root", None, Trs::default());
+        let hips = scene.add_node("cf_j_hips", Some(root), Trs::default());
+        let arm_turn = Quat::from_euler(glam::EulerRot::YXZ, 0.3, -0.2, 0.9);
+        let trs = |pos: Vec3, rot: Quat| Trs {
+            pos,
+            rot,
+            scale: Vec3::ONE,
+        };
+        let arm_l = scene.add_node("cf_j_arm00_L", Some(hips), trs(Vec3::new(0.2, 1.4, 0.0), arm_turn));
+        let arm_r = scene.add_node(
+            "cf_j_arm00_R",
+            Some(hips),
+            trs(Vec3::new(-0.2, 1.4, 0.0), reflect(arm_turn)),
+        );
+        let hand_l = scene.add_node(
+            "cf_j_hand_L",
+            Some(arm_l),
+            trs(Vec3::new(0.3, 0.05, 0.1), Quat::IDENTITY),
+        );
+        let _hand_r = scene.add_node(
+            "cf_j_hand_R",
+            Some(arm_r),
+            trs(Vec3::new(-0.3, 0.05, 0.1), Quat::IDENTITY),
+        );
+        let rest = scene.nodes.iter().map(|n| n.local).collect();
+        (scene, rest, [root, hips, arm_l, arm_r, hand_l])
+    }
+
+    #[test]
+    fn mirroring_puts_the_twin_where_the_mirror_shows_it() {
+        let (mut scene, rest, [root, _, arm_l, arm_r, hand_l]) = body();
+        // The left arm raised by hand.
+        let edit = BoneEdit {
+            rot: Quat::from_euler(glam::EulerRot::YXZ, 0.4, 0.7, -0.5),
+            ..Default::default()
+        };
+        apply(&mut scene, &[(arm_l, edit)]);
+        let found = mirrored(&scene, &rest, root, &[(arm_l, edit)], &[(arm_l, arm_r)]);
+        assert_eq!(found.len(), 1);
+        let edits: Vec<(usize, BoneEdit)> = found
+            .iter()
+            .map(|(n, rot)| {
+                (
+                    *n,
+                    BoneEdit {
+                        rot: *rot,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        apply(&mut scene, &edits);
+        let (world, _) = scene.world();
+        let hand_r = scene.find(root, "cf_j_hand_R").unwrap();
+        let left = world[hand_l].w_axis.truncate();
+        let right = world[hand_r].w_axis.truncate();
+        assert!(
+            right.abs_diff_eq(Vec3::new(-left.x, left.y, left.z), 1e-4),
+            "{left} {right}"
+        );
+    }
+
+    #[test]
+    fn mirroring_twice_gives_the_pose_back() {
+        let (mut scene, rest, [root, _, arm_l, arm_r, _]) = body();
+        let start = BoneEdit {
+            rot: Quat::from_euler(glam::EulerRot::YXZ, -0.6, 0.2, 0.8),
+            ..Default::default()
+        };
+        apply(&mut scene, &[(arm_l, start)]);
+        let swap = [(arm_l, arm_r), (arm_r, arm_l)];
+        let once = mirrored(&scene, &rest, root, &[(arm_l, start)], &swap);
+        let as_edits = |list: &[(usize, Quat)]| -> Vec<(usize, BoneEdit)> {
+            list.iter()
+                .map(|(n, rot)| {
+                    (
+                        *n,
+                        BoneEdit {
+                            rot: *rot,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect()
+        };
+        // Pose the swapped edits from the bones as they rest.
+        for (n, r) in scene.nodes.iter_mut().zip(&rest) {
+            n.local = *r;
+        }
+        let once = as_edits(&once);
+        apply(&mut scene, &once);
+        let twice = mirrored(&scene, &rest, root, &once, &swap);
+        let back = twice.iter().find(|(n, _)| *n == arm_l).unwrap().1;
+        assert!(
+            back.abs_diff_eq(start.rot, 1e-4) || back.abs_diff_eq(-start.rot, 1e-4),
+            "{back}"
+        );
+        assert_eq!(twin_name("cf_j_arm00_L"), "cf_j_arm00_R");
+        assert_eq!(twin_name("cf_j_spine01"), "cf_j_spine01");
     }
 
     #[test]

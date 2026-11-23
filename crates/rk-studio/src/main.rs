@@ -158,6 +158,10 @@ struct Cli {
     /// Show the sun's dome as Ctrl+L shows it, to picture it.
     #[arg(long, hide = true)]
     sun_preview: bool,
+    /// Mirror the selected character's pose once she is built, to
+    /// picture it.
+    #[arg(long, hide = true)]
+    mirror_pose: bool,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -699,6 +703,7 @@ impl Studio {
             }
         };
         state.sun_preview = cli.sun_preview;
+        state.mirror_pending = cli.mirror_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }
@@ -1080,6 +1085,21 @@ impl eframe::App for Studio {
             panels::open(&mut self.dock, Panel::Content);
             if let Some(tab) = self.dock.find_tab(&Panel::Content) {
                 let _ = self.dock.set_active_tab(tab);
+            }
+        }
+
+        // A mirror asked for at the start, once the character is built.
+        if self.state.mirror_pending {
+            let id = self.state.doc.selected;
+            let ready = id.is_some_and(|id| {
+                self.state
+                    .live
+                    .as_ref()
+                    .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
+            });
+            if ready {
+                viewport::mirror(&mut self.state, false);
+                self.state.mirror_pending = false;
             }
         }
 
