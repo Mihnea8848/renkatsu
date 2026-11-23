@@ -143,6 +143,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AnimationCmd,
     },
+    /// The bones CharaStudio poses by hand (FK), as found on a card's
+    /// character, by part.
+    Bones { card: PathBuf },
     /// Print which states a card's clothes have, and what a row of state
     /// changes such as `top=1 bottom=3 all=0` shows.
     Clothes {
@@ -605,6 +608,7 @@ fn main() -> Result<()> {
             map: map.as_deref(),
             map_time: &map_time,
         }),
+        Cmd::Bones { card } => pose::bones(&card),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },
         } => pose::list(all),
