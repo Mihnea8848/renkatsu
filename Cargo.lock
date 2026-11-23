@@ -2995,6 +2995,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk-ik"
+version = "0.2.2"
+dependencies = [
+ "glam",
+ "serde_json",
+]
+
+[[package]]
 name = "rk-installer"
 version = "0.2.2"
 dependencies = [
