@@ -1816,6 +1816,8 @@ pub struct Physics {
     /// Whether it runs; off leaves the skirts exactly as the game moves
     /// them.
     advanced: bool,
+    /// What the character is among, for Advanced Skirt Physics.
+    obstacles: Option<std::sync::Arc<cloth::Obstacles>>,
 }
 
 impl Physics {
@@ -1955,8 +1957,8 @@ impl Physics {
                 _ => {}
             }
         }
-        if let Some(cloth) = self.cloth.as_ref().filter(|_| self.advanced) {
-            cloth.solve(scene, &mut self.bones, &live);
+        if let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) {
+            cloth.solve(scene, &mut self.bones, &live, self.obstacles.as_ref());
         }
     }
 
@@ -1965,6 +1967,18 @@ impl Physics {
     pub fn fit_cloth(&mut self, scene: &Scene, names: &std::collections::HashMap<String, usize>, on: bool) {
         self.cloth = Some(cloth::Cloth::build(scene, names, &self.bones));
         self.advanced = on;
+    }
+
+    /// What the character is among (a map's floors and furniture), for
+    /// Advanced Skirt Physics to rest skirts on; `None` for nothing.
+    pub fn set_obstacles(&mut self, obstacles: Option<std::sync::Arc<cloth::Obstacles>>) {
+        self.obstacles = obstacles;
+    }
+
+    /// Whether there is anything around the character for skirts to rest
+    /// on.
+    pub fn has_obstacles(&self) -> bool {
+        self.obstacles.as_ref().is_some_and(|o| !o.pieces.is_empty())
     }
 
     /// Whether Advanced Skirt Physics runs.
