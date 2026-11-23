@@ -115,6 +115,10 @@ struct Cli {
     /// says otherwise.
     #[arg(long)]
     size: Option<String>,
+    /// Where the window opens on the desktop, as X,Y, and without taking
+    /// the keyboard: for scripted pictures on a screen of their own.
+    #[arg(long, hide = true, value_delimiter = ',')]
+    at: Vec<f32>,
     /// Start on the project selector even where the settings or a
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
@@ -1454,6 +1458,9 @@ fn run() -> Result<()> {
             .with_decorations(false),
         ..Default::default()
     };
+    if let [x, y] = cli.at[..] {
+        options.viewport = options.viewport.with_position([x, y]).with_active(false);
+    }
     options.wgpu_options.surface.present_mode = if settings.frame_rate.vsync() {
         wgpu::PresentMode::AutoVsync
     } else {

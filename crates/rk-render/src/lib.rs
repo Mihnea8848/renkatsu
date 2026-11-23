@@ -188,7 +188,7 @@ pub struct Lamp {
     /// A spot's full cone in degrees; none for a point or directional lamp.
     pub spot_angle: Option<f32>,
     /// Its place among the lamps that cast shadows (`lamp_shadow::SLOTS`
-    /// at most); none when it casts none. A directional lamp casts none.
+    /// at most); none when it casts none.
     pub shadow: Option<u8>,
 }
 
@@ -201,15 +201,17 @@ pub(crate) fn lamp_rows(lamps: &[Lamp], mask: u32) -> ([[f32; 4]; 24], [f32; 4])
             continue;
         }
         let [r, g, b, _] = material::linear([l.color[0], l.color[1], l.color[2], 1.0]);
-        // A point or spot lamp that casts shadows says its slot in the
-        // place's last number: 1 casts none, 3 the first slot, 5 the next.
+        // A lamp that casts shadows says its slot in the place's last
+        // number: for a point or spot 1 casts none, 3 the first slot, 5
+        // the next; for a directional lamp 0 casts none, -1 the first
+        // slot, -2 the next.
         let slot = l
             .shadow
             .filter(|s| usize::from(*s) < lamp_shadow::SLOTS)
             .map_or(0.0, |s| f32::from(s) + 1.0);
         let place = match l.at {
             Some([x, y, z]) => [x, y, z, 1.0 + 2.0 * slot],
-            None => [l.dir[0], l.dir[1], l.dir[2], 0.0],
+            None => [l.dir[0], l.dir[1], l.dir[2], -slot],
         };
         let cone = l.spot_angle.map_or(-1.0, |a| (a.to_radians() / 2.0).cos());
         rows[n * 3] = place;
@@ -1783,11 +1785,20 @@ impl Renderer {
         // The lamps that cast shadows, by slot.
         let lamp_slots = lamp_shadow::by_slot(env.lamps.iter().chain(&env.map_lamps));
         let lamp_shadows = lamp_slots.iter().any(Option::is_some);
+        // Their views: a directional lamp's follow the camera.
+        let sight = shadow::View {
+            eye: camera.eye,
+            forward: (camera.target - camera.eye).normalize_or(Vec3::Z),
+            up: Vec3::Y,
+            fov_y_deg: camera.fov_y_deg,
+            aspect,
+        };
+        let lamp_views = lamp_slots.map(|lamp| lamp.map_or_else(Vec::new, |lamp| lamp_shadow::views(&lamp, &sight)));
         if lamp_shadows {
             self.queue.write_buffer(
                 &self.lamp_buf,
                 0,
-                bytemuck::bytes_of(&lamp_shadow::uniform(&lamp_slots, Mat4::IDENTITY)),
+                bytemuck::bytes_of(&lamp_shadow::uniform(&lamp_views, Mat4::IDENTITY)),
             );
         }
         if cast || occlude || lamp_shadows {
@@ -2027,7 +2038,7 @@ impl Renderer {
             if lamp_shadows && !lamps_drawn {
                 lamps_drawn = true;
                 if let Some((_, gpu, _)) = &map_frame {
-                    gpu.write_lamp_tiles(&self.queue, &lamp_slots);
+                    gpu.write_lamp_tiles(&self.queue, &lamp_views);
                 }
                 let mut pass = crate::pass::Pass::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("lamp shadows"),
@@ -2047,7 +2058,7 @@ impl Renderer {
                 let side = lamp_shadow::TILE;
                 for (slot, lamp) in lamp_slots.iter().enumerate() {
                     let Some(lamp) = lamp else { continue };
-                    for (face, vp) in lamp_shadow::views(lamp).into_iter().enumerate() {
+                    for (face, &vp) in lamp_views[slot].iter().enumerate() {
                         let tile = lamp_shadow::tile(slot, face);
                         let [x, y] = lamp_shadow::origin(tile);
                         pass.set_viewport(x as f32, y as f32, side as f32, side as f32, 0.0, 1.0);
@@ -2055,9 +2066,9 @@ impl Renderer {
                         if let Some((pipes, gpu, frame)) = &map_frame {
                             gpu.draw_lamp_casters(pipes, &mut pass, frame, tile, vp);
                         }
-                        if !charas {
-                            continue;
-                        }
+                        // The characters cast whichever view draws the
+                        // atlas first: a mirror that leaves them out of its
+                        // picture still sees their shadows.
                         let globals = Globals {
                             view_proj: vp.to_cols_array(),
                             light_dir: [-lamp.dir[0], -lamp.dir[1], -lamp.dir[2], 0.0],

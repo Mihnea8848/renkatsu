@@ -951,8 +951,8 @@ impl Scene {
     /// takes them, in the Outliner's order.
     pub fn lamps(&self, map: bool) -> Vec<(ObjectId, rk_render::Lamp)> {
         let mut out = Vec::new();
-        // The point and spot lamps that cast shadows, numbered in the
-        // Outliner's order whatever they light, the first two only.
+        // The lamps that cast shadows, numbered in the Outliner's order
+        // whatever they light, the first two only.
         let mut shadowed = 0u8;
         for (_, id) in self.rows() {
             let Some(o) = self.get(id).filter(|o| self.shown(o.id)) else {
@@ -972,10 +972,11 @@ impl Scene {
             else {
                 continue;
             };
-            let shadow = (*shadows && matches!(light, LightKind::Point | LightKind::Spot)).then(|| {
-                shadowed += 1;
-                shadowed - 1
-            });
+            let shadow = (*shadows && matches!(light, LightKind::Point | LightKind::Spot | LightKind::Directional))
+                .then(|| {
+                    shadowed += 1;
+                    shadowed - 1
+                });
             let shadow = shadow.filter(|s| usize::from(*s) < rk_render::lamp_shadow::SLOTS);
             if *light == LightKind::Character || !(if map { *on_map } else { *on_characters }) {
                 continue;

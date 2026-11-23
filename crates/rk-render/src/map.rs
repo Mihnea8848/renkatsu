@@ -2422,13 +2422,9 @@ impl MapGpu {
 
     /// Writes the lamps' shadow tiles for the map's casters and surfaces,
     /// taken into the map's own space.
-    pub(crate) fn write_lamp_tiles(
-        &self,
-        queue: &wgpu::Queue,
-        slots: &[Option<crate::Lamp>; crate::lamp_shadow::SLOTS],
-    ) {
+    pub(crate) fn write_lamp_tiles(&self, queue: &wgpu::Queue, views: &[Vec<Mat4>; crate::lamp_shadow::SLOTS]) {
         let root = self.placement.rigid();
-        let u = crate::lamp_shadow::uniform(slots, root);
+        let u = crate::lamp_shadow::uniform(views, root);
         queue.write_buffer(&self.lamp_buf, 0, bytemuck::bytes_of(&u));
         for (m, (buf, _)) in u.view_proj.iter().zip(&self.lamp_tiles) {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(m));
