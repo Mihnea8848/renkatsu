@@ -1073,7 +1073,7 @@ fn grid_look(k: &Look, cell: f32, camera: &rk_render::Camera) -> crate::grid_pas
 }
 
 /// One icon, `size` its radius and `fade` how much of it shows.
-fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, kind: Kind, selected: bool, size: f32, fade: f32) {
+fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, look: &IconLook, selected: bool, size: f32, fade: f32) {
     let alpha = |a: u8| (f32::from(a) * fade) as u8;
     p.circle_filled(at, size, Theme::glass(k.t.well, alpha(215)));
     let edge = if selected {
@@ -1082,13 +1082,28 @@ fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, kind: Kind, selected: bool, si
         Stroke::new(1.0, Theme::glass(k.t.hover, alpha(150)))
     };
     p.circle_stroke(at, size, edge);
+    // A notch on the ring, the way a spot or directional lamp shines.
+    if let Some(d) = look.shines {
+        let side = Vec2::new(-d.y, d.x) * (size * 0.28);
+        let base = at + d * (size - 0.5);
+        let tip = at + d * (size + size * 0.38);
+        p.add(egui::Shape::convex_polygon(
+            vec![base + side, tip, base - side],
+            if selected {
+                edge.color
+            } else {
+                Theme::glass(look.tint, alpha(235))
+            },
+            Stroke::NONE,
+        ));
+    }
     glyph(
         p,
         k,
         at,
-        kind.glyph(),
+        look.glyph,
         size * 14.0 / 11.0,
-        Theme::glass(kind.color(), alpha(255)),
+        Theme::glass(look.tint, alpha(255)),
     );
 }
 
@@ -1107,7 +1122,7 @@ struct Shown {
 
 /// An icon's radius at full size, and at its smallest.
 const ICON_SIZE: f32 = 11.0;
-const ICON_SMALLEST: f32 = 6.0;
+const ICON_SMALLEST: f32 = 8.0;
 /// Up to how far an icon keeps its full size, in metres.
 const ICON_NEAR: f32 = 4.0;
 /// The least distance between two icons' middles, in points: two closer
@@ -1255,13 +1270,54 @@ fn draw_lamp_reach(p: &egui::Painter, st: &State, view: &View) {
     }
 }
 
-fn draw_icons(p: &egui::Painter, k: &Look, st: &State, shown: &[Shown]) {
+fn draw_icons(p: &egui::Painter, k: &Look, st: &State, view: &View, shown: &[Shown]) {
     let mut order: Vec<&Shown> = shown.iter().collect();
     order.sort_by(|a, b| a.size.total_cmp(&b.size));
     for icon in order {
         let fade = if icon.behind { 0.3 } else { 1.0 };
-        icon_at(p, k, icon.at, icon.kind, st.doc.is_selected(icon.id), icon.size, fade);
+        let look = icon_look(st, view, icon.id, icon.kind);
+        icon_at(p, k, icon.at, &look, st.doc.is_selected(icon.id), icon.size, fade);
     }
+}
+
+/// What an icon shows of its object: its glyph, by kind of light, the
+/// light's colour, and which way a spot or directional lamp shines on
+/// the screen.
+struct IconLook {
+    glyph: &'static str,
+    tint: Color32,
+    shines: Option<Vec2>,
+}
+
+fn icon_look(st: &State, view: &View, id: ObjectId, kind: Kind) -> IconLook {
+    use crate::scene::Content;
+    let scene = st.doc.scene();
+    use crate::scene::LightKind;
+    let mut look = IconLook {
+        glyph: kind.glyph(),
+        tint: kind.color(),
+        shines: None,
+    };
+    if let Some(Content::Light { light, color, .. }) = scene.get(id).map(|o| &o.content) {
+        look.glyph = match light {
+            LightKind::Character => icon::SUN_DIM,
+            LightKind::Directional => icon::SUN,
+            LightKind::Point => icon::LIGHTBULB,
+            LightKind::Spot => icon::FLASHLIGHT,
+        };
+        // The light's colour, lightened so a dark one still reads.
+        let up = |v: f32| ((0.55 + 0.45 * v.clamp(0.0, 1.0)) * 255.0) as u8;
+        look.tint = Color32::from_rgb(up(color[0]), up(color[1]), up(color[2]));
+        if matches!(light, LightKind::Spot | LightKind::Directional) {
+            let (_, turn, at) = scene.world(id).to_scale_rotation_translation();
+            let towards = turn * Vec3::Z;
+            if let (Some(a), Some(b)) = (view.screen(at), view.screen(at + towards * 0.5)) {
+                let d = b - a;
+                look.shines = (d.length() > 1.0).then(|| d.normalized());
+            }
+        }
+    }
+    look
 }
 
 /// Draws what the pointer works with over the scene's picture: the grid,
@@ -1289,7 +1345,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     draw_lamp_reach(&p, st, &view);
     let pointer = ui.ctx().pointer_hover_pos();
     let shown = shown_icons(st, &view, pointer);
-    draw_icons(&p, k, st, &shown);
+    draw_icons(&p, k, st, &view, &shown);
     st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {
