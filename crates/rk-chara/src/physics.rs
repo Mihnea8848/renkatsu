@@ -1960,6 +1960,11 @@ impl Physics {
         if let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) {
             cloth.solve(scene, &mut self.bones, &live, self.obstacles.as_ref());
         }
+        // The vertices between the skirt's bones, after skinning.
+        scene.push_out = match &self.cloth {
+            Some(cloth) if self.advanced => cloth.push_out(self.has_obstacles()),
+            _ => None,
+        };
     }
 
     /// Fits Advanced Skirt Physics to the character as it is now, which

@@ -415,6 +415,82 @@ pub struct Instance {
 pub struct Scene {
     pub nodes: Vec<Node>,
     pub renderers: Vec<RendererInst>,
+    /// Advanced Skirt Physics' last word on the skirts: what their
+    /// vertices are pushed out of after skinning. Set by the physics.
+    pub push_out: Option<PushOut>,
+}
+
+/// Most capsules a skinned mesh is pushed out of; the shader holds a
+/// fixed list.
+pub const PUSH_CAPSULES: usize = 32;
+/// How far off a capsule or the floor a pushed vertex is put.
+pub const PUSH_GAP: f32 = 0.005;
+
+/// What skirt vertices are pushed out of after skinning, so that a leg
+/// or the floor between two skirt bones does not show through: capsules
+/// along the limbs, each in the space of its node, and a floor at a
+/// node's XZ plane. A vertex is pushed by the share of its weight on the
+/// skirt's bones, so the waistband stays where it is.
+#[derive(Debug, Clone, Default)]
+pub struct PushOut {
+    /// Node, the two ends and their radii.
+    pub capsules: Vec<(usize, Vec3, Vec3, f32, f32)>,
+    pub floor: Option<usize>,
+    /// The skirt's bones, by node.
+    pub skirt: std::sync::Arc<Vec<bool>>,
+}
+
+/// `PushOut` for one posed mesh, in the world.
+#[derive(Debug, Clone, Default)]
+pub struct PushDraw {
+    /// Each capsule's ends with their radii in `w`.
+    pub capsules: Vec<[Vec4; 2]>,
+    /// The floor's normal and its distance from the origin, as a plane.
+    pub floor: Option<Vec4>,
+    /// Which of the mesh's bone slots are skirt bones.
+    pub skirt_slots: Vec<bool>,
+}
+
+impl PushDraw {
+    /// Pushes a skinned vertex at `p` out of the capsules and above the
+    /// floor by `share`, its weight on skirt bones; as `skin.wgsl` does.
+    pub fn apply(&self, mut p: Vec3, share: f32) -> Vec3 {
+        if share <= 0.0 {
+            return p;
+        }
+        for [a, b] in &self.capsules {
+            let (a3, b3) = (a.truncate(), b.truncate());
+            let axis = b3 - a3;
+            let len2 = axis.length_squared();
+            let t = if len2 > 0.0 {
+                ((p - a3).dot(axis) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = p - (a3 + axis * t);
+            let r = a.w + (b.w - a.w) * t + PUSH_GAP;
+            let dist = d.length();
+            if dist < r && dist > 1e-6 {
+                p += d * ((r - dist) / dist * share);
+            }
+        }
+        if let Some(f) = self.floor {
+            let h = p.dot(f.truncate()) - f.w;
+            if h < PUSH_GAP {
+                p += f.truncate() * ((PUSH_GAP - h) * share);
+            }
+        }
+        p
+    }
+
+    /// The vertex's weight on skirt bones.
+    pub fn share(&self, bones: [u32; 4], weights: [f32; 4]) -> f32 {
+        (0..4)
+            .filter(|&k| self.skirt_slots.get(bones[k] as usize).copied().unwrap_or(false))
+            .map(|k| weights[k].max(0.0))
+            .sum::<f32>()
+            .min(1.0)
+    }
 }
 
 impl Scene {
@@ -525,6 +601,8 @@ pub struct DrawMesh<'a> {
     /// Lowest and highest corner of the renderer's culling box in the world
     /// (`Renderer.bounds`); `None` when the files give no box.
     pub bounds: Option<[[f32; 3]; 2]>,
+    /// Advanced Skirt Physics' push-out, for a mesh with skirt bones.
+    pub push: Option<PushDraw>,
 }
 
 /// How a posed mesh's vertices reach the world.
@@ -611,8 +689,11 @@ impl DrawMesh<'_> {
         };
         for vi in 0..n {
             let mat = self.vertex_matrix(vi);
-            out.positions
-                .push(mat.transform_point3(Vec3::from(self.base_positions[vi])).to_array());
+            let mut p = mat.transform_point3(Vec3::from(self.base_positions[vi]));
+            if let (Some(push), Some(sv)) = (&self.push, self.renderer.mesh.skin.get(vi)) {
+                p = push.apply(p, push.share(sv.bones, sv.weights));
+            }
+            out.positions.push(p.to_array());
             out.tangents.push(if has_tangents {
                 let t = self.renderer.mesh.tangents[vi];
                 let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
@@ -684,12 +765,46 @@ impl Scene {
                 }
             };
             let bounds = r.bounds.map(|b| b.transformed(world[r.root_bone.unwrap_or(r.node)]));
+            let push = self.push_out.as_ref().and_then(|push| {
+                let skirt_slots: Vec<bool> = r
+                    .bones
+                    .iter()
+                    .map(|b| b.is_some_and(|n| push.skirt.get(n).copied().unwrap_or(false)))
+                    .collect();
+                if !r.skinned || !skirt_slots.contains(&true) {
+                    return None;
+                }
+                let capsules = push
+                    .capsules
+                    .iter()
+                    .take(PUSH_CAPSULES)
+                    .map(|&(node, a, b, ra, rb)| {
+                        let m = world[node];
+                        let s = m.x_axis.truncate().length();
+                        [
+                            m.transform_point3(a).extend(ra * s),
+                            m.transform_point3(b).extend(rb * s),
+                        ]
+                    })
+                    .collect();
+                let floor = push.floor.map(|n| {
+                    let m = world[n];
+                    let up = m.y_axis.truncate().normalize_or_zero();
+                    up.extend(up.dot(m.w_axis.truncate()))
+                });
+                Some(PushDraw {
+                    capsules,
+                    floor,
+                    skirt_slots,
+                })
+            });
             out.push(DrawMesh {
                 renderer: r,
                 base_positions,
                 base_normals,
                 skinning,
                 bounds,
+                push,
             });
         }
         out
