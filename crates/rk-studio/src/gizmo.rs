@@ -1533,8 +1533,9 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) 
     // The arrow to the sun, and the sun where it meets the dome.
     let sun_colour = Color32::from_rgb(255, 208, 92);
     let arrow = Stroke::new(2.0, sun_colour);
-    line(Vec3::ZERO, towards * 0.92, arrow);
-    if let (Some(tip), Some(back)) = (point(towards * 0.92), point(towards * 0.78)) {
+    // The arrow stops short of the sun.
+    line(Vec3::ZERO, towards * 0.74, arrow);
+    if let (Some(tip), Some(back)) = (point(towards * 0.74), point(towards * 0.6)) {
         let d = (tip - back).normalized();
         let side = Vec2::new(-d.y, d.x) * 6.0;
         p.add(egui::Shape::convex_polygon(
@@ -1544,8 +1545,18 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) 
         ));
     }
     if let Some(at) = point(towards) {
-        p.circle_filled(at, 6.0, sun_colour);
-        p.circle_stroke(at, 9.0, Stroke::new(1.0, sun_colour.gamma_multiply(0.5)));
+        // A sun: a soft warm glow, eight short rays and a bright core.
+        for (r, alpha) in [(15.0, 0.10), (11.0, 0.18), (8.5, 0.28)] {
+            p.circle_filled(at, r, sun_colour.gamma_multiply(alpha));
+        }
+        let ray = Stroke::new(1.5, sun_colour);
+        for i in 0..8 {
+            let (s, c) = (i as f32 / 8.0 * TAU + TAU / 16.0).sin_cos();
+            let d = Vec2::new(c, s);
+            p.line_segment([at + d * 8.0, at + d * 12.5], ray);
+        }
+        p.circle_filled(at, 5.5, sun_colour);
+        p.circle_filled(at, 3.0, Color32::from_rgb(255, 244, 210));
     }
     // Its shadow on the horizon, for where it stands round.
     let flat = Vec3::new(towards.x, 0.0, towards.z).normalize_or_zero();
