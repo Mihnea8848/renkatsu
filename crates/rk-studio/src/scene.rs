@@ -954,10 +954,8 @@ impl Scene {
         // The lamps that cast shadows, numbered in the Outliner's order
         // whatever they light, the first two only.
         let mut shadowed = 0u8;
-        for (_, id) in self.rows() {
-            let Some(o) = self.get(id).filter(|o| self.shown(o.id)) else {
-                continue;
-            };
+        for o in self.shown_rows() {
+            let id = o.id;
             let Content::Light {
                 light,
                 on_characters,
@@ -1078,13 +1076,10 @@ impl Scene {
             _ => None,
         };
         let mut best: Option<(ObjectId, f32)> = None;
-        for (_, id) in self.rows() {
-            let Some(object) = self.get(id).filter(|o| self.shown(o.id)) else {
-                continue;
-            };
+        for object in self.shown_rows() {
             if let Some(b) = brightness(object) {
                 if best.is_none_or(|(_, top)| b > top) {
-                    best = Some((id, b));
+                    best = Some((object.id, b));
                 }
             }
         }
@@ -1343,21 +1338,61 @@ impl Scene {
     /// being depth 0.
     pub fn rows(&self) -> Vec<(usize, ObjectId)> {
         let mut rows = Vec::with_capacity(self.objects.len());
-        self.walk(None, 0, &mut rows);
+        self.walk(&self.child_lists(), None, 0, &mut rows);
         rows
     }
 
-    fn walk(&self, parent: Option<ObjectId>, depth: usize, rows: &mut Vec<(usize, ObjectId)>) {
-        for id in self.children(parent) {
-            rows.push((depth, id));
-            self.walk(Some(id), depth + 1, rows);
+    /// The places in `objects` of each object's children, by parent, in
+    /// the scene's order: one pass, where asking each object for its
+    /// children would go over the whole scene for every object.
+    fn child_lists(&self) -> std::collections::HashMap<Option<ObjectId>, Vec<usize>> {
+        let mut lists: std::collections::HashMap<Option<ObjectId>, Vec<usize>> = std::collections::HashMap::new();
+        for (i, o) in self.objects.iter().enumerate() {
+            lists.entry(o.parent).or_default().push(i);
         }
+        lists
+    }
+
+    fn walk(
+        &self,
+        lists: &std::collections::HashMap<Option<ObjectId>, Vec<usize>>,
+        parent: Option<ObjectId>,
+        depth: usize,
+        rows: &mut Vec<(usize, ObjectId)>,
+    ) {
+        for &i in lists.get(&parent).map_or(&[][..], Vec::as_slice) {
+            let id = self.objects[i].id;
+            rows.push((depth, id));
+            self.walk(lists, Some(id), depth + 1, rows);
+        }
+    }
+
+    /// The objects that show, in tree order: those not inside a hidden
+    /// object or folder, as `shown` tells them.
+    pub fn shown_rows(&self) -> Vec<&Object> {
+        fn walk<'a>(
+            scene: &'a Scene,
+            lists: &std::collections::HashMap<Option<ObjectId>, Vec<usize>>,
+            parent: Option<ObjectId>,
+            out: &mut Vec<&'a Object>,
+        ) {
+            for &i in lists.get(&parent).map_or(&[][..], Vec::as_slice) {
+                let o = &scene.objects[i];
+                if o.visible {
+                    out.push(o);
+                    walk(scene, lists, Some(o.id), out);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(self.objects.len());
+        walk(self, &self.child_lists(), None, &mut out);
+        out
     }
 
     /// An object and everything below it, in tree order.
     pub fn subtree(&self, id: ObjectId) -> Vec<ObjectId> {
         let mut rows = vec![(0, id)];
-        self.walk(Some(id), 1, &mut rows);
+        self.walk(&self.child_lists(), Some(id), 1, &mut rows);
         rows.into_iter().map(|(_, id)| id).collect()
     }
 
@@ -1388,14 +1423,14 @@ impl Scene {
     /// The light that lights the scene: the first one that shows, in tree
     /// order. The renderer has one light.
     pub fn key_light(&self) -> Option<&Object> {
-        self.rows().into_iter().filter_map(|(_, id)| self.get(id)).find(|o| {
+        self.shown_rows().into_iter().find(|o| {
             matches!(
                 o.content,
                 Content::Light {
                     light: LightKind::Character,
                     ..
                 }
-            ) && self.shown(o.id)
+            )
         })
     }
 
@@ -2489,6 +2524,29 @@ mod tests {
             .collect();
         assert_eq!(filters, vec![(Some(5), false), (None, true)]);
         assert!(effects.contains(&("Fog".to_owned(), Some("Effects".to_owned()), false)));
+    }
+
+    #[test]
+    fn shown_rows_are_the_rows_that_show() {
+        let mut scene = Scene::empty();
+        let open = scene.add("Open", Content::Folder, None);
+        let shut = scene.add("Shut", Content::Folder, None);
+        let inner = scene.add("Inner", Content::Folder, Some(shut));
+        for (name, parent) in [("a", None), ("b", Some(open)), ("c", Some(shut)), ("d", Some(inner))] {
+            scene.add(name, Content::light(), parent);
+        }
+        let hidden = scene.add("e", Content::light(), Some(open));
+        scene.get_mut(shut).unwrap().visible = false;
+        scene.get_mut(hidden).unwrap().visible = false;
+        let old: Vec<ObjectId> = scene
+            .rows()
+            .into_iter()
+            .map(|(_, id)| id)
+            .filter(|id| scene.shown(*id))
+            .collect();
+        let new: Vec<ObjectId> = scene.shown_rows().into_iter().map(|o| o.id).collect();
+        assert_eq!(new, old);
+        assert_eq!(new.len(), 3, "Open, a and b");
     }
 
     #[test]
