@@ -22,6 +22,9 @@ use rk_unityfs::{PPtr, UObject};
 pub const SETTLE_FRAMES: u32 = 90;
 /// Frame time assumed for settling: display refresh at 60 Hz.
 pub const FRAME_TIME: f32 = 1.0 / 60.0;
+/// Frames of a settle over which Advanced Skirt Physics moves into a new
+/// pose (`Physics::ease`).
+pub const EASE_FRAMES: u32 = 30;
 
 // ---------------------------------------------------------------------------
 // Unity transform semantics on scene nodes.
@@ -163,6 +166,8 @@ impl Curve {
         }
     }
 }
+
+pub mod cloth;
 
 // ---------------------------------------------------------------------------
 // DynamicBoneCollider.
@@ -1735,6 +1740,49 @@ pub enum Bone {
     Ver02(Ver02),
 }
 
+impl Bone {
+    /// `ResetParticlesPosition`: the particles go back on their bones and
+    /// the component's place becomes the one it moves from, so that the
+    /// next update does not take the jump for movement.
+    fn reset(&mut self, scene: &Scene) {
+        match self {
+            Bone::Dynamic(d) => {
+                reset_particles(scene, &mut d.particles);
+                d.object_prev = position(scene, d.def.node);
+            }
+            Bone::Ver01(d) => {
+                reset_particles(scene, &mut d.particles);
+                d.object_prev = position(scene, d.def.node);
+            }
+            Bone::Ver02(d) => {
+                reset_particles(scene, &mut d.particles);
+                if let Some(root) = d.def.root {
+                    d.object_prev = position(scene, root);
+                }
+            }
+        }
+    }
+
+    /// The object the component sits on and whether the component itself
+    /// is switched on.
+    fn component(&self) -> (usize, bool) {
+        match self {
+            Bone::Dynamic(d) => (d.def.node, d.def.enabled),
+            Bone::Ver01(d) => (d.def.node, d.def.enabled),
+            Bone::Ver02(d) => (d.def.node, d.def.enabled),
+        }
+    }
+
+    /// `OnDisable`: the bones go back to their rest transforms.
+    fn init_transforms(&self, scene: &mut Scene) {
+        match self {
+            Bone::Dynamic(d) => d.init_transforms(scene),
+            Bone::Ver01(d) => d.init_transforms(scene),
+            Bone::Ver02(d) => d.init_transforms(scene),
+        }
+    }
+}
+
 /// What a physics component came with, so that a kind can be switched
 /// off: the body (its bust and buttocks too), hair, clothes or an
 /// accessory.
@@ -1760,6 +1808,16 @@ pub struct Physics {
     pub belongs: Vec<Belongs>,
     /// The kinds that hold still at their rest pose instead of moving.
     still: Vec<Belongs>,
+    /// Whether each of `bones` sat on an object that was active when last
+    /// looked at; a component of a hidden object does not run.
+    active: Vec<bool>,
+    /// Advanced Skirt Physics (`cloth`), once fitted to the character.
+    cloth: Option<cloth::Cloth>,
+    /// Whether it runs; off leaves the skirts exactly as the game moves
+    /// them.
+    advanced: bool,
+    /// What the character is among, for Advanced Skirt Physics.
+    obstacles: Option<std::sync::Arc<cloth::Obstacles>>,
 }
 
 impl Physics {
@@ -1773,6 +1831,42 @@ impl Physics {
                 Bone::Ver02(d) => d.start(scene),
             }
         }
+        self.active = self
+            .bones
+            .iter()
+            .map(|b| active_in_hierarchy(scene, b.component().0))
+            .collect();
+    }
+
+    /// What Unity does when an object with a component is switched off or
+    /// on, as clothes are by their states and accessories by theirs:
+    /// `OnDisable` puts the component's bones back to their rest
+    /// transforms, and `OnEnable` starts its particles again from where
+    /// the bones are (`ResetParticlesPosition`). A component on an object
+    /// that is off runs neither `Update` nor `LateUpdate`.
+    pub fn follow_objects(&mut self, scene: &mut Scene) {
+        self.active.resize(self.bones.len(), true);
+        for (b, was) in self.bones.iter_mut().zip(self.active.iter_mut()) {
+            let (node, enabled) = b.component();
+            let now = active_in_hierarchy(scene, node);
+            if now == *was {
+                continue;
+            }
+            *was = now;
+            if !enabled {
+                continue;
+            }
+            if now {
+                b.reset(scene);
+            } else {
+                b.init_transforms(scene);
+            }
+        }
+    }
+
+    /// Whether the bone at `i` sits on an object that is on.
+    fn shown(&self, i: usize) -> bool {
+        self.active.get(i).copied().unwrap_or(true)
     }
 
     /// What `ChaControl.LateUpdateForce` does once the body shape is set:
@@ -1801,8 +1895,12 @@ impl Physics {
     /// The first half of a frame, the components' `Update`: the bones go
     /// back to where they were loaded. An animation writes its bones
     /// after this and before `end_frame`, as Unity's Animator does.
-    pub fn begin_frame(&self, scene: &mut Scene) {
+    pub fn begin_frame(&mut self, scene: &mut Scene) {
+        self.follow_objects(scene);
         for (i, b) in self.bones.iter().enumerate() {
+            if !self.shown(i) {
+                continue;
+            }
             let moves = self.moves(i);
             match b {
                 Bone::Dynamic(d) if d.running() => d.init_transforms(scene),
@@ -1829,11 +1927,7 @@ impl Physics {
         for (i, b) in self.bones.iter_mut().enumerate() {
             let belongs = self.belongs.get(i).copied().unwrap_or_default();
             if self.still.contains(&belongs) && !still.contains(&belongs) {
-                match b {
-                    Bone::Dynamic(d) => reset_particles(scene, &mut d.particles),
-                    Bone::Ver01(d) => reset_particles(scene, &mut d.particles),
-                    Bone::Ver02(d) => reset_particles(scene, &mut d.particles),
-                }
+                b.reset(scene);
             }
         }
         self.still = still.to_vec();
@@ -1842,17 +1936,92 @@ impl Physics {
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
-        let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i)).collect();
-        for (b, moves) in self.bones.iter_mut().zip(moving) {
+        self.follow_objects(scene);
+        let moving: Vec<bool> = (0..self.bones.len()).map(|i| self.moves(i) && self.shown(i)).collect();
+        let cloth = self.cloth.as_mut().filter(|_| self.advanced);
+        if let Some(cloth) = cloth {
+            cloth.begin(scene, &self.bones);
+        }
+        let mut live = vec![false; self.bones.len()];
+        for ((b, moves), live) in self.bones.iter_mut().zip(moving).zip(&mut live) {
             if !moves {
                 continue;
             }
             match b {
-                Bone::Dynamic(d) if d.running() => d.late_update(scene, &self.colliders, dt),
+                Bone::Dynamic(d) if d.running() => {
+                    d.late_update(scene, &self.colliders, dt);
+                    *live = true;
+                }
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),
                 Bone::Ver02(d) if d.running() => d.late_update(scene, &self.colliders, dt),
                 _ => {}
             }
+        }
+        if let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) {
+            cloth.solve(scene, &mut self.bones, &live, self.obstacles.as_ref());
+        }
+    }
+
+    /// Fits Advanced Skirt Physics to the character as it is now, which
+    /// should be the pose it was built in, and switches it `on` or off.
+    pub fn fit_cloth(&mut self, scene: &Scene, names: &std::collections::HashMap<String, usize>, on: bool) {
+        self.cloth = Some(cloth::Cloth::build(scene, names, &self.bones));
+        self.advanced = on;
+    }
+
+    /// What the character is among (a map's floors and furniture), for
+    /// Advanced Skirt Physics to rest skirts on; `None` for nothing.
+    pub fn set_obstacles(&mut self, obstacles: Option<std::sync::Arc<cloth::Obstacles>>) {
+        self.obstacles = obstacles;
+    }
+
+    /// Whether there is anything around the character for skirts to rest
+    /// on.
+    pub fn has_obstacles(&self) -> bool {
+        self.obstacles.as_ref().is_some_and(|o| !o.pieces.is_empty())
+    }
+
+    /// Whether Advanced Skirt Physics runs.
+    pub fn advanced(&self) -> bool {
+        self.advanced && self.cloth.is_some()
+    }
+
+    /// Switches Advanced Skirt Physics on or off; true when that changed
+    /// anything, so that the skirts are to settle again.
+    pub fn set_advanced(&mut self, on: bool) -> bool {
+        let was = self.advanced();
+        self.advanced = on;
+        self.advanced() != was
+    }
+
+    /// With Advanced Skirt Physics on, a new pose is reached over
+    /// `EASE_FRAMES` frames of the settle instead of in one jump, so that
+    /// a leg moving into a skirt pushes it instead of passing through it.
+    /// Call after the pose was written: every bone the physics does not
+    /// drive goes from `from` towards it by `amount`, from 0 to 1.
+    pub fn ease(&self, scene: &mut Scene, from: &[crate::scene::Trs], amount: f32) {
+        if !self.advanced() || amount >= 1.0 {
+            return;
+        }
+        let mut driven = vec![false; scene.nodes.len()];
+        for b in &self.bones {
+            let ps = match b {
+                Bone::Dynamic(d) => &d.particles,
+                Bone::Ver01(d) => &d.particles,
+                Bone::Ver02(d) => &d.particles,
+            };
+            for n in ps.iter().filter_map(|p| p.node) {
+                driven[n] = true;
+            }
+        }
+        for ((node, f), driven) in scene.nodes.iter_mut().zip(from).zip(driven) {
+            if driven {
+                continue;
+            }
+            let l = &mut node.local;
+            l.pos = f.pos.lerp(l.pos, amount);
+            l.rot = f.rot.slerp(l.rot, amount);
+            l.scale = f.scale.lerp(l.scale, amount);
         }
     }
 
@@ -1886,10 +2055,29 @@ impl Physics {
     /// Puts every particle back on its bone, as `ResetParticlesPosition`.
     pub fn reset(&mut self, scene: &Scene) {
         for b in &mut self.bones {
+            b.reset(scene);
+        }
+    }
+
+    /// Moves every particle with the character when it is placed somewhere
+    /// else while nothing runs, so that hair and skirts keep the shape they
+    /// settled in. `ResetParticlesPosition` would put them back on bones
+    /// that hold their rest shape, which in a sitting or lying pose is
+    /// inside the legs. `moved` is the change of the character's world
+    /// transform.
+    pub fn carry(&mut self, moved: Mat4) {
+        let carry = |particles: &mut [Particle], prev: &mut Vec3| {
+            for p in particles.iter_mut() {
+                p.pos = moved.transform_point3(p.pos);
+                p.prev = moved.transform_point3(p.prev);
+            }
+            *prev = moved.transform_point3(*prev);
+        };
+        for b in &mut self.bones {
             match b {
-                Bone::Dynamic(d) => reset_particles(scene, &mut d.particles),
-                Bone::Ver01(d) => reset_particles(scene, &mut d.particles),
-                Bone::Ver02(d) => reset_particles(scene, &mut d.particles),
+                Bone::Dynamic(d) => carry(&mut d.particles, &mut d.object_prev),
+                Bone::Ver01(d) => carry(&mut d.particles, &mut d.object_prev),
+                Bone::Ver02(d) => carry(&mut d.particles, &mut d.object_prev),
             }
         }
     }
@@ -2085,6 +2273,105 @@ mod tests {
         let posed = position(&scene, b);
         physics.settle(&mut scene, 120, FRAME_TIME);
         assert!(position(&scene, b).y < posed.y - 0.01);
+    }
+
+    #[test]
+    fn a_reset_is_not_taken_for_movement() {
+        // A skirt-like chain with inertia, moved a metre and reset: the
+        // next frame must not carry it along by the move, as
+        // `ResetParticlesPosition` sets where the component moves from.
+        let mut scene = Scene::default();
+        let holder = scene.add_node("holder", None, Trs::default());
+        let root = scene.add_node("root", Some(holder), at(Vec3::new(0.0, 1.0, 0.0)));
+        let a = scene.add_node("a", Some(root), at(Vec3::new(0.0, -0.1, 0.0)));
+        let b = scene.add_node("b", Some(a), at(Vec3::new(0.0, -0.1, 0.0)));
+        let mut physics = dynamic(DynamicBoneDef {
+            node: root,
+            root: Some(root),
+            inert: 0.8,
+            stiffness: 0.0,
+            elasticity: 0.0,
+            damping: 0.0,
+            ..Default::default()
+        });
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 10, FRAME_TIME);
+        scene.nodes[holder].local.pos = Vec3::new(1.0, 0.0, 0.0);
+        physics.reset(&scene);
+        let placed = position(&scene, b);
+        physics.step(&mut scene, FRAME_TIME);
+        assert!(
+            close(position(&scene, b), placed, 1e-5),
+            "{:?} {placed:?}",
+            position(&scene, b)
+        );
+    }
+
+    #[test]
+    fn a_hidden_object_stops_its_physics() {
+        // A skirt on a clothing object that is switched off, as a bottom
+        // in state 3 is: `OnDisable` puts its bones back to rest and it
+        // stays there; switched on, it starts again from the bones.
+        let mut scene = Scene::default();
+        let clothes = scene.add_node("ct_clothesBot", None, Trs::default());
+        let bones = chain(&mut scene, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -0.1, 0.0), 3);
+        let mut physics = dynamic(DynamicBoneDef {
+            node: clothes,
+            root: Some(bones[0]),
+            force: Vec3::new(0.01, 0.0, 0.0),
+            ..Default::default()
+        });
+        let rest = position(&scene, bones[2]);
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 30, FRAME_TIME);
+        assert!(position(&scene, bones[2]).x > 0.01);
+
+        scene.nodes[clothes].active = false;
+        physics.settle(&mut scene, 30, FRAME_TIME);
+        assert!(close(position(&scene, bones[2]), rest, 1e-5));
+
+        // On again: the first frame starts from the bones at rest, so the
+        // chain has only begun to swing.
+        scene.nodes[clothes].active = true;
+        physics.step(&mut scene, FRAME_TIME);
+        let x = position(&scene, bones[2]).x;
+        assert!(x > 0.0 && x < 0.01, "{x}");
+    }
+
+    #[test]
+    fn a_carried_chain_keeps_its_shape() {
+        let mut scene = Scene::default();
+        let holder = scene.add_node("holder", None, Trs::default());
+        let root = scene.add_node("root", Some(holder), at(Vec3::new(0.0, 1.0, 0.0)));
+        let a = scene.add_node("a", Some(root), at(Vec3::new(0.0, -0.1, 0.0)));
+        let b = scene.add_node("b", Some(a), at(Vec3::new(0.0, -0.1, 0.0)));
+        let mut physics = dynamic(DynamicBoneDef {
+            node: root,
+            root: Some(root),
+            inert: 0.8,
+            force: Vec3::new(0.01, 0.0, 0.0),
+            ..Default::default()
+        });
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 120, FRAME_TIME);
+        let swung = position(&scene, b) - position(&scene, root);
+        assert!(swung.x > 0.01);
+        // Turned and moved while nothing runs: the swing turns with it.
+        let before = scene.world().0[holder];
+        scene.nodes[holder].local = Trs {
+            pos: Vec3::new(2.0, 0.0, 0.0),
+            rot: Quat::from_rotation_y(std::f32::consts::PI),
+            ..Default::default()
+        };
+        let after = scene.world().0[holder];
+        physics.carry(after * before.inverse());
+        physics.begin_frame(&mut scene);
+        physics.end_frame(&mut scene, 0.0);
+        let held = position(&scene, b) - position(&scene, root);
+        assert!(
+            close(held, Quat::from_rotation_y(std::f32::consts::PI) * swung, 1e-4),
+            "{held:?} {swung:?}"
+        );
     }
 
     #[test]

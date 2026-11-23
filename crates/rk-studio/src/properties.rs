@@ -23,6 +23,9 @@ const AXES: [&str; 3] = ["X", "Y", "Z"];
 /// the liquid on the skin and the clothes now, and the rest of the game's
 /// H-time effects later.
 const H_PAGE: &str = "H Effects";
+/// Renkatsu's own improvements on the game, such as Advanced Skirt
+/// Physics.
+const RENKATSU_PAGE: &str = "Renkatsu";
 
 /// How far a number moves per point of drag: positions and scales, then
 /// angles in degrees.
@@ -75,9 +78,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // then who it is. A card whose profile could not be read still has
     // the first two.
     let pages: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Animation", "Profile", H_PAGE],
-        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits", H_PAGE],
-        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Profile", H_PAGE, RENKATSU_PAGE],
+        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE, RENKATSU_PAGE],
         None => &[],
     };
     // The page that holds what the body shows in an H scene, which is of
@@ -177,9 +179,40 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             return;
         }
-        if let (Some(p), 2..) = (shown.as_mut(), page) {
+        let page_name = pages.get(page).copied().unwrap_or_default();
+        // Renkatsu's own improvements on the game.
+        if page_name == RENKATSU_PAGE {
+            let Content::Character {
+                outfit, game_skirts, ..
+            } = &mut object.content
+            else {
+                return;
+            };
+            if section(ui, k, st, 18, "Physics") {
+                // Per outfit: the ones listed move as in CharaStudio.
+                let mut advanced = !game_skirts.contains(outfit);
+                row(ui, k, "Skirts", None, |ui, rect| {
+                    widgets::checkbox(ui, k, rect, ui.id().with("advanced skirts"), &mut advanced, "Advanced");
+                });
+                if advanced {
+                    game_skirts.retain(|o| o != outfit);
+                } else if !game_skirts.contains(outfit) {
+                    game_skirts.push(*outfit);
+                    game_skirts.sort_unstable();
+                }
+                section_end(ui, k);
+            }
+            return;
+        }
+        // Who the character is, what she likes and what she is like in
+        // bed, as sections of one page, and a way back to the card's.
+        if let (Some(p), "Profile") = (shown.as_mut(), page_name) {
             if let Some(card) = &card_profile {
-                profile_page(ui, k, st, p, card, page - 1);
+                let parts = if p.male { 1 } else { 3 };
+                for n in 1..=parts {
+                    profile_page(ui, k, st, p, n);
+                }
+                card_data(ui, k, st, p, card);
             }
             return;
         }
@@ -353,6 +386,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 section_end(ui, k);
             }
+            // The pose made by hand over the animation, while she is posed
+            // by hand.
+            pose_sections(ui, k, st, object.id, &mut object.content);
             return;
         }
         // A character light is turned by its angles alone.
@@ -935,8 +971,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 hide_walls,
                 light_intensity,
                 filter_decay,
+                sun,
                 ..
             } => {
+                let own_sun = crate::map_menu::own_sun(st);
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
                 let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
@@ -989,6 +1027,21 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     row(ui, k, "Hide walls", none, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
                     });
+                    let mut angles = sun.unwrap_or(own_sun);
+                    let before = angles;
+                    let mut reset = false;
+                    row(ui, k, "Sun heading", None, |ui, rect| {
+                        let turned = sun.is_some();
+                        reset = crate::map_menu::sun_heading(ui, k, rect, id.with("sun heading"), &mut angles, turned);
+                    });
+                    row(ui, k, "Sun elevation", None, |ui, rect| {
+                        crate::map_menu::sun_elevation(ui, k, rect, id.with("sun elevation"), &mut angles);
+                    });
+                    if reset {
+                        *sun = None;
+                    } else if angles != before {
+                        *sun = Some(angles);
+                    }
                     row(ui, k, "Light intensity", None, |ui, rect| {
                         widgets::number(
                             ui,
@@ -1149,20 +1202,25 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
 fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     let t = &k.t;
     let line_height = k.d.row + 4.0;
-    let widths: Vec<f32> = pages
+    // Tabs that are a little too wide for one line close up first; the
+    // ones that still do not fit go on the next, rather than off the edge
+    // of the panel.
+    let room = ui.available_width() - 16.0;
+    let text: Vec<f32> = pages
         .iter()
-        .map(|name| widgets::text_width(ui, name, k.font()).ceil() + 18.0)
+        .map(|name| widgets::text_width(ui, name, k.font()).ceil())
         .collect();
-    // Tabs that do not fit on one line go on the next, rather than off
-    // the edge of the panel.
-    let room = ui.available_width() - 8.0;
-    let mut lines = 1;
-    let mut used = 0.0;
+    let gap = ((room - text.iter().sum::<f32>()) / pages.len().max(1) as f32).clamp(8.0, 18.0);
+    let widths: Vec<f32> = text.iter().map(|w| w + gap).collect();
+    // Where each tab goes: its line and its left edge.
+    let mut place = Vec::with_capacity(widths.len());
+    let (mut lines, mut used) = (1, 0.0);
     for w in &widths {
         if used + w > room && used > 0.0 {
             lines += 1;
             used = 0.0;
         }
+        place.push((lines - 1, used));
         used += w;
     }
     let (rect, _) = ui.allocate_exact_size(
@@ -1170,14 +1228,10 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
         Sense::hover(),
     );
     hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
-    let mut x = rect.left() + 8.0;
-    let mut top = rect.top();
     for (i, name) in pages.iter().enumerate() {
         let w = widths[i];
-        if x + w > rect.left() + 8.0 + room && x > rect.left() + 8.0 {
-            x = rect.left() + 8.0;
-            top += line_height;
-        }
+        let (line, left) = place[i];
+        let (x, top) = (rect.left() + 8.0 + left, rect.top() + line_height * line as f32);
         let tab = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + w, top + line_height));
         let resp = ui.interact(tab, ui.id().with(("property page", i)), Sense::click());
         if resp.clicked() {
@@ -1204,16 +1258,103 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
             );
             p.rect_filled(line, 0.0, t.select);
         }
-        x += w;
     }
 }
 
-/// Who the character is (page 1), what it likes (page 2) or what it is
-/// like in bed (page 3). The values
-/// start as the card's; changing one keeps the change in the scene, for
-/// this character only. Each page ends with the way back to the card's
-/// values for what it shows.
-fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &Profile, page: usize) {
+/// The Animation page's sections of the pose made by hand, while the
+/// character is posed by hand: the bone chosen (on its ball or in the
+/// Animator) with its turn over the animation and a way back.
+fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
+    let Content::Character { pose_layer, .. } = content else {
+        return;
+    };
+    let ui_id = ui.id().with("pose");
+    if !pose_layer.as_ref().is_some_and(|l| l.fk_on) {
+        return;
+    }
+    let joints = st.live.as_ref().and_then(|l| l.joints(id));
+    let waiting = joints.is_none().then_some("The character is not built");
+    if section(ui, k, st, 16, "Bone") {
+        let name = st
+            .pose_bone
+            .clone()
+            .filter(|n| joints.as_ref().is_some_and(|j| j.iter().any(|(_, b)| b == n)));
+        let edit = name
+            .as_ref()
+            .and_then(|n| pose_layer.as_ref()?.fk.get(n).copied())
+            .unwrap_or_default();
+        let off = waiting.or(name.is_none().then_some("No bone chosen"));
+        row(ui, k, "Bone", off, |ui, rect| {
+            let shown = name
+                .as_deref()
+                .map_or_else(|| "None".to_owned(), crate::bones::pose_label);
+            label(
+                ui.painter(),
+                k,
+                Pos2::new(rect.left() + 4.0, rect.center().y),
+                &shown,
+                k.t.text,
+            );
+            if let Some(raw) = name.as_deref().filter(|raw| *raw != shown) {
+                ui.interact(rect, ui_id.with("bone name"), Sense::hover())
+                    .on_hover_text(raw);
+            }
+        });
+        // The turn over the animation, in Unity's angles. A trace of
+        // rounding is no turn, not a minus zero.
+        let (y, x, z) = edit.rot.to_euler(glam::EulerRot::YXZ);
+        let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
+        let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
+        let mut angles = shown;
+        let mut reset = false;
+        let turned = edit.rot != glam::Quat::IDENTITY;
+        row(ui, k, "Rotation", off, |ui, rect| {
+            // The angles, and at their end a way back to the animation's
+            // turn while the bone is turned by hand.
+            let side = rect.height();
+            let fields = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+            vec3(ui, k, fields, ui_id.with("rotation"), &mut angles, 0.5);
+            if turned {
+                let button = Rect::from_min_size(Pos2::new(fields.right() + 4.0, rect.top()), Vec2::splat(side));
+                let resp = ui
+                    .interact(button, ui_id.with("reset"), Sense::click())
+                    .on_hover_text("Reset");
+                let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+                ui.painter().rect_filled(button, k.radius(), fill);
+                glyph(
+                    ui.painter(),
+                    k,
+                    button.center(),
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    14.0,
+                    k.t.text,
+                );
+                reset = resp.clicked();
+            }
+        });
+        if let Some(name) = name.filter(|_| reset || angles != shown) {
+            let rot = if reset {
+                glam::Quat::IDENTITY
+            } else {
+                rk_chara::scene::euler_deg(angles[0], angles[1], angles[2])
+            };
+            let edit = rk_chara::pose::BoneEdit { rot, ..edit };
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            if edit.is_identity() {
+                layer.fk.remove(&name);
+            } else {
+                layer.fk.insert(name, edit);
+            }
+        }
+        section_end(ui, k);
+    }
+}
+
+/// Who the character is (part 1), what it likes (part 2) or what it is
+/// like in bed (part 3), as sections of the Profile page. The values start
+/// as the card's; changing one keeps the change in the scene, for this
+/// character only.
+fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, page: usize) {
     let id = ui.id().with("profile");
     if page == 1 {
         if section(ui, k, st, 7, "Name") {
@@ -1293,7 +1434,7 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &P
             section_end(ui, k);
         }
     } else {
-        if section(ui, k, st, 12, "Traits") {
+        if section(ui, k, st, 12, "H traits") {
             let grid = Grid {
                 items: &profile::H_TRAITS,
                 hint: Some("Add custom field"),
@@ -1326,33 +1467,15 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &P
             section_end(ui, k);
         }
     }
-    // The page's values as the card has them, with the other pages' left
-    // as they are now.
-    let mut from_card = p.clone();
-    match page {
-        2 => {
-            from_card.likes = card.likes.clone();
-            from_card.custom_likes = card.custom_likes.clone();
-        }
-        3 => {
-            from_card.h_traits = card.h_traits.clone();
-            from_card.custom_h_traits = card.custom_h_traits.clone();
-            from_card.denial = card.denial.clone();
-            from_card.weak_point = card.weak_point;
-        }
-        _ => {
-            from_card = Profile {
-                likes: p.likes.clone(),
-                custom_likes: p.custom_likes.clone(),
-                h_traits: p.h_traits.clone(),
-                custom_h_traits: p.custom_h_traits.clone(),
-                denial: p.denial.clone(),
-                weak_point: p.weak_point,
-                ..card.clone()
-            };
-        }
-    }
+}
+
+/// The way back to the card's own profile, likes and traits.
+fn card_data(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &Profile) {
     if section(ui, k, st, 11, "Card data") {
+        let from_card = Profile {
+            male: p.male,
+            ..card.clone()
+        };
         let changed = from_card != *p;
         let why = (!changed).then_some("No changes");
         row(ui, k, "Values", why, |ui, rect| {

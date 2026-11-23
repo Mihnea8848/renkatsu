@@ -27,6 +27,10 @@ pub struct Args<'a> {
     pub son: bool,
     pub censor: bool,
     pub no_physics: bool,
+    pub colliders: Option<&'a str>,
+    pub game_skirts: bool,
+    pub at: Option<&'a str>,
+    pub turn: f32,
     pub list: bool,
     /// Draw the light's real-time shadows.
     pub shadows: bool,
@@ -76,6 +80,20 @@ fn parse_liquid(text: &str) -> Result<rk_chara::siru::Levels> {
 }
 
 /// A colour written as `r,g,b`, each from 0 to 1.
+/// `floor,skirt` and the like as the Colliders plugin's switches.
+fn collider_switches(text: &str) -> Result<rk_chara::colliders::Settings> {
+    let mut s = rk_chara::colliders::Settings::default();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty() && *p != "none") {
+        match part {
+            "floor" => s.floor = true,
+            "skirt" => s.skirt = true,
+            "breast" => s.breast = true,
+            _ => anyhow::bail!("`{part}`: the switches are floor, skirt and breast"),
+        }
+    }
+    Ok(s)
+}
+
 fn colour(text: &str) -> Result<[f64; 4]> {
     let [r, g, b] = point(text)?;
     anyhow::ensure!(
@@ -116,10 +134,34 @@ pub fn render(a: Args) -> Result<()> {
         visible_son: a.son.then_some(true),
         censor: a.censor,
         physics: !a.no_physics,
+        collider_switches: a.colliders.map(collider_switches).transpose()?,
+        advanced_skirts: !a.game_skirts,
         ..Default::default()
     };
     let mut chara = rk_chara::build(&game, &card, &opts)?;
     let t_build = t.elapsed();
+    // Where she stands, with her hair and skirts carried along.
+    if a.at.is_some() || a.turn != 0.0 {
+        let top = chara.top;
+        let was = chara.scene.nodes[top].local.matrix();
+        let at = a.at.map(point).transpose()?.unwrap_or_default();
+        let local = &mut chara.scene.nodes[top].local;
+        local.pos = glam::Vec3::from(at);
+        local.rot = glam::Quat::from_rotation_y(a.turn.to_radians()) * local.rot;
+        let now = chara.scene.nodes[top].local.matrix();
+        chara.physics.carry(now * was.inverse());
+    }
+    // The map first, so that skirts rest on its floors and furniture.
+    let mut renderer = Renderer::new()?;
+    let map = match a.map {
+        Some(which) => Some(crate::map::scene(&game, which, a.map_time, renderer.supports_bc())?),
+        None => None,
+    };
+    if let Some(scene) = &map {
+        chara
+            .physics
+            .set_obstacles(Some(std::sync::Arc::new(crate::map::obstacles(scene))));
+    }
     let mut states = [rk_chara::clothes_state::ON; rk_chara::clothes_state::KINDS];
     if let Some(spec) = a.clothes {
         states = crate::pose::parse_states(spec, &chara.clothes.worn)?;
@@ -159,11 +201,9 @@ pub fn render(a: Args) -> Result<()> {
         let phase = motion.phase(a.time, false);
         // The frame as the game shows it: the animation, then the physics.
         if !a.no_physics {
-            for _ in 0..opts.settle_frames {
-                chara.physics.begin_frame(&mut chara.scene);
-                chara.animate(&bound, phase, &states);
-                chara.physics.end_frame(&mut chara.scene, opts.frame_time);
-            }
+            chara.settle_pose(opts.settle_frames, opts.frame_time, |c| {
+                c.animate(&bound, phase, &states)
+            });
         } else {
             chara.animate(&bound, phase, &states);
         }
@@ -214,10 +254,8 @@ pub fn render(a: Args) -> Result<()> {
         camera.eye = point(p)?.into();
     }
     let background = a.background.map(colour).transpose()?.unwrap_or(BACKGROUND);
-    let mut renderer = Renderer::new()?;
-    if let Some(which) = a.map {
-        let scene = crate::map::scene(&game, which, a.map_time, renderer.supports_bc())?;
-        renderer.set_map(Some(&scene));
+    if let Some(scene) = &map {
+        renderer.set_map(Some(scene));
     }
     let env = Environment {
         ramp: chara.ramp.clone(),

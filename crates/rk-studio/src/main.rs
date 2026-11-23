@@ -12,6 +12,7 @@
 mod about;
 mod anim_import;
 mod animations;
+mod animator;
 mod bones;
 mod brand;
 mod camera;
@@ -115,6 +116,10 @@ struct Cli {
     /// says otherwise.
     #[arg(long)]
     size: Option<String>,
+    /// Where the window opens on the desktop, as X,Y, and without taking
+    /// the keyboard: for scripted pictures on a screen of their own.
+    #[arg(long, hide = true, value_delimiter = ',')]
+    at: Vec<f32>,
     /// Start on the project selector even where the settings or a
     /// screenshot would not, to picture it.
     #[arg(long, hide = true)]
@@ -143,6 +148,20 @@ struct Cli {
     /// name, or "none". Without it the first `--card` character is.
     #[arg(long)]
     select: Option<String>,
+    /// Start on the Pose page of the selected character with this bone
+    /// chosen, to picture it.
+    #[arg(long, hide = true)]
+    pose_bone: Option<String>,
+    /// Start on this page of Properties, by its place, to picture it.
+    #[arg(long, hide = true)]
+    property_tab: Option<usize>,
+    /// Show the sun's dome as Ctrl+L shows it, to picture it.
+    #[arg(long, hide = true)]
+    sun_preview: bool,
+    /// Mirror the selected character's pose once she is built, to
+    /// picture it.
+    #[arg(long, hide = true)]
+    mirror_pose: bool,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -657,6 +676,12 @@ impl Studio {
             .iter()
             .find(|o| o.kind() == kinds::Kind::Character)
             .map(|o| o.id);
+        if let Some(bone) = &cli.pose_bone {
+            state.pose_bone = Some(bone.clone());
+            state.property_tab = 1;
+            state.fk_open = true;
+            state.show_animator = true;
+        }
         state.doc.selected = match cli.select.as_deref() {
             None => first,
             Some(name) if name.eq_ignore_ascii_case("none") => None,
@@ -677,6 +702,11 @@ impl Studio {
                 )
             }
         };
+        state.sun_preview = cli.sun_preview;
+        state.mirror_pending = cli.mirror_pose;
+        if let Some(tab) = cli.property_tab {
+            state.property_tab = tab;
+        }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
                 .iter()
@@ -971,7 +1001,7 @@ impl eframe::App for Studio {
         }
         // A drag that changes a value is one step of the history; it ends
         // when the pointer is let go.
-        if !ctx.input(|i| i.pointer.any_down()) {
+        if !ctx.input(|i| i.pointer.any_down()) && !self.state.sun_turning {
             self.state.doc.end_gesture();
         }
         self.state.poll_picker();
@@ -1054,6 +1084,29 @@ impl eframe::App for Studio {
             self.bottom = Panel::Content;
             panels::open(&mut self.dock, Panel::Content);
             if let Some(tab) = self.dock.find_tab(&Panel::Content) {
+                let _ = self.dock.set_active_tab(tab);
+            }
+        }
+
+        // A mirror asked for at the start, once the character is built.
+        if self.state.mirror_pending {
+            let id = self.state.doc.selected;
+            let ready = id.is_some_and(|id| {
+                self.state
+                    .live
+                    .as_ref()
+                    .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
+            });
+            if ready {
+                viewport::mirror(&mut self.state, false);
+                self.state.mirror_pending = false;
+            }
+        }
+
+        // Posing by hand was switched on: the Animator panel comes forward.
+        if std::mem::take(&mut self.state.show_animator) {
+            panels::open(&mut self.dock, Panel::Animator);
+            if let Some(tab) = self.dock.find_tab(&Panel::Animator) {
                 let _ = self.dock.set_active_tab(tab);
             }
         }
@@ -1454,6 +1507,9 @@ fn run() -> Result<()> {
             .with_decorations(false),
         ..Default::default()
     };
+    if let [x, y] = cli.at[..] {
+        options.viewport = options.viewport.with_position([x, y]).with_active(false);
+    }
     options.wgpu_options.surface.present_mode = if settings.frame_rate.vsync() {
         wgpu::PresentMode::AutoVsync
     } else {

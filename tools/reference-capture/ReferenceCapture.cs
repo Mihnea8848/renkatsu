@@ -43,6 +43,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using BepInEx;
@@ -68,6 +69,7 @@ namespace Renkatsu
 
         private ConfigEntry<KeyboardShortcut> hotkey;
         private ConfigEntry<KeyboardShortcut> batchHotkey;
+        private ConfigEntry<KeyboardShortcut> mathHotkey;
         private bool running;
 
         private void Awake()
@@ -76,6 +78,8 @@ namespace Renkatsu
                 "Loads every card from UserData/renkatsu/cards.txt and saves reference pictures.");
             batchHotkey = Config.Bind("General", "Batch hotkey", new KeyboardShortcut(KeyCode.F10, KeyCode.LeftControl, KeyCode.LeftShift),
                 "Runs every case of UserData/renkatsu/batch.txt and saves to out/batch.");
+            mathHotkey = Config.Bind("General", "Unity maths hotkey", new KeyboardShortcut(KeyCode.F11, KeyCode.LeftControl, KeyCode.LeftShift),
+                "Saves Unity's answers for the rotation and vector functions the IK solver uses to out/unitymath.json.");
         }
 
         private void Update()
@@ -91,6 +95,10 @@ namespace Renkatsu
             else if (batchHotkey.Value.IsDown())
             {
                 StartCoroutine(Run("batch.txt", "batch"));
+            }
+            else if (mathHotkey.Value.IsDown())
+            {
+                UnityMath();
             }
         }
 
@@ -1854,6 +1862,157 @@ namespace Renkatsu
             }
             s.Append("}}");
             return s.ToString();
+        }
+
+        // Unity's own answers for the functions Renkatsu's IK port uses, on
+        // fixed pseudo-random inputs and the edge cases, for rk-ik's tests.
+        // Each case is one flat row: the inputs, then the result.
+        private void UnityMath()
+        {
+            System.Random rng = new System.Random(20261123);
+            Func<float, float, float> num = (lo, hi) => lo + (float)rng.NextDouble() * (hi - lo);
+            Func<Vector3> vec = () =>
+            {
+                Vector3 v = new Vector3(num(-1f, 1f), num(-1f, 1f), num(-1f, 1f));
+                return v * Mathf.Pow(10f, num(-2f, 1f));
+            };
+            Func<Quaternion> rot = () => Quaternion.Euler(num(-180f, 180f), num(-180f, 180f), num(-180f, 180f));
+            Vector3[] edges = { Vector3.zero, Vector3.right, Vector3.left, Vector3.up, Vector3.down, Vector3.forward, Vector3.back,
+                new Vector3(1e-6f, 0f, 0f), new Vector3(0.3f, -0.4f, 0.8f), -new Vector3(0.3f, -0.4f, 0.8f) };
+            StringBuilder s = new StringBuilder("{");
+            Action<string, List<float[]>> put = (name, list) =>
+            {
+                s.Append(s.Length > 1 ? ",\n" : "\n").Append(Str(name)).Append(": [");
+                for (int i = 0; i < list.Count; i++)
+                {
+                    s.Append(i == 0 ? "\n  [" : ",\n  [");
+                    for (int j = 0; j < list[i].Length; j++)
+                    {
+                        s.Append(j == 0 ? "" : ", ").Append(F(list[i][j]));
+                    }
+                    s.Append("]");
+                }
+                s.Append("\n]");
+            };
+            Func<Vector3, float[]> fv = v => new[] { v.x, v.y, v.z };
+            Func<Quaternion, float[]> fq = q => new[] { q.x, q.y, q.z, q.w };
+            Func<float[][], float[]> row = parts => parts.SelectMany(p => p).ToArray();
+            const int N = 400;
+
+            List<float[]> rows = new List<float[]>();
+            foreach (Vector3 a in edges)
+            {
+                foreach (Vector3 b in edges)
+                {
+                    rows.Add(row(new[] { fv(a), fv(b), fq(Quaternion.LookRotation(a, b)) }));
+                }
+            }
+            for (int i = 0; i < N; i++)
+            {
+                Vector3 a = vec(), b = vec();
+                rows.Add(row(new[] { fv(a), fv(b), fq(Quaternion.LookRotation(a, b)) }));
+            }
+            put("look_rotation", rows);
+
+            rows = new List<float[]>();
+            foreach (Vector3 a in edges)
+            {
+                foreach (Vector3 b in edges)
+                {
+                    rows.Add(row(new[] { fv(a), fv(b), fq(Quaternion.FromToRotation(a, b)) }));
+                }
+            }
+            for (int i = 0; i < N; i++)
+            {
+                Vector3 a = vec();
+                Vector3 b = i % 10 == 0 ? -a * num(0.5f, 2f) : vec();
+                rows.Add(row(new[] { fv(a), fv(b), fq(Quaternion.FromToRotation(a, b)) }));
+            }
+            put("from_to_rotation", rows);
+
+            rows = new List<float[]>();
+            float[] angles = { 0f, 90f, -90f, 180f, 360f, 720.5f };
+            foreach (Vector3 a in edges)
+            {
+                foreach (float d in angles)
+                {
+                    rows.Add(row(new[] { new[] { d }, fv(a), fq(Quaternion.AngleAxis(d, a)) }));
+                }
+            }
+            for (int i = 0; i < N; i++)
+            {
+                float d = num(-400f, 400f);
+                Vector3 a = vec();
+                rows.Add(row(new[] { new[] { d }, fv(a), fq(Quaternion.AngleAxis(d, a)) }));
+            }
+            put("angle_axis", rows);
+
+            rows = new List<float[]>();
+            for (int i = 0; i < N; i++)
+            {
+                Quaternion q = rot();
+                if (i % 4 == 1)
+                {
+                    q = new Quaternion(q.x * 1.5f, q.y * 1.5f, q.z * 1.5f, q.w * 1.5f);
+                }
+                rows.Add(row(new[] { fq(q), fq(Quaternion.Inverse(q)) }));
+            }
+            put("inverse", rows);
+
+            foreach (string kind in new[] { "lerp", "slerp" })
+            {
+                rows = new List<float[]>();
+                for (int i = 0; i < N; i++)
+                {
+                    Quaternion a = rot();
+                    Quaternion b = i % 5 == 0 ? new Quaternion(-a.x, -a.y, -a.z, -a.w) : i % 5 == 1 ? a * Quaternion.Euler(num(-5f, 5f), num(-5f, 5f), 0f) : rot();
+                    float t = i % 7 == 0 ? num(-0.5f, 1.5f) : num(0f, 1f);
+                    Quaternion r = kind == "lerp" ? Quaternion.Lerp(a, b, t) : Quaternion.Slerp(a, b, t);
+                    rows.Add(row(new[] { fq(a), fq(b), new[] { t }, fq(r) }));
+                }
+                put("quat_" + kind, rows);
+            }
+
+            rows = new List<float[]>();
+            foreach (Vector3 a0 in edges)
+            {
+                foreach (Vector3 b0 in edges)
+                {
+                    Vector3 a = a0, b = b0;
+                    Vector3.OrthoNormalize(ref a, ref b);
+                    rows.Add(row(new[] { fv(a0), fv(b0), fv(a), fv(b) }));
+                }
+            }
+            for (int i = 0; i < N; i++)
+            {
+                Vector3 a0 = vec(), b0 = i % 10 == 0 ? Vector3.zero : vec();
+                if (i % 10 == 5)
+                {
+                    b0 = a0 * num(-2f, 2f);
+                }
+                Vector3 a = a0, b = b0;
+                Vector3.OrthoNormalize(ref a, ref b);
+                rows.Add(row(new[] { fv(a0), fv(b0), fv(a), fv(b) }));
+            }
+            put("ortho_normalize", rows);
+
+            // Managed functions too, as a check on the port of their C#.
+            rows = new List<float[]>();
+            for (int i = 0; i < N; i++)
+            {
+                Quaternion a = rot(), b = rot();
+                Vector3 v = vec(), w = vec();
+                rows.Add(row(new[] { fq(a), fq(b), fv(v), fv(w), fq(a * b), fv(a * v), fv(v.normalized),
+                    fv(Vector3.Project(v, w)), new[] { Vector3.Angle(v, w), Vector3.Distance(v, w) } }));
+            }
+            put("managed", rows);
+
+            s.Append("\n}\n");
+            string dir = Path.Combine(Paths.GameRootPath, "UserData/renkatsu/out");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "unitymath.json");
+            File.WriteAllText(path, s.ToString(), new UTF8Encoding(false));
+            Logger.LogMessage("Reference capture: Unity maths saved to " + path);
         }
 
         private static string F(float v)

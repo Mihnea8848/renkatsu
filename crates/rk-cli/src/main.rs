@@ -91,6 +91,21 @@ enum Cmd {
         /// Keep hair, skirts and the bust in their rest pose.
         #[arg(long)]
         no_physics: bool,
+        /// The Colliders plugin's switches as Studio's character panel sets
+        /// them: the ones to switch on, such as `floor,skirt`, or `none`.
+        /// Without it the card's own setting counts.
+        #[arg(long)]
+        colliders: Option<String>,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics.
+        #[arg(long)]
+        game_skirts: bool,
+        /// Where the character stands in the map, as `x,y,z` in metres.
+        #[arg(long, allow_hyphen_values = true)]
+        at: Option<String>,
+        /// How far the character is turned round, in degrees.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        turn: f32,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -143,6 +158,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AnimationCmd,
     },
+    /// The bones CharaStudio poses by hand (FK), as found on a card's
+    /// character, by part.
+    Bones { card: PathBuf },
     /// Print which states a card's clothes have, and what a row of state
     /// changes such as `top=1 bottom=3 all=0` shows.
     Clothes {
@@ -239,6 +257,10 @@ enum Cmd {
         /// Smooth the edges of cut-out surfaces with alpha to coverage.
         #[arg(long)]
         alpha_to_coverage: bool,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics.
+        #[arg(long)]
+        game_skirts: bool,
     },
     /// The maps CharaStudio lists and what their scenes hold.
     Map {
@@ -422,6 +444,10 @@ enum MapCmd {
         /// What the camera looks at, with --eye: x,y,z.
         #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
         target: Vec<f32>,
+        /// The sun turned by hand, in place of the map's: heading round
+        /// the up axis from +Z toward +X and elevation, in degrees.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        sun: Vec<f32>,
     },
     /// Show a map's Animators and the objects they move.
     Motion {
@@ -539,7 +565,8 @@ fn main() -> Result<()> {
             only,
             studio,
             alpha_to_coverage,
-        } => capture_check::check(&dir, &out, &only, studio, alpha_to_coverage),
+            game_skirts,
+        } => capture_check::check(&dir, &out, &only, studio, alpha_to_coverage, game_skirts),
         Cmd::Compare {
             cards,
             count,
@@ -561,6 +588,10 @@ fn main() -> Result<()> {
             son,
             censor,
             no_physics,
+            colliders,
+            game_skirts,
+            at,
+            turn,
             list,
             no_shadows,
             clothes,
@@ -588,6 +619,10 @@ fn main() -> Result<()> {
             son,
             censor,
             no_physics,
+            colliders: colliders.as_deref(),
+            game_skirts,
+            at: at.as_deref(),
+            turn,
             list,
             shadows: !no_shadows,
             clothes: clothes.as_deref(),
@@ -601,6 +636,7 @@ fn main() -> Result<()> {
             map: map.as_deref(),
             map_time: &map_time,
         }),
+        Cmd::Bones { card } => pose::bones(&card),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },
         } => pose::list(all),
@@ -645,6 +681,7 @@ fn main() -> Result<()> {
                     motion,
                     eye,
                     target,
+                    sun,
                 },
         } => map::render(
             &map,
@@ -659,6 +696,10 @@ fn main() -> Result<()> {
                 motion,
                 look: match (eye.as_slice(), target.as_slice()) {
                     ([a, b, c], [x, y, z]) => Some(([*a, *b, *c], [*x, *y, *z])),
+                    _ => None,
+                },
+                sun: match sun.as_slice() {
+                    [heading, elevation] => Some([*heading, *elevation]),
                     _ => None,
                 },
             },

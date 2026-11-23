@@ -1223,7 +1223,7 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
             icon::IMAGE
         } else if lower.ends_with(".zipmod") {
             icon::PACKAGE
-        } else if lower.ends_with(".toml") {
+        } else if lower.ends_with(".rkscene") || lower.ends_with(".toml") {
             Kind::Scene.glyph()
         } else {
             icon::FILE

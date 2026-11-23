@@ -130,6 +130,54 @@ pub fn export(group: i32, category: i32, number: Option<i32>, out: &Path) -> Res
 
 /// Reads every animation and binds it to the skeleton of a card's
 /// character, and says what did not fit.
+/// Prints CharaStudio's FK bones as found on a card's character: by part,
+/// each bone's number, object, shown name and level, then those of the
+/// table the character does not have.
+pub fn bones(card: &Path) -> Result<()> {
+    use rk_chara::bone_info::{self, Part};
+    let game = Game::open_user(&[])?;
+    let card = Card::load(card)?;
+    let options = BuildOptions {
+        clothes: false,
+        accessories: false,
+        physics: false,
+        ..Default::default()
+    };
+    let chara = rk_chara::build(&game, &card, &options)?;
+    let table = bone_info::read(&game);
+    let female = card.sex() == 1;
+    let found = bone_info::on_character(&table, &chara.scene, chara.animator, chara.top, female);
+    println!(
+        "{} bones in the table, {} on {} ({})",
+        table.len(),
+        found.len(),
+        card.full_name(),
+        if female { "female" } else { "male" }
+    );
+    for part in Part::ALL {
+        let bones: Vec<_> = found.iter().filter(|b| b.info.parts().contains(&part)).collect();
+        println!("\n{} ({}):", part.label(), bones.len());
+        for b in bones {
+            println!(
+                "  {:>4}  {:<28} {}  level {}",
+                b.info.no, b.info.bone, b.info.name, b.info.level
+            );
+        }
+    }
+    let missing: Vec<_> = table
+        .values()
+        .filter(|i| !(female && i.level == 2))
+        .filter(|i| !found.iter().any(|b| b.info.no == i.no))
+        .collect();
+    if !missing.is_empty() {
+        println!("\nNot on this character ({}):", missing.len());
+        for i in missing {
+            println!("  {:>4}  {:<28} {}  group {}", i.no, i.bone, i.name, i.group);
+        }
+    }
+    Ok(())
+}
+
 pub fn check(card: &Path) -> Result<()> {
     let game = Game::open_user(&[])?;
     let card = Card::load(card)?;

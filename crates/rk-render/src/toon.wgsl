@@ -91,6 +91,9 @@ fn fogged(i: VsOut, c: vec4<f32>) -> vec4<f32> {
 struct LampShadow {
     view_proj: array<mat4x4<f32>, 12>,
     params: vec4<f32>,
+    // Per slot, a texel's width in metres in a directional lamp's three
+    // cascades.
+    texel: array<vec4<f32>, 2>,
 }
 @group(0) @binding(4) var lamp_atlas: texture_depth_2d;
 @group(0) @binding(5) var lamp_compare: sampler_comparison;
@@ -1776,7 +1779,7 @@ fn lamp_reach(i: VsOut, k: u32) -> vec3<f32> {
     // A soft toon edge: a lit side and a shadow, with a smooth border.
     let turn = smoothstep(-0.05, 0.35, ndl);
     var shade = 1.0;
-    if (place.w > 0.5 && atten * turn > 0.0) {
+    if ((place.w > 0.5 || place.w < -0.5) && atten * turn > 0.0) {
         shade = lamp_shadow(k, i.world);
     }
     return colour.rgb * atten * turn * shade;
@@ -1788,6 +1791,9 @@ fn lamp_reach(i: VsOut, k: u32) -> vec3<f32> {
 // steps towards the lamp by about a texel there, against shading itself.
 fn lamp_shadow(k: u32, world: vec3<f32>) -> f32 {
     let place = g.lamps[k * 3u];
+    if place.w < -0.5 {
+        return sun_like_shadow(i32(round(-place.w)) - 1, normalize(place.xyz), world);
+    }
     let slot = i32(round((place.w - 1.0) * 0.5)) - 1;
     if slot < 0 {
         return 1.0;
@@ -1808,13 +1814,20 @@ fn lamp_shadow(k: u32, world: vec3<f32>) -> f32 {
     let tile = slot * 6 + face;
     let dist = length(d);
     let at = world - d / max(dist, 1e-4) * (0.02 + dist * 0.006);
+    let lit = lamp_tile(tile, at);
+    return select(lit, 1.0, lit < 0.0);
+}
+
+// How much of a lamp's light one tile of the atlas lets through to `at`,
+// by nine comparisons; -1 when `at` is outside the tile's view.
+fn lamp_tile(tile: i32, at: vec3<f32>) -> f32 {
     let clip = ls.view_proj[tile] * vec4<f32>(at, 1.0);
     if clip.w <= 0.0 {
-        return 1.0;
+        return -1.0;
     }
     let p = clip.xyz / clip.w;
     if abs(p.x) > 1.0 || abs(p.y) > 1.0 || p.z < 0.0 || p.z > 1.0 {
-        return 1.0;
+        return -1.0;
     }
     let size = vec2<f32>(0.25, 1.0 / 3.0);
     let cell = vec2<f32>(f32(tile % 4), f32(tile / 4)) * size;
@@ -1830,6 +1843,23 @@ fn lamp_shadow(k: u32, world: vec3<f32>) -> f32 {
         }
     }
     return lit / 9.0;
+}
+
+// How much of a directional lamp in `slot` reaches `world`: the first of
+// its three cascades that holds the point, which steps towards the lamp by
+// two of that cascade's texels.
+fn sun_like_shadow(slot: i32, to_lamp: vec3<f32>, world: vec3<f32>) -> f32 {
+    if slot < 0 {
+        return 1.0;
+    }
+    let texel = ls.texel[slot];
+    for (var c = 0; c < 3; c++) {
+        let lit = lamp_tile(slot * 6 + c, world + to_lamp * texel[c] * 2.0);
+        if lit >= 0.0 {
+            return lit;
+        }
+    }
+    return 1.0;
 }
 
 

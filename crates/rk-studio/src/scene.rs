@@ -237,11 +237,19 @@ pub enum Content {
         /// game.
         #[serde(default = "yes")]
         liquid_clothes: bool,
+        /// The outfits whose skirts move exactly as in CharaStudio; the
+        /// others use Advanced Skirt Physics.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        game_skirts: Vec<usize>,
         /// The animation the character plays or the pose it holds; none
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
         #[serde(default, alias = "pose", skip_serializing_if = "Option::is_none")]
         animation: Option<Box<Animation>>,
+        /// The pose made by hand, over the animation or over the
+        /// character as built (`rk_chara::pose`); none for no edits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose_layer: Option<Box<rk_chara::pose::Layer>>,
         /// Who the character is, as changed in this scene; none keeps the
         /// card's. The card itself is never written.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,11 +351,32 @@ pub enum Content {
         /// colours deep.
         #[serde(default = "half")]
         filter_decay: f32,
+        /// The sun turned by hand: its heading round the up axis from +Z
+        /// toward +X and its elevation over the horizon, in degrees. None
+        /// for the map's own sun of its time of day.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sun: Option<[f32; 2]>,
         /// Its movable pieces were put in the scene, once: pieces deleted
         /// after stay deleted.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pieces_listed: bool,
     },
+}
+
+/// The unit vector towards a sun at `[heading, elevation]` in degrees:
+/// heading round the up axis from +Z toward +X.
+pub fn sun_towards([heading, elevation]: [f32; 2]) -> glam::Vec3 {
+    let (h, e) = (heading.to_radians(), elevation.to_radians());
+    glam::Vec3::new(e.cos() * h.sin(), e.sin(), e.cos() * h.cos())
+}
+
+/// The heading and elevation in degrees of a sun towards `dir`, heading
+/// from 0 to 360.
+pub fn sun_angles(dir: glam::Vec3) -> [f32; 2] {
+    let dir = dir.normalize_or(glam::Vec3::Y);
+    let heading = dir.x.atan2(dir.z).to_degrees().rem_euclid(360.0);
+    let elevation = dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+    [heading, elevation]
 }
 
 fn whole() -> f32 {
@@ -394,7 +423,9 @@ impl Content {
             clothes: [0; 9],
             liquid: [0; rk_chara::siru::PARTS],
             liquid_clothes: true,
+            game_skirts: Vec::new(),
             animation: None,
+            pose_layer: None,
             profile: None,
             light_group: None,
         }
@@ -462,6 +493,7 @@ impl Content {
             hide_walls: true,
             light_intensity: 1.0,
             filter_decay: 0.5,
+            sun: None,
             pieces_listed: false,
         }
     }
@@ -929,13 +961,11 @@ impl Scene {
     /// takes them, in the Outliner's order.
     pub fn lamps(&self, map: bool) -> Vec<(ObjectId, rk_render::Lamp)> {
         let mut out = Vec::new();
-        // The point and spot lamps that cast shadows, numbered in the
-        // Outliner's order whatever they light, the first two only.
+        // The lamps that cast shadows, numbered in the Outliner's order
+        // whatever they light, the first two only.
         let mut shadowed = 0u8;
-        for (_, id) in self.rows() {
-            let Some(o) = self.get(id).filter(|o| self.shown(o.id)) else {
-                continue;
-            };
+        for o in self.shown_rows() {
+            let id = o.id;
             let Content::Light {
                 light,
                 on_characters,
@@ -950,10 +980,11 @@ impl Scene {
             else {
                 continue;
             };
-            let shadow = (*shadows && matches!(light, LightKind::Point | LightKind::Spot)).then(|| {
-                shadowed += 1;
-                shadowed - 1
-            });
+            let shadow = (*shadows && matches!(light, LightKind::Point | LightKind::Spot | LightKind::Directional))
+                .then(|| {
+                    shadowed += 1;
+                    shadowed - 1
+                });
             let shadow = shadow.filter(|s| usize::from(*s) < rk_render::lamp_shadow::SLOTS);
             if *light == LightKind::Character || !(if map { *on_map } else { *on_characters }) {
                 continue;
@@ -998,6 +1029,15 @@ impl Scene {
                 _ => None,
             })
             .unwrap_or(0.0)
+    }
+
+    /// The shown map's sun turned by hand, as the unit vector towards it;
+    /// none for the map's own sun or without a map.
+    pub fn map_sun(&self) -> Option<[f32; 3]> {
+        self.objects.iter().find_map(|o| match &o.content {
+            Content::Map { sun: Some(angles), .. } if self.shown(o.id) => Some(sun_towards(*angles).to_array()),
+            _ => None,
+        })
     }
 
     /// The shown map's Light intensity, or 1 without a map.
@@ -1046,13 +1086,10 @@ impl Scene {
             _ => None,
         };
         let mut best: Option<(ObjectId, f32)> = None;
-        for (_, id) in self.rows() {
-            let Some(object) = self.get(id).filter(|o| self.shown(o.id)) else {
-                continue;
-            };
+        for object in self.shown_rows() {
             if let Some(b) = brightness(object) {
                 if best.is_none_or(|(_, top)| b > top) {
-                    best = Some((id, b));
+                    best = Some((object.id, b));
                 }
             }
         }
@@ -1311,21 +1348,61 @@ impl Scene {
     /// being depth 0.
     pub fn rows(&self) -> Vec<(usize, ObjectId)> {
         let mut rows = Vec::with_capacity(self.objects.len());
-        self.walk(None, 0, &mut rows);
+        self.walk(&self.child_lists(), None, 0, &mut rows);
         rows
     }
 
-    fn walk(&self, parent: Option<ObjectId>, depth: usize, rows: &mut Vec<(usize, ObjectId)>) {
-        for id in self.children(parent) {
-            rows.push((depth, id));
-            self.walk(Some(id), depth + 1, rows);
+    /// The places in `objects` of each object's children, by parent, in
+    /// the scene's order: one pass, where asking each object for its
+    /// children would go over the whole scene for every object.
+    fn child_lists(&self) -> std::collections::HashMap<Option<ObjectId>, Vec<usize>> {
+        let mut lists: std::collections::HashMap<Option<ObjectId>, Vec<usize>> = std::collections::HashMap::new();
+        for (i, o) in self.objects.iter().enumerate() {
+            lists.entry(o.parent).or_default().push(i);
         }
+        lists
+    }
+
+    fn walk(
+        &self,
+        lists: &std::collections::HashMap<Option<ObjectId>, Vec<usize>>,
+        parent: Option<ObjectId>,
+        depth: usize,
+        rows: &mut Vec<(usize, ObjectId)>,
+    ) {
+        for &i in lists.get(&parent).map_or(&[][..], Vec::as_slice) {
+            let id = self.objects[i].id;
+            rows.push((depth, id));
+            self.walk(lists, Some(id), depth + 1, rows);
+        }
+    }
+
+    /// The objects that show, in tree order: those not inside a hidden
+    /// object or folder, as `shown` tells them.
+    pub fn shown_rows(&self) -> Vec<&Object> {
+        fn walk<'a>(
+            scene: &'a Scene,
+            lists: &std::collections::HashMap<Option<ObjectId>, Vec<usize>>,
+            parent: Option<ObjectId>,
+            out: &mut Vec<&'a Object>,
+        ) {
+            for &i in lists.get(&parent).map_or(&[][..], Vec::as_slice) {
+                let o = &scene.objects[i];
+                if o.visible {
+                    out.push(o);
+                    walk(scene, lists, Some(o.id), out);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(self.objects.len());
+        walk(self, &self.child_lists(), None, &mut out);
+        out
     }
 
     /// An object and everything below it, in tree order.
     pub fn subtree(&self, id: ObjectId) -> Vec<ObjectId> {
         let mut rows = vec![(0, id)];
-        self.walk(Some(id), 1, &mut rows);
+        self.walk(&self.child_lists(), Some(id), 1, &mut rows);
         rows.into_iter().map(|(_, id)| id).collect()
     }
 
@@ -1356,14 +1433,14 @@ impl Scene {
     /// The light that lights the scene: the first one that shows, in tree
     /// order. The renderer has one light.
     pub fn key_light(&self) -> Option<&Object> {
-        self.rows().into_iter().filter_map(|(_, id)| self.get(id)).find(|o| {
+        self.shown_rows().into_iter().find(|o| {
             matches!(
                 o.content,
                 Content::Light {
                     light: LightKind::Character,
                     ..
                 }
-            ) && self.shown(o.id)
+            )
         })
     }
 
@@ -2460,6 +2537,45 @@ mod tests {
     }
 
     #[test]
+    fn shown_rows_are_the_rows_that_show() {
+        let mut scene = Scene::empty();
+        let open = scene.add("Open", Content::Folder, None);
+        let shut = scene.add("Shut", Content::Folder, None);
+        let inner = scene.add("Inner", Content::Folder, Some(shut));
+        for (name, parent) in [("a", None), ("b", Some(open)), ("c", Some(shut)), ("d", Some(inner))] {
+            scene.add(name, Content::light(), parent);
+        }
+        let hidden = scene.add("e", Content::light(), Some(open));
+        scene.get_mut(shut).unwrap().visible = false;
+        scene.get_mut(hidden).unwrap().visible = false;
+        let old: Vec<ObjectId> = scene
+            .rows()
+            .into_iter()
+            .map(|(_, id)| id)
+            .filter(|id| scene.shown(*id))
+            .collect();
+        let new: Vec<ObjectId> = scene.shown_rows().into_iter().map(|o| o.id).collect();
+        assert_eq!(new, old);
+        assert_eq!(new.len(), 3, "Open, a and b");
+    }
+
+    #[test]
+    fn a_sun_turned_by_hand_reads_back_its_angles() {
+        for angles in [[0.0, 45.0], [90.0, 10.0], [215.0, 60.0], [359.0, -5.0]] {
+            let dir = sun_towards(angles);
+            assert!((dir.length() - 1.0).abs() < 1e-5);
+            let back = sun_angles(dir);
+            assert!(
+                (back[0] - angles[0]).abs() < 1e-3 && (back[1] - angles[1]).abs() < 1e-3,
+                "{angles:?} {back:?}"
+            );
+        }
+        // East is +X, straight up is +Y.
+        assert!(sun_towards([90.0, 0.0]).abs_diff_eq(glam::Vec3::X, 1e-5));
+        assert!(sun_towards([0.0, 90.0]).abs_diff_eq(glam::Vec3::Y, 1e-5));
+    }
+
+    #[test]
     fn the_colour_filter_decays_with_the_maps_light() {
         let mut scene = Scene::new();
         assert_eq!(scene.filter_fade(), 0.0);
@@ -3155,6 +3271,25 @@ mod tests {
     }
 
     #[test]
+    fn game_skirts_are_saved_per_outfit() {
+        let (mut doc, [_, anna, ..]) = cast();
+        // Advanced Skirt Physics is on unless an outfit is listed, and an
+        // empty list is not written.
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(!text.contains("game_skirts"), "{text}");
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        let Content::Character { game_skirts, .. } = &mut edited.content else {
+            panic!("Anna is a character");
+        };
+        *game_skirts = vec![2];
+        assert!(doc.edit(edited.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("game_skirts = [2]"), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, edited.content);
+    }
+
+    #[test]
     fn clothes_states_and_the_pose_are_saved_and_undone() {
         let (mut doc, [_, anna, ..]) = cast();
         let pose = Animation {
@@ -3188,6 +3323,27 @@ mod tests {
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(&back, doc.scene());
         assert_eq!(back.get(anna).unwrap().content, edited.content);
+
+        // A pose made by hand is saved, read back and undone with them.
+        let mut posed = edited.clone();
+        if let Content::Character { pose_layer, .. } = &mut posed.content {
+            let mut layer = rk_chara::pose::Layer::default();
+            layer.fk.insert(
+                "cf_j_arm00_L".into(),
+                rk_chara::pose::BoneEdit {
+                    rot: glam::Quat::from_rotation_z(-1.0),
+                    ..Default::default()
+                },
+            );
+            *pose_layer = Some(Box::new(layer));
+        }
+        assert!(doc.edit(posed.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("[objects.pose_layer.fk.cf_j_arm00_L]"), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, posed.content);
+        assert!(doc.undo());
+        assert_eq!(doc.scene().get(anna).unwrap().content, edited.content);
 
         // One step back: dressed and as built again.
         assert!(doc.undo());
@@ -3305,6 +3461,7 @@ kind = "map"
                 hide_walls: true,
                 light_intensity: 1.0,
                 filter_decay: 0.5,
+                sun: None,
                 pieces_listed: false,
             }
         );

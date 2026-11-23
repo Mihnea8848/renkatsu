@@ -305,6 +305,21 @@ pub struct State {
     pub speed_shown: Option<f64>,
     /// When the lens last changed (Alt and the wheel), for its meter.
     pub lens_shown: Option<f64>,
+    /// The sun is being turned with its shortcut held: one step of the
+    /// history until it is let go, though no button is down.
+    pub sun_turning: bool,
+    /// The sun's dome shows without the key held, for pictures.
+    pub sun_preview: bool,
+    /// Mirror the selected character's pose once she is built, for
+    /// pictures.
+    pub mirror_pending: bool,
+    /// The bone the Pose page shows, by name.
+    pub pose_bone: Option<String>,
+    /// Whether Forward kinematics is open in the Pose palette, showing its
+    /// parts.
+    pub fk_open: bool,
+    /// What the Animator panel's skeleton is searched by.
+    pub animator_search: String,
     /// The project that is open; `Project::none()` while the project
     /// selector shows.
     pub project: Project,
@@ -363,6 +378,9 @@ pub struct State {
     pub renaming: Option<(ObjectId, String)>,
     /// The Content panel was asked for and should come to the front.
     pub show_content: bool,
+    /// Something asked for the Animator panel: it is opened if it is not
+    /// shown, and brought forward.
+    pub show_animator: bool,
     /// The folder open in the Content panel, relative to the project: one
     /// of the project's folders or a folder the user made below one.
     pub subfolder: String,
@@ -419,7 +437,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 16],
+    pub sections: [bool; 19],
     /// The page of a character's Properties: the scene's settings, the
     /// card's profile or its likes.
     pub property_tab: usize,
@@ -811,6 +829,12 @@ impl State {
             map_pictures: crate::map_library::Pictures::default(),
             speed_shown: None,
             lens_shown: None,
+            sun_turning: false,
+            sun_preview: false,
+            mirror_pending: false,
+            pose_bone: None,
+            fk_open: false,
+            animator_search: String::new(),
             library: Library::new(&project),
             project,
             selector: None,
@@ -839,6 +863,7 @@ impl State {
             scene_folded: false,
             renaming: None,
             show_content: false,
+            show_animator: false,
             subfolder: project::FOLDERS[0].to_owned(),
             folder_back: Vec::new(),
             folder_forward: Vec::new(),
@@ -864,7 +889,8 @@ impl State {
             playback: Playback::Stopped,
             clock: 0.0,
             sections: [
-                true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true,
             ],
             property_tab: 0,
             profiles: Default::default(),
@@ -2173,14 +2199,15 @@ impl State {
             .cloned();
         let id = match there {
             Some(mut object) => {
-                let (hide_walls, light_intensity, filter_decay) = match object.content {
+                let (hide_walls, light_intensity, filter_decay, sun) = match object.content {
                     Content::Map {
                         hide_walls,
                         light_intensity,
                         filter_decay,
+                        sun,
                         ..
-                    } => (hide_walls, light_intensity, filter_decay),
-                    _ => (true, 1.0, 0.5),
+                    } => (hide_walls, light_intensity, filter_decay, sun),
+                    _ => (true, 1.0, 0.5, None),
                 };
                 object.name = self.doc.scene().free_name(&map.name);
                 object.content = Content::Map {
@@ -2189,6 +2216,7 @@ impl State {
                     hide_walls,
                     light_intensity,
                     filter_decay,
+                    sun,
                     pieces_listed: false,
                 };
                 // The old map's pieces go with it; the new map lists its own.

@@ -128,6 +128,8 @@ pub struct Gizmos {
     band: Option<Pos2>,
     /// The icons drawn last frame, which clicks pick from.
     shown: Vec<Shown>,
+    /// The bone handles the Pose tool drew last frame, near ones last.
+    balls: Vec<Ball>,
     /// Whether each icon was behind something, for the camera's eye and
     /// the icon's place it was worked out for.
     behind: std::collections::HashMap<ObjectId, (Vec3, Vec3, bool)>,
@@ -240,8 +242,30 @@ impl Frame {
     }
 }
 
-/// An object as a drag found it.
+/// What a drag takes hold of. Objects of the scene for now; a bone of a
+/// character and an IK target join them with the Pose tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Grip {
+    Object(ObjectId),
+    /// A bone of a character, by name, turned with the Pose tool.
+    Bone(ObjectId, String),
+}
+
+/// What a drag did in the world, before it is told to what it holds: where
+/// its place went, the turn it made about its pivot and the stretch along
+/// the gizmo's axes.
+struct Moved {
+    place: Vec3,
+    turn: Quat,
+    stretch: Mat3,
+}
+
+/// An object or a bone as a drag found it. For a bone, `object` is its
+/// character, `parent_turn` the bone's parent's turn in the world, `place`
+/// the bone's place, and `bone` its own turn and its edit by hand.
 struct Start {
+    grip: Grip,
+    bone: Option<(Quat, rk_chara::pose::BoneEdit)>,
     object: Object,
     /// What carries the object's own transform into the scene.
     parent: Mat4,
@@ -336,21 +360,26 @@ impl Drag {
     /// Takes hold of a handle where the pointer pressed.
     fn begin(tool: usize, handle: Handle, frame: Frame, pivot: Pivot, view: &View, press: Pos2, st: &State) -> Drag {
         let scene = st.doc.scene();
-        let starts = st
-            .doc
-            .selected_all()
-            .into_iter()
-            .filter_map(|id| {
-                let object = scene.get(id)?.clone();
-                let parent = scene.parent_world(id);
-                Some(Start {
-                    parent,
-                    parent_turn: parent.to_scale_rotation_translation().1,
-                    place: parent.transform_point3(object.transform.position.into()),
-                    object,
+        let starts = if st.tool == crate::viewport::POSE_TOOL {
+            bone_start(st).into_iter().collect()
+        } else {
+            st.doc
+                .selected_all()
+                .into_iter()
+                .filter_map(|id| {
+                    let object = scene.get(id)?.clone();
+                    let parent = scene.parent_world(id);
+                    Some(Start {
+                        grip: Grip::Object(id),
+                        bone: None,
+                        parent,
+                        parent_turn: parent.to_scale_rotation_translation().1,
+                        place: parent.transform_point3(object.transform.position.into()),
+                        object,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         let ray = view.ray(press);
         let mut drag = Drag {
             tool,
@@ -487,38 +516,90 @@ impl Drag {
     }
 
     /// The transform an object has at this point of the drag.
-    fn moved(&self, start: &Start) -> Transform {
+    /// What the drag did in the world to what `start` holds: its place
+    /// moved, turned or stretched about the pivot.
+    fn world(&self, start: &Start) -> Moved {
         let frame = &self.frame;
-        let mut t = start.object.transform;
         let around = match self.pivot {
             Pivot::Origin => start.place,
             Pivot::Centre => frame.origin,
         };
-        let back = start.parent.inverse();
-        let own = t.quat();
-        let place = match self.amount {
-            Amount::Move(delta) => start.place + delta,
+        let still = Moved {
+            place: start.place,
+            turn: Quat::IDENTITY,
+            stretch: Mat3::IDENTITY,
+        };
+        match self.amount {
+            Amount::Move(delta) => Moved {
+                place: start.place + delta,
+                ..still
+            },
             Amount::Turn(angle) => {
-                let Handle::Axis(i) = self.handle else { return t };
+                let Handle::Axis(i) = self.handle else { return still };
                 let turn = Quat::from_axis_angle(frame.axes[i], angle);
-                let now = (start.parent_turn.inverse() * turn * start.parent_turn * own).normalize();
-                let (y, x, z) = now.to_euler(EulerRot::YXZ);
-                t.rotation = clean(Vec3::new(x, y, z) * (180.0 / std::f32::consts::PI));
-                around + turn * (start.place - around)
+                Moved {
+                    place: around + turn * (start.place - around),
+                    turn,
+                    ..still
+                }
             }
             Amount::Scale(scale) => {
-                // The stretch along the gizmo's axes, as one matrix; each
-                // of the object's own axes grows by how much it is
-                // stretched.
+                // The stretch along the gizmo's axes, as one matrix.
                 let axes = Mat3::from_cols(frame.axes[0], frame.axes[1], frame.axes[2]);
                 let stretch = axes * Mat3::from_diagonal(scale) * axes.transpose();
-                let turn = start.parent_turn * own;
-                let grown = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| (stretch * (turn * axis)).length());
-                t.scale = clean(Vec3::from(t.scale) * Vec3::from(grown));
-                around + stretch * (start.place - around)
+                Moved {
+                    place: around + stretch * (start.place - around),
+                    stretch,
+                    ..still
+                }
             }
+        }
+    }
+
+    /// The character of the bone `start` holds, with the bone's edit turned
+    /// as far as the drag has gone: the turn in the world `T` taken into the
+    /// bone's own space, `edit * local⁻¹ * (parent⁻¹ * T * parent * local)`.
+    fn turned_bone(&self, start: &Start, name: &str) -> Option<Object> {
+        let (local, edit) = start.bone?;
+        let turn = self.world(start).turn;
+        let parent = start.parent_turn;
+        let now = (parent.inverse() * turn * parent * local).normalize();
+        let rot = (edit.rot * local.inverse() * now).normalize();
+        let mut object = start.object.clone();
+        let crate::scene::Content::Character { pose_layer, .. } = &mut object.content else {
+            return None;
         };
-        t.position = clean(back.transform_point3(place));
+        let layer = pose_layer.get_or_insert_with(Default::default);
+        layer
+            .fk
+            .insert(name.to_owned(), rk_chara::pose::BoneEdit { rot, ..edit });
+        Some(object)
+    }
+
+    /// The transform of the object `start` holds after the drag.
+    fn moved(&self, start: &Start) -> Transform {
+        let mut t = start.object.transform;
+        if matches!(self.amount, Amount::Turn(_)) && !matches!(self.handle, Handle::Axis(_)) {
+            return t;
+        }
+        let m = self.world(start);
+        let own = t.quat();
+        match self.amount {
+            Amount::Move(_) => {}
+            Amount::Turn(_) => {
+                let now = (start.parent_turn.inverse() * m.turn * start.parent_turn * own).normalize();
+                let (y, x, z) = now.to_euler(EulerRot::YXZ);
+                t.rotation = clean(Vec3::new(x, y, z) * (180.0 / std::f32::consts::PI));
+            }
+            Amount::Scale(_) => {
+                // Each of the object's own axes grows by how much it is
+                // stretched.
+                let turn = start.parent_turn * own;
+                let grown = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| (m.stretch * (turn * axis)).length());
+                t.scale = clean(Vec3::from(t.scale) * Vec3::from(grown));
+            }
+        }
+        t.position = clean(start.parent.inverse().transform_point3(m.place));
         t
     }
 
@@ -887,7 +968,9 @@ fn build(tool: usize, frame: &Frame, view: &View, hot: Option<Handle>, drag: Opt
 pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> bool {
     let Some(live) = st.live.as_ref() else { return false };
     let view = View::of(&live.cam.orbit.camera(), full);
-    let tool = st.tool;
+    // The Pose tool turns its bone with the Rotate tool's rings.
+    let pose = st.tool == crate::viewport::POSE_TOOL;
+    let tool = if pose { ROTATE } else { st.tool };
     let (pos, press, primary, secondary, alt, ctrl, escape) = ui.input(|i| {
         (
             i.pointer.latest_pos(),
@@ -922,9 +1005,18 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                 drag.follow(&view, pos, snap);
             }
             for start in &drag.starts {
-                let mut object = start.object.clone();
-                object.transform = drag.moved(start);
-                st.doc.edit(object, true);
+                match &start.grip {
+                    Grip::Object(_) => {
+                        let mut object = start.object.clone();
+                        object.transform = drag.moved(start);
+                        st.doc.edit(object, true);
+                    }
+                    Grip::Bone(_, name) => {
+                        if let Some(object) = drag.turned_bone(start, name) {
+                            st.doc.edit(object, true);
+                        }
+                    }
+                }
             }
             st.gizmo.drag = Some(drag);
         }
@@ -934,8 +1026,20 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
         return true;
     }
 
+    // The Pose tool: a click on a bone's ball chooses the bone, and shows
+    // it on the Pose page; elsewhere it selects as the Select tool does.
+    if pose && scene.clicked_by(PointerButton::Primary) && !alt {
+        if let Some(ball) = pos.and_then(|pos| ball_at(st, pos)).cloned() {
+            st.pose_bone = Some(ball.bone);
+            st.property_tab = 1;
+            st.doc.selected = Some(ball.character);
+            return true;
+        }
+    }
     let selecting = (1..=SCALE).contains(&tool);
-    let at = if (MOVE..=SCALE).contains(&tool) {
+    let at = if pose {
+        bone_frame(st, &view)
+    } else if (MOVE..=SCALE).contains(&tool) {
         frame(st, &view, tool)
     } else {
         None
@@ -1073,7 +1177,7 @@ fn grid_look(k: &Look, cell: f32, camera: &rk_render::Camera) -> crate::grid_pas
 }
 
 /// One icon, `size` its radius and `fade` how much of it shows.
-fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, kind: Kind, selected: bool, size: f32, fade: f32) {
+fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, look: &IconLook, selected: bool, size: f32, fade: f32) {
     let alpha = |a: u8| (f32::from(a) * fade) as u8;
     p.circle_filled(at, size, Theme::glass(k.t.well, alpha(215)));
     let edge = if selected {
@@ -1082,14 +1186,205 @@ fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, kind: Kind, selected: bool, si
         Stroke::new(1.0, Theme::glass(k.t.hover, alpha(150)))
     };
     p.circle_stroke(at, size, edge);
+    // A notch on the ring, the way a spot or directional lamp shines.
+    if let Some(d) = look.shines {
+        let side = Vec2::new(-d.y, d.x) * (size * 0.28);
+        let base = at + d * (size - 0.5);
+        let tip = at + d * (size + size * 0.38);
+        p.add(egui::Shape::convex_polygon(
+            vec![base + side, tip, base - side],
+            if selected {
+                edge.color
+            } else {
+                Theme::glass(look.tint, alpha(235))
+            },
+            Stroke::NONE,
+        ));
+    }
     glyph(
         p,
         k,
         at,
-        kind.glyph(),
+        look.glyph,
         size * 14.0 / 11.0,
-        Theme::glass(kind.color(), alpha(255)),
+        Theme::glass(look.tint, alpha(255)),
     );
+}
+
+/// A bone's handle as the Pose tool shows it: CharaStudio's ball on each
+/// bone it poses by hand.
+#[derive(Debug, Clone)]
+struct Ball {
+    character: ObjectId,
+    bone: String,
+    at: Pos2,
+    radius: f32,
+    /// Where the bone above it that shows is, for the line between them.
+    parent: Option<Pos2>,
+    /// Where it is in the world, and its radius there.
+    world: Vec3,
+    size: f32,
+}
+
+/// A ball's radius in the world, and the least and most it shows at.
+const BALL_SIZE: f32 = 0.03;
+const BALL_SMALLEST: f32 = 3.5;
+const BALL_LARGEST: f32 = 9.0;
+
+/// The selected character and its bone chosen for the Pose tool's gizmo,
+/// while its FK is on.
+fn chosen_bone(st: &State) -> Option<(ObjectId, String)> {
+    let id = st.doc.selected?;
+    let name = st.pose_bone.clone()?;
+    let on = matches!(
+        st.doc.scene().get(id).map(|o| &o.content),
+        Some(crate::scene::Content::Character { pose_layer: Some(l), .. }) if l.fk_on
+    );
+    on.then_some((id, name))
+}
+
+/// The Pose tool's gizmo: rings on the chosen bone, along its own axes or
+/// the world's.
+fn bone_frame(st: &State, view: &View) -> Option<Frame> {
+    let (id, name) = chosen_bone(st)?;
+    let (origin, turn, _, _) = st.live.as_ref()?.bone_turns(id, &name)?;
+    if (origin - view.eye).dot(view.forward) < 0.02 {
+        return None;
+    }
+    let turn = if st.gizmo.space == Space::Local {
+        turn
+    } else {
+        Quat::IDENTITY
+    };
+    Some(Frame {
+        origin,
+        axes: [turn * Vec3::X, turn * Vec3::Y, turn * Vec3::Z],
+        unit: view.unit_at(origin),
+    })
+}
+
+/// The chosen bone as a drag takes hold of it.
+fn bone_start(st: &State) -> Option<Start> {
+    let (id, name) = chosen_bone(st)?;
+    let (place, _, parent_turn, local) = st.live.as_ref()?.bone_turns(id, &name)?;
+    let object = st.doc.scene().get(id)?.clone();
+    let edit = match &object.content {
+        crate::scene::Content::Character {
+            pose_layer: Some(l), ..
+        } => l.fk.get(&name).copied().unwrap_or_default(),
+        _ => Default::default(),
+    };
+    Some(Start {
+        grip: Grip::Bone(id, name),
+        bone: Some((local, edit)),
+        object,
+        parent: Mat4::IDENTITY,
+        parent_turn,
+        place,
+    })
+}
+
+/// The handles of the selected characters' FK bones, far ones first.
+fn balls(st: &State, view: &View) -> Vec<Ball> {
+    let Some(live) = st.live.as_ref() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(f32, Ball)> = Vec::new();
+    for id in st.doc.selected_all() {
+        let Some(handles) = live.fk_handles(id) else { continue };
+        for (bone, world, parent) in handles {
+            let depth = (world - view.eye).dot(view.forward);
+            let (Some(at), Some(edge)) = (view.screen(world), view.screen(world + Vec3::Y * BALL_SIZE)) else {
+                continue;
+            };
+            if depth <= 0.0 {
+                continue;
+            }
+            let radius = (edge - at).length().clamp(BALL_SMALLEST, BALL_LARGEST);
+            // The world's size of a point of the screen at the ball.
+            let per_point = 2.0 * depth * (view.fov * 0.5).tan() / view.rect.height().max(1.0);
+            out.push((
+                depth,
+                Ball {
+                    character: id,
+                    bone,
+                    at,
+                    radius,
+                    parent: parent.and_then(|p| view.screen(p)),
+                    world,
+                    size: radius * per_point,
+                },
+            ));
+        }
+    }
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, b)| b).collect()
+}
+
+/// The ball under a point, the nearest of those it touches.
+fn ball_at(st: &State, pos: Pos2) -> Option<&Ball> {
+    st.gizmo
+        .balls
+        .iter()
+        .rev()
+        .find(|b| b.at.distance(pos) <= b.radius + 2.0)
+}
+
+/// Draws the lines between the balls, from each to the bone above it.
+fn draw_bone_lines(p: &egui::Painter, st: &State) {
+    let line = Stroke::new(1.0, Color32::from_white_alpha(60));
+    for b in &st.gizmo.balls {
+        if let Some(parent) = b.parent {
+            p.line_segment([parent, b.at], line);
+        }
+    }
+}
+
+/// The balls as solid spheres for the gizmo's layer, as CharaStudio's
+/// guide draws them: see-through white (three quarters white, a quarter
+/// seen), clearer under the pointer and for the bone chosen. In the layer
+/// near balls hide far ones, and each is shaded towards its rim.
+fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
+    const RINGS: usize = 10;
+    const SIDES: usize = 18;
+    let hot = pointer
+        .and_then(|pos| ball_at(st, pos))
+        .map(|b| (b.character, b.bone.clone()));
+    let chosen = st.pose_bone.as_deref();
+    let mut mesh = Mesh::default();
+    for b in &st.gizmo.balls {
+        let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
+        let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
+        let (grey, alpha) = if lit || on { (1.0, 0.85) } else { (0.75, 0.3) };
+        // A light from the camera's side and a little above, so that each
+        // ball reads as a sphere: lit in front, darker at its rim.
+        let light = ((view.eye - b.world).normalize_or(Vec3::Z) + Vec3::Y * 0.7).normalize();
+        let point = |ring: usize, side: usize| {
+            let (sa, ca) = (ring as f32 / RINGS as f32 * std::f32::consts::PI).sin_cos();
+            let (sb, cb) = (side as f32 / SIDES as f32 * TAU).sin_cos();
+            let n = Vec3::new(sa * cb, ca, sa * sb);
+            let p = b.world + n * b.size;
+            let lit = n.dot(light).max(0.0);
+            let shade = grey * (0.55 + 0.45 * lit) + 0.12 * lit.powi(16);
+            [p.x, p.y, p.z, n.x, n.y, n.z, shade, shade, shade, alpha]
+        };
+        // Only the half that faces the camera: seen through, the far half
+        // would show as stripes.
+        let facing = |v: &Vertex| {
+            let (p, n) = (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]));
+            n.dot(view.eye - p) > 0.0
+        };
+        for ring in 0..RINGS {
+            for side in 0..SIDES {
+                let (a, c) = (point(ring, side), point(ring, side + 1));
+                let (d, e) = (point(ring + 1, side), point(ring + 1, side + 1));
+                if [&a, &c, &d, &e].into_iter().any(facing) {
+                    mesh.solid.extend([a, d, c, c, d, e]);
+                }
+            }
+        }
+    }
+    mesh
 }
 
 /// An icon as the viewport shows it this frame: for its object and the
@@ -1107,7 +1402,7 @@ struct Shown {
 
 /// An icon's radius at full size, and at its smallest.
 const ICON_SIZE: f32 = 11.0;
-const ICON_SMALLEST: f32 = 6.0;
+const ICON_SMALLEST: f32 = 8.0;
 /// Up to how far an icon keeps its full size, in metres.
 const ICON_NEAR: f32 = 4.0;
 /// The least distance between two icons' middles, in points: two closer
@@ -1180,13 +1475,277 @@ fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown>
 }
 
 /// Draws the shown icons, the far under the near.
-fn draw_icons(p: &egui::Painter, k: &Look, st: &State, shown: &[Shown]) {
+/// The smallest convex outline round points, clockwise on the screen
+/// (Andrew's monotone chain).
+fn convex_hull(mut points: Vec<Pos2>) -> Vec<Pos2> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup_by(|a, b| a.distance(*b) < 0.01);
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: Pos2, a: Pos2, b: Pos2| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Pos2> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let list: Box<dyn Iterator<Item = &Pos2>> = if pass == 0 {
+            Box::new(points.iter())
+        } else {
+            Box::new(points.iter().rev())
+        };
+        for &q in list {
+            while hull.len() >= start + 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// The sun's dome's radius, in points.
+const DOME: f32 = 62.0;
+
+/// The sun as Unreal shows it while it is turned (Ctrl+L): in the view's
+/// corner, a wire half dome turned as the camera looks, its horizon and
+/// two arcs over the top, with an arrow from the middle to the sun and its
+/// angles below.
+fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) {
+    let scene = st.doc.scene();
+    let sun = scene.objects().iter().find_map(|o| match &o.content {
+        crate::scene::Content::Map { sun, .. } => Some(*sun),
+        _ => None,
+    });
+    let Some(sun) = sun else { return };
+    let [heading, elevation] = sun.unwrap_or_else(|| crate::map_menu::own_sun(st));
+    let towards = crate::scene::sun_towards([heading, elevation]);
+    // A widget of its own in the view's lower right corner, turned as the
+    // camera looks but standing nowhere in the scene: each way is laid
+    // flat along the camera's right and up.
+    let right = Vec3::Y.cross(view.forward).normalize_or(Vec3::X);
+    let up = view.forward.cross(right);
+    let radius = DOME;
+    let middle = Pos2::new(view.rect.right() - radius - 28.0, view.rect.bottom() - radius - 52.0);
+    let point = |dir: Vec3| Some(middle + Vec2::new(dir.dot(right), -dir.dot(up)) * radius);
+    // A soft shade behind, so that the lines read on a bright floor: the
+    // dome's own outline as the camera sees it, a little larger.
+    let mut outline: Vec<Pos2> = Vec::new();
+    for ring in 0..=8 {
+        let (sin_up, cos_up) = (ring as f32 / 8.0 * std::f32::consts::FRAC_PI_2).sin_cos();
+        for i in 0..32 {
+            let (s, c) = (i as f32 / 32.0 * TAU).sin_cos();
+            if let Some(at) = point(Vec3::new(c * cos_up, sin_up, s * cos_up)) {
+                outline.push(middle + (at - middle) * 1.14);
+            }
+        }
+    }
+    let hull = convex_hull(outline);
+    let lowest = hull.iter().map(|q| q.y).fold(middle.y, f32::max);
+    if hull.len() >= 3 {
+        p.add(egui::Shape::convex_polygon(
+            hull,
+            Color32::from_black_alpha(70),
+            Stroke::NONE,
+        ));
+    }
+    let line = |a: Vec3, b: Vec3, stroke: Stroke| {
+        if let (Some(a), Some(b)) = (point(a), point(b)) {
+            p.line_segment([a, b], stroke);
+        }
+    };
+    let faint = Stroke::new(1.0, Color32::from_white_alpha(75));
+    let firm = Stroke::new(1.5, Color32::from_white_alpha(150));
+    const SIDES: usize = 64;
+    // The horizon, and rings at 30 and 60 degrees up.
+    for (up, stroke) in [(0.0f32, firm), (30.0, faint), (60.0, faint)] {
+        let (sin_up, cos_up) = up.to_radians().sin_cos();
+        for i in 0..SIDES {
+            let at = |i: usize| {
+                let (s, c) = (i as f32 / SIDES as f32 * TAU).sin_cos();
+                Vec3::new(c * cos_up, sin_up, s * cos_up)
+            };
+            line(at(i), at(i + 1), stroke);
+        }
+    }
+    // Two arcs over the top, along the axes.
+    for across in [Vec3::X, Vec3::Z] {
+        for i in 0..SIDES / 2 {
+            let at = |i: usize| {
+                let (s, c) = (i as f32 / SIDES as f32 * TAU).sin_cos();
+                across * c + Vec3::Y * s
+            };
+            line(at(i), at(i + 1), faint);
+        }
+    }
+    // The arrow to the sun, and the sun where it meets the dome.
+    let sun_colour = Color32::from_rgb(255, 208, 92);
+    let arrow = Stroke::new(2.0, sun_colour);
+    // The arrow stops short of the sun.
+    line(Vec3::ZERO, towards * 0.74, arrow);
+    if let (Some(tip), Some(back)) = (point(towards * 0.74), point(towards * 0.6)) {
+        let d = (tip - back).normalized();
+        let side = Vec2::new(-d.y, d.x) * 6.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![tip + d * 4.0, back + side, back - side],
+            sun_colour,
+            Stroke::NONE,
+        ));
+    }
+    if let Some(at) = point(towards) {
+        // A sun: a soft warm glow, eight short rays and a bright core.
+        for (r, alpha) in [(15.0, 0.10), (11.0, 0.18), (8.5, 0.28)] {
+            p.circle_filled(at, r, sun_colour.gamma_multiply(alpha));
+        }
+        let ray = Stroke::new(1.5, sun_colour);
+        for i in 0..8 {
+            let (s, c) = (i as f32 / 8.0 * TAU + TAU / 16.0).sin_cos();
+            let d = Vec2::new(c, s);
+            p.line_segment([at + d * 8.0, at + d * 12.5], ray);
+        }
+        p.circle_filled(at, 5.5, sun_colour);
+        p.circle_filled(at, 3.0, Color32::from_rgb(255, 244, 210));
+    }
+    // Its shadow on the horizon, for where it stands round.
+    let flat = Vec3::new(towards.x, 0.0, towards.z).normalize_or_zero();
+    if flat != Vec3::ZERO {
+        line(Vec3::ZERO, flat, faint);
+        line(flat, towards, faint);
+    }
+    // Under the dome.
+    {
+        let below = Pos2::new(middle.x, lowest + 20.0);
+        let text = format!("{heading:.0}°  ·  {elevation:.0}° up");
+        let font = k.bold(k.d.text);
+        let size = widgets::text_width(ui, &text, font.clone());
+        let chip = Rect::from_center_size(below, Vec2::new(size + 14.0, k.d.text + 10.0));
+        p.rect_filled(chip, k.radius(), Theme::glass(k.t.well, 230));
+        p.text(chip.center(), Align2::CENTER_CENTER, text, font, k.t.text_bright);
+    }
+}
+
+/// The reach of each selected lamp, as Unreal shows it: three circles of
+/// a point lamp's range, a spot's cone out to its range, and an arrow
+/// along the way a directional lamp shines. Thin lines in the lamp's
+/// colour, lightened so a dark one still shows.
+fn draw_lamp_reach(p: &egui::Painter, st: &State, view: &View) {
+    use crate::scene::{Content, LightKind};
+    let scene = st.doc.scene();
+    for o in scene.objects() {
+        let Content::Light {
+            light,
+            range,
+            spot_angle,
+            color,
+            ..
+        } = &o.content
+        else {
+            continue;
+        };
+        if *light == LightKind::Character || !st.doc.is_selected(o.id) || !scene.shown(o.id) {
+            continue;
+        }
+        let (_, turn, at) = scene.world(o.id).to_scale_rotation_translation();
+        // A light shines along its forward axis.
+        let shines = (turn * Vec3::Z).normalize_or(Vec3::NEG_Y);
+        let (u, w) = shines.any_orthonormal_pair();
+        let light_up = |v: f32| ((0.5 + 0.5 * v.clamp(0.0, 1.0)) * 255.0) as u8;
+        let tint = Color32::from_rgba_unmultiplied(light_up(color[0]), light_up(color[1]), light_up(color[2]), 210);
+        let stroke = Stroke::new(1.0, tint);
+        let segment = |a: Vec3, b: Vec3| {
+            if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+                p.line_segment([a, b], stroke);
+            }
+        };
+        let round = |k: usize, n: usize| {
+            let (sin, cos) = (k as f32 / n as f32 * TAU).sin_cos();
+            (cos, sin)
+        };
+        let circle = |centre: Vec3, x: Vec3, y: Vec3, radius: f32| {
+            const SIDES: usize = 64;
+            for k in 0..SIDES {
+                let (c0, s0) = round(k, SIDES);
+                let (c1, s1) = round(k + 1, SIDES);
+                segment(centre + (x * c0 + y * s0) * radius, centre + (x * c1 + y * s1) * radius);
+            }
+        };
+        match light {
+            LightKind::Point => {
+                for (x, y) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
+                    circle(at, x, y, *range);
+                }
+            }
+            LightKind::Spot => {
+                let half = (spot_angle * 0.5).clamp(0.5, 89.5).to_radians();
+                let end = at + shines * (range * half.cos());
+                let radius = range * half.sin();
+                circle(end, u, w, radius);
+                for k in 0..8 {
+                    let (c, s) = round(k, 8);
+                    segment(at, end + (u * c + w * s) * radius);
+                }
+            }
+            LightKind::Directional => {
+                let tip = at + shines * 1.5;
+                segment(at, tip);
+                for k in 0..4 {
+                    let (c, s) = round(k, 4);
+                    segment(tip, tip - shines * 0.3 + (u * c + w * s) * 0.12);
+                }
+                circle(at, u, w, 0.25);
+            }
+            LightKind::Character => {}
+        }
+    }
+}
+
+fn draw_icons(p: &egui::Painter, k: &Look, st: &State, view: &View, shown: &[Shown]) {
     let mut order: Vec<&Shown> = shown.iter().collect();
     order.sort_by(|a, b| a.size.total_cmp(&b.size));
     for icon in order {
         let fade = if icon.behind { 0.3 } else { 1.0 };
-        icon_at(p, k, icon.at, icon.kind, st.doc.is_selected(icon.id), icon.size, fade);
+        let look = icon_look(st, view, icon.id, icon.kind);
+        icon_at(p, k, icon.at, &look, st.doc.is_selected(icon.id), icon.size, fade);
     }
+}
+
+/// What an icon shows of its object: its glyph, by kind of light, the
+/// light's colour, and which way a spot or directional lamp shines on
+/// the screen.
+struct IconLook {
+    glyph: &'static str,
+    tint: Color32,
+    shines: Option<Vec2>,
+}
+
+fn icon_look(st: &State, view: &View, id: ObjectId, kind: Kind) -> IconLook {
+    use crate::scene::Content;
+    let scene = st.doc.scene();
+    use crate::scene::LightKind;
+    let mut look = IconLook {
+        glyph: kind.glyph(),
+        tint: kind.color(),
+        shines: None,
+    };
+    if let Some(Content::Light { light, color, .. }) = scene.get(id).map(|o| &o.content) {
+        look.glyph = match light {
+            LightKind::Character => icon::SUN_DIM,
+            LightKind::Directional => icon::SUN,
+            LightKind::Point => icon::LIGHTBULB,
+            LightKind::Spot => icon::FLASHLIGHT,
+        };
+        // The light's colour, lightened so a dark one still reads.
+        let up = |v: f32| ((0.55 + 0.45 * v.clamp(0.0, 1.0)) * 255.0) as u8;
+        look.tint = Color32::from_rgb(up(color[0]), up(color[1]), up(color[2]));
+        if matches!(light, LightKind::Spot | LightKind::Directional) {
+            let (_, turn, at) = scene.world(id).to_scale_rotation_translation();
+            let towards = turn * Vec3::Z;
+            if let (Some(a), Some(b)) = (view.screen(at), view.screen(at + towards * 0.5)) {
+                let d = b - a;
+                look.shines = (d.length() > 1.0).then(|| d.normalized());
+            }
+        }
+    }
+    look
 }
 
 /// Draws what the pointer works with over the scene's picture: the grid,
@@ -1211,20 +1770,39 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
         }
     }
 
+    draw_lamp_reach(&p, st, &view);
+    if st.sun_turning || st.sun_preview {
+        draw_sun_dome(ui, &p, k, st, &view);
+    }
     let pointer = ui.ctx().pointer_hover_pos();
+    st.gizmo.balls = if tool == crate::viewport::POSE_TOOL {
+        balls(st, &view)
+    } else {
+        Vec::new()
+    };
     let shown = shown_icons(st, &view, pointer);
-    draw_icons(&p, k, st, &shown);
+    draw_icons(&p, k, st, &view, &shown);
+    draw_bone_lines(&p, st);
+    let mut balls_left = ball_mesh(st, &view, pointer);
     st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {
         Some(drag) => Some(drag.shown()),
         None if (MOVE..=SCALE).contains(&tool) => frame(st, &view, tool),
+        None if tool == crate::viewport::POSE_TOOL => bone_frame(st, &view),
         None => None,
+    };
+    // The Pose tool's gizmo is the Rotate tool's.
+    let tool = if tool == crate::viewport::POSE_TOOL {
+        ROTATE
+    } else {
+        tool
     };
     if let Some(at) = shown {
         let drag = st.gizmo.drag.as_ref();
         let hot = drag.map(|d| d.handle).or(st.gizmo.hover);
-        let mesh = build(drag.map_or(tool, |d| d.tool), &at, &view, hot, drag);
+        let mut mesh = build(drag.map_or(tool, |d| d.tool), &at, &view, hot, drag);
+        mesh.solid.append(&mut balls_left.solid);
         let readout = drag.and_then(|d| {
             // Beside the spoke of a dial, or below the pivot.
             let place = match (d.tool, d.amount, d.handle) {
@@ -1253,6 +1831,14 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
             let chip = Rect::from_center_size(place, Vec2::new(size + 14.0, k.d.text + 11.0));
             p.rect_filled(chip, k.radius(), Theme::glass(k.t.well, 230));
             p.text(chip.center(), Align2::CENTER_CENTER, text, font, k.t.text_bright);
+        }
+    }
+
+    // The balls by themselves when no gizmo shows.
+    if !balls_left.solid.is_empty() {
+        if let Some(live) = st.live.as_mut() {
+            let id = live.paint_gizmo(pixels, view.view_proj, &balls_left);
+            p.image(id, full, whole, Color32::WHITE);
         }
     }
 
@@ -1429,6 +2015,8 @@ mod tests {
         let view = view();
         let frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
         let start = Start {
+            grip: Grip::Object(object.id),
+            bone: None,
             parent,
             parent_turn: parent.to_scale_rotation_translation().1,
             place: parent.transform_point3(object.transform.position.into()),
@@ -1450,6 +2038,68 @@ mod tests {
             readout: String::new(),
         };
         drag.moved(&start)
+    }
+
+    #[test]
+    fn turning_a_bone_turns_it_in_the_world_by_the_drag() {
+        let view = view();
+        let mut frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
+        // The rings along the bone's own axes, whatever they are.
+        let world_turn = Quat::from_euler(EulerRot::YXZ, 0.7, -0.3, 0.2);
+        frame.axes = [world_turn * Vec3::X, world_turn * Vec3::Y, world_turn * Vec3::Z];
+        let mut scene = Scene::empty();
+        let id = scene.add("Anna", Content::character("a.png".into()), None);
+        let parent_turn = Quat::from_euler(EulerRot::YXZ, -0.4, 0.5, 0.1);
+        let local = Quat::from_euler(EulerRot::YXZ, 0.2, 0.9, -0.6);
+        let edit = rk_chara::pose::BoneEdit {
+            rot: Quat::from_rotation_x(0.3),
+            ..Default::default()
+        };
+        let start = Start {
+            grip: Grip::Bone(id, "cf_j_arm00_L".into()),
+            bone: Some((local, edit)),
+            object: scene.get(id).unwrap().clone(),
+            parent: Mat4::IDENTITY,
+            parent_turn,
+            place: frame.origin,
+        };
+        for axis in 0..3 {
+            let angle = 0.8;
+            let drag = Drag {
+                tool: ROTATE,
+                handle: Handle::Axis(axis),
+                frame,
+                on_grid: false,
+                pivot: Pivot::Origin,
+                starts: Vec::new(),
+                press: Pos2::ZERO,
+                along: 0.0,
+                held: Vec3::ZERO,
+                spoke: Vec3::X,
+                tangent: Vec2::X,
+                amount: Amount::Turn(angle),
+                readout: String::new(),
+            };
+            let turned = drag.turned_bone(&start, "cf_j_arm00_L").unwrap();
+            let Content::Character {
+                pose_layer: Some(layer),
+                ..
+            } = &turned.content
+            else {
+                panic!("the character carries the edit");
+            };
+            let new_edit = layer.fk["cf_j_arm00_L"].rot;
+            // The pose under the edit stays; the bone in the world turned by
+            // the drag about the ring's axis.
+            let base = local * edit.rot.inverse();
+            let before = parent_turn * local;
+            let after = parent_turn * base * new_edit;
+            let turn = Quat::from_axis_angle(frame.axes[axis], angle);
+            assert!(
+                after.abs_diff_eq(turn * before, 1e-5) || after.abs_diff_eq(-(turn * before), 1e-5),
+                "{axis}"
+            );
+        }
     }
 
     fn light() -> Object {

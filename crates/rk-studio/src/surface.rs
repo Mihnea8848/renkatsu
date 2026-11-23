@@ -44,14 +44,30 @@ pub fn floor_below(point: Vec3, surfaces: &[&dyn Surface], ground: Option<f32>) 
 /// found going round `point`, a quarter metre a ring, the nearest wins,
 /// a step up or down counting double: a floor beside a table wins over
 /// the table's top.
+///
+/// When `point` lies over a floor with a ceiling over it, she is in a
+/// room, and stays in it: only floors under a ceiling count, so she lands
+/// on the room's floor below `point`, not on its roof or on a floor
+/// outside it, however little of her the camera sees in there.
 pub fn stand_spot(point: Vec3, to_camera: Vec3, surface: &dyn Surface) -> Option<Vec3> {
+    // The room's floor under her: the first under a ceiling below her,
+    // or above her when she is under the room. She is put on it before
+    // looking round, so a bed or a shelf is a climb from there, not a
+    // way down from the roof.
+    let rooms: Vec<Vec3> = floors(point, 20.0, surface)
+        .into_iter()
+        .filter(|floor| roofed(*floor, surface))
+        .collect();
+    let room = rooms.iter().find(|floor| floor.y <= point.y + 0.5).or(rooms.last());
+    let inside = room.is_some();
+    let point = room.map_or(point, |floor| Vec3::new(point.x, floor.y, point.z));
     // Near and fine; a map whose floor is far from its origin, or whose
     // near floors are walled in, gets a coarser look further out and down.
-    let near = search(point, to_camera, surface, 0.25, 12.0, 20.0);
+    let near = search(point, to_camera, surface, inside, 0.25, 12.0, 20.0);
     if near.is_some_and(|(score, _)| score == 0.0) {
         return near.map(|(_, spot)| spot);
     }
-    let far = search(point, to_camera, surface, 2.0, 60.0, 200.0);
+    let far = search(point, to_camera, surface, inside, 2.0, 60.0, 200.0);
     [near, far]
         .into_iter()
         .flatten()
@@ -63,6 +79,7 @@ fn search(
     point: Vec3,
     to_camera: Vec3,
     surface: &dyn Surface,
+    inside: bool,
     step: f32,
     reach: f32,
     depth: f32,
@@ -88,6 +105,9 @@ fn search(
             let across = Vec3::new(side.z, 0.0, -side.x);
             let column = point + (side * cos + across * sin) * r;
             for floor in floors(column, depth, surface) {
+                if inside && !roofed(floor, surface) {
+                    continue;
+                }
                 // A metre down, or a metre short of a full view, weighs as
                 // three metres further out; a metre up as eight, so that a
                 // walled-in floor beats the roof over it.
@@ -126,11 +146,23 @@ fn floors(at: Vec3, depth: f32, surface: &dyn Surface) -> Vec<Vec3> {
     found
 }
 
+/// The head room a character needs.
+const HEAD: f32 = 1.8;
+
+/// Whether a floor has a ceiling over it, high enough to stand under and
+/// within a storey and a half. A roof under the open sky, a floor outside
+/// the room, or the underside of a floor has none.
+fn roofed(floor: Vec3, surface: &dyn Surface) -> bool {
+    const STOREY: f32 = 5.0;
+    surface
+        .meet(floor + Vec3::Y * 0.05, Vec3::Y)
+        .is_some_and(|far| (HEAD..STOREY).contains(&far))
+}
+
 /// Whether a character fits on `floor` with the camera's side open, and
 /// how many metres short of a full view that side is: a small room's
 /// floor still beats the roof over it, a roomy spot beats both.
 fn room_at(floor: Vec3, to_camera: Vec3, surface: &dyn Surface) -> Option<f32> {
-    const HEAD: f32 = 1.8;
     const ELBOWS: f32 = 0.25;
     // CharaStudio's narrow lens frames a character from about five metres.
     const SIGHT: f32 = 6.0;
@@ -234,6 +266,27 @@ mod tests {
             spot.y.abs() < 1e-3 && spot.x.abs() < 1.9 && spot.z.abs() < 1.4,
             "{spot}"
         );
+    }
+
+    #[test]
+    fn a_character_in_a_room_stays_in_it_though_only_outside_is_open() {
+        // A room as above, on a wide floor: outside, the camera would see
+        // all of her, from the roof too. She starts on the roof.
+        let walls = vec![
+            floor(),
+            (Vec3::new(-2.0, 0.0, -1.5), Vec3::new(-1.9, 3.0, 1.5)),
+            (Vec3::new(1.9, 0.0, -1.5), Vec3::new(2.0, 3.0, 1.5)),
+            (Vec3::new(-2.0, 0.0, -1.5), Vec3::new(2.0, 3.0, -1.4)),
+            (Vec3::new(-2.0, 0.0, 1.4), Vec3::new(2.0, 3.0, 1.5)),
+            (Vec3::new(-2.0, 3.0, -1.5), Vec3::new(2.0, 3.5, 1.5)),
+        ];
+        for start in [Vec3::ZERO, Vec3::new(0.0, 3.5, 0.0)] {
+            let spot = stand_spot(start, Vec3::X, &Boxes(walls.clone())).unwrap();
+            assert!(
+                spot.y.abs() < 1e-3 && spot.x.abs() < 1.9 && spot.z.abs() < 1.4,
+                "{start}: {spot}"
+            );
+        }
     }
 
     #[test]

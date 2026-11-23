@@ -86,6 +86,12 @@ pub struct BuildOptions {
     /// Run the Colliders plugin: floor, arm and leg colliders where the
     /// card switches them on, and its changes to skirts and the bust.
     pub colliders: bool,
+    /// The Colliders plugin's three switches as Studio's character panel
+    /// sets them; `None` takes the ones the card was saved with.
+    pub collider_switches: Option<crate::colliders::Settings>,
+    /// Advanced Skirt Physics: Renkatsu's own pass that keeps legs, arms
+    /// and the floor out of skirts. Off moves them exactly as the game.
+    pub advanced_skirts: bool,
     /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
     /// and turns the lower legs, feet and toes.
     pub stiletto: bool,
@@ -117,6 +123,8 @@ impl Default for BuildOptions {
             accessory_states: true,
             uncensor_selector: true,
             colliders: true,
+            collider_switches: None,
+            advanced_skirts: true,
             stiletto: true,
         }
     }
@@ -184,6 +192,9 @@ struct PhysicsSource {
     belongs: crate::physics::Belongs,
     /// The prefab's top object, where paths to DynamicBone roots start.
     root: usize,
+    /// The name `LoadCharaFbxData` gives the top object (`ct_clothesBot`
+    /// and so on), where it renames it; plugins look for that name.
+    object: Option<&'static str>,
 }
 
 impl<'g> Builder<'g> {
@@ -252,6 +263,7 @@ impl<'g> Builder<'g> {
             slot: None,
             root: inst.root,
             belongs,
+            object: None,
         });
     }
 
@@ -649,7 +661,11 @@ impl<'g> Builder<'g> {
                             def.colliders = body_colliders.clone();
                         }
                         if let Some((settings, _, added)) = &plugin {
-                            crate::colliders::dynamic_bone(&mut def, scene, *settings, added);
+                            let object = match source.object {
+                                Some(name) if *node == source.root => name,
+                                _ => scene.nodes[*node].name.as_str(),
+                            };
+                            crate::colliders::dynamic_bone(&mut def, scene, object, *settings, added);
                         }
                         if let (Some(slot), Some(root)) = (source.slot, def.root) {
                             crate::dynamic_bone_editor::apply(edits, slot, &scene.nodes[root].name, &mut def);
@@ -2421,6 +2437,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     // The game copies DynamicBone roots onto the body
                     // skeleton for tops and bottoms only.
                     b.physics_source(inst, true, i < 2, true, crate::physics::Belongs::Clothes);
+                    if let Some(source) = b.physics_sources.last_mut() {
+                        source.object = Some(crate::overlays::MAIN_IDS[i]);
+                    }
                     assign_weights(&mut b.scene, inst, &bones, "cf_j_root", hips);
                     rig.add_piece(&b.scene, i, inst);
                     let sources = compose::color_sources(None);
@@ -2534,6 +2553,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                                 b.clothing_blend_shape(&inst, &blend_shapes, outfit, sub.category, 0);
                             }
                             b.physics_source(&inst, true, true, true, crate::physics::Belongs::Clothes);
+                            if let Some(source) = b.physics_sources.last_mut() {
+                                source.object = Some(crate::overlays::SUB_IDS[k]);
+                            }
                             assign_weights(&mut b.scene, &inst, &bones, "cf_j_root", hips);
                             rig.add_part(&b.scene, k, &inst);
                             // A sailor top's liquid goes on its one part,
@@ -2783,7 +2805,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             .get(crate::colliders::BREAST_SIZE)
             .copied()
             .unwrap_or(0.0);
-        (crate::colliders::read(&card.ext), bust)
+        let switches = opts
+            .collider_switches
+            .unwrap_or_else(|| crate::colliders::read(&card.ext));
+        (switches, bust)
     });
     let dbde_edits = if opts.dbde {
         crate::dbde::for_outfit(&card.ext, outfit)
@@ -2793,6 +2818,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut physics = b.read_physics(top, &bones, &bone_edits, &dbde_edits, collider_plugin);
     if opts.physics {
         physics.start(&mut b.scene);
+        // Advanced Skirt Physics is fitted to the body as built.
+        physics.fit_cloth(&b.scene, &bones, opts.advanced_skirts);
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
     }
@@ -2825,8 +2852,11 @@ impl Character {
     /// objects each state shows, the masks under the top, and the heels,
     /// which come off with the shoes. Bones the heels moved are put back
     /// as they were first, so an animation is to be applied again after.
+    /// The physics of a piece that comes off stops and its bones go back
+    /// to rest, as Unity's `OnDisable` does when the game hides it.
     pub fn set_clothes(&mut self, states: &crate::clothes_state::States) {
         self.clothes.apply(&mut self.scene, states);
+        self.physics.follow_objects(&mut self.scene);
         if let Some(heels) = &self.heels {
             heels.reset(&mut self.scene);
         }
@@ -2881,13 +2911,43 @@ impl Character {
         }
     }
 
+    /// Lets the physics settle on a new pose for `frames` frames of `dt`
+    /// seconds, as the game's frames do: `pose` writes the pose each frame.
+    /// With Advanced Skirt Physics on, the pose is reached over the first
+    /// `EASE_FRAMES` frames from where the bones were before.
+    pub fn settle_pose(&mut self, frames: u32, dt: f32, mut pose: impl FnMut(&mut Character)) {
+        let from: Vec<crate::scene::Trs> = self.scene.nodes.iter().map(|n| n.local).collect();
+        for frame in 0..frames {
+            self.physics.begin_frame(&mut self.scene);
+            pose(self);
+            let amount = (frame + 1) as f32 / (crate::physics::EASE_FRAMES + 1) as f32;
+            self.physics.ease(&mut self.scene, &from, amount);
+            self.physics.end_frame(&mut self.scene, dt);
+        }
+    }
+
     /// Writes one frame of a motion to the bones: the heels come off, the
     /// motion writes the bones it names, and the heels go on again.
     pub fn animate(&mut self, motion: &crate::motion::Bound, phase: f32, states: &crate::clothes_state::States) {
+        self.pose_frame(Some((motion, phase)), &[], states);
+    }
+
+    /// Poses one frame: the heels come off, the motion (if any) writes the
+    /// bones it names, the edits made by hand go on top of that
+    /// (`crate::pose`), and the heels go on again.
+    pub fn pose_frame(
+        &mut self,
+        motion: Option<(&crate::motion::Bound, f32)>,
+        edits: &[(usize, crate::pose::BoneEdit)],
+        states: &crate::clothes_state::States,
+    ) {
         if let Some(heels) = &self.heels {
             heels.reset(&mut self.scene);
         }
-        motion.apply(&mut self.scene, phase);
+        if let Some((motion, phase)) = motion {
+            motion.apply(&mut self.scene, phase);
+        }
+        crate::pose::apply(&mut self.scene, edits);
         self.wear_heels(states);
     }
 }

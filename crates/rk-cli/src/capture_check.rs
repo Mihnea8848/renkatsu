@@ -147,13 +147,23 @@ fn scores(s: &Summary) -> String {
     )
 }
 
-pub fn check(dir: &Path, out_dir: &Path, only: &[String], studio: bool, alpha_to_coverage: bool) -> Result<()> {
+pub fn check(
+    dir: &Path,
+    out_dir: &Path,
+    only: &[String],
+    studio: bool,
+    alpha_to_coverage: bool,
+    game_skirts: bool,
+) -> Result<()> {
     let files = cases(dir, only)?;
     anyhow::ensure!(!files.is_empty(), "no capture files in {}", dir.display());
     let game = Game::open(&Config::load()?)?;
     let mut renderer = Renderer::new()?;
     std::fs::create_dir_all(out_dir)?;
-    let opts = BuildOptions::default();
+    let opts = BuildOptions {
+        advanced_skirts: !game_skirts,
+        ..Default::default()
+    };
     let (mut compared, mut stored, mut failed) = (0, 0, 0);
     for file in &files {
         let stem = file.file_stem().unwrap_or_default().to_string_lossy().to_string();

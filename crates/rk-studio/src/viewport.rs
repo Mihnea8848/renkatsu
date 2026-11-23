@@ -72,6 +72,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     }
     if !busy {
         navigate(ui, st, &scene, full);
+        turn_sun(ui, st, &scene);
     }
     // A card dragged from the Content panel and let go here joins the scene.
     if dragged_over::<DragCard>(ui, full) {
@@ -194,7 +195,7 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
             Pos2::new(left, bar.bottom()),
             Vec2::new(
                 palette_width(st.mode, 184.0),
-                palette_height(k, st.mode).min(rail_rect.height()),
+                palette_height(k, st).min(rail_rect.height()),
             ),
         );
         drawer(ui, k, pal);
@@ -322,7 +323,7 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(rail_rect.right() + 4.0, rail_rect.top()),
-            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st.mode)),
+            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st)),
         );
         block(ui, k, pal);
         palette(ui, k, st, pal);
@@ -349,7 +350,7 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
             Pos2::new(left, top),
             Vec2::new(
                 palette_width(st.mode, 196.0),
-                palette_height(k, st.mode).min(full.bottom() - top),
+                palette_height(k, st).min(full.bottom() - top),
             ),
         );
         drawer(ui, k, pal);
@@ -1017,23 +1018,63 @@ fn map_mode(mode: usize) -> bool {
     MODES.get(mode).is_some_and(|m| m.name == "Map")
 }
 
-/// The palette's width: the Map mode's rows need more room than tools.
+/// The palette's width: the Map mode's rows need more room than tools,
+/// and the Pose mode's categories a box at their end.
 fn palette_width(mode: usize, tools: f32) -> f32 {
     if map_mode(mode) {
         crate::map_menu::WIDTH
+    } else if MODES.get(mode).is_some_and(|m| m.name == "Pose") {
+        POSE_PALETTE_WIDTH
     } else {
         tools
     }
 }
 
-/// Height the palette needs for a mode's tools.
-fn palette_height(k: &Look, mode: usize) -> f32 {
+/// The Pose palette's width.
+const POSE_PALETTE_WIDTH: f32 = 220.0;
+
+/// Height the palette needs for a mode's tools, with the FK parts under
+/// Forward kinematics while the selected character's FK is on.
+fn palette_height(k: &Look, st: &State) -> f32 {
+    let mode = st.mode;
     if map_mode(mode) {
         return 34.0 + crate::map_menu::height(k);
     }
     let sections = MODES[mode].sections;
-    let rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
+    let mut rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
+    if MODES[mode].name == "Pose" && st.fk_open && fk_layer(st).is_some() {
+        rows += FK_PART_ROWS;
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
+}
+
+/// The rows the FK parts take in the Pose palette, one each.
+const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len();
+
+/// The pose layer of the selected character, when a character is selected.
+fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
+    match st.doc.selection().map(|o| &o.content) {
+        Some(crate::scene::Content::Character { pose_layer, .. }) => {
+            Some(pose_layer.as_deref().cloned().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// Changes the selected character's pose layer as one step of the history.
+fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let crate::scene::Content::Character { pose_layer, .. } = &mut object.content else {
+        return;
+    };
+    let layer = pose_layer.get_or_insert_with(Default::default);
+    change(layer);
+    if layer.is_empty() {
+        *pose_layer = None;
+    }
+    st.doc.edit(object, false);
 }
 
 /// The active mode's tools in named sections, under a header that pins or
@@ -1118,6 +1159,36 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     index += 1;
                     continue;
                 }
+                if *name == "Forward kinematics" {
+                    fk_category(ui, k, st, row, id, g, name);
+                    y += palette_row(k);
+                    index += 1;
+                    if st.fk_open {
+                        if let Some(layer) = fk_layer(st) {
+                            fk_parts(
+                                ui,
+                                k,
+                                st,
+                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
+                                &layer,
+                            );
+                            y += FK_PART_ROWS as f32 * palette_row(k);
+                        }
+                    }
+                    continue;
+                }
+                if *name == "Mirror pose" || *name == "Copy to other side" {
+                    // A copy takes the bone chosen and what hangs from it.
+                    let copy = *name == "Copy to other side";
+                    let ready = fk_layer(st).is_some_and(|l| l.fk_on) && (!copy || st.pose_bone.is_some());
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() && ready {
+                        mirror(st, copy);
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 // Only the Select mode's rows are states; the others act.
                 let on = st.mode == 0 && st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
@@ -1157,16 +1228,107 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
     }
 }
 
+/// A category of the Pose palette that is switched on and opened: an
+/// arrow that opens or closes it, its name, and a box that switches it for
+/// the selected character. Switching it on opens it, off closes it.
+fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
+    let layer = fk_layer(st);
+    let on = layer.as_ref().is_some_and(|l| l.fk_on);
+    let resp = ui.interact(row, id, Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(row, 2.0, k.t.control);
+    }
+    let y = row.center().y;
+    let arrow = if st.fk_open {
+        icon::CARET_DOWN
+    } else {
+        icon::CARET_RIGHT
+    };
+    glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
+    let tint = if on { k.t.text_bright } else { k.t.text };
+    glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
+    widgets::label(p, k, Pos2::new(row.left() + 38.0, y), name, tint);
+    let side = 14.0;
+    let box_rect = Rect::from_min_size(
+        Pos2::new(row.right() - side - 8.0, row.top()),
+        Vec2::new(side + 8.0, row.height()),
+    );
+    let mut ticked = on;
+    if layer.is_some() {
+        widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
+    }
+    if ticked != on {
+        edit_fk_layer(st, |l| l.fk_on = ticked);
+        st.fk_open = ticked;
+        st.show_animator |= ticked;
+    } else if resp.clicked() {
+        st.fk_open = !st.fk_open;
+    }
+}
+
+/// Mirrors the selected character's pose by hand, or with `copy` copies
+/// the chosen bone and the bones below it to the other side, as one step
+/// of the history.
+pub fn mirror(st: &mut State, copy: bool) {
+    let Some(id) = st.doc.selected else { return };
+    let bone = st.pose_bone.clone().filter(|_| copy);
+    let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) else {
+        return;
+    };
+    edit_fk_layer(st, |l| {
+        for (name, rot) in found {
+            let edit = rk_chara::pose::BoneEdit {
+                rot,
+                ..l.fk.get(&name).copied().unwrap_or_default()
+            };
+            if edit.is_identity() {
+                l.fk.remove(&name);
+            } else {
+                l.fk.insert(name, edit);
+            }
+        }
+    });
+}
+
+/// The FK parts as boxes to tick, one to a row, under the category's
+/// name.
+fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
+    for (i, part) in rk_chara::bone_info::Part::ALL.into_iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
+        );
+        let mut on = layer.fk_parts.contains(&part);
+        let was = on;
+        widgets::checkbox(
+            ui,
+            k,
+            cell,
+            ui.id().with(("fk part", part.label())),
+            &mut on,
+            part.label(),
+        );
+        if on != was {
+            edit_fk_layer(st, |l| {
+                if on {
+                    l.fk_parts.push(part);
+                } else {
+                    l.fk_parts.retain(|p| *p != part);
+                }
+            });
+        }
+    }
+}
+
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 25] = [
+const LATER_TOOLS: [&str; 23] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
-    "Forward kinematics",
     "Inverse kinematics",
-    "Mirror pose",
     "Load pose",
     "Save pose",
     "Reset pose",
@@ -1642,15 +1804,8 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
             keys if keys.is_empty() => format!("{name} ({key})"),
             keys => format!("{name} ({keys})"),
         };
-        let later = i == POSE_TOOL;
-        let sense = if later { Sense::hover() } else { Sense::click() };
-        let tip = if later {
-            format!("{name}: not available yet")
-        } else {
-            tip
-        };
         let resp = ui
-            .interact(r, ui.id().with(("tool-strip", i)), sense)
+            .interact(r, ui.id().with(("tool-strip", i)), Sense::click())
             .on_hover_text(tip);
         if resp.clicked() {
             st.tool = i;
@@ -1662,13 +1817,7 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
         } else if resp.hovered() {
             p.rect_filled(r.shrink(3.0), 2.0, k.t.control);
         }
-        let color = if later {
-            Theme::glass(k.t.text_dim, 150)
-        } else if on || resp.hovered() {
-            Color32::WHITE
-        } else {
-            k.t.text
-        };
+        let color = if on || resp.hovered() { Color32::WHITE } else { k.t.text };
         glyph(p, k, r.center(), g, 16.0, color);
         // A hairline sets the navigation tools and the pose tool apart.
         if i == 2 || i == 5 {
@@ -1891,6 +2040,43 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     if let Some(nav) = nav {
         nav_cursor(ui, nav);
     }
+}
+
+/// The map's sun turned as in Unreal: with its shortcut (Ctrl+L) held,
+/// moving the mouse sideways turns its heading, up and down raises and
+/// lowers it. One hold is one step of the history.
+fn turn_sun(ui: &Ui, st: &mut State, scene: &egui::Response) {
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    let held = !typing && ui.input(|i| crate::keymap::held_chord(&st.keys, Action::TurnSun, i));
+    if !held || (!st.sun_turning && !scene.hovered()) {
+        st.sun_turning = false;
+        return;
+    }
+    let map = st
+        .doc
+        .scene()
+        .objects()
+        .iter()
+        .find(|o| matches!(o.content, crate::scene::Content::Map { .. }))
+        .map(|o| o.id);
+    let Some(mut object) = map.and_then(|id| st.doc.scene().get(id).cloned()) else {
+        return;
+    };
+    st.sun_turning = true;
+    let delta = ui.input(|i| i.pointer.delta());
+    if delta == Vec2::ZERO {
+        return;
+    }
+    let own = crate::map_menu::own_sun(st);
+    if let crate::scene::Content::Map { sun, .. } = &mut object.content {
+        let [heading, elevation] = sun.unwrap_or(own);
+        *sun = Some([
+            (heading + delta.x * 0.4).rem_euclid(360.0),
+            (elevation - delta.y * 0.4).clamp(-90.0, 90.0),
+        ]);
+    }
+    st.doc.edit(object, true);
+    ui.ctx().request_repaint();
 }
 
 /// Hides the system pointer and draws the action's symbol in its place,

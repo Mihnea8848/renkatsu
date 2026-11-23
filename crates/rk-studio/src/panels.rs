@@ -26,16 +26,18 @@ pub enum Panel {
     Content,
     Console,
     Timeline,
+    Animator,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 6] = [
+    pub const ALL: [Panel; 7] = [
         Panel::Viewport,
         Panel::Outliner,
         Panel::Properties,
         Panel::Content,
         Panel::Console,
         Panel::Timeline,
+        Panel::Animator,
     ];
 
     pub fn title(self) -> &'static str {
@@ -46,6 +48,7 @@ impl Panel {
             Panel::Content => "Content",
             Panel::Console => "Console",
             Panel::Timeline => "Timeline",
+            Panel::Animator => "Animator",
         }
     }
 
@@ -57,6 +60,7 @@ impl Panel {
             Panel::Content => icon::FOLDER_SIMPLE,
             Panel::Console => icon::TERMINAL_WINDOW,
             Panel::Timeline => icon::FILM_STRIP,
+            Panel::Animator => icon::PERSON_ARMS_SPREAD,
         }
     }
 }
@@ -92,7 +96,7 @@ pub fn default_layout(bottom: Panel) -> DockState<Panel> {
     let surface = state.main_surface_mut();
     let [left, right] = surface.split_right(NodeIndex::root(), 0.795, vec![Panel::Outliner]);
     surface.split_below(right, 0.44, vec![Panel::Properties]);
-    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline];
+    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline, Panel::Animator];
     let active = tabs.iter().position(|p| *p == bottom).unwrap_or(0);
     let [top, below] = surface.split_below(left, 0.75, tabs);
     let path = |node| egui_dock::NodePath {
@@ -207,6 +211,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Content => crate::content_panel::show(ui, k, st),
             Panel::Console => console(ui, k, st),
             Panel::Timeline => timeline(ui, k),
+            Panel::Animator => crate::animator::show(ui, k, st),
         }
     }
 

@@ -8,7 +8,9 @@
 //! My project/
 //!   My project.rkproj  the project's name, its scene and its characters
 //!   Characters/*.png   the cards the project owns, copied in on import
-//!   Scenes/*.toml      scenes, as the scene model writes itself
+//!   Scenes/*.rkscene   scenes, as TOML the scene model writes; older
+//!                      projects' `.toml` scenes open and move to
+//!                      `.rkscene` when they are saved
 //!   Mods/*.zipmod      the zipmods those cards need, copied from the game
 //!   Animations/        the animations the project owns, copied in on
 //!                      import as Renkatsu animation files (`.rkanim`),
@@ -50,6 +52,10 @@ pub const ANIMATIONS: &str = "Animations";
 /// made by hand will go.
 pub const POSES: &str = "Poses";
 pub const SCENES: &str = "Scenes";
+/// The extension of a scene file.
+pub const SCENE_EXTENSION: &str = "rkscene";
+/// The extension scenes had before they had one of their own.
+const OLD_SCENE_EXTENSION: &str = "toml";
 pub(crate) const MODS: &str = "Mods";
 /// The extension of a link to an animation as Renkatsu 0.1.4 saved it.
 pub const OLD_LINK: &str = "rkpose";
@@ -259,7 +265,7 @@ pub fn summary(root: &Path) -> Option<Summary> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")))
+        .filter(|e| is_scene_file(&e.path()))
         .count();
     Some(Summary {
         name: match &read {
@@ -288,6 +294,12 @@ pub fn cards_in(root: &Path) -> Vec<PathBuf> {
     cards.retain(|p| is_card(p));
     cards.sort_by(|a, b| by_name(a, b));
     cards
+}
+
+/// Whether a path names a scene file, of this build or an older one.
+pub fn is_scene_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case(SCENE_EXTENSION) || x.eq_ignore_ascii_case(OLD_SCENE_EXTENSION))
 }
 
 /// Every file below a folder, at any depth.
@@ -490,7 +502,7 @@ impl Project {
         let mut scenes = Vec::new();
         files_below(&self.root.join(SCENES), &mut scenes);
         for path in scenes {
-            if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")) {
+            if !is_scene_file(&path) {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&path) else {
@@ -585,10 +597,23 @@ impl Project {
     }
 
     /// Writes the scene to its file, named after the scene the first time,
-    /// and the project file with it.
+    /// and the project file with it. A scene still in an older `.toml`
+    /// file moves to a `.rkscene` of the same name, unless one is there.
     pub fn save_scene(&mut self, scene: &Scene) -> Result<()> {
         if self.file.scene.is_empty() {
-            self.file.scene = relative(SCENES, &format!("{}.toml", file_name(&scene.name)));
+            self.file.scene = relative(SCENES, &format!("{}.{SCENE_EXTENSION}", file_name(&scene.name)));
+        }
+        let mut old = None;
+        let current = Path::new(&self.file.scene);
+        if current
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case(OLD_SCENE_EXTENSION))
+        {
+            let moved = current.with_extension(SCENE_EXTENSION);
+            if !self.root.join(&moved).exists() {
+                old = Some(self.root.join(current));
+                self.file.scene = moved.to_string_lossy().replace('\\', "/");
+            }
         }
         let path = self.root.join(&self.file.scene);
         if let Some(dir) = path.parent() {
@@ -599,6 +624,9 @@ impl Project {
             scene: scene.clone(),
         })?;
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        if let Some(old) = old {
+            std::fs::remove_file(&old).with_context(|| format!("removing {}", old.display()))?;
+        }
         self.save()
     }
 
@@ -774,13 +802,13 @@ mod tests {
         let mut scene = Scene::empty();
         scene.add("Key light", Content::light(), None);
         project.save_scene(&scene).unwrap();
-        let path = root.join("Scenes/Untitled scene.toml");
+        let path = root.join("Scenes/Untitled scene.rkscene");
         let text = std::fs::read_to_string(&path).unwrap();
         let mut file: SceneFile = toml::from_str(&text).unwrap();
         file.format = 1;
         file.scene = scene;
         std::fs::write(&path, toml::to_string(&file).unwrap()).unwrap();
-        let read = project.read_scene_at("Scenes/Untitled scene.toml").unwrap();
+        let read = project.read_scene_at("Scenes/Untitled scene.rkscene").unwrap();
         let effects: Vec<&str> = read
             .objects()
             .iter()
@@ -790,8 +818,29 @@ mod tests {
         assert_eq!(effects, ["Colour filter", "Bloom", "Ambient occlusion", "Vignette"]);
         // A scene of this build keeps what it has.
         project.save_scene(&read).unwrap();
-        let again = project.read_scene_at("Scenes/Untitled scene.toml").unwrap();
+        let again = project.read_scene_at("Scenes/Untitled scene.rkscene").unwrap();
         assert_eq!(again.objects().len(), read.objects().len());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_older_toml_scene_moves_to_rkscene_when_saved() {
+        let home = scratch("old-scene-file");
+        let root = home.join("P");
+        let mut project = Project::create(&root, "P").unwrap();
+        let mut scene = Scene::empty();
+        scene.name = "Main".to_owned();
+        project.save_scene(&scene).unwrap();
+        assert_eq!(project.file.scene, "Scenes/Main.rkscene");
+        // As an older build left it: the same scene in a .toml file.
+        std::fs::rename(root.join("Scenes/Main.rkscene"), root.join("Scenes/Main.toml")).unwrap();
+        project.file.scene = "Scenes/Main.toml".to_owned();
+        assert_eq!(summary(&root).unwrap().scenes, 1);
+        let read = project.read_scene_at("Scenes/Main.toml").unwrap();
+        project.save_scene(&read).unwrap();
+        assert_eq!(project.file.scene, "Scenes/Main.rkscene");
+        assert!(root.join("Scenes/Main.rkscene").is_file());
+        assert!(!root.join("Scenes/Main.toml").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -811,7 +860,7 @@ mod tests {
         scene.name = "Main: take 1".to_owned();
         scene.add("Renkatsu-Chan", Content::character(PathBuf::from(&card)), None);
         project.save_scene(&scene).unwrap();
-        assert_eq!(project.file.scene, "Scenes/Main_ take 1.toml");
+        assert_eq!(project.file.scene, "Scenes/Main_ take 1.rkscene");
 
         let text = std::fs::read_to_string(project.path()).unwrap();
         assert!(text.contains("name = \"First\""), "{text}");
@@ -943,16 +992,24 @@ mod tests {
         let mut scene = Scene::new();
         scene.add("Anna", Content::character(PathBuf::from(&card)), None);
         project.save_scene(&scene).unwrap();
-        std::fs::copy(root.join("Scenes/Untitled scene.toml"), root.join("Scenes/Other.toml")).unwrap();
+        std::fs::copy(
+            root.join("Scenes/Untitled scene.rkscene"),
+            root.join("Scenes/Other.toml"),
+        )
+        .unwrap();
 
         // The card goes into a folder of the user's and the scene is renamed.
         std::fs::create_dir_all(root.join("Characters/Cast")).unwrap();
         std::fs::rename(root.join(&card), root.join("Characters/Cast/Anna B.png")).unwrap();
-        std::fs::rename(root.join("Scenes/Untitled scene.toml"), root.join("Scenes/Main.toml")).unwrap();
+        std::fs::rename(
+            root.join("Scenes/Untitled scene.rkscene"),
+            root.join("Scenes/Main.toml"),
+        )
+        .unwrap();
         project
             .retarget(&|old| match old {
                 "Characters/Anna.png" => Some("Characters/Cast/Anna B.png".to_owned()),
-                "Scenes/Untitled scene.toml" => Some("Scenes/Main.toml".to_owned()),
+                "Scenes/Untitled scene.rkscene" => Some("Scenes/Main.toml".to_owned()),
                 _ => None,
             })
             .unwrap();

@@ -31,7 +31,7 @@ use crate::scene::{Content, MapTime, ObjectId, Poses, Scene};
 use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use rk_chara::clothes_state::{self as cs, States};
 use rk_chara::motion::{self, Bound, Motion};
 use rk_chara::scene::{ShadowCasting, Trs};
@@ -67,6 +67,9 @@ struct Actor {
     distance: f32,
     /// Where the object is in the scene, as last given to the root.
     applied: Option<Mat4>,
+    /// Where it was when the physics last saw it: hair and skirts are
+    /// carried along from there when it is moved while nothing runs.
+    physics_at: Option<Mat4>,
     /// How many outfits the card has.
     outfits: usize,
     /// The names More Outfits gives the card's outfits, by outfit number.
@@ -85,6 +88,12 @@ struct Actor {
     animation_problem: Option<String>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
+    /// The edits made by hand the bones were last posed with, and their
+    /// bones' nodes.
+    layer: Option<rk_chara::pose::Layer>,
+    edits: Vec<(usize, rk_chara::pose::BoneEdit)>,
+    /// The bones CharaStudio poses by hand (FK), as found on it.
+    fk: Vec<rk_chara::bone_info::FkBone>,
     /// Its textures are on the GPU: it can be drawn without a wait.
     warm: bool,
     /// Seconds the build took.
@@ -188,11 +197,21 @@ struct MapGround {
     pieces: Vec<MapPiece>,
 }
 
+/// What `Live::obstacles` was made from.
+#[derive(PartialEq)]
+struct ObstaclesKey {
+    ground: usize,
+    root: glam::Mat4,
+    moved: Vec<(usize, glam::Mat4)>,
+    copies: Vec<(usize, glam::Mat4)>,
+}
+
 struct MapPiece {
     /// Its place in the map's list of objects.
     object: usize,
-    positions: Vec<[f32; 3]>,
-    indices: Vec<u32>,
+    /// Shared with the characters' skirts, which rest on the map.
+    positions: std::sync::Arc<Vec<[f32; 3]>>,
+    indices: std::sync::Arc<Vec<u32>>,
     bounds: ([f32; 3], [f32; 3]),
 }
 
@@ -211,8 +230,8 @@ impl MapGround {
             }
             pieces.push(MapPiece {
                 object: i,
-                positions: std::mem::take(&mut mesh.positions),
-                indices: std::mem::take(&mut mesh.indices),
+                positions: std::sync::Arc::new(std::mem::take(&mut mesh.positions)),
+                indices: std::sync::Arc::new(std::mem::take(&mut mesh.indices)),
                 bounds: mesh.bounds,
             });
         }
@@ -382,8 +401,16 @@ impl Actor {
         let (scale, rot, pos) = (world * self.rest[top].matrix()).to_scale_rotation_translation();
         self.chara.scene.nodes[top].local = Trs { pos, rot, scale };
         if !running {
-            self.chara.physics.reset(&self.chara.scene);
+            // Hair and skirts move with the character and keep the shape
+            // they settled in; CharaStudio does not put them back on their
+            // rest shape, which in a sitting or lying pose is inside the
+            // legs. The first time there is nothing to carry.
+            match self.physics_at {
+                Some(was) => self.chara.physics.carry(world * was.inverse()),
+                None => self.chara.physics.reset(&self.chara.scene),
+            }
         }
+        self.physics_at = Some(world);
         self.applied = Some(world);
         true
     }
@@ -394,6 +421,20 @@ impl Actor {
         let node = self.chara.scene.find(self.chara.top, name)?;
         let (world, _) = self.chara.scene.world();
         Some(self.applied.unwrap_or_default().inverse() * world[node])
+    }
+
+    /// Poses one frame: the animation at `phase` when there is one, and
+    /// the edits made by hand on top. The edited bones start from how they
+    /// were loaded, so that a bone the animation does not move takes its
+    /// edit once, not once more every frame.
+    fn pose_frame(&mut self, phase: Option<f32>, states: &States) {
+        for &(node, _) in &self.edits {
+            if let (Some(n), Some(rest)) = (self.chara.scene.nodes.get_mut(node), self.rest.get(node)) {
+                n.local = *rest;
+            }
+        }
+        let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
+        self.chara.pose_frame(motion, &self.edits, states);
     }
 
     /// Puts the bones back as they were loaded.
@@ -421,7 +462,9 @@ impl Actor {
             clothes,
             liquid,
             liquid_clothes,
+            game_skirts,
             animation: pose,
+            pose_layer,
             ..
         } = &object.content
         else {
@@ -435,6 +478,13 @@ impl Actor {
         if states != self.clothes {
             self.chara.set_clothes(&states);
             self.clothes = states;
+            again = true;
+        }
+
+        // Advanced Skirt Physics goes by the outfit; a switch settles the
+        // skirts again.
+        let advanced = !game_skirts.contains(&self.recipe.outfit);
+        if self.chara.physics.set_advanced(advanced) {
             again = true;
         }
 
@@ -488,6 +538,22 @@ impl Actor {
             again = true;
         }
 
+        // Edits made by hand: a change poses the character again from
+        // the bones as loaded, so a bone no longer edited goes back.
+        let layer = pose_layer.as_deref().filter(|l| !l.is_empty());
+        if layer != self.layer.as_ref() {
+            self.layer = layer.cloned();
+            // A bone of CharaStudio's FK table takes its edit while one of
+            // its parts is on.
+            let fk = &self.fk;
+            let parts_of = |name: &str| fk.iter().find(|b| b.info.bone == name).map(|b| b.info.parts());
+            self.edits = layer.map_or_else(Vec::new, |l| {
+                l.resolve_parts(&self.chara.scene, self.chara.top, parts_of)
+            });
+            self.back_to_rest();
+            again = true;
+        }
+
         let phase = match (&self.playing, pose) {
             (Some(playing), Some(pose)) => Some(playing.phase(pose, clock.time)),
             _ => None,
@@ -500,9 +566,7 @@ impl Actor {
             if *simulate {
                 self.chara.physics.begin_frame(&mut self.chara.scene);
             }
-            if let (Some(playing), Some(phase)) = (&self.playing, phase) {
-                self.chara.animate(&playing.bound, phase, &states);
-            }
+            self.pose_frame(phase, &states);
             if *simulate {
                 self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
             }
@@ -510,21 +574,40 @@ impl Actor {
             return moved;
         }
         if !again && phase == self.phase {
-            return self.place(world, false);
+            let moved = self.place(world, false);
+            // Moved onto a chair or a bed, the skirts settle on it.
+            let physics = &self.chara.physics;
+            if moved && *simulate && physics.advanced() && physics.has_obstacles() {
+                for _ in 0..rk_chara::physics::SETTLE_FRAMES {
+                    self.chara.physics.begin_frame(&mut self.chara.scene);
+                    self.chara
+                        .physics
+                        .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
+                }
+            }
+            return moved;
         }
         // Nothing plays: the character is posed once and holds still.
+        // Advanced Skirt Physics moves into the new pose from this one.
+        let mut from: Vec<Trs> = self.chara.scene.nodes.iter().map(|n| n.local).collect();
         self.back_to_rest();
         self.place(world, false);
+        let top = self.chara.top;
+        from[top] = self.chara.scene.nodes[top].local;
         self.chara.refresh_heels(&states);
-        if let (Some(playing), Some(phase)) = (&self.playing, phase) {
-            self.chara.animate(&playing.bound, phase, &states);
-            self.chara.physics.reset(&self.chara.scene);
+        let motion = self.playing.is_some() && phase.is_some();
+        if motion || !self.edits.is_empty() {
+            // Hair and skirts settle from where they were, as CharaStudio
+            // never puts them back on their rest shape for a new pose.
+            self.pose_frame(phase, &states);
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
-                for _ in 0..rk_chara::physics::SETTLE_FRAMES {
+                for frame in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
-                    self.chara.animate(&playing.bound, phase, &states);
+                    self.pose_frame(phase, &states);
+                    let amount = (frame + 1) as f32 / (rk_chara::physics::EASE_FRAMES + 1) as f32;
+                    self.chara.physics.ease(&mut self.chara.scene, &from, amount);
                     self.chara
                         .physics
                         .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
@@ -534,6 +617,13 @@ impl Actor {
         self.phase = phase;
         true
     }
+}
+
+/// CharaStudio's table of FK bones, read from the game once.
+fn fk_table(game: &rk_vfs::Game) -> &'static std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo> {
+    static TABLE: std::sync::OnceLock<std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| rk_chara::bone_info::read(game))
 }
 
 /// The animation file of the project that a scene's animation names,
@@ -575,6 +665,9 @@ pub struct Live {
     renderer: Renderer,
     render_state: egui_wgpu::RenderState,
     actors: Vec<Actor>,
+    /// The map as the characters' skirts rest on it, and what it was made
+    /// from, so that it is made again only when the map moves.
+    obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
     /// Characters that could not be built, with what was tried and why, so
     /// that they are not tried again every frame.
     failed: Vec<(ObjectId, Recipe, String)>,
@@ -656,6 +749,7 @@ impl Live {
             renderer,
             render_state: render_state.clone(),
             actors: Vec::new(),
+            obstacles: None,
             failed: Vec::new(),
             pending: Vec::new(),
             patient: false,
@@ -748,6 +842,117 @@ impl Live {
     /// What the camera can focus on for an object: a built character.
     pub fn subject(&self, id: ObjectId) -> Option<Focus> {
         self.actors.iter().find(|a| a.id == id).map(Actor::subject)
+    }
+
+    /// Where a built character's FK bones of the parts shown are in the
+    /// world, by name: the handles the Pose tool shows.
+    /// Each comes with the place of the nearest bone above it that shows
+    /// too, for the line between them.
+    pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3, Option<Vec3>)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        // Only while the character's FK is on, as CharaStudio shows them.
+        let layer = actor.layer.as_ref().filter(|l| l.fk_on)?;
+        let scene = &actor.chara.scene;
+        let (world, active) = scene.world();
+        let shown: Vec<&rk_chara::bone_info::FkBone> = actor
+            .fk
+            .iter()
+            .filter(|b| active.get(b.node).copied().unwrap_or(false))
+            // The bones of the parts switched on.
+            .filter(|b| layer.part_on(&b.info.parts()))
+            .collect();
+        let at = |node: usize| world[node].w_axis.truncate();
+        Some(
+            shown
+                .iter()
+                .map(|b| {
+                    let mut up = scene.nodes[b.node].parent;
+                    while let Some(n) = up.filter(|n| !shown.iter().any(|s| s.node == *n)) {
+                        up = scene.nodes[n].parent;
+                    }
+                    (b.info.bone.clone(), at(b.node), up.map(at))
+                })
+                .collect(),
+        )
+    }
+
+    /// The edits that mirror a character's pose by hand: with `bone` the
+    /// bone and the FK bones below it onto their twins on the other side,
+    /// without it every FK bone of the parts that are on onto its twin (a
+    /// bone in the middle onto itself). By bone name.
+    pub fn mirror_edits(&self, id: ObjectId, bone: Option<&str>) -> Option<Vec<(String, Quat)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor.layer.as_ref()?;
+        let scene = &actor.chara.scene;
+        let top = actor.chara.top;
+        let below = |node: usize, of: usize| {
+            let mut at = Some(node);
+            while let Some(n) = at {
+                if n == of {
+                    return true;
+                }
+                at = scene.nodes[n].parent;
+            }
+            false
+        };
+        let from = match bone {
+            Some(name) => Some(scene.find(top, name)?),
+            None => None,
+        };
+        let pairs: Vec<(usize, usize)> = actor
+            .fk
+            .iter()
+            .filter(|b| layer.part_on(&b.info.parts()))
+            .filter(|b| from.is_none_or(|f| below(b.node, f)))
+            .filter_map(|b| {
+                let twin = scene.find(top, &rk_chara::pose::twin_name(&b.info.bone))?;
+                // A copy goes to the other side only.
+                (from.is_none() || twin != b.node).then_some((b.node, twin))
+            })
+            .collect();
+        let found = rk_chara::pose::mirrored(scene, &actor.rest, top, &actor.edits, &pairs);
+        Some(
+            found
+                .into_iter()
+                .map(|(n, rot)| (scene.nodes[n].name.clone(), rot))
+                .collect(),
+        )
+    }
+
+    /// Where a built character's bone is and how it is turned: its place
+    /// and turn in the world, its parent's turn in the world and its own
+    /// turn in its parent, for the Pose tool's gizmo.
+    pub fn bone_turns(&self, id: ObjectId, name: &str) -> Option<(Vec3, Quat, Quat, Quat)> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let scene = &actor.chara.scene;
+        let node = scene.find(actor.chara.top, name)?;
+        let (world, _) = scene.world();
+        let (_, turn, at) = world[node].to_scale_rotation_translation();
+        let parent = scene.nodes[node]
+            .parent
+            .map_or(Quat::IDENTITY, |p| world[p].to_scale_rotation_translation().1);
+        Some((at, turn, parent, scene.nodes[node].local.rot))
+    }
+
+    /// A built character's joints, the bones a pose edits: the nodes named
+    /// `cf_j_` below `cf_j_root`, in tree order, each with its depth among
+    /// them.
+    pub fn joints(&self, id: ObjectId) -> Option<Vec<(usize, String)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let scene = &actor.chara.scene;
+        let root = scene.find(actor.chara.animator, "cf_j_root")?;
+        let mut out = Vec::new();
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
+            let n = &scene.nodes[node];
+            let joint = n.name.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("cf_j_"));
+            if joint {
+                out.push((depth, n.name.clone()));
+            }
+            let below = depth + usize::from(joint);
+            stack.extend(n.children.iter().rev().map(|&c| (c, below)));
+        }
+        Some(out)
     }
 
     pub fn built(&self, id: ObjectId) -> Option<Built> {
@@ -957,8 +1162,10 @@ impl Live {
         let mut order: Vec<usize> = (0..self.actors.len()).collect();
         order.sort_by_key(|i| scene.depth(self.actors[*i].id));
         self.poses.clear();
+        let obstacles = self.obstacles();
         for at in order {
             let actor = &mut self.actors[at];
+            actor.chara.physics.set_obstacles(obstacles.clone());
             let Some(object) = scene.get(actor.id) else { continue };
             let options = match &object.content {
                 Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
@@ -1387,6 +1594,13 @@ impl Live {
         if let Some(placement) = placed {
             self.renderer.place_map(placement);
         }
+        self.renderer.set_map_sun(scene.map_sun());
+    }
+
+    /// The map's own sun of its time of day, as the unit vector towards it
+    /// in the world; none until a map is drawn.
+    pub fn map_sun(&self) -> Option<[f32; 3]> {
+        self.renderer.map_sun()
     }
 
     /// Puts the camera at CharaStudio's starting view, which a new map is
@@ -1463,6 +1677,61 @@ impl Live {
             return None;
         }
         self.map.ground.as_ref().zip(self.map.placed)
+    }
+
+    /// The map as Advanced Skirt Physics sees it: every mesh the camera
+    /// sees, where it is in the world now, duplicates included. It is
+    /// made again only when the map, its place or its pieces changed.
+    fn obstacles(&mut self) -> Option<std::sync::Arc<rk_chara::physics::cloth::Obstacles>> {
+        let Some((ground, placed)) = self.map_ground(&[]) else {
+            self.obstacles = None;
+            return None;
+        };
+        let key = ObstaclesKey {
+            // The map's own meshes: a map read again has new ones.
+            ground: ground
+                .pieces
+                .first()
+                .map_or(0, |p| std::sync::Arc::as_ptr(&p.positions) as usize),
+            root: placed.rigid(),
+            moved: self.map_moved(),
+            copies: self.map.copies.iter().map(|(o, m, _)| (*o, *m)).collect(),
+        };
+        if let Some((was, made)) = &self.obstacles {
+            if *was == key {
+                return Some(made.clone());
+            }
+        }
+        let made = self.make_obstacles()?;
+        self.obstacles = Some((key, made.clone()));
+        Some(made)
+    }
+
+    fn make_obstacles(&self) -> Option<std::sync::Arc<rk_chara::physics::cloth::Obstacles>> {
+        use rk_chara::physics::cloth::{Obstacle, Obstacles};
+        let (ground, placed) = self.map_ground(&[])?;
+        let root = placed.rigid();
+        let moved = self.map_moved();
+        let mut pieces = Vec::with_capacity(ground.pieces.len() + self.map.copies.len());
+        let obstacle = |piece: &MapPiece, m: glam::Mat4| Obstacle {
+            positions: piece.positions.clone(),
+            indices: piece.indices.clone(),
+            bounds: piece.bounds,
+            world: root * m,
+        };
+        for piece in &ground.pieces {
+            let m = moved
+                .iter()
+                .find(|(o, _)| *o == piece.object)
+                .map_or(glam::Mat4::IDENTITY, |(_, m)| *m);
+            pieces.push(obstacle(piece, m));
+        }
+        for (object, m, _) in &self.map.copies {
+            if let Some(piece) = ground.pieces.iter().find(|p| p.object == *object) {
+                pieces.push(obstacle(piece, *m));
+            }
+        }
+        Some(std::sync::Arc::new(Obstacles { pieces }))
     }
 
     /// Where the map's objects stand now: posed by their Animators, then
@@ -1598,6 +1867,8 @@ impl Live {
             ..Default::default()
         };
         let chara = rk_chara::build(game, &card, &options)?;
+        let fk =
+            rk_chara::bone_info::on_character(fk_table(game), &chara.scene, chara.animator, chara.top, card.sex() == 1);
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
@@ -1609,14 +1880,18 @@ impl Live {
             center: home.target,
             distance: (home.eye - home.target).length(),
             applied: None,
+            physics_at: None,
             outfits: card.coordinates.len(),
             outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],
             liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
+            layer: None,
+            edits: Vec::new(),
             playing: None,
             animation_problem: None,
             phase: None,
+            fk,
             warm: false,
             took: 0.0,
         })

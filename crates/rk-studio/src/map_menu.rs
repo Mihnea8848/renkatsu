@@ -57,6 +57,58 @@ fn edit(ui: &Ui, st: &mut State, id: ObjectId, change: impl FnOnce(&mut Content)
     }
 }
 
+/// The heading and elevation of the map's own sun of its time of day, as
+/// the fields show it before it is turned by hand.
+pub(crate) fn own_sun(st: &State) -> [f32; 2] {
+    st.live
+        .as_ref()
+        .and_then(|l| l.map_sun())
+        .map_or([0.0, 45.0], |dir| crate::scene::sun_angles(glam::Vec3::from(dir)))
+}
+
+/// The sun's heading in degrees in `rect`, with a button at its end that
+/// gives the map its own sun back while it is `turned` by hand; whether
+/// that button was clicked.
+pub(crate) fn sun_heading(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    id: egui::Id,
+    angles: &mut [f32; 2],
+    turned: bool,
+) -> bool {
+    let side = rect.height();
+    let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+    widgets::number_to(ui, k, field, id, &mut angles[0], widgets::Marker::None, true, 0.5, 0);
+    angles[0] = angles[0].rem_euclid(360.0);
+    if !turned {
+        return false;
+    }
+    let button = Rect::from_min_size(Pos2::new(field.right() + 4.0, rect.top()), Vec2::splat(side));
+    let resp = ui
+        .interact(button, id.with("own"), egui::Sense::click())
+        .on_hover_text("The map's own sun");
+    let fill = if resp.hovered() { k.t.hover } else { k.t.control };
+    ui.painter().rect_filled(button, k.radius(), fill);
+    widgets::glyph(
+        ui.painter(),
+        k,
+        button.center(),
+        icon::ARROW_COUNTER_CLOCKWISE,
+        14.0,
+        k.t.text,
+    );
+    resp.clicked()
+}
+
+/// The sun's elevation over the horizon in degrees in `rect`.
+pub(crate) fn sun_elevation(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, angles: &mut [f32; 2]) {
+    let side = rect.height();
+    let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
+    widgets::number_to(ui, k, field, id, &mut angles[1], widgets::Marker::None, true, 0.5, 0);
+    angles[1] = angles[1].clamp(-90.0, 90.0);
+}
+
 /// Which of the fog's presets its settings are, if any.
 fn fog_preset(st: &State, id: ObjectId) -> Option<usize> {
     let Some(Content::Effect {
@@ -118,7 +170,7 @@ pub const WIDTH: f32 = 300.0;
 /// Where a row's control starts, from the palette's left.
 const NAME: f32 = 112.0;
 /// The rows the palette shows at most, for its height.
-const ROWS: f32 = 8.0;
+const ROWS: f32 = 10.0;
 
 /// The height of the palette's body, under its header.
 pub fn height(k: &Look) -> f32 {
@@ -164,6 +216,7 @@ pub fn panel(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
         hide_walls,
         light_intensity,
         filter_decay,
+        sun,
         ..
     }) = st.doc.scene().get(map).map(|o| o.content.clone())
     else {
@@ -218,6 +271,21 @@ pub fn panel(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
         edit(ui, st, map, |c| {
             if let Content::Map { time, .. } = c {
                 *time = picked;
+            }
+        });
+    }
+
+    let mut angles = sun.unwrap_or_else(|| own_sun(st));
+    let before = angles;
+    let rect = row(ui, k, area, &mut y, "Sun heading");
+    let reset = sun_heading(ui, k, rect, ui.id().with("sun heading"), &mut angles, sun.is_some());
+    let rect = row(ui, k, area, &mut y, "Sun elevation");
+    sun_elevation(ui, k, rect, ui.id().with("sun elevation"), &mut angles);
+    if reset || angles != before {
+        let turned = (!reset).then_some(angles);
+        edit(ui, st, map, |c| {
+            if let Content::Map { sun, .. } = c {
+                *sun = turned;
             }
         });
     }

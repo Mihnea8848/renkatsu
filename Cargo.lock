@@ -1465,6 +1465,9 @@ name = "glam"
 version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "glifo"
@@ -2961,6 +2964,8 @@ dependencies = [
  "rk-vfs",
  "rmpv",
  "roxmltree",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -2992,6 +2997,14 @@ dependencies = [
  "anyhow",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "rk-ik"
+version = "0.2.2"
+dependencies = [
+ "glam",
+ "serde_json",
 ]
 
 [[package]]
