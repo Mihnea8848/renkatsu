@@ -789,21 +789,32 @@ impl Live {
 
     /// Where a built character's FK bones of the parts shown are in the
     /// world, by name: the handles the Pose tool shows.
-    pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3)>> {
+    /// Each comes with the place of the nearest bone above it that shows
+    /// too, for the line between them.
+    pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3, Option<Vec3>)>> {
+        use rk_chara::bone_info::Part;
         let actor = self.actors.iter().find(|a| a.id == id)?;
-        let (world, active) = actor.chara.scene.world();
+        let scene = &actor.chara.scene;
+        let (world, active) = scene.world();
+        let shown: Vec<&rk_chara::bone_info::FkBone> = actor
+            .fk
+            .iter()
+            .filter(|b| active.get(b.node).copied().unwrap_or(false))
+            // CharaStudio's FK starts with the body and the neck on; the
+            // other parts show once they can be switched on.
+            .filter(|b| b.info.parts().iter().any(|p| matches!(p, Part::Body | Part::Neck)))
+            .collect();
+        let at = |node: usize| world[node].w_axis.truncate();
         Some(
-            actor
-                .fk
+            shown
                 .iter()
-                .filter(|b| active.get(b.node).copied().unwrap_or(false))
-                // CharaStudio's FK starts with the body and the neck on;
-                // the other parts show once they can be switched on.
-                .filter(|b| {
-                    use rk_chara::bone_info::Part;
-                    b.info.parts().iter().any(|p| matches!(p, Part::Body | Part::Neck))
+                .map(|b| {
+                    let mut up = scene.nodes[b.node].parent;
+                    while let Some(n) = up.filter(|n| !shown.iter().any(|s| s.node == *n)) {
+                        up = scene.nodes[n].parent;
+                    }
+                    (b.info.bone.clone(), at(b.node), up.map(at))
                 })
-                .map(|b| (b.info.bone.clone(), world[b.node].w_axis.truncate()))
                 .collect(),
         )
     }

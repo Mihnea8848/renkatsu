@@ -1127,6 +1127,8 @@ struct Ball {
     bone: String,
     at: Pos2,
     radius: f32,
+    /// Where the bone above it that shows is, for the line between them.
+    parent: Option<Pos2>,
 }
 
 /// A ball's radius in the world, and the least and most it shows at.
@@ -1142,7 +1144,7 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
     let mut out: Vec<(f32, Ball)> = Vec::new();
     for id in st.doc.selected_all() {
         let Some(handles) = live.fk_handles(id) else { continue };
-        for (bone, world) in handles {
+        for (bone, world, parent) in handles {
             let depth = (world - view.eye).dot(view.forward);
             let (Some(at), Some(edge)) = (view.screen(world), view.screen(world + Vec3::Y * BALL_SIZE)) else {
                 continue;
@@ -1158,6 +1160,7 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
                     bone,
                     at,
                     radius,
+                    parent: parent.and_then(|p| view.screen(p)),
                 },
             ));
         }
@@ -1175,27 +1178,28 @@ fn ball_at(st: &State, pos: Pos2) -> Option<&Ball> {
         .find(|b| b.at.distance(pos) <= b.radius + 2.0)
 }
 
-/// Draws the balls as CharaStudio's guide does: the group's colour (white
-/// by default) at three quarters and a quarter seen through, full under
-/// the pointer and for the bone chosen.
-fn draw_balls(p: &egui::Painter, k: &Look, st: &State, pointer: Option<Pos2>) {
+/// Draws the balls as CharaStudio's guide does, see-through white spheres
+/// (three quarters white, a quarter seen), clearer under the pointer and
+/// for the bone chosen, with a thin line from each to the bone above it.
+fn draw_balls(p: &egui::Painter, st: &State, pointer: Option<Pos2>) {
     let hot = pointer
         .and_then(|pos| ball_at(st, pos))
         .map(|b| (b.character, b.bone.clone()));
     let chosen = st.pose_bone.as_deref();
+    let line = Stroke::new(1.0, Color32::from_white_alpha(60));
+    for b in &st.gizmo.balls {
+        if let Some(parent) = b.parent {
+            p.line_segment([parent, b.at], line);
+        }
+    }
     for b in &st.gizmo.balls {
         let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
         let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
-        let fill = if lit || on {
-            Color32::WHITE
-        } else {
-            Color32::from_rgba_unmultiplied(191, 191, 191, 64)
-        };
-        p.circle_filled(b.at, b.radius, fill);
-        p.circle_stroke(b.at, b.radius, Stroke::new(1.0, Color32::from_black_alpha(90)));
-        if on {
-            p.circle_stroke(b.at, b.radius + 2.0, Stroke::new(1.5, k.t.select_bright));
-        }
+        let alpha = if lit || on { 190 } else { 64 };
+        p.circle_filled(b.at, b.radius, Color32::from_rgba_unmultiplied(191, 191, 191, alpha));
+        // A brighter spot up and to the left, as light on a sphere.
+        let spot = b.at + Vec2::new(-0.3, -0.3) * b.radius;
+        p.circle_filled(spot, b.radius * 0.4, Color32::from_white_alpha(alpha / 2));
     }
 }
 
@@ -1443,7 +1447,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     };
     let shown = shown_icons(st, &view, pointer);
     draw_icons(&p, k, st, &view, &shown);
-    draw_balls(&p, k, st, pointer);
+    draw_balls(&p, st, pointer);
     st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {
