@@ -1475,6 +1475,34 @@ fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown>
 }
 
 /// Draws the shown icons, the far under the near.
+/// The smallest convex outline round points, clockwise on the screen
+/// (Andrew's monotone chain).
+fn convex_hull(mut points: Vec<Pos2>) -> Vec<Pos2> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup_by(|a, b| a.distance(*b) < 0.01);
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: Pos2, a: Pos2, b: Pos2| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Pos2> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let list: Box<dyn Iterator<Item = &Pos2>> = if pass == 0 {
+            Box::new(points.iter())
+        } else {
+            Box::new(points.iter().rev())
+        };
+        for &q in list {
+            while hull.len() >= start + 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    hull
+}
+
 /// The sun's dome's radius, in points.
 const DOME: f32 = 62.0;
 
@@ -1499,8 +1527,27 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) 
     let radius = DOME;
     let middle = Pos2::new(view.rect.right() - radius - 28.0, view.rect.bottom() - radius - 52.0);
     let point = |dir: Vec3| Some(middle + Vec2::new(dir.dot(right), -dir.dot(up)) * radius);
-    // A soft shade behind, so that the lines read on a bright floor.
-    p.circle_filled(middle, radius * 1.18, Color32::from_black_alpha(70));
+    // A soft shade behind, so that the lines read on a bright floor: the
+    // dome's own outline as the camera sees it, a little larger.
+    let mut outline: Vec<Pos2> = Vec::new();
+    for ring in 0..=8 {
+        let (sin_up, cos_up) = (ring as f32 / 8.0 * std::f32::consts::FRAC_PI_2).sin_cos();
+        for i in 0..32 {
+            let (s, c) = (i as f32 / 32.0 * TAU).sin_cos();
+            if let Some(at) = point(Vec3::new(c * cos_up, sin_up, s * cos_up)) {
+                outline.push(middle + (at - middle) * 1.14);
+            }
+        }
+    }
+    let hull = convex_hull(outline);
+    let lowest = hull.iter().map(|q| q.y).fold(middle.y, f32::max);
+    if hull.len() >= 3 {
+        p.add(egui::Shape::convex_polygon(
+            hull,
+            Color32::from_black_alpha(70),
+            Stroke::NONE,
+        ));
+    }
     let line = |a: Vec3, b: Vec3, stroke: Stroke| {
         if let (Some(a), Some(b)) = (point(a), point(b)) {
             p.line_segment([a, b], stroke);
@@ -1565,7 +1612,8 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) 
         line(flat, towards, faint);
     }
     // Under the dome.
-    if let Some(below) = point(Vec3::ZERO).map(|c| c + Vec2::new(0.0, radius * 1.18 + 14.0)) {
+    {
+        let below = Pos2::new(middle.x, lowest + 20.0);
         let text = format!("{heading:.0}°  ·  {elevation:.0}° up");
         let font = k.bold(k.d.text);
         let size = widgets::text_width(ui, &text, font.clone());
