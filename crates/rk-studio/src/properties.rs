@@ -74,12 +74,20 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // A character's pages: the scene's own values, then what it plays,
     // then who it is. A card whose profile could not be read still has
     // the first two.
-    let pages: &[&str] = match &shown {
+    let all: &[&str] = match &shown {
         Some(p) if p.male => &["Scene", "Animation", "Pose", "Profile", H_PAGE],
         Some(_) => &["Scene", "Animation", "Pose", "Profile", "Likes", "H Traits", H_PAGE],
         None if kind == Kind::Character => &["Scene", "Animation", "Pose", H_PAGE],
         None => &[],
     };
+    // The Pose page is there while the character is posed by hand (FK,
+    // switched in the Pose mode's palette).
+    let fk_on = matches!(
+        &object.content,
+        Content::Character { pose_layer: Some(l), .. } if l.fk_on
+    );
+    let pages: Vec<&str> = all.iter().copied().filter(|p| *p != "Pose" || fk_on).collect();
+    let pages = pages.as_slice();
     // The page that holds what the body shows in an H scene, which is of
     // the scene and not of the card, so every character has it.
     let h_page = pages.iter().position(|&p| p == H_PAGE);
@@ -1236,50 +1244,15 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
     }
 }
 
-/// The Pose page: CharaStudio's FK switch, off at first, and while it is
-/// on the bone chosen (on its ball or in the Outliner) with its turn over
-/// the animation and a way back.
+/// The Pose page, while the character is posed by hand: the bone chosen
+/// (on its ball or in the Outliner) with its turn over the animation and a
+/// way back.
 fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     let Content::Character { pose_layer, .. } = content else {
         return;
     };
     let ui_id = ui.id().with("pose");
-    use rk_chara::bone_info::Part;
-    let mut fk_on = pose_layer.as_ref().is_some_and(|l| l.fk_on);
-    let parts_before = pose_layer
-        .as_ref()
-        .map_or_else(|| Part::START.to_vec(), |l| l.fk_parts.clone());
-    let mut parts = parts_before.clone();
-    if section(ui, k, st, 17, "Kinematics") {
-        row(ui, k, "FK", None, |ui, rect| {
-            widgets::checkbox(ui, k, rect, ui_id.with("fk"), &mut fk_on, "On");
-        });
-        // CharaStudio's FK parts: a part's bones show and take their edits
-        // while it is on.
-        if fk_on {
-            for part in Part::ALL {
-                row(ui, k, part.label(), None, |ui, rect| {
-                    let mut on = parts.contains(&part);
-                    widgets::checkbox(ui, k, rect, ui_id.with(("part", part.label())), &mut on, "");
-                    if on && !parts.contains(&part) {
-                        parts.push(part);
-                    } else if !on {
-                        parts.retain(|p| *p != part);
-                    }
-                });
-            }
-        }
-        section_end(ui, k);
-    }
-    if fk_on != pose_layer.as_ref().is_some_and(|l| l.fk_on) || parts != parts_before {
-        let layer = pose_layer.get_or_insert_with(Default::default);
-        layer.fk_on = fk_on;
-        layer.fk_parts = parts;
-        if layer.is_empty() {
-            *pose_layer = None;
-        }
-    }
-    if !fk_on {
+    if !pose_layer.as_ref().is_some_and(|l| l.fk_on) {
         return;
     }
     let joints = st.live.as_ref().and_then(|l| l.joints(id));

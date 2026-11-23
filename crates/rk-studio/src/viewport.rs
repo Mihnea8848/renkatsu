@@ -195,7 +195,7 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
             Pos2::new(left, bar.bottom()),
             Vec2::new(
                 palette_width(st.mode, 184.0),
-                palette_height(k, st.mode).min(rail_rect.height()),
+                palette_height(k, st).min(rail_rect.height()),
             ),
         );
         drawer(ui, k, pal);
@@ -323,7 +323,7 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(rail_rect.right() + 4.0, rail_rect.top()),
-            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st.mode)),
+            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st)),
         );
         block(ui, k, pal);
         palette(ui, k, st, pal);
@@ -350,7 +350,7 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
             Pos2::new(left, top),
             Vec2::new(
                 palette_width(st.mode, 196.0),
-                palette_height(k, st.mode).min(full.bottom() - top),
+                palette_height(k, st).min(full.bottom() - top),
             ),
         );
         drawer(ui, k, pal);
@@ -1027,14 +1027,45 @@ fn palette_width(mode: usize, tools: f32) -> f32 {
     }
 }
 
-/// Height the palette needs for a mode's tools.
-fn palette_height(k: &Look, mode: usize) -> f32 {
+/// Height the palette needs for a mode's tools, with the FK parts under
+/// Forward kinematics while the selected character's FK is on.
+fn palette_height(k: &Look, st: &State) -> f32 {
+    let mode = st.mode;
     if map_mode(mode) {
         return 34.0 + crate::map_menu::height(k);
     }
     let sections = MODES[mode].sections;
-    let rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
+    let mut rows: usize = sections.iter().map(|(_, tools)| tools.len()).sum();
+    if MODES[mode].name == "Pose" && fk_layer(st).is_some_and(|l| l.fk_on) {
+        rows += rk_chara::bone_info::Part::ALL.len();
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
+}
+
+/// The pose layer of the selected character, when a character is selected.
+fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
+    match st.doc.selection().map(|o| &o.content) {
+        Some(crate::scene::Content::Character { pose_layer, .. }) => {
+            Some(pose_layer.as_deref().cloned().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// Changes the selected character's pose layer as one step of the history.
+fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let crate::scene::Content::Character { pose_layer, .. } = &mut object.content else {
+        return;
+    };
+    let layer = pose_layer.get_or_insert_with(Default::default);
+    change(layer);
+    if layer.is_empty() {
+        *pose_layer = None;
+    }
+    st.doc.edit(object, false);
 }
 
 /// The active mode's tools in named sections, under a header that pins or
@@ -1119,6 +1150,40 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     index += 1;
                     continue;
                 }
+                if *name == "Forward kinematics" {
+                    // CharaStudio's FK switch for the selected character,
+                    // with its parts under it while it is on.
+                    let layer = fk_layer(st);
+                    let on = layer.as_ref().is_some_and(|l| l.fk_on);
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, on);
+                    if resp.clicked() && layer.is_some() {
+                        edit_fk_layer(st, |l| l.fk_on = !on);
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    if let Some(layer) = layer.filter(|l| l.fk_on) {
+                        for part in rk_chara::bone_info::Part::ALL {
+                            let row = Rect::from_min_size(
+                                Pos2::new(rect.left() + 22.0, y + 1.0),
+                                Vec2::new(rect.width() - 28.0, palette_row(k) - 2.0),
+                            );
+                            let id = ui.id().with(("fk part", part.label()));
+                            let on = layer.fk_parts.contains(&part);
+                            let g = if on { icon::DOT } else { icon::DOT_OUTLINE };
+                            if widgets::tool_row(ui, k, row, id, g, part.label(), on).clicked() {
+                                edit_fk_layer(st, |l| {
+                                    if on {
+                                        l.fk_parts.retain(|p| *p != part);
+                                    } else {
+                                        l.fk_parts.push(part);
+                                    }
+                                });
+                            }
+                            y += palette_row(k);
+                        }
+                    }
+                    continue;
+                }
                 // Only the Select mode's rows are states; the others act.
                 let on = st.mode == 0 && st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
@@ -1159,13 +1224,12 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 25] = [
+const LATER_TOOLS: [&str; 24] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
-    "Forward kinematics",
     "Inverse kinematics",
     "Mirror pose",
     "Load pose",
