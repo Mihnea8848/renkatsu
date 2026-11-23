@@ -100,6 +100,12 @@ enum Cmd {
         /// Physics.
         #[arg(long)]
         game_skirts: bool,
+        /// Where the character stands in the map, as `x,y,z` in metres.
+        #[arg(long, allow_hyphen_values = true)]
+        at: Option<String>,
+        /// How far the character is turned round, in degrees.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        turn: f32,
         /// Print every mesh and material that gets drawn.
         #[arg(long)]
         list: bool,
@@ -584,6 +590,8 @@ fn main() -> Result<()> {
             no_physics,
             colliders,
             game_skirts,
+            at,
+            turn,
             list,
             no_shadows,
             clothes,
@@ -613,6 +621,8 @@ fn main() -> Result<()> {
             no_physics,
             colliders: colliders.as_deref(),
             game_skirts,
+            at: at.as_deref(),
+            turn,
             list,
             shadows: !no_shadows,
             clothes: clothes.as_deref(),

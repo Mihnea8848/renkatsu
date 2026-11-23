@@ -10,21 +10,175 @@
 //! - collision of the particles and of the edges between them, down each
 //!   chain and across to the next one, since the game tests particles
 //!   only and a leg slips through the 17 to 20 cm between two chains;
-//! - a floor at the character's root.
+//! - a floor at the character's root, where there is no map;
+//! - what the character is among (`Obstacles`): a map's floors, seats,
+//!   beds and desks, as the triangles that are drawn. Each segment of a
+//!   chain, from the waist down, is kept on the side of a surface its
+//!   upper end is on, so a dress rests on a chair seat or a bed and
+//!   slides along it instead of passing through.
 //!
 //! Every constraint only pushes out, so a skirt that touches nothing stays
 //! where the game's step put it.
 
 use super::{keep_length, position, world, Bone, Particle};
 use crate::scene::{Part, Scene, Skinning};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Rounds of the constraints per frame.
 const ITERATIONS: u32 = 8;
 /// Places along each limb bone where the body mesh's thickness is taken;
 /// a limb bone gets one capsule between each two.
 const STATIONS: usize = 4;
+
+/// How far off a surface a segment that met it is put.
+const SURFACE_GAP: f32 = 0.01;
+/// Rounds of the surface test per frame: a segment put back off one
+/// surface can meet another.
+const SURFACE_ROUNDS: usize = 3;
+/// How much further than a skirt reaches its nearby triangles are
+/// gathered, so that they serve while it moves a little.
+const GATHER_MARGIN: f32 = 0.3;
+
+/// A triangle of `Obstacles` in the world, with the box around it.
+#[derive(Debug, Clone, Copy)]
+struct Triangle {
+    corners: [Vec3; 3],
+    lo: Vec3,
+    hi: Vec3,
+}
+
+impl Triangle {
+    fn new(corners: [Vec3; 3]) -> Self {
+        let [a, b, c] = corners;
+        Self {
+            corners,
+            lo: a.min(b).min(c),
+            hi: a.max(b).max(c),
+        }
+    }
+}
+
+/// The triangles near one skirt, kept while the skirt stays in the box
+/// they were gathered for and the obstacles are the same.
+#[derive(Debug, Clone, Default)]
+struct Nearby {
+    from: usize,
+    lo: Vec3,
+    hi: Vec3,
+    triangles: Vec<Triangle>,
+}
+
+/// The triangles around a character that its skirts rest on, other than
+/// its own body: a map's floors and furniture.
+#[derive(Debug, Clone, Default)]
+pub struct Obstacles {
+    pub pieces: Vec<Obstacle>,
+}
+
+/// One mesh of `Obstacles`, in its own space.
+#[derive(Debug, Clone)]
+pub struct Obstacle {
+    pub positions: Arc<Vec<[f32; 3]>>,
+    pub indices: Arc<Vec<u32>>,
+    /// The box around `positions`.
+    pub bounds: ([f32; 3], [f32; 3]),
+    /// Where the mesh is in the world.
+    pub world: Mat4,
+}
+
+impl Obstacles {
+    /// The triangles, in the world, of every mesh that may reach into the
+    /// box from `lo` to `hi`.
+    fn gather(&self, lo: Vec3, hi: Vec3, out: &mut Vec<Triangle>) {
+        for piece in &self.pieces {
+            if piece.world.determinant().abs() < 1e-12 {
+                continue;
+            }
+            // The world box as a box in the piece's space.
+            let back = piece.world.inverse();
+            let (mut llo, mut lhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for k in 0..8 {
+                let corner = Vec3::new(
+                    if k & 1 == 0 { lo.x } else { hi.x },
+                    if k & 2 == 0 { lo.y } else { hi.y },
+                    if k & 4 == 0 { lo.z } else { hi.z },
+                );
+                let p = back.transform_point3(corner);
+                llo = llo.min(p);
+                lhi = lhi.max(p);
+            }
+            let (blo, bhi) = (Vec3::from(piece.bounds.0), Vec3::from(piece.bounds.1));
+            if !(blo.cmple(lhi).all() && bhi.cmpge(llo).all()) {
+                continue;
+            }
+            for t in piece.indices.chunks_exact(3) {
+                let corner = |i: usize| piece.positions.get(t[i] as usize).copied().map(Vec3::from);
+                let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+                    continue;
+                };
+                let (tlo, thi) = (a.min(b).min(c), a.max(b).max(c));
+                if tlo.cmple(lhi).all() && thi.cmpge(llo).all() {
+                    let w = |p: Vec3| piece.world.transform_point3(p);
+                    out.push(Triangle::new([w(a), w(b), w(c)]));
+                }
+            }
+        }
+    }
+}
+
+/// Where the segment from `p` to `q` passes through the triangle, as a
+/// share of the way from `p` (Moeller and Trumbore), both faces counting.
+fn segment_meets(p: Vec3, q: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
+    let dir = q - p;
+    let (e1, e2) = (*b - *a, *c - *a);
+    let h = dir.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let f = 1.0 / det;
+    let s = p - *a;
+    let u = f * s.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let qv = s.cross(e1);
+    let v = f * dir.dot(qv);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = f * e2.dot(qv);
+    (0.0..=1.0).contains(&t).then_some(t)
+}
+
+/// Keeps each segment of a chain, from the root down, on the side of the
+/// surfaces its upper end is on: a lower end that went through a surface
+/// is put back onto it, a little off, where it went through.
+fn rest_on(chain: &mut [Vec3], triangles: &[Triangle]) {
+    for i in 1..chain.len() {
+        for _ in 0..SURFACE_ROUNDS {
+            let (p, q) = (chain[i - 1], chain[i]);
+            let (lo, hi) = (p.min(q), p.max(q));
+            let Some((t, tri)) = triangles
+                .iter()
+                .filter(|tri| tri.lo.cmple(hi).all() && tri.hi.cmpge(lo).all())
+                .filter_map(|tri| segment_meets(p, q, &tri.corners).map(|t| (t, &tri.corners)))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+            else {
+                break;
+            };
+            let hit = p + (q - p) * t;
+            let mut n = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+            if n.dot(p - hit) < 0.0 {
+                n = -n;
+            }
+            let depth = (q - hit).dot(n);
+            chain[i] = q + n * (SURFACE_GAP - depth);
+        }
+    }
+}
 
 /// A capsule with a radius at each end, in the space of `node`.
 #[derive(Debug, Clone)]
@@ -66,6 +220,8 @@ pub struct Cloth {
     pub floor: Option<usize>,
     /// Rest places of every ring particle, taken before the bones step.
     rest: Vec<Vec<Vec<Vec3>>>,
+    /// The obstacles' triangles near each ring.
+    nearby: Vec<Nearby>,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -126,6 +282,7 @@ impl Cloth {
             capsules,
             floor: names.get("cf_j_root").copied(),
             rest: Vec::new(),
+            nearby: Vec::new(),
             rings,
         }
     }
@@ -173,18 +330,29 @@ impl Cloth {
             .collect();
     }
 
-    /// Pushes the particles the bones step left out of the limbs and the
-    /// floor, then poses the bones again. `live` says which bones ran.
-    pub(super) fn solve(&self, scene: &mut Scene, bones: &mut [Bone], live: &[bool]) {
+    /// Pushes the particles the bones step left out of the limbs, the
+    /// floor and the `obstacles`, then poses the bones again. `live` says
+    /// which bones ran.
+    pub(super) fn solve(
+        &mut self,
+        scene: &mut Scene,
+        bones: &mut [Bone],
+        live: &[bool],
+        obstacles: Option<&std::sync::Arc<Obstacles>>,
+    ) {
         if self.rings.is_empty() {
             return;
         }
         let all = self.world_capsules(scene);
-        let floor = self.floor.map(|n| {
+        // A map brings its own floors; the plane at the root is for
+        // where there is none.
+        let mapped = obstacles.is_some_and(|o| !o.pieces.is_empty());
+        let floor = self.floor.filter(|_| !mapped).map(|n| {
             let m = world(scene, n);
             (m.w_axis.truncate(), m.y_axis.truncate().normalize_or_zero())
         });
-        for (ring, rest) in self.rings.iter().zip(&self.rest) {
+        self.nearby.resize(self.rings.len(), Nearby::default());
+        for ((ring, rest), nearby) in self.rings.iter().zip(&self.rest).zip(&mut self.nearby) {
             if ring.iter().any(|&b| !live[b]) || rest.len() != ring.len() {
                 continue;
             }
@@ -215,7 +383,26 @@ impl Cloth {
                 })
                 .copied()
                 .collect();
-            if capsules.is_empty() && floor.is_none() {
+            match obstacles {
+                Some(obstacles) => {
+                    let (want_lo, want_hi) = (lo - Vec3::splat(margin), hi + Vec3::splat(margin));
+                    let from = std::sync::Arc::as_ptr(obstacles) as usize;
+                    let inside = nearby.lo.cmple(want_lo).all() && nearby.hi.cmpge(want_hi).all();
+                    if nearby.from != from || !inside {
+                        let grow = Vec3::splat(GATHER_MARGIN);
+                        *nearby = Nearby {
+                            from,
+                            lo: want_lo - grow,
+                            hi: want_hi + grow,
+                            triangles: Vec::new(),
+                        };
+                        obstacles.gather(nearby.lo, nearby.hi, &mut nearby.triangles);
+                    }
+                }
+                None => *nearby = Nearby::default(),
+            }
+            let triangles = &nearby.triangles;
+            if capsules.is_empty() && floor.is_none() && triangles.is_empty() {
                 continue;
             }
             let n = ring.len();
@@ -266,6 +453,11 @@ impl Cloth {
                         let parent = chain[i - 1];
                         keep_length(parent, &mut chain[i], len);
                     }
+                }
+            }
+            if !triangles.is_empty() {
+                for chain in &mut pos {
+                    rest_on(chain, triangles);
                 }
             }
             for (c, &b) in ring.iter().enumerate() {
@@ -493,6 +685,58 @@ mod tests {
         let mut p = Vec3::new(1.0, 0.1, 0.0);
         point_capsule(&mut p, &c);
         assert!((p.y - 0.3).abs() < 1e-5);
+    }
+
+    /// A square seat at height 0.5, one metre across.
+    fn seat() -> Vec<Triangle> {
+        let (a, b, c, d) = (
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+        );
+        vec![Triangle::new([a, b, c]), Triangle::new([a, c, d])]
+    }
+
+    #[test]
+    fn a_chain_through_a_seat_rests_on_it() {
+        let mut chain: Vec<Vec3> = (0..4)
+            .map(|i| Vec3::new(0.1 * i as f32, 0.7 - 0.1 * i as f32, 0.0))
+            .collect();
+        rest_on(&mut chain, &seat());
+        for p in &chain {
+            assert!(p.y >= 0.5, "{p:?}");
+        }
+        // It slid along the seat instead of stopping where it met it.
+        assert!((chain[3].x - 0.3).abs() < 1e-5, "{:?}", chain[3]);
+        assert!((chain[3].y - 0.5 - SURFACE_GAP).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_chain_beside_a_seat_hangs_free() {
+        let mut chain: Vec<Vec3> = (0..4).map(|i| Vec3::new(0.7, 0.7 - 0.1 * i as f32, 0.0)).collect();
+        let was = chain.clone();
+        rest_on(&mut chain, &seat());
+        assert_eq!(chain, was);
+    }
+
+    #[test]
+    fn obstacles_give_the_triangles_near_a_box_in_the_world() {
+        let o = Obstacles {
+            pieces: vec![Obstacle {
+                positions: Arc::new(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]),
+                indices: Arc::new(vec![0, 1, 2]),
+                bounds: ([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+                world: Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0)),
+            }],
+        };
+        let mut out = Vec::new();
+        o.gather(Vec3::new(0.2, 0.4, 0.2), Vec3::new(0.3, 0.6, 0.3), &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].corners[1], Vec3::new(1.0, 0.5, 0.0));
+        out.clear();
+        o.gather(Vec3::new(0.2, 0.0, 0.2), Vec3::new(0.3, 0.2, 0.3), &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

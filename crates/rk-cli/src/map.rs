@@ -354,6 +354,26 @@ pub fn scene(game: &Game, which: &str, time: &str, bc: bool) -> Result<rk_render
     Ok(scene)
 }
 
+/// The meshes of a map the camera sees, for skirts to rest on, with the
+/// map at the origin.
+pub fn obstacles(scene: &rk_render::map::MapScene) -> rk_chara::physics::cloth::Obstacles {
+    use rk_chara::physics::cloth::{Obstacle, Obstacles};
+    use std::sync::Arc;
+    Obstacles {
+        pieces: scene
+            .objects
+            .iter()
+            .filter(|o| scene.seen(o) && !o.mesh.indices.is_empty())
+            .map(|o| Obstacle {
+                positions: Arc::new(o.mesh.positions.clone()),
+                indices: Arc::new(o.mesh.indices.clone()),
+                bounds: o.mesh.bounds,
+                world: glam::Mat4::IDENTITY,
+            })
+            .collect(),
+    }
+}
+
 /// Prints a map's Animators: what each plays, what it drives, and which
 /// of the map's objects it moves. With `at`, also where those objects
 /// stand at each of these seconds.

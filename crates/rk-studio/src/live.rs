@@ -197,11 +197,21 @@ struct MapGround {
     pieces: Vec<MapPiece>,
 }
 
+/// What `Live::obstacles` was made from.
+#[derive(PartialEq)]
+struct ObstaclesKey {
+    ground: usize,
+    root: glam::Mat4,
+    moved: Vec<(usize, glam::Mat4)>,
+    copies: Vec<(usize, glam::Mat4)>,
+}
+
 struct MapPiece {
     /// Its place in the map's list of objects.
     object: usize,
-    positions: Vec<[f32; 3]>,
-    indices: Vec<u32>,
+    /// Shared with the characters' skirts, which rest on the map.
+    positions: std::sync::Arc<Vec<[f32; 3]>>,
+    indices: std::sync::Arc<Vec<u32>>,
     bounds: ([f32; 3], [f32; 3]),
 }
 
@@ -220,8 +230,8 @@ impl MapGround {
             }
             pieces.push(MapPiece {
                 object: i,
-                positions: std::mem::take(&mut mesh.positions),
-                indices: std::mem::take(&mut mesh.indices),
+                positions: std::sync::Arc::new(std::mem::take(&mut mesh.positions)),
+                indices: std::sync::Arc::new(std::mem::take(&mut mesh.indices)),
                 bounds: mesh.bounds,
             });
         }
@@ -564,7 +574,18 @@ impl Actor {
             return moved;
         }
         if !again && phase == self.phase {
-            return self.place(world, false);
+            let moved = self.place(world, false);
+            // Moved onto a chair or a bed, the skirts settle on it.
+            let physics = &self.chara.physics;
+            if moved && *simulate && physics.advanced() && physics.has_obstacles() {
+                for _ in 0..rk_chara::physics::SETTLE_FRAMES {
+                    self.chara.physics.begin_frame(&mut self.chara.scene);
+                    self.chara
+                        .physics
+                        .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
+                }
+            }
+            return moved;
         }
         // Nothing plays: the character is posed once and holds still.
         // Advanced Skirt Physics moves into the new pose from this one.
@@ -644,6 +665,9 @@ pub struct Live {
     renderer: Renderer,
     render_state: egui_wgpu::RenderState,
     actors: Vec<Actor>,
+    /// The map as the characters' skirts rest on it, and what it was made
+    /// from, so that it is made again only when the map moves.
+    obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
     /// Characters that could not be built, with what was tried and why, so
     /// that they are not tried again every frame.
     failed: Vec<(ObjectId, Recipe, String)>,
@@ -725,6 +749,7 @@ impl Live {
             renderer,
             render_state: render_state.clone(),
             actors: Vec::new(),
+            obstacles: None,
             failed: Vec::new(),
             pending: Vec::new(),
             patient: false,
@@ -1094,8 +1119,10 @@ impl Live {
         let mut order: Vec<usize> = (0..self.actors.len()).collect();
         order.sort_by_key(|i| scene.depth(self.actors[*i].id));
         self.poses.clear();
+        let obstacles = self.obstacles();
         for at in order {
             let actor = &mut self.actors[at];
+            actor.chara.physics.set_obstacles(obstacles.clone());
             let Some(object) = scene.get(actor.id) else { continue };
             let options = match &object.content {
                 Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
@@ -1607,6 +1634,61 @@ impl Live {
             return None;
         }
         self.map.ground.as_ref().zip(self.map.placed)
+    }
+
+    /// The map as Advanced Skirt Physics sees it: every mesh the camera
+    /// sees, where it is in the world now, duplicates included. It is
+    /// made again only when the map, its place or its pieces changed.
+    fn obstacles(&mut self) -> Option<std::sync::Arc<rk_chara::physics::cloth::Obstacles>> {
+        let Some((ground, placed)) = self.map_ground(&[]) else {
+            self.obstacles = None;
+            return None;
+        };
+        let key = ObstaclesKey {
+            // The map's own meshes: a map read again has new ones.
+            ground: ground
+                .pieces
+                .first()
+                .map_or(0, |p| std::sync::Arc::as_ptr(&p.positions) as usize),
+            root: placed.rigid(),
+            moved: self.map_moved(),
+            copies: self.map.copies.iter().map(|(o, m, _)| (*o, *m)).collect(),
+        };
+        if let Some((was, made)) = &self.obstacles {
+            if *was == key {
+                return Some(made.clone());
+            }
+        }
+        let made = self.make_obstacles()?;
+        self.obstacles = Some((key, made.clone()));
+        Some(made)
+    }
+
+    fn make_obstacles(&self) -> Option<std::sync::Arc<rk_chara::physics::cloth::Obstacles>> {
+        use rk_chara::physics::cloth::{Obstacle, Obstacles};
+        let (ground, placed) = self.map_ground(&[])?;
+        let root = placed.rigid();
+        let moved = self.map_moved();
+        let mut pieces = Vec::with_capacity(ground.pieces.len() + self.map.copies.len());
+        let obstacle = |piece: &MapPiece, m: glam::Mat4| Obstacle {
+            positions: piece.positions.clone(),
+            indices: piece.indices.clone(),
+            bounds: piece.bounds,
+            world: root * m,
+        };
+        for piece in &ground.pieces {
+            let m = moved
+                .iter()
+                .find(|(o, _)| *o == piece.object)
+                .map_or(glam::Mat4::IDENTITY, |(_, m)| *m);
+            pieces.push(obstacle(piece, m));
+        }
+        for (object, m, _) in &self.map.copies {
+            if let Some(piece) = ground.pieces.iter().find(|p| p.object == *object) {
+                pieces.push(obstacle(piece, *m));
+            }
+        }
+        Some(std::sync::Arc::new(Obstacles { pieces }))
     }
 
     /// Where the map's objects stand now: posed by their Animators, then
