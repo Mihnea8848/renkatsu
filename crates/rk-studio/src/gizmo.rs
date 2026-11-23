@@ -1475,13 +1475,14 @@ fn shown_icons(st: &mut State, view: &View, pointer: Option<Pos2>) -> Vec<Shown>
 }
 
 /// Draws the shown icons, the far under the near.
-/// The sun's dome's radius, in parts of the view's height.
-const DOME: f32 = 0.2;
+/// The sun's dome's radius, in points.
+const DOME: f32 = 62.0;
 
-/// The sun as Unreal shows it while it is turned (Ctrl+L): a wire half
-/// dome around where the camera looks, its horizon and two arcs over the
-/// top, with an arrow from the middle to the sun and its angles below.
-fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View, camera: &rk_render::Camera) {
+/// The sun as Unreal shows it while it is turned (Ctrl+L): in the view's
+/// corner, a wire half dome turned as the camera looks, its horizon and
+/// two arcs over the top, with an arrow from the middle to the sun and its
+/// angles below.
+fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View) {
     let scene = st.doc.scene();
     let sun = scene.objects().iter().find_map(|o| match &o.content {
         crate::scene::Content::Map { sun, .. } => Some(*sun),
@@ -1490,10 +1491,16 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View, 
     let Some(sun) = sun else { return };
     let [heading, elevation] = sun.unwrap_or_else(|| crate::map_menu::own_sun(st));
     let towards = crate::scene::sun_towards([heading, elevation]);
-    let centre = camera.target;
-    // Its radius a fifth of the view's height.
-    let radius = view.unit_at(centre) * view.rect.height() * DOME;
-    let point = |dir: Vec3| view.screen(centre + dir * radius);
+    // A widget of its own in the view's lower right corner, turned as the
+    // camera looks but standing nowhere in the scene: each way is laid
+    // flat along the camera's right and up.
+    let right = Vec3::Y.cross(view.forward).normalize_or(Vec3::X);
+    let up = view.forward.cross(right);
+    let radius = DOME;
+    let middle = Pos2::new(view.rect.right() - radius - 28.0, view.rect.bottom() - radius - 52.0);
+    let point = |dir: Vec3| Some(middle + Vec2::new(dir.dot(right), -dir.dot(up)) * radius);
+    // A soft shade behind, so that the lines read on a bright floor.
+    p.circle_filled(middle, radius * 1.18, Color32::from_black_alpha(70));
     let line = |a: Vec3, b: Vec3, stroke: Stroke| {
         if let (Some(a), Some(b)) = (point(a), point(b)) {
             p.line_segment([a, b], stroke);
@@ -1546,8 +1553,8 @@ fn draw_sun_dome(ui: &Ui, p: &egui::Painter, k: &Look, st: &State, view: &View, 
         line(Vec3::ZERO, flat, faint);
         line(flat, towards, faint);
     }
-    // Just under the dome's front.
-    if let Some(below) = point(Vec3::ZERO).map(|c| c + Vec2::new(0.0, view.rect.height() * DOME * 0.5 + 18.0)) {
+    // Under the dome.
+    if let Some(below) = point(Vec3::ZERO).map(|c| c + Vec2::new(0.0, radius * 1.18 + 14.0)) {
         let text = format!("{heading:.0}°  ·  {elevation:.0}° up");
         let font = k.bold(k.d.text);
         let size = widgets::text_width(ui, &text, font.clone());
@@ -1706,7 +1713,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
 
     draw_lamp_reach(&p, st, &view);
     if st.sun_turning || st.sun_preview {
-        draw_sun_dome(ui, &p, k, st, &view, &camera);
+        draw_sun_dome(ui, &p, k, st, &view);
     }
     let pointer = ui.ctx().pointer_hover_pos();
     st.gizmo.balls = if tool == crate::viewport::POSE_TOOL {
