@@ -30,11 +30,22 @@
 //   sun=day|evening|night  the map's time of day
 //   settle=90            frames to wait before the picture
 //   plain                skip the pictures with Studio's effects
+//   ik=on                switch on IK with its targets on the bones, as
+//                        Studio's copy button puts them, and write what
+//                        the solver read, worked out and wrote to
+//                        <name>.ik.json
+//   ik=LeftHand:x,y,z[:x,y,z]  the same, with that target (a name of
+//                        OICharInfo.IKTargetEN or its number) moved by
+//                        x,y,z in the world and turned by Euler angles
+//   fk=on                switch on FK with the animation copied into it
+//   fk=cf_j_neck:x,y,z   the same, with that bone's Euler angles in
+//                        Studio's FK fields raised by x,y,z
 // Without a list, the default card.
 //
 // Output: <name>.<view>.studio.png  with Studio's effects
 //         <name>.<view>.plain.png   image effects off
 //         <name>.json
+//         <name>.ik.json            with ik=
 //         index.txt (batch only): one line per case
 //         The views are "body" and "face" unless the line says otherwise.
 
@@ -311,6 +322,30 @@ namespace Renkatsu
                 {
                     yield return null;
                 }
+                IkWatch watch = null;
+                if (chara != null && (e.Ik || e.Fk))
+                {
+                    bool set = false;
+                    try
+                    {
+                        Kinematics(chara, e);
+                        set = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not set up IK or FK for " + name + ": " + ex);
+                    }
+                    for (int i = 0; set && i < KinematicFrames; i++)
+                    {
+                        yield return null;
+                    }
+                    // The solver is watched through the frame of the picture.
+                    if (set && e.Ik)
+                    {
+                        watch = new IkWatch(chara);
+                    }
+                    yield return null;
+                }
                 yield return new WaitForEndOfFrame();
 
                 bool ok = false;
@@ -323,6 +358,18 @@ namespace Renkatsu
                 catch (Exception ex)
                 {
                     Logger.LogError("Reference capture: failed on " + name + ": " + ex);
+                }
+                if (watch != null)
+                {
+                    watch.Stop();
+                    try
+                    {
+                        File.WriteAllText(Path.Combine(outDir, name + ".ik.json"), watch.Json(), new UTF8Encoding(false));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not write the IK of " + name + ": " + ex);
+                    }
                 }
 
                 if (ok && e.Frames > 0 && chara != null)
@@ -348,6 +395,20 @@ namespace Renkatsu
                     }
                     chara.animeSpeed = 0f;
                     Time.captureFramerate = oldRate;
+                }
+
+                // The next case starts without IK or FK.
+                if (chara != null && (e.Ik || e.Fk))
+                {
+                    try
+                    {
+                        chara.ActiveKinematicMode(OICharInfo.KinematicMode.IK, false, true);
+                        chara.ActiveKinematicMode(OICharInfo.KinematicMode.FK, false, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not switch IK and FK off after " + name + ": " + ex);
+                    }
                 }
 
                 float took = Time.realtimeSinceStartup - began;
@@ -499,6 +560,11 @@ namespace Renkatsu
             public int Sun;
             public int Settle = SettleFrames;
             public bool PlainOnly;
+            public bool Ik;
+            // Target number, then the move and the turn.
+            public List<KeyValuePair<int, Vector3[]>> IkMoves = new List<KeyValuePair<int, Vector3[]>>();
+            public bool Fk;
+            public List<KeyValuePair<string, Vector3>> FkTurns = new List<KeyValuePair<string, Vector3>>();
         }
 
         private static readonly string[] SunNames = { "day", "evening", "night" };
@@ -677,6 +743,26 @@ namespace Renkatsu
                     break;
                 case "settle":
                     e.Settle = int.Parse(value);
+                    break;
+                case "ik":
+                    e.Ik = true;
+                    if (value != "on")
+                    {
+                        int no;
+                        if (!int.TryParse(parts[0], out no))
+                        {
+                            no = (int)Enum.Parse(typeof(OICharInfo.IKTargetEN), parts[0], true);
+                        }
+                        Vector3 turn = parts.Length > 2 ? Point(parts[2]) : Vector3.zero;
+                        e.IkMoves.Add(new KeyValuePair<int, Vector3[]>(no, new[] { Point(parts[1]), turn }));
+                    }
+                    break;
+                case "fk":
+                    e.Fk = true;
+                    if (value != "on")
+                    {
+                        e.FkTurns.Add(new KeyValuePair<string, Vector3>(parts[0], Point(parts[1])));
+                    }
                     break;
                 default:
                     throw new FormatException("unknown field " + key);
@@ -1812,6 +1898,297 @@ namespace Renkatsu
                 first = false;
             }
             s.Append("}");
+        }
+
+        // Frames between switching IK or FK on and the picture.
+        private const int KinematicFrames = 5;
+
+        // Switches on IK or FK as a list line asks. The bones hold the
+        // animation's pose here, so the targets and the FK fields start
+        // where the animation is, as Studio's copy buttons put them.
+        private static void Kinematics(OCIChar chara, Entry e)
+        {
+            if (e.Ik && e.Fk)
+            {
+                throw new FormatException("Studio has IK or FK on, not both");
+            }
+            if (e.Fk)
+            {
+                chara.fkCtrl.CopyBone();
+                for (int i = 0; i < chara.oiCharInfo.activeFK.Length; i++)
+                {
+                    chara.oiCharInfo.activeFK[i] = true;
+                }
+                chara.ActiveKinematicMode(OICharInfo.KinematicMode.FK, true, true);
+                foreach (KeyValuePair<string, Vector3> turn in e.FkTurns)
+                {
+                    OCIChar.BoneInfo bone = chara.listBones.FirstOrDefault(b => b.guideObject.transformTarget != null && b.guideObject.transformTarget.name == turn.Key);
+                    if (bone == null)
+                    {
+                        throw new FormatException("no FK bone " + turn.Key);
+                    }
+                    bone.boneInfo.changeAmount.rot = bone.boneInfo.changeAmount.rot + turn.Value;
+                }
+            }
+            if (e.Ik)
+            {
+                chara.ikCtrl.CopyBone((OIBoneInfo.BoneGroup)(-1));
+                for (int i = 0; i < chara.oiCharInfo.activeIK.Length; i++)
+                {
+                    chara.oiCharInfo.activeIK[i] = true;
+                }
+                chara.ActiveKinematicMode(OICharInfo.KinematicMode.IK, true, true);
+                foreach (KeyValuePair<int, Vector3[]> move in e.IkMoves)
+                {
+                    OIIKTargetInfo info;
+                    if (!chara.oiCharInfo.ikTarget.TryGetValue(move.Key, out info))
+                    {
+                        throw new FormatException("no IK target " + move.Key);
+                    }
+                    OCIChar.IKInfo target = chara.listIKTarget.First(t => t.targetInfo == info);
+                    target.targetObject.position += move.Value[0];
+                    target.targetObject.rotation = Quaternion.Euler(move.Value[1]) * target.targetObject.rotation;
+                    target.guideObject.changeAmount.pos = target.targetObject.localPosition;
+                    if (target.guideObject.enableRot)
+                    {
+                        target.guideObject.changeAmount.rot = target.targetObject.localEulerAngles;
+                    }
+                }
+            }
+        }
+
+        // Watches a character's FullBodyBipedIK through one update: every
+        // bone as the solver is about to read them with every setting of
+        // the solver, its chains, effectors and mappings (private ones too:
+        // what it worked out when it started), the solver's points once it
+        // has solved, and every bone as it left them.
+        private sealed class IkWatch
+        {
+            private readonly RootMotion.FinalIK.IKSolverFullBodyBiped solver;
+            private readonly Transform[] bones;
+            private readonly Dictionary<Transform, int> index = new Dictionary<Transform, int>();
+            private string read;
+            private string settings;
+            private string solved;
+            private string written;
+
+            public IkWatch(OCIChar chara)
+            {
+                solver = chara.finalIK.solver;
+                bones = chara.charInfo.objBodyBone.GetComponentsInChildren<Transform>(true);
+                for (int i = 0; i < bones.Length; i++)
+                {
+                    index[bones[i]] = i;
+                }
+                solver.OnPreRead += PreRead;
+                solver.OnPostSolve += PostSolve;
+                solver.OnPostUpdate += PostUpdate;
+            }
+
+            public void Stop()
+            {
+                solver.OnPreRead -= PreRead;
+                solver.OnPostSolve -= PostSolve;
+                solver.OnPostUpdate -= PostUpdate;
+            }
+
+            private void PreRead()
+            {
+                if (read == null)
+                {
+                    read = Bones();
+                    settings = Settings();
+                }
+            }
+
+            private void PostSolve()
+            {
+                if (read != null && solved == null)
+                {
+                    solved = Points();
+                }
+            }
+
+            private void PostUpdate()
+            {
+                if (read != null && written == null)
+                {
+                    written = Bones();
+                }
+            }
+
+            private string Bones()
+            {
+                StringBuilder s = new StringBuilder("[");
+                for (int i = 0; i < bones.Length; i++)
+                {
+                    Transform t = bones[i];
+                    int parent;
+                    if (t.parent == null || !index.TryGetValue(t.parent, out parent))
+                    {
+                        parent = -1;
+                    }
+                    s.Append(i == 0 ? "\n" : ",\n");
+                    s.Append("{\"name\": ").Append(Str(t.name));
+                    s.Append(", \"parent\": ").Append(parent);
+                    s.Append(", \"t\": ").Append(V(t.localPosition));
+                    s.Append(", \"r\": ").Append(Q(t.localRotation));
+                    s.Append(", \"s\": ").Append(V(t.localScale));
+                    s.Append(", \"pos\": ").Append(V(t.position));
+                    s.Append(", \"rot\": ").Append(Q(t.rotation));
+                    s.Append("}");
+                }
+                return s.Append("\n]").ToString();
+            }
+
+            private string Points()
+            {
+                StringBuilder s = new StringBuilder("[");
+                RootMotion.FinalIK.IKSolver.Point[] points = solver.GetPoints();
+                for (int i = 0; i < points.Length; i++)
+                {
+                    s.Append(i == 0 ? "\n" : ",\n").Append(Fields(points[i]));
+                }
+                return s.Append("\n]").ToString();
+            }
+
+            private string Settings()
+            {
+                StringBuilder s = new StringBuilder("{");
+                s.Append("\n\"solver\": ").Append(Fields(solver));
+                s.Append(",\n\"chains\": [");
+                for (int i = 0; i < solver.chain.Length; i++)
+                {
+                    RootMotion.FinalIK.FBIKChain c = solver.chain[i];
+                    s.Append(i == 0 ? "\n" : ",\n");
+                    s.Append("{\"chain\": ").Append(Fields(c));
+                    s.Append(", \"bend\": ").Append(Fields(c.bendConstraint));
+                    s.Append(", \"bend_goal\": ").Append(Place(c.bendConstraint.bendGoal));
+                    s.Append(", \"nodes\": [");
+                    for (int j = 0; j < c.nodes.Length; j++)
+                    {
+                        s.Append(j == 0 ? "" : ", ").Append(Fields(c.nodes[j]));
+                    }
+                    s.Append("]}");
+                }
+                s.Append("\n],\n\"effectors\": [");
+                for (int i = 0; i < solver.effectors.Length; i++)
+                {
+                    RootMotion.FinalIK.IKEffector f = solver.effectors[i];
+                    s.Append(i == 0 ? "\n" : ",\n");
+                    s.Append("{\"effector\": ").Append(Fields(f));
+                    s.Append(", \"target_place\": ").Append(Place(f.target)).Append("}");
+                }
+                s.Append("\n],\n\"spine_mapping\": ").Append(Fields(solver.spineMapping));
+                s.Append(",\n\"bone_mappings\": [");
+                for (int i = 0; i < solver.boneMappings.Length; i++)
+                {
+                    s.Append(i == 0 ? "\n" : ",\n").Append(Fields(solver.boneMappings[i]));
+                }
+                s.Append("\n],\n\"limb_mappings\": [");
+                for (int i = 0; i < solver.limbMappings.Length; i++)
+                {
+                    s.Append(i == 0 ? "\n" : ",\n").Append(Fields(solver.limbMappings[i]));
+                }
+                return s.Append("\n]\n}").ToString();
+            }
+
+            // Where a transform is in the world, or null.
+            private static string Place(Transform t)
+            {
+                if (t == null)
+                {
+                    return "null";
+                }
+                return "{\"name\": " + Str(t.name) + ", \"pos\": " + V(t.position) + ", \"rot\": " + Q(t.rotation) + "}";
+            }
+
+            public string Json()
+            {
+                StringBuilder s = new StringBuilder("{\n");
+                s.Append("\"watched\": ").Append(B(written != null)).Append(",\n");
+                s.Append("\"settings\": ").Append(settings ?? "null").Append(",\n");
+                s.Append("\"read\": ").Append(read ?? "null").Append(",\n");
+                s.Append("\"solved\": ").Append(solved ?? "null").Append(",\n");
+                s.Append("\"written\": ").Append(written ?? "null").Append("\n}\n");
+                return s.ToString();
+            }
+        }
+
+        // The fields of an object of the solver, public and private, by
+        // name: numbers, switches, enum names, vectors, rotations, and the
+        // names of the transforms it refers to; lists of these too.
+        private static string Fields(object o)
+        {
+            if (o == null)
+            {
+                return "null";
+            }
+            StringBuilder s = new StringBuilder("{");
+            bool first = true;
+            for (Type type = o.GetType(); type != null && type != typeof(object); type = type.BaseType)
+            {
+                foreach (FieldInfo field in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    string text = Value(field.GetValue(o));
+                    if (text == null)
+                    {
+                        continue;
+                    }
+                    s.Append(first ? "" : ", ").Append(Str(field.Name)).Append(": ").Append(text);
+                    first = false;
+                }
+            }
+            return s.Append("}").ToString();
+        }
+
+        private static string Value(object v)
+        {
+            if (v is float)
+            {
+                return F((float)v);
+            }
+            if (v is int)
+            {
+                return ((int)v).ToString(CultureInfo.InvariantCulture);
+            }
+            if (v is bool)
+            {
+                return B((bool)v);
+            }
+            if (v is Enum)
+            {
+                return Str(v.ToString());
+            }
+            if (v is Vector3)
+            {
+                return V((Vector3)v);
+            }
+            if (v is Quaternion)
+            {
+                return Q((Quaternion)v);
+            }
+            Transform t = v as Transform;
+            if (t != null)
+            {
+                return Str(t.name);
+            }
+            Array list = v as Array;
+            if (list != null)
+            {
+                Type item = list.GetType().GetElementType();
+                if (item != typeof(float) && item != typeof(int) && item != typeof(bool) && item != typeof(Vector3) && item != typeof(Quaternion) && item != typeof(Transform))
+                {
+                    return null;
+                }
+                StringBuilder s = new StringBuilder("[");
+                for (int i = 0; i < list.Length; i++)
+                {
+                    s.Append(i == 0 ? "" : ", ").Append(Value(list.GetValue(i)) ?? "null");
+                }
+                return s.Append("]").ToString();
+            }
+            return null;
         }
 
         // Type, state and public fields of one image effect: numbers,
