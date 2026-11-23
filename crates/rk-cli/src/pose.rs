@@ -451,3 +451,172 @@ pub fn mods() -> Result<()> {
     );
     Ok(())
 }
+
+/// Prints the FullBodyBipedIK settings the game's body stores and, with a
+/// capture, each one CharaStudio's solver had otherwise.
+pub fn ik_settings(card: &Path, capture: Option<&Path>) -> Result<()> {
+    let game = Game::open_user(&[])?;
+    let card = Card::load(card)?;
+    let options = BuildOptions {
+        clothes: false,
+        accessories: false,
+        physics: false,
+        ..Default::default()
+    };
+    let chara = rk_chara::build(&game, &card, &options)?;
+    let ik = chara.ik.as_ref().context("the body has no FullBodyBipedIK")?;
+    print!("{}", rk_chara::fbbik::describe(ik, &chara.scene));
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    let text = std::fs::read_to_string(capture).with_context(|| format!("reading {}", capture.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&text)?;
+    let set = &json["settings"];
+    let name = |n: Option<usize>| n.map_or(String::new(), |n| chara.scene.nodes[n].name.clone());
+    let mut ck = Checks::default();
+    let s = &set["solver"];
+    ck.num("iterations".into(), ik.iterations.into(), &s["iterations"]);
+    ck.num(
+        "IKPositionWeight".into(),
+        ik.ik_position_weight.into(),
+        &s["IKPositionWeight"],
+    );
+    ck.num("spineStiffness".into(), ik.spine_stiffness.into(), &s["spineStiffness"]);
+    ck.num(
+        "pullBodyVertical".into(),
+        ik.pull_body_vertical.into(),
+        &s["pullBodyVertical"],
+    );
+    ck.num(
+        "pullBodyHorizontal".into(),
+        ik.pull_body_horizontal.into(),
+        &s["pullBodyHorizontal"],
+    );
+    for (i, c) in ik.chains.iter().enumerate() {
+        let t = &set["chains"][i];
+        ck.num(format!("chain {i} pin"), c.pin.into(), &t["chain"]["pin"]);
+        ck.num(format!("chain {i} pull"), c.pull.into(), &t["chain"]["pull"]);
+        ck.num(format!("chain {i} push"), c.push.into(), &t["chain"]["push"]);
+        ck.num(
+            format!("chain {i} pushParent"),
+            c.push_parent.into(),
+            &t["chain"]["pushParent"],
+        );
+        ck.num(format!("chain {i} reach"), c.reach.into(), &t["chain"]["reach"]);
+        ck.num(
+            format!("chain {i} bend weight"),
+            c.bend_constraint.weight.into(),
+            &t["bend"]["weight"],
+        );
+        for (k, n) in c.nodes.iter().enumerate() {
+            ck.same(
+                t["nodes"][k]["transform"].as_str() == Some(name(n.transform).as_str()),
+                format!(
+                    "chain {i} node {k}: stored {}, Studio {}",
+                    name(n.transform),
+                    t["nodes"][k]["transform"]
+                ),
+            );
+        }
+        for (key, ours) in [
+            ("reachSmoothing", c.reach_smoothing),
+            ("pushSmoothing", c.push_smoothing),
+        ] {
+            ck.same(
+                t["chain"][key].as_str() == Some(format!("{ours:?}").as_str()),
+                format!("chain {i} {key}: stored {ours:?}, Studio {}", t["chain"][key]),
+            );
+        }
+    }
+    for (i, e) in ik.effectors.iter().enumerate() {
+        let t = &set["effectors"][i]["effector"];
+        ck.num(
+            format!("effector {i} positionWeight"),
+            e.position_weight.into(),
+            &t["positionWeight"],
+        );
+        ck.num(
+            format!("effector {i} rotationWeight"),
+            e.rotation_weight.into(),
+            &t["rotationWeight"],
+        );
+        ck.num(
+            format!("effector {i} maintainRelativePositionWeight"),
+            e.maintain_relative_position_weight.into(),
+            &t["maintainRelativePositionWeight"],
+        );
+        ck.num(
+            format!("effector {i} effectChildNodes"),
+            f64::from(u8::from(e.effect_child_nodes)),
+            &t["effectChildNodes"],
+        );
+        ck.same(
+            t["bone"].as_str() == Some(name(e.bone).as_str()),
+            format!("effector {i} bone: stored {}, Studio {}", name(e.bone), t["bone"]),
+        );
+    }
+    let m = &set["spine_mapping"];
+    ck.num(
+        "spine mapping iterations".into(),
+        ik.spine_mapping.iterations.into(),
+        &m["iterations"],
+    );
+    ck.num(
+        "spine mapping twistWeight".into(),
+        ik.spine_mapping.twist_weight.into(),
+        &m["twistWeight"],
+    );
+    for (i, b) in ik.bone_mappings.iter().enumerate() {
+        ck.num(
+            format!("bone mapping {i} maintainRotationWeight"),
+            b.maintain_rotation_weight.into(),
+            &set["bone_mappings"][i]["maintainRotationWeight"],
+        );
+    }
+    for (i, l) in ik.limb_mappings.iter().enumerate() {
+        let t = &set["limb_mappings"][i];
+        ck.num(
+            format!("limb mapping {i} maintainRotationWeight"),
+            l.maintain_rotation_weight.into(),
+            &t["maintainRotationWeight"],
+        );
+        ck.num(format!("limb mapping {i} weight"), l.weight.into(), &t["weight"]);
+    }
+    println!(
+        "\n{} values checked against {}, {} differ:",
+        ck.checked,
+        capture.display(),
+        ck.differ.len()
+    );
+    for d in ck.differ {
+        println!("  {d}");
+    }
+    Ok(())
+}
+
+/// Values compared with a capture, and the ones that differ.
+#[derive(Default)]
+struct Checks {
+    checked: usize,
+    differ: Vec<String>,
+}
+
+impl Checks {
+    fn num(&mut self, at: String, ours: f64, theirs: &serde_json::Value) {
+        let theirs = match theirs {
+            serde_json::Value::Bool(b) => f64::from(u8::from(*b)),
+            v => v.as_f64().unwrap_or(f64::NAN),
+        };
+        self.same(
+            (ours - theirs).abs() <= 1e-6,
+            format!("{at}: stored {ours}, Studio {theirs}"),
+        );
+    }
+
+    fn same(&mut self, same: bool, otherwise: String) {
+        self.checked += 1;
+        if !same {
+            self.differ.push(otherwise);
+        }
+    }
+}
