@@ -935,8 +935,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 hide_walls,
                 light_intensity,
                 filter_decay,
+                sun,
                 ..
             } => {
+                let own_sun = crate::map_menu::own_sun(st);
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
                 let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
@@ -989,6 +991,21 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     row(ui, k, "Hide walls", none, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
                     });
+                    let mut angles = sun.unwrap_or(own_sun);
+                    let before = angles;
+                    let mut reset = false;
+                    row(ui, k, "Sun heading", None, |ui, rect| {
+                        let turned = sun.is_some();
+                        reset = crate::map_menu::sun_heading(ui, k, rect, id.with("sun heading"), &mut angles, turned);
+                    });
+                    row(ui, k, "Sun elevation", None, |ui, rect| {
+                        crate::map_menu::sun_elevation(ui, k, rect, id.with("sun elevation"), &mut angles);
+                    });
+                    if reset {
+                        *sun = None;
+                    } else if angles != before {
+                        *sun = Some(angles);
+                    }
                     row(ui, k, "Light intensity", None, |ui, rect| {
                         widgets::number(
                             ui,

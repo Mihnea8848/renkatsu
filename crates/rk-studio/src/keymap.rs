@@ -104,6 +104,8 @@ pub enum Action {
     ShowInputs,
     /// The floating icons of lights and cameras in the viewport.
     ObjectIcons,
+    /// Held while the mouse moves, turns the map's sun, as in Unreal.
+    TurnSun,
     /// A direction to fly in, as `FLY` lists them.
     Fly(u8),
     /// A mode of the rail, by its place.
@@ -136,7 +138,7 @@ const fn def(action: Action, id: &'static str, name: &'static str, group: Group,
 
 /// Every action. Where two actions share a key, the first one listed
 /// gets it. The defaults follow Unity and Unreal, then Blender.
-pub const ACTIONS: [Def; 59] = [
+pub const ACTIONS: [Def; 60] = [
     def(
         Action::NewProject,
         "new-project",
@@ -263,6 +265,7 @@ pub const ACTIONS: [Def; 59] = [
         Group::View,
         &["Ctrl+H"],
     ),
+    def(Action::TurnSun, "turn-sun", "Turn the sun", Group::View, &["Ctrl+L"]),
     def(Action::Fly(0), "fly-forward", "Forward", Group::Fly, &["W"]),
     def(Action::Fly(1), "fly-back", "Back", Group::Fly, &["S"]),
     def(Action::Fly(2), "fly-left", "Left", Group::Fly, &["A"]),
@@ -409,6 +412,15 @@ fn group_of(action: Action) -> Group {
 /// Whether a key of `action` is held, whatever the modifiers.
 pub fn held(keys: &Keymap, action: Action, input: &egui::InputState) -> bool {
     keys.chords(action).iter().any(|c| input.key_down(c.key))
+}
+
+/// Whether one of an action's chords is held with its modifiers, and no
+/// others: Ctrl+L, not L alone.
+pub fn held_chord(keys: &Keymap, action: Action, input: &egui::InputState) -> bool {
+    let m = input.modifiers;
+    keys.chords(action)
+        .iter()
+        .any(|c| input.key_down(c.key) && c.ctrl == (m.command || m.ctrl) && c.shift == m.shift && c.alt == m.alt)
 }
 
 fn index(action: Action) -> usize {
@@ -769,7 +781,7 @@ impl State {
             A::Shortcuts => self.shortcuts_open = !self.shortcuts_open,
             A::Packages => self.ask(Command::Packages, ctx),
             // Read where they act, while the right button or a drag is held.
-            A::Fly(_) | A::CancelDrag => {}
+            A::Fly(_) | A::CancelDrag | A::TurnSun => {}
         }
     }
 }

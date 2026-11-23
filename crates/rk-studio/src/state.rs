@@ -305,6 +305,9 @@ pub struct State {
     pub speed_shown: Option<f64>,
     /// When the lens last changed (Alt and the wheel), for its meter.
     pub lens_shown: Option<f64>,
+    /// The sun is being turned with its shortcut held: one step of the
+    /// history until it is let go, though no button is down.
+    pub sun_turning: bool,
     /// The project that is open; `Project::none()` while the project
     /// selector shows.
     pub project: Project,
@@ -811,6 +814,7 @@ impl State {
             map_pictures: crate::map_library::Pictures::default(),
             speed_shown: None,
             lens_shown: None,
+            sun_turning: false,
             library: Library::new(&project),
             project,
             selector: None,
@@ -2173,14 +2177,15 @@ impl State {
             .cloned();
         let id = match there {
             Some(mut object) => {
-                let (hide_walls, light_intensity, filter_decay) = match object.content {
+                let (hide_walls, light_intensity, filter_decay, sun) = match object.content {
                     Content::Map {
                         hide_walls,
                         light_intensity,
                         filter_decay,
+                        sun,
                         ..
-                    } => (hide_walls, light_intensity, filter_decay),
-                    _ => (true, 1.0, 0.5),
+                    } => (hide_walls, light_intensity, filter_decay, sun),
+                    _ => (true, 1.0, 0.5, None),
                 };
                 object.name = self.doc.scene().free_name(&map.name);
                 object.content = Content::Map {
@@ -2189,6 +2194,7 @@ impl State {
                     hide_walls,
                     light_intensity,
                     filter_decay,
+                    sun,
                     pieces_listed: false,
                 };
                 // The old map's pieces go with it; the new map lists its own.

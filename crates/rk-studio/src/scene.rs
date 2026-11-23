@@ -343,11 +343,32 @@ pub enum Content {
         /// colours deep.
         #[serde(default = "half")]
         filter_decay: f32,
+        /// The sun turned by hand: its heading round the up axis from +Z
+        /// toward +X and its elevation over the horizon, in degrees. None
+        /// for the map's own sun of its time of day.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sun: Option<[f32; 2]>,
         /// Its movable pieces were put in the scene, once: pieces deleted
         /// after stay deleted.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pieces_listed: bool,
     },
+}
+
+/// The unit vector towards a sun at `[heading, elevation]` in degrees:
+/// heading round the up axis from +Z toward +X.
+pub fn sun_towards([heading, elevation]: [f32; 2]) -> glam::Vec3 {
+    let (h, e) = (heading.to_radians(), elevation.to_radians());
+    glam::Vec3::new(e.cos() * h.sin(), e.sin(), e.cos() * h.cos())
+}
+
+/// The heading and elevation in degrees of a sun towards `dir`, heading
+/// from 0 to 360.
+pub fn sun_angles(dir: glam::Vec3) -> [f32; 2] {
+    let dir = dir.normalize_or(glam::Vec3::Y);
+    let heading = dir.x.atan2(dir.z).to_degrees().rem_euclid(360.0);
+    let elevation = dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+    [heading, elevation]
 }
 
 fn whole() -> f32 {
@@ -462,6 +483,7 @@ impl Content {
             hide_walls: true,
             light_intensity: 1.0,
             filter_decay: 0.5,
+            sun: None,
             pieces_listed: false,
         }
     }
@@ -998,6 +1020,15 @@ impl Scene {
                 _ => None,
             })
             .unwrap_or(0.0)
+    }
+
+    /// The shown map's sun turned by hand, as the unit vector towards it;
+    /// none for the map's own sun or without a map.
+    pub fn map_sun(&self) -> Option<[f32; 3]> {
+        self.objects.iter().find_map(|o| match &o.content {
+            Content::Map { sun: Some(angles), .. } if self.shown(o.id) => Some(sun_towards(*angles).to_array()),
+            _ => None,
+        })
     }
 
     /// The shown map's Light intensity, or 1 without a map.
@@ -2460,6 +2491,22 @@ mod tests {
     }
 
     #[test]
+    fn a_sun_turned_by_hand_reads_back_its_angles() {
+        for angles in [[0.0, 45.0], [90.0, 10.0], [215.0, 60.0], [359.0, -5.0]] {
+            let dir = sun_towards(angles);
+            assert!((dir.length() - 1.0).abs() < 1e-5);
+            let back = sun_angles(dir);
+            assert!(
+                (back[0] - angles[0]).abs() < 1e-3 && (back[1] - angles[1]).abs() < 1e-3,
+                "{angles:?} {back:?}"
+            );
+        }
+        // East is +X, straight up is +Y.
+        assert!(sun_towards([90.0, 0.0]).abs_diff_eq(glam::Vec3::X, 1e-5));
+        assert!(sun_towards([0.0, 90.0]).abs_diff_eq(glam::Vec3::Y, 1e-5));
+    }
+
+    #[test]
     fn the_colour_filter_decays_with_the_maps_light() {
         let mut scene = Scene::new();
         assert_eq!(scene.filter_fade(), 0.0);
@@ -3305,6 +3352,7 @@ kind = "map"
                 hide_walls: true,
                 light_intensity: 1.0,
                 filter_decay: 0.5,
+                sun: None,
                 pieces_listed: false,
             }
         );

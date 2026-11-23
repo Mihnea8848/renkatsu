@@ -1387,6 +1387,13 @@ impl Live {
         if let Some(placement) = placed {
             self.renderer.place_map(placement);
         }
+        self.renderer.set_map_sun(scene.map_sun());
+    }
+
+    /// The map's own sun of its time of day, as the unit vector towards it
+    /// in the world; none until a map is drawn.
+    pub fn map_sun(&self) -> Option<[f32; 3]> {
+        self.renderer.map_sun()
     }
 
     /// Puts the camera at CharaStudio's starting view, which a new map is

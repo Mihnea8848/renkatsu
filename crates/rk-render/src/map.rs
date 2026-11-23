@@ -1528,6 +1528,9 @@ pub(crate) struct MapGpu {
     /// What the objects' matrices and the copies were given last, hashed.
     given: (u64, u64),
     pub(crate) light: MapLight,
+    /// The sun turned by hand, as the unit vector towards it in the
+    /// world; none for the map's own sun of its time of day.
+    sun: Option<Vec3>,
     /// The lowest and highest corner of everything drawn.
     bounds: (Vec3, Vec3),
     vanish: Vec<VanishVolume>,
@@ -1885,6 +1888,7 @@ impl MapGpu {
             moves: 0,
             given: (0, 0),
             light: l.clone(),
+            sun: None,
             bounds: map.bounds(),
             rest_bounds: map.bounds(),
             vanish: map.vanish.clone(),
@@ -2053,10 +2057,32 @@ impl MapGpu {
     /// The unit vector towards the map's sun, in the world: the sun
     /// turns with the map.
     pub(crate) fn sun_dir(&self) -> [f32; 3] {
-        let own = Vec3::from(self.light.sun_dir);
         self.placement
             .rigid()
-            .transform_vector3(own)
+            .transform_vector3(self.own_sun())
+            .normalize_or_zero()
+            .to_array()
+    }
+
+    /// The unit vector towards the sun in the map's own space: the one
+    /// turned by hand, or the map's.
+    fn own_sun(&self) -> Vec3 {
+        match self.sun {
+            Some(world) => self
+                .placement
+                .rigid()
+                .inverse()
+                .transform_vector3(world)
+                .normalize_or(Vec3::Y),
+            None => Vec3::from(self.light.sun_dir),
+        }
+    }
+
+    /// The map's own sun of its time of day, towards it in the world.
+    pub(crate) fn map_sun(&self) -> [f32; 3] {
+        self.placement
+            .rigid()
+            .transform_vector3(Vec3::from(self.light.sun_dir))
             .normalize_or_zero()
             .to_array()
     }
@@ -2120,7 +2146,7 @@ impl MapGpu {
                 camera.eye.z,
                 l.cut_above.unwrap_or(f32::MAX),
             ],
-            sun_dir: [l.sun_dir[0], l.sun_dir[1], l.sun_dir[2], 0.0],
+            sun_dir: self.own_sun().extend(0.0).to_array(),
             sun_color: [l.sun_color[0], l.sun_color[1], l.sun_color[2], 0.0],
             sh: l.ambient_sh,
             fog_color: own_fog.map_or([fog.color[0], fog.color[1], fog.color[2], 1.0], |(c, _)| c),
@@ -2179,7 +2205,7 @@ impl MapGpu {
             };
             let splits = crate::shadow::ShadowSettings::default().cascade_splits;
             let ranges = crate::shadow::cascade_ranges(0.03, set.distance, splits);
-            let light = crate::shadow::light_view(Vec3::from(l.sun_dir));
+            let light = crate::shadow::light_view(self.own_sun());
             for (i, r) in ranges.iter().enumerate() {
                 let slice = slices.slice_corners(r.0, r.1);
                 if let Some((vp, texel)) = fit_cascade(&slice, light, self.bounds, SHADOW_ATLAS / 2) {
@@ -2452,7 +2478,7 @@ impl MapGpu {
         for vp in &frame.cascades {
             h.write(bytemuck::cast_slice(&vp.to_cols_array()));
         }
-        h.write(bytemuck::cast_slice(&self.light.sun_dir));
+        h.write(bytemuck::cast_slice(&self.own_sun().to_array()));
         h.write(bytemuck::cast_slice(&self.placement.root.to_cols_array()));
         h.write_u64(self.moves);
         h.write_usize(frame.casters.len());
@@ -2735,6 +2761,22 @@ impl Renderer {
             }
             map.placement = placement;
         }
+    }
+
+    /// Turns the map's sun to shine from `towards`, a vector towards it in
+    /// the world, or back to the map's own sun of its time of day with
+    /// none. Its light, its shadows and the sky follow; what the map baked
+    /// into its lightmaps stays as the game made it.
+    pub fn set_map_sun(&mut self, towards: Option<[f32; 3]>) {
+        if let Some(map) = self.map_scene.as_mut() {
+            map.sun = towards.map(Vec3::from).map(|v| v.normalize_or(Vec3::Y));
+        }
+    }
+
+    /// The map's own sun of its time of day, as the unit vector towards it
+    /// in the world; none without a map.
+    pub fn map_sun(&self) -> Option<[f32; 3]> {
+        self.map_scene.as_ref().map(MapGpu::map_sun)
     }
 
     /// Puts objects of the map that `set_map` uploaded elsewhere than

@@ -971,7 +971,7 @@ impl eframe::App for Studio {
         }
         // A drag that changes a value is one step of the history; it ends
         // when the pointer is let go.
-        if !ctx.input(|i| i.pointer.any_down()) {
+        if !ctx.input(|i| i.pointer.any_down()) && !self.state.sun_turning {
             self.state.doc.end_gesture();
         }
         self.state.poll_picker();

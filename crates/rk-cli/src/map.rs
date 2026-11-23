@@ -435,6 +435,8 @@ pub struct RenderOptions<'a> {
     pub motion: Option<f32>,
     /// The camera's place and what it looks at, in place of the view's.
     pub look: Option<([f32; 3], [f32; 3])>,
+    /// The sun turned by hand: heading and elevation in degrees.
+    pub sun: Option<[f32; 2]>,
 }
 
 /// Draws a map to a PNG, plainly lit, from `view`: `inside`, at eye
@@ -458,6 +460,7 @@ pub fn render(
         capture,
         motion,
         look,
+        sun,
     } = options;
     use glam::Vec3;
     let time = time_of_day(time)?;
@@ -621,6 +624,10 @@ pub fn render(
         camera.eye, camera.target
     );
     renderer.set_map(Some(&scene));
+    if let Some([heading, elevation]) = sun {
+        let (h, e) = (heading.to_radians(), elevation.to_radians());
+        renderer.set_map_sun(Some([e.cos() * h.sin(), e.sin(), e.cos() * h.cos()]));
+    }
     if let (Some(mut moving), Some(seconds)) = (moving, motion) {
         let found = moving.bind(&rk_map::motion::places(&scene));
         renderer.set_map_object_matrices(&moving.pose(seconds));

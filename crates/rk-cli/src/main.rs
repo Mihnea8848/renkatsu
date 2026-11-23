@@ -422,6 +422,10 @@ enum MapCmd {
         /// What the camera looks at, with --eye: x,y,z.
         #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
         target: Vec<f32>,
+        /// The sun turned by hand, in place of the map's: heading round
+        /// the up axis from +Z toward +X and elevation, in degrees.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        sun: Vec<f32>,
     },
     /// Show a map's Animators and the objects they move.
     Motion {
@@ -645,6 +649,7 @@ fn main() -> Result<()> {
                     motion,
                     eye,
                     target,
+                    sun,
                 },
         } => map::render(
             &map,
@@ -659,6 +664,10 @@ fn main() -> Result<()> {
                 motion,
                 look: match (eye.as_slice(), target.as_slice()) {
                     ([a, b, c], [x, y, z]) => Some(([*a, *b, *c], [*x, *y, *z])),
+                    _ => None,
+                },
+                sun: match sun.as_slice() {
+                    [heading, elevation] => Some([*heading, *elevation]),
                     _ => None,
                 },
             },

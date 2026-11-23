@@ -72,6 +72,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, header: Option<Rect>) {
     }
     if !busy {
         navigate(ui, st, &scene, full);
+        turn_sun(ui, st, &scene);
     }
     // A card dragged from the Content panel and let go here joins the scene.
     if dragged_over::<DragCard>(ui, full) {
@@ -1891,6 +1892,43 @@ fn navigate(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) {
     if let Some(nav) = nav {
         nav_cursor(ui, nav);
     }
+}
+
+/// The map's sun turned as in Unreal: with its shortcut (Ctrl+L) held,
+/// moving the mouse sideways turns its heading, up and down raises and
+/// lowers it. One hold is one step of the history.
+fn turn_sun(ui: &Ui, st: &mut State, scene: &egui::Response) {
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    let held = !typing && ui.input(|i| crate::keymap::held_chord(&st.keys, Action::TurnSun, i));
+    if !held || (!st.sun_turning && !scene.hovered()) {
+        st.sun_turning = false;
+        return;
+    }
+    let map = st
+        .doc
+        .scene()
+        .objects()
+        .iter()
+        .find(|o| matches!(o.content, crate::scene::Content::Map { .. }))
+        .map(|o| o.id);
+    let Some(mut object) = map.and_then(|id| st.doc.scene().get(id).cloned()) else {
+        return;
+    };
+    st.sun_turning = true;
+    let delta = ui.input(|i| i.pointer.delta());
+    if delta == Vec2::ZERO {
+        return;
+    }
+    let own = crate::map_menu::own_sun(st);
+    if let crate::scene::Content::Map { sun, .. } = &mut object.content {
+        let [heading, elevation] = sun.unwrap_or(own);
+        *sun = Some([
+            (heading + delta.x * 0.4).rem_euclid(360.0),
+            (elevation - delta.y * 0.4).clamp(-90.0, 90.0),
+        ]);
+    }
+    st.doc.edit(object, true);
+    ui.ctx().request_repaint();
 }
 
 /// Hides the system pointer and draws the action's symbol in its place,
