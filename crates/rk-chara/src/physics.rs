@@ -1735,6 +1735,30 @@ pub enum Bone {
     Ver02(Ver02),
 }
 
+impl Bone {
+    /// `ResetParticlesPosition`: the particles go back on their bones and
+    /// the component's place becomes the one it moves from, so that the
+    /// next update does not take the jump for movement.
+    fn reset(&mut self, scene: &Scene) {
+        match self {
+            Bone::Dynamic(d) => {
+                reset_particles(scene, &mut d.particles);
+                d.object_prev = position(scene, d.def.node);
+            }
+            Bone::Ver01(d) => {
+                reset_particles(scene, &mut d.particles);
+                d.object_prev = position(scene, d.def.node);
+            }
+            Bone::Ver02(d) => {
+                reset_particles(scene, &mut d.particles);
+                if let Some(root) = d.def.root {
+                    d.object_prev = position(scene, root);
+                }
+            }
+        }
+    }
+}
+
 /// What a physics component came with, so that a kind can be switched
 /// off: the body (its bust and buttocks too), hair, clothes or an
 /// accessory.
@@ -1829,11 +1853,7 @@ impl Physics {
         for (i, b) in self.bones.iter_mut().enumerate() {
             let belongs = self.belongs.get(i).copied().unwrap_or_default();
             if self.still.contains(&belongs) && !still.contains(&belongs) {
-                match b {
-                    Bone::Dynamic(d) => reset_particles(scene, &mut d.particles),
-                    Bone::Ver01(d) => reset_particles(scene, &mut d.particles),
-                    Bone::Ver02(d) => reset_particles(scene, &mut d.particles),
-                }
+                b.reset(scene);
             }
         }
         self.still = still.to_vec();
@@ -1886,10 +1906,29 @@ impl Physics {
     /// Puts every particle back on its bone, as `ResetParticlesPosition`.
     pub fn reset(&mut self, scene: &Scene) {
         for b in &mut self.bones {
+            b.reset(scene);
+        }
+    }
+
+    /// Moves every particle with the character when it is placed somewhere
+    /// else while nothing runs, so that hair and skirts keep the shape they
+    /// settled in. `ResetParticlesPosition` would put them back on bones
+    /// that hold their rest shape, which in a sitting or lying pose is
+    /// inside the legs. `moved` is the change of the character's world
+    /// transform.
+    pub fn carry(&mut self, moved: Mat4) {
+        let carry = |particles: &mut [Particle], prev: &mut Vec3| {
+            for p in particles.iter_mut() {
+                p.pos = moved.transform_point3(p.pos);
+                p.prev = moved.transform_point3(p.prev);
+            }
+            *prev = moved.transform_point3(*prev);
+        };
+        for b in &mut self.bones {
             match b {
-                Bone::Dynamic(d) => reset_particles(scene, &mut d.particles),
-                Bone::Ver01(d) => reset_particles(scene, &mut d.particles),
-                Bone::Ver02(d) => reset_particles(scene, &mut d.particles),
+                Bone::Dynamic(d) => carry(&mut d.particles, &mut d.object_prev),
+                Bone::Ver01(d) => carry(&mut d.particles, &mut d.object_prev),
+                Bone::Ver02(d) => carry(&mut d.particles, &mut d.object_prev),
             }
         }
     }
@@ -2085,6 +2124,74 @@ mod tests {
         let posed = position(&scene, b);
         physics.settle(&mut scene, 120, FRAME_TIME);
         assert!(position(&scene, b).y < posed.y - 0.01);
+    }
+
+    #[test]
+    fn a_reset_is_not_taken_for_movement() {
+        // A skirt-like chain with inertia, moved a metre and reset: the
+        // next frame must not carry it along by the move, as
+        // `ResetParticlesPosition` sets where the component moves from.
+        let mut scene = Scene::default();
+        let holder = scene.add_node("holder", None, Trs::default());
+        let root = scene.add_node("root", Some(holder), at(Vec3::new(0.0, 1.0, 0.0)));
+        let a = scene.add_node("a", Some(root), at(Vec3::new(0.0, -0.1, 0.0)));
+        let b = scene.add_node("b", Some(a), at(Vec3::new(0.0, -0.1, 0.0)));
+        let mut physics = dynamic(DynamicBoneDef {
+            node: root,
+            root: Some(root),
+            inert: 0.8,
+            stiffness: 0.0,
+            elasticity: 0.0,
+            damping: 0.0,
+            ..Default::default()
+        });
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 10, FRAME_TIME);
+        scene.nodes[holder].local.pos = Vec3::new(1.0, 0.0, 0.0);
+        physics.reset(&scene);
+        let placed = position(&scene, b);
+        physics.step(&mut scene, FRAME_TIME);
+        assert!(
+            close(position(&scene, b), placed, 1e-5),
+            "{:?} {placed:?}",
+            position(&scene, b)
+        );
+    }
+
+    #[test]
+    fn a_carried_chain_keeps_its_shape() {
+        let mut scene = Scene::default();
+        let holder = scene.add_node("holder", None, Trs::default());
+        let root = scene.add_node("root", Some(holder), at(Vec3::new(0.0, 1.0, 0.0)));
+        let a = scene.add_node("a", Some(root), at(Vec3::new(0.0, -0.1, 0.0)));
+        let b = scene.add_node("b", Some(a), at(Vec3::new(0.0, -0.1, 0.0)));
+        let mut physics = dynamic(DynamicBoneDef {
+            node: root,
+            root: Some(root),
+            inert: 0.8,
+            force: Vec3::new(0.01, 0.0, 0.0),
+            ..Default::default()
+        });
+        physics.start(&mut scene);
+        physics.settle(&mut scene, 120, FRAME_TIME);
+        let swung = position(&scene, b) - position(&scene, root);
+        assert!(swung.x > 0.01);
+        // Turned and moved while nothing runs: the swing turns with it.
+        let before = scene.world().0[holder];
+        scene.nodes[holder].local = Trs {
+            pos: Vec3::new(2.0, 0.0, 0.0),
+            rot: Quat::from_rotation_y(std::f32::consts::PI),
+            ..Default::default()
+        };
+        let after = scene.world().0[holder];
+        physics.carry(after * before.inverse());
+        physics.begin_frame(&mut scene);
+        physics.end_frame(&mut scene, 0.0);
+        let held = position(&scene, b) - position(&scene, root);
+        assert!(
+            close(held, Quat::from_rotation_y(std::f32::consts::PI) * swung, 1e-4),
+            "{held:?} {swung:?}"
+        );
     }
 
     #[test]
