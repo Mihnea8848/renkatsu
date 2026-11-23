@@ -31,7 +31,7 @@ use crate::scene::{Content, MapTime, ObjectId, Poses, Scene};
 use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use rk_chara::clothes_state::{self as cs, States};
 use rk_chara::motion::{self, Bound, Motion};
 use rk_chara::scene::{ShadowCasting, Trs};
@@ -833,6 +833,21 @@ impl Live {
                 })
                 .collect(),
         )
+    }
+
+    /// Where a built character's bone is and how it is turned: its place
+    /// and turn in the world, its parent's turn in the world and its own
+    /// turn in its parent, for the Pose tool's gizmo.
+    pub fn bone_turns(&self, id: ObjectId, name: &str) -> Option<(Vec3, Quat, Quat, Quat)> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let scene = &actor.chara.scene;
+        let node = scene.find(actor.chara.top, name)?;
+        let (world, _) = scene.world();
+        let (_, turn, at) = world[node].to_scale_rotation_translation();
+        let parent = scene.nodes[node]
+            .parent
+            .map_or(Quat::IDENTITY, |p| world[p].to_scale_rotation_translation().1);
+        Some((at, turn, parent, scene.nodes[node].local.rot))
     }
 
     /// A built character's joints, the bones a pose edits: the nodes named

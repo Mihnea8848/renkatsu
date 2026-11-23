@@ -244,9 +244,11 @@ impl Frame {
 
 /// What a drag takes hold of. Objects of the scene for now; a bone of a
 /// character and an IK target join them with the Pose tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Grip {
     Object(ObjectId),
+    /// A bone of a character, by name, turned with the Pose tool.
+    Bone(ObjectId, String),
 }
 
 /// What a drag did in the world, before it is told to what it holds: where
@@ -258,9 +260,12 @@ struct Moved {
     stretch: Mat3,
 }
 
-/// An object as a drag found it.
+/// An object or a bone as a drag found it. For a bone, `object` is its
+/// character, `parent_turn` the bone's parent's turn in the world, `place`
+/// the bone's place, and `bone` its own turn and its edit by hand.
 struct Start {
     grip: Grip,
+    bone: Option<(Quat, rk_chara::pose::BoneEdit)>,
     object: Object,
     /// What carries the object's own transform into the scene.
     parent: Mat4,
@@ -355,22 +360,26 @@ impl Drag {
     /// Takes hold of a handle where the pointer pressed.
     fn begin(tool: usize, handle: Handle, frame: Frame, pivot: Pivot, view: &View, press: Pos2, st: &State) -> Drag {
         let scene = st.doc.scene();
-        let starts = st
-            .doc
-            .selected_all()
-            .into_iter()
-            .filter_map(|id| {
-                let object = scene.get(id)?.clone();
-                let parent = scene.parent_world(id);
-                Some(Start {
-                    grip: Grip::Object(id),
-                    parent,
-                    parent_turn: parent.to_scale_rotation_translation().1,
-                    place: parent.transform_point3(object.transform.position.into()),
-                    object,
+        let starts = if st.tool == crate::viewport::POSE_TOOL {
+            bone_start(st).into_iter().collect()
+        } else {
+            st.doc
+                .selected_all()
+                .into_iter()
+                .filter_map(|id| {
+                    let object = scene.get(id)?.clone();
+                    let parent = scene.parent_world(id);
+                    Some(Start {
+                        grip: Grip::Object(id),
+                        bone: None,
+                        parent,
+                        parent_turn: parent.to_scale_rotation_translation().1,
+                        place: parent.transform_point3(object.transform.position.into()),
+                        object,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         let ray = view.ray(press);
         let mut drag = Drag {
             tool,
@@ -545,6 +554,26 @@ impl Drag {
                 }
             }
         }
+    }
+
+    /// The character of the bone `start` holds, with the bone's edit turned
+    /// as far as the drag has gone: the turn in the world `T` taken into the
+    /// bone's own space, `edit * local⁻¹ * (parent⁻¹ * T * parent * local)`.
+    fn turned_bone(&self, start: &Start, name: &str) -> Option<Object> {
+        let (local, edit) = start.bone?;
+        let turn = self.world(start).turn;
+        let parent = start.parent_turn;
+        let now = (parent.inverse() * turn * parent * local).normalize();
+        let rot = (edit.rot * local.inverse() * now).normalize();
+        let mut object = start.object.clone();
+        let crate::scene::Content::Character { pose_layer, .. } = &mut object.content else {
+            return None;
+        };
+        let layer = pose_layer.get_or_insert_with(Default::default);
+        layer
+            .fk
+            .insert(name.to_owned(), rk_chara::pose::BoneEdit { rot, ..edit });
+        Some(object)
     }
 
     /// The transform of the object `start` holds after the drag.
@@ -939,7 +968,9 @@ fn build(tool: usize, frame: &Frame, view: &View, hot: Option<Handle>, drag: Opt
 pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> bool {
     let Some(live) = st.live.as_ref() else { return false };
     let view = View::of(&live.cam.orbit.camera(), full);
-    let tool = st.tool;
+    // The Pose tool turns its bone with the Rotate tool's rings.
+    let pose = st.tool == crate::viewport::POSE_TOOL;
+    let tool = if pose { ROTATE } else { st.tool };
     let (pos, press, primary, secondary, alt, ctrl, escape) = ui.input(|i| {
         (
             i.pointer.latest_pos(),
@@ -974,11 +1005,16 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                 drag.follow(&view, pos, snap);
             }
             for start in &drag.starts {
-                match start.grip {
+                match &start.grip {
                     Grip::Object(_) => {
                         let mut object = start.object.clone();
                         object.transform = drag.moved(start);
                         st.doc.edit(object, true);
+                    }
+                    Grip::Bone(_, name) => {
+                        if let Some(object) = drag.turned_bone(start, name) {
+                            st.doc.edit(object, true);
+                        }
                     }
                 }
             }
@@ -992,7 +1028,7 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
 
     // The Pose tool: a click on a bone's ball chooses the bone, and shows
     // it on the Pose page; elsewhere it selects as the Select tool does.
-    if tool == crate::viewport::POSE_TOOL && scene.clicked_by(PointerButton::Primary) && !alt {
+    if pose && scene.clicked_by(PointerButton::Primary) && !alt {
         if let Some(ball) = pos.and_then(|pos| ball_at(st, pos)).cloned() {
             st.pose_bone = Some(ball.bone);
             st.property_tab = 2;
@@ -1000,8 +1036,10 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
             return true;
         }
     }
-    let selecting = (1..=SCALE).contains(&tool) || tool == crate::viewport::POSE_TOOL;
-    let at = if (MOVE..=SCALE).contains(&tool) {
+    let selecting = (1..=SCALE).contains(&tool);
+    let at = if pose {
+        bone_frame(st, &view)
+    } else if (MOVE..=SCALE).contains(&tool) {
         frame(st, &view, tool)
     } else {
         None
@@ -1192,6 +1230,59 @@ struct Ball {
 const BALL_SIZE: f32 = 0.03;
 const BALL_SMALLEST: f32 = 3.5;
 const BALL_LARGEST: f32 = 9.0;
+
+/// The selected character and its bone chosen for the Pose tool's gizmo,
+/// while its FK is on.
+fn chosen_bone(st: &State) -> Option<(ObjectId, String)> {
+    let id = st.doc.selected?;
+    let name = st.pose_bone.clone()?;
+    let on = matches!(
+        st.doc.scene().get(id).map(|o| &o.content),
+        Some(crate::scene::Content::Character { pose_layer: Some(l), .. }) if l.fk_on
+    );
+    on.then_some((id, name))
+}
+
+/// The Pose tool's gizmo: rings on the chosen bone, along its own axes or
+/// the world's.
+fn bone_frame(st: &State, view: &View) -> Option<Frame> {
+    let (id, name) = chosen_bone(st)?;
+    let (origin, turn, _, _) = st.live.as_ref()?.bone_turns(id, &name)?;
+    if (origin - view.eye).dot(view.forward) < 0.02 {
+        return None;
+    }
+    let turn = if st.gizmo.space == Space::Local {
+        turn
+    } else {
+        Quat::IDENTITY
+    };
+    Some(Frame {
+        origin,
+        axes: [turn * Vec3::X, turn * Vec3::Y, turn * Vec3::Z],
+        unit: view.unit_at(origin),
+    })
+}
+
+/// The chosen bone as a drag takes hold of it.
+fn bone_start(st: &State) -> Option<Start> {
+    let (id, name) = chosen_bone(st)?;
+    let (place, _, parent_turn, local) = st.live.as_ref()?.bone_turns(id, &name)?;
+    let object = st.doc.scene().get(id)?.clone();
+    let edit = match &object.content {
+        crate::scene::Content::Character {
+            pose_layer: Some(l), ..
+        } => l.fk.get(&name).copied().unwrap_or_default(),
+        _ => Default::default(),
+    };
+    Some(Start {
+        grip: Grip::Bone(id, name),
+        bone: Some((local, edit)),
+        object,
+        parent: Mat4::IDENTITY,
+        parent_turn,
+        place,
+    })
+}
 
 /// The handles of the selected characters' FK bones, far ones first.
 fn balls(st: &State, view: &View) -> Vec<Ball> {
@@ -1542,7 +1633,14 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     let shown = match &st.gizmo.drag {
         Some(drag) => Some(drag.shown()),
         None if (MOVE..=SCALE).contains(&tool) => frame(st, &view, tool),
+        None if tool == crate::viewport::POSE_TOOL => bone_frame(st, &view),
         None => None,
+    };
+    // The Pose tool's gizmo is the Rotate tool's.
+    let tool = if tool == crate::viewport::POSE_TOOL {
+        ROTATE
+    } else {
+        tool
     };
     if let Some(at) = shown {
         let drag = st.gizmo.drag.as_ref();
@@ -1762,6 +1860,7 @@ mod tests {
         let frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
         let start = Start {
             grip: Grip::Object(object.id),
+            bone: None,
             parent,
             parent_turn: parent.to_scale_rotation_translation().1,
             place: parent.transform_point3(object.transform.position.into()),
@@ -1783,6 +1882,68 @@ mod tests {
             readout: String::new(),
         };
         drag.moved(&start)
+    }
+
+    #[test]
+    fn turning_a_bone_turns_it_in_the_world_by_the_drag() {
+        let view = view();
+        let mut frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
+        // The rings along the bone's own axes, whatever they are.
+        let world_turn = Quat::from_euler(EulerRot::YXZ, 0.7, -0.3, 0.2);
+        frame.axes = [world_turn * Vec3::X, world_turn * Vec3::Y, world_turn * Vec3::Z];
+        let mut scene = Scene::empty();
+        let id = scene.add("Anna", Content::character("a.png".into()), None);
+        let parent_turn = Quat::from_euler(EulerRot::YXZ, -0.4, 0.5, 0.1);
+        let local = Quat::from_euler(EulerRot::YXZ, 0.2, 0.9, -0.6);
+        let edit = rk_chara::pose::BoneEdit {
+            rot: Quat::from_rotation_x(0.3),
+            ..Default::default()
+        };
+        let start = Start {
+            grip: Grip::Bone(id, "cf_j_arm00_L".into()),
+            bone: Some((local, edit)),
+            object: scene.get(id).unwrap().clone(),
+            parent: Mat4::IDENTITY,
+            parent_turn,
+            place: frame.origin,
+        };
+        for axis in 0..3 {
+            let angle = 0.8;
+            let drag = Drag {
+                tool: ROTATE,
+                handle: Handle::Axis(axis),
+                frame,
+                on_grid: false,
+                pivot: Pivot::Origin,
+                starts: Vec::new(),
+                press: Pos2::ZERO,
+                along: 0.0,
+                held: Vec3::ZERO,
+                spoke: Vec3::X,
+                tangent: Vec2::X,
+                amount: Amount::Turn(angle),
+                readout: String::new(),
+            };
+            let turned = drag.turned_bone(&start, "cf_j_arm00_L").unwrap();
+            let Content::Character {
+                pose_layer: Some(layer),
+                ..
+            } = &turned.content
+            else {
+                panic!("the character carries the edit");
+            };
+            let new_edit = layer.fk["cf_j_arm00_L"].rot;
+            // The pose under the edit stays; the bone in the world turned by
+            // the drag about the ring's axis.
+            let base = local * edit.rot.inverse();
+            let before = parent_turn * local;
+            let after = parent_turn * base * new_edit;
+            let turn = Quat::from_axis_angle(frame.axes[axis], angle);
+            assert!(
+                after.abs_diff_eq(turn * before, 1e-5) || after.abs_diff_eq(-(turn * before), 1e-5),
+                "{axis}"
+            );
+        }
     }
 
     fn light() -> Object {
