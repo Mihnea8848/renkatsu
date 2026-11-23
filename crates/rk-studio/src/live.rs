@@ -67,6 +67,9 @@ struct Actor {
     distance: f32,
     /// Where the object is in the scene, as last given to the root.
     applied: Option<Mat4>,
+    /// Where it was when the physics last saw it: hair and skirts are
+    /// carried along from there when it is moved while nothing runs.
+    physics_at: Option<Mat4>,
     /// How many outfits the card has.
     outfits: usize,
     /// The names More Outfits gives the card's outfits, by outfit number.
@@ -388,8 +391,16 @@ impl Actor {
         let (scale, rot, pos) = (world * self.rest[top].matrix()).to_scale_rotation_translation();
         self.chara.scene.nodes[top].local = Trs { pos, rot, scale };
         if !running {
-            self.chara.physics.reset(&self.chara.scene);
+            // Hair and skirts move with the character and keep the shape
+            // they settled in; CharaStudio does not put them back on their
+            // rest shape, which in a sitting or lying pose is inside the
+            // legs. The first time there is nothing to carry.
+            match self.physics_at {
+                Some(was) => self.chara.physics.carry(world * was.inverse()),
+                None => self.chara.physics.reset(&self.chara.scene),
+            }
         }
+        self.physics_at = Some(world);
         self.applied = Some(world);
         true
     }
@@ -547,8 +558,9 @@ impl Actor {
         self.chara.refresh_heels(&states);
         let motion = self.playing.is_some() && phase.is_some();
         if motion || !self.edits.is_empty() {
+            // Hair and skirts settle from where they were, as CharaStudio
+            // never puts them back on their rest shape for a new pose.
             self.pose_frame(phase, &states);
-            self.chara.physics.reset(&self.chara.scene);
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
@@ -1712,6 +1724,7 @@ impl Live {
             center: home.target,
             distance: (home.eye - home.target).length(),
             applied: None,
+            physics_at: None,
             outfits: card.coordinates.len(),
             outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],
