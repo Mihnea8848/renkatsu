@@ -242,8 +242,25 @@ impl Frame {
     }
 }
 
+/// What a drag takes hold of. Objects of the scene for now; a bone of a
+/// character and an IK target join them with the Pose tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grip {
+    Object(ObjectId),
+}
+
+/// What a drag did in the world, before it is told to what it holds: where
+/// its place went, the turn it made about its pivot and the stretch along
+/// the gizmo's axes.
+struct Moved {
+    place: Vec3,
+    turn: Quat,
+    stretch: Mat3,
+}
+
 /// An object as a drag found it.
 struct Start {
+    grip: Grip,
     object: Object,
     /// What carries the object's own transform into the scene.
     parent: Mat4,
@@ -346,6 +363,7 @@ impl Drag {
                 let object = scene.get(id)?.clone();
                 let parent = scene.parent_world(id);
                 Some(Start {
+                    grip: Grip::Object(id),
                     parent,
                     parent_turn: parent.to_scale_rotation_translation().1,
                     place: parent.transform_point3(object.transform.position.into()),
@@ -489,38 +507,70 @@ impl Drag {
     }
 
     /// The transform an object has at this point of the drag.
-    fn moved(&self, start: &Start) -> Transform {
+    /// What the drag did in the world to what `start` holds: its place
+    /// moved, turned or stretched about the pivot.
+    fn world(&self, start: &Start) -> Moved {
         let frame = &self.frame;
-        let mut t = start.object.transform;
         let around = match self.pivot {
             Pivot::Origin => start.place,
             Pivot::Centre => frame.origin,
         };
-        let back = start.parent.inverse();
-        let own = t.quat();
-        let place = match self.amount {
-            Amount::Move(delta) => start.place + delta,
+        let still = Moved {
+            place: start.place,
+            turn: Quat::IDENTITY,
+            stretch: Mat3::IDENTITY,
+        };
+        match self.amount {
+            Amount::Move(delta) => Moved {
+                place: start.place + delta,
+                ..still
+            },
             Amount::Turn(angle) => {
-                let Handle::Axis(i) = self.handle else { return t };
+                let Handle::Axis(i) = self.handle else { return still };
                 let turn = Quat::from_axis_angle(frame.axes[i], angle);
-                let now = (start.parent_turn.inverse() * turn * start.parent_turn * own).normalize();
-                let (y, x, z) = now.to_euler(EulerRot::YXZ);
-                t.rotation = clean(Vec3::new(x, y, z) * (180.0 / std::f32::consts::PI));
-                around + turn * (start.place - around)
+                Moved {
+                    place: around + turn * (start.place - around),
+                    turn,
+                    ..still
+                }
             }
             Amount::Scale(scale) => {
-                // The stretch along the gizmo's axes, as one matrix; each
-                // of the object's own axes grows by how much it is
-                // stretched.
+                // The stretch along the gizmo's axes, as one matrix.
                 let axes = Mat3::from_cols(frame.axes[0], frame.axes[1], frame.axes[2]);
                 let stretch = axes * Mat3::from_diagonal(scale) * axes.transpose();
-                let turn = start.parent_turn * own;
-                let grown = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| (stretch * (turn * axis)).length());
-                t.scale = clean(Vec3::from(t.scale) * Vec3::from(grown));
-                around + stretch * (start.place - around)
+                Moved {
+                    place: around + stretch * (start.place - around),
+                    stretch,
+                    ..still
+                }
             }
-        };
-        t.position = clean(back.transform_point3(place));
+        }
+    }
+
+    /// The transform of the object `start` holds after the drag.
+    fn moved(&self, start: &Start) -> Transform {
+        let mut t = start.object.transform;
+        if matches!(self.amount, Amount::Turn(_)) && !matches!(self.handle, Handle::Axis(_)) {
+            return t;
+        }
+        let m = self.world(start);
+        let own = t.quat();
+        match self.amount {
+            Amount::Move(_) => {}
+            Amount::Turn(_) => {
+                let now = (start.parent_turn.inverse() * m.turn * start.parent_turn * own).normalize();
+                let (y, x, z) = now.to_euler(EulerRot::YXZ);
+                t.rotation = clean(Vec3::new(x, y, z) * (180.0 / std::f32::consts::PI));
+            }
+            Amount::Scale(_) => {
+                // Each of the object's own axes grows by how much it is
+                // stretched.
+                let turn = start.parent_turn * own;
+                let grown = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| (m.stretch * (turn * axis)).length());
+                t.scale = clean(Vec3::from(t.scale) * Vec3::from(grown));
+            }
+        }
+        t.position = clean(start.parent.inverse().transform_point3(m.place));
         t
     }
 
@@ -924,9 +974,13 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                 drag.follow(&view, pos, snap);
             }
             for start in &drag.starts {
-                let mut object = start.object.clone();
-                object.transform = drag.moved(start);
-                st.doc.edit(object, true);
+                match start.grip {
+                    Grip::Object(_) => {
+                        let mut object = start.object.clone();
+                        object.transform = drag.moved(start);
+                        st.doc.edit(object, true);
+                    }
+                }
             }
             st.gizmo.drag = Some(drag);
         }
@@ -1663,6 +1717,7 @@ mod tests {
         let view = view();
         let frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
         let start = Start {
+            grip: Grip::Object(object.id),
             parent,
             parent_turn: parent.to_scale_rotation_translation().1,
             place: parent.transform_point3(object.transform.position.into()),
