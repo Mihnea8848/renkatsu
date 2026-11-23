@@ -186,8 +186,16 @@ pub struct Capsule {
     pub node: usize,
     pub a: Vec3,
     pub b: Vec3,
+    /// The limb's mean thickness at each end, which the chains collide
+    /// with.
     pub ra: f32,
     pub rb: f32,
+    /// The thickness that nine in ten of the limb's vertices stay within,
+    /// which skirt vertices are pushed out of.
+    pub fa: f32,
+    pub fb: f32,
+    /// Whether the skirt's chains collide with it, or only its vertices.
+    pub chains: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -222,6 +230,9 @@ pub struct Cloth {
     rest: Vec<Vec<Vec<Vec3>>>,
     /// The obstacles' triangles near each ring.
     nearby: Vec<Nearby>,
+    /// The skirts' moving bones, by node, for the push-out of their
+    /// vertices.
+    skirt: Arc<Vec<bool>>,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -278,18 +289,43 @@ impl Cloth {
         } else {
             fit_limbs(scene, names)
         };
+        // The bones below the top one of each chain: the waistband sits
+        // on the hips, where the limbs' fit is too thick to push from.
+        let mut skirt = vec![false; scene.nodes.len()];
+        for &b in rings.iter().flatten() {
+            for p in particles(&bones[b]).unwrap_or(&[]).iter().skip(2) {
+                if let Some(n) = p.node {
+                    skirt[n] = true;
+                }
+            }
+        }
         Self {
             capsules,
             floor: names.get("cf_j_root").copied(),
             rest: Vec::new(),
             nearby: Vec::new(),
+            skirt: Arc::new(skirt),
             rings,
         }
+    }
+
+    /// What the skirts' vertices are pushed out of after skinning: the
+    /// limbs, and the floor at the root where there is no map.
+    pub(super) fn push_out(&self, mapped: bool) -> Option<crate::scene::PushOut> {
+        if self.rings.is_empty() {
+            return None;
+        }
+        Some(crate::scene::PushOut {
+            capsules: self.capsules.iter().map(|c| (c.node, c.a, c.b, c.fa, c.fb)).collect(),
+            floor: self.floor.filter(|_| !mapped),
+            skirt: self.skirt.clone(),
+        })
     }
 
     fn world_capsules(&self, scene: &Scene) -> Vec<WorldCapsule> {
         self.capsules
             .iter()
+            .filter(|c| c.chains)
             .map(|c| {
                 let m = world(scene, c.node);
                 let s = m.x_axis.truncate().length();
@@ -540,19 +576,34 @@ fn edge_capsule(p0: &mut Vec3, p1: &mut Vec3, w0: f32, cap: &WorldCapsule) {
     *p1 += push * b1;
 }
 
-/// The limb bones that get capsules: from one joint to the next, with the
-/// joint whose subtree holds the limb's vertices.
-const LIMBS: [(&str, &str, &str); 5] = [
-    ("cf_j_thigh00", "cf_j_thigh00", "cf_j_leg01"),
-    ("cf_j_thigh00", "cf_j_leg01", "cf_j_leg03"),
-    ("cf_j_arm00", "cf_j_arm00", "cf_j_forearm01"),
-    ("cf_j_arm00", "cf_j_forearm01", "cf_j_hand"),
-    ("cf_j_arm00", "cf_j_hand", "cf_j_middle03"),
+/// The body parts that get capsules: the joint whose subtree holds the
+/// part's vertices, the bone from one joint to the next (the same joint
+/// twice for a ball around it), how many places along it the thickness is
+/// taken at, and whether skirt vertices are pushed out of the thickness
+/// nine in ten of its vertices stay within or of its mean thickness. Only
+/// the buttocks take the thicker one: on the legs it reaches past the
+/// thighs and flattens the pleats of a standing skirt. Both sides of each
+/// fit the shader's `scene::PUSH_CAPSULES`. The hands come last, so that a
+/// hand resting on the lap keeps the skirt between it and the thigh, and
+/// they push only the vertices (`VERTICES_ONLY`): a hand on the lap would
+/// otherwise hold a whole panel of the skirt up.
+const LIMBS: [(&str, &str, &str, usize, bool); 7] = [
+    ("cf_d_siri", "cf_j_siri", "cf_j_siri", 1, true),
+    ("cf_j_thigh00", "cf_j_thigh00", "cf_j_leg01", STATIONS, false),
+    ("cf_j_thigh00", "cf_j_leg01", "cf_j_leg03", STATIONS, false),
+    ("cf_j_thigh00", "cf_j_leg03", "cf_j_toes", 2, false),
+    ("cf_j_arm00", "cf_j_arm00", "cf_j_forearm01", STATIONS, false),
+    ("cf_j_arm00", "cf_j_forearm01", "cf_j_hand", STATIONS, false),
+    ("cf_j_arm00", "cf_j_hand", "cf_j_middle03", 2, false),
 ];
+/// The joints of `LIMBS` whose capsules push only the skirt's vertices:
+/// the hands, and the buttocks, which the game's own colliders keep the
+/// chains off already.
+const VERTICES_ONLY: [&str; 2] = ["cf_j_hand", "cf_j_siri"];
 
-/// Capsules along the legs, arms and hands, with the thickness the body
-/// mesh has there: the mean distance from the bone line of the limb's
-/// vertices near each of `STATIONS` places along it.
+/// Capsules along the buttocks, legs, feet, arms and hands, with the
+/// thickness the body mesh has there: the distances from the bone line
+/// of the part's vertices near each place along it.
 pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> {
     let posed = scene.pose();
     let Some(body) = posed
@@ -563,21 +614,22 @@ pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> 
         return Vec::new();
     };
     let positions = body.positions();
+    // The vertices of a part, by the joint whose subtree holds it.
+    let mut part_verts: HashMap<usize, Vec<Vec3>> = HashMap::new();
     let mut out = Vec::new();
-    for side in ["L", "R"] {
-        let joint = |n: &str| names.get(&format!("{n}_{side}")).copied();
-        let mut limb_verts: HashMap<usize, Vec<Vec3>> = HashMap::new();
-        for (root, from, to) in LIMBS {
+    for (root, from, to, stations, thick) in LIMBS {
+        for side in ["L", "R"] {
+            let joint = |n: &str| names.get(&format!("{n}_{side}")).copied();
             let (Some(root), Some(from), Some(to)) = (joint(root), joint(from), joint(to)) else {
                 continue;
             };
-            let verts = limb_verts.entry(root).or_insert_with(|| {
-                let limb: HashSet<usize> = scene.subtree(root).into_iter().collect();
-                let of_limb: Vec<bool> = body
+            let verts = part_verts.entry(root).or_insert_with(|| {
+                let part: HashSet<usize> = scene.subtree(root).into_iter().collect();
+                let of_part: Vec<bool> = body
                     .renderer
                     .bones
                     .iter()
-                    .map(|b| b.is_some_and(|n| limb.contains(&n)))
+                    .map(|b| b.is_some_and(|n| part.contains(&n)))
                     .collect();
                 body.renderer
                     .mesh
@@ -586,7 +638,7 @@ pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> 
                     .zip(&positions)
                     .filter(|(bw, _)| {
                         let w: f32 = (0..4)
-                            .filter(|&k| of_limb.get(bw.bones[k] as usize).copied().unwrap_or(false))
+                            .filter(|&k| of_part.get(bw.bones[k] as usize).copied().unwrap_or(false))
                             .map(|k| bw.weights[k])
                             .sum();
                         w > 0.5
@@ -594,53 +646,93 @@ pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> 
                     .map(|(_, p)| Vec3::from(*p))
                     .collect()
             });
-            out.extend(fit_bone(scene, verts, from, to));
+            let mut fitted = if from == to {
+                fit_ball(scene, verts, from)
+            } else {
+                fit_bone(scene, verts, from, to, stations)
+            };
+            for c in &mut fitted {
+                if !thick {
+                    (c.fa, c.fb) = (c.ra, c.rb);
+                }
+                c.chains = !VERTICES_ONLY.iter().any(|j| scene.nodes[from].name.starts_with(j));
+            }
+            out.extend(fitted);
         }
     }
     out
 }
 
+/// A ball around the joint `at`, as thick as its vertices are from it.
+fn fit_ball(scene: &Scene, verts: &[Vec3], at: usize) -> Vec<Capsule> {
+    let c = position(scene, at);
+    let mut far: Vec<f32> = verts.iter().map(|v| (*v - c).length()).collect();
+    if far.is_empty() {
+        return Vec::new();
+    }
+    far.sort_by(f32::total_cmp);
+    let mean = far.iter().sum::<f32>() / far.len() as f32;
+    let tenth = far[(far.len() - 1) * 9 / 10];
+    let m = world(scene, at);
+    let scale = m.x_axis.truncate().length().max(f32::EPSILON);
+    let local = m.inverse().transform_point3(c);
+    vec![Capsule {
+        node: at,
+        a: local,
+        b: local,
+        ra: mean / scale,
+        rb: mean / scale,
+        fa: tenth / scale,
+        fb: tenth / scale,
+        chains: true,
+    }]
+}
+
 /// The capsules of one limb bone from `from` to `to`.
-fn fit_bone(scene: &Scene, verts: &[Vec3], from: usize, to: usize) -> Vec<Capsule> {
+fn fit_bone(scene: &Scene, verts: &[Vec3], from: usize, to: usize, stations: usize) -> Vec<Capsule> {
     let (a, b) = (position(scene, from), position(scene, to));
     let axis = b - a;
     let len2 = axis.length_squared();
     if len2 <= 0.0 {
         return Vec::new();
     }
-    let half = 0.5 / (STATIONS - 1) as f32;
-    let radii: Vec<f32> = (0..STATIONS)
+    let half = 0.5 / (stations - 1) as f32;
+    // The mean and the ninth tenth of the distances near each station.
+    let radii: Vec<(f32, f32)> = (0..stations)
         .map(|k| {
-            let at = k as f32 / (STATIONS - 1) as f32;
-            let (mut sum, mut count) = (0.0, 0u32);
-            for v in verts {
-                let t = (*v - a).dot(axis) / len2;
-                if (0.0..=1.0).contains(&t) && (t - at).abs() <= half {
-                    sum += (*v - (a + axis * t)).length();
-                    count += 1;
-                }
+            let at = k as f32 / (stations - 1) as f32;
+            let mut near: Vec<f32> = verts
+                .iter()
+                .filter_map(|v| {
+                    let t = (*v - a).dot(axis) / len2;
+                    ((0.0..=1.0).contains(&t) && (t - at).abs() <= half).then(|| (*v - (a + axis * t)).length())
+                })
+                .collect();
+            if near.is_empty() {
+                return (0.0, 0.0);
             }
-            if count > 0 {
-                sum / count as f32
-            } else {
-                0.0
-            }
+            near.sort_by(f32::total_cmp);
+            let mean = near.iter().sum::<f32>() / near.len() as f32;
+            (mean, near[(near.len() - 1) * 9 / 10])
         })
         .collect();
     let m = world(scene, from);
     let inv = m.inverse();
     let scale = m.x_axis.truncate().length().max(f32::EPSILON);
-    (0..STATIONS - 1)
-        .filter(|&k| radii[k] > 0.0 && radii[k + 1] > 0.0)
+    (0..stations - 1)
+        .filter(|&k| radii[k].0 > 0.0 && radii[k + 1].0 > 0.0)
         .map(|k| {
-            let t0 = k as f32 / (STATIONS - 1) as f32;
-            let t1 = (k + 1) as f32 / (STATIONS - 1) as f32;
+            let t0 = k as f32 / (stations - 1) as f32;
+            let t1 = (k + 1) as f32 / (stations - 1) as f32;
             Capsule {
                 node: from,
                 a: inv.transform_point3(a + axis * t0),
                 b: inv.transform_point3(a + axis * t1),
-                ra: radii[k] / scale,
-                rb: radii[k + 1] / scale,
+                ra: radii[k].0 / scale,
+                rb: radii[k + 1].0 / scale,
+                fa: radii[k].1 / scale,
+                fb: radii[k + 1].1 / scale,
+                chains: true,
             }
         })
         .collect()
@@ -737,6 +829,29 @@ mod tests {
         out.clear();
         o.gather(Vec3::new(0.2, 0.0, 0.2), Vec3::new(0.3, 0.2, 0.3), &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_skirt_vertex_is_pushed_out_by_its_share() {
+        use crate::scene::{PushDraw, PUSH_GAP};
+        use glam::Vec4;
+        let push = PushDraw {
+            capsules: vec![[Vec4::new(0.0, 0.0, 0.0, 0.1), Vec4::new(1.0, 0.0, 0.0, 0.1)]],
+            floor: Some(Vec4::new(0.0, 1.0, 0.0, -1.0)),
+            skirt_slots: vec![false, true],
+        };
+        // Weighted half on a skirt bone: half way out of the capsule.
+        let share = push.share([0, 1, 0, 0], [0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(share, 0.5);
+        let p = push.apply(Vec3::new(0.5, 0.05, 0.0), share);
+        assert!((p.y - (0.05 + 0.5 * (0.1 + PUSH_GAP - 0.05))).abs() < 1e-5, "{p:?}");
+        // All on the skirt: onto the surface; none: left alone.
+        let p = push.apply(Vec3::new(0.5, 0.05, 0.0), 1.0);
+        assert!((p.y - (0.1 + PUSH_GAP)).abs() < 1e-5, "{p:?}");
+        assert_eq!(push.apply(Vec3::new(0.5, 0.05, 0.0), 0.0), Vec3::new(0.5, 0.05, 0.0));
+        // Under the floor at height -1: back above it.
+        let p = push.apply(Vec3::new(3.0, -1.2, 0.0), 1.0);
+        assert!((p.y - (-1.0 + PUSH_GAP)).abs() < 1e-5, "{p:?}");
     }
 
     #[test]
