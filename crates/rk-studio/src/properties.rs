@@ -75,9 +75,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // then who it is. A card whose profile could not be read still has
     // the first two.
     let pages: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Animation", "Profile", H_PAGE],
-        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits", H_PAGE],
-        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
+        Some(p) if p.male => &["Scene", "Animation", "Pose", "Profile", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Pose", "Profile", "Likes", "H Traits", H_PAGE],
+        None if kind == Kind::Character => &["Scene", "Animation", "Pose", H_PAGE],
         None => &[],
     };
     // The page that holds what the body shows in an H scene, which is of
@@ -177,9 +177,20 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             return;
         }
-        if let (Some(p), 2..) = (shown.as_mut(), page) {
+        let page_name = pages.get(page).copied().unwrap_or_default();
+        if page_name == "Pose" {
+            pose_page(ui, k, st, object.id, &mut object.content);
+            return;
+        }
+        let profile_page_index = match page_name {
+            "Profile" => Some(1),
+            "Likes" => Some(2),
+            "H Traits" => Some(3),
+            _ => None,
+        };
+        if let (Some(p), Some(n)) = (shown.as_mut(), profile_page_index) {
             if let Some(card) = &card_profile {
-                profile_page(ui, k, st, p, card, page - 1);
+                profile_page(ui, k, st, p, card, n);
             }
             return;
         }
@@ -1222,6 +1233,135 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
             p.rect_filled(line, 0.0, t.select);
         }
         x += w;
+    }
+}
+
+/// The Pose page: the bone chosen in the list, with its turn over the
+/// animation and a way back, then the character's bones to choose from.
+fn pose_page(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
+    let Content::Character { pose_layer, .. } = content else {
+        return;
+    };
+    let ui_id = ui.id().with("pose");
+    let joints = st.live.as_ref().and_then(|l| l.joints(id));
+    let waiting = joints.is_none().then_some("The character is not built");
+    if section(ui, k, st, 16, "Bone") {
+        let name = st
+            .pose_bone
+            .clone()
+            .filter(|n| joints.as_ref().is_some_and(|j| j.iter().any(|(_, b)| b == n)));
+        let edit = name
+            .as_ref()
+            .and_then(|n| pose_layer.as_ref()?.fk.get(n).copied())
+            .unwrap_or_default();
+        let off = waiting.or(name.is_none().then_some("No bone chosen"));
+        row(ui, k, "Bone", off, |ui, rect| {
+            label(
+                ui.painter(),
+                k,
+                Pos2::new(rect.left() + 4.0, rect.center().y),
+                name.as_deref().unwrap_or("None"),
+                k.t.text,
+            );
+        });
+        // The turn over the animation, in Unity's angles.
+        let (y, x, z) = edit.rot.to_euler(glam::EulerRot::YXZ);
+        // A trace of rounding is no turn, not a minus zero.
+        let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
+        let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
+        let mut angles = shown;
+        row(ui, k, "Rotation", off, |ui, rect| {
+            vec3(ui, k, rect, ui_id.with("rotation"), &mut angles, 0.5);
+        });
+        let mut reset = false;
+        row(ui, k, "", off, |ui, rect| {
+            let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
+            reset = widgets::flat_button(
+                &mut child,
+                k,
+                Some(icon::ARROW_COUNTER_CLOCKWISE),
+                "Reset",
+                false,
+                false,
+            )
+            .clicked();
+        });
+        if let Some(name) = name.filter(|_| reset || angles != shown) {
+            let rot = if reset {
+                glam::Quat::IDENTITY
+            } else {
+                rk_chara::scene::euler_deg(angles[0], angles[1], angles[2])
+            };
+            let edit = rk_chara::pose::BoneEdit { rot, ..edit };
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            if edit.is_identity() {
+                layer.fk.remove(&name);
+            } else {
+                layer.fk.insert(name, edit);
+            }
+            if layer.is_empty() {
+                *pose_layer = None;
+            }
+        }
+        section_end(ui, k);
+    }
+    if section(ui, k, st, 17, "Bones") {
+        let Some(joints) = joints else {
+            row(ui, k, "Bones", waiting, |_, _| {});
+            section_end(ui, k);
+            return;
+        };
+        ui.add_space(4.0);
+        let w = ui.available_width() - 16.0;
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            widgets::search(ui, k, &mut st.pose_search, "Search", w);
+        });
+        ui.add_space(4.0);
+        let needle = st.pose_search.to_lowercase();
+        let edited = |name: &str| {
+            pose_layer
+                .as_ref()
+                .is_some_and(|l| l.fk.get(name).is_some_and(|e| !e.is_identity()))
+        };
+        let t = &k.t;
+        egui::ScrollArea::vertical()
+            .id_salt(ui_id.with("bones"))
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for (depth, name) in joints
+                    .iter()
+                    .filter(|(_, n)| needle.is_empty() || n.to_lowercase().contains(&needle))
+                {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
+                    let on = st.pose_bone.as_deref() == Some(name.as_str());
+                    let p = ui.painter();
+                    if on {
+                        p.rect_filled(rect, 0.0, t.select);
+                    } else if resp.hovered() {
+                        p.rect_filled(rect, 0.0, t.hover);
+                    }
+                    let indent = if needle.is_empty() { *depth as f32 * 10.0 } else { 0.0 };
+                    let colour = if edited(name) {
+                        t.accent
+                    } else if on {
+                        t.text_bright
+                    } else {
+                        t.text
+                    };
+                    label(
+                        p,
+                        k,
+                        Pos2::new(rect.left() + 10.0 + indent, rect.center().y),
+                        name,
+                        colour,
+                    );
+                    if resp.clicked() {
+                        st.pose_bone = Some(name.clone());
+                    }
+                }
+            });
+        section_end(ui, k);
     }
 }
 

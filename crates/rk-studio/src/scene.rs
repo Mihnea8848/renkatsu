@@ -3300,6 +3300,27 @@ mod tests {
         assert_eq!(&back, doc.scene());
         assert_eq!(back.get(anna).unwrap().content, edited.content);
 
+        // A pose made by hand is saved, read back and undone with them.
+        let mut posed = edited.clone();
+        if let Content::Character { pose_layer, .. } = &mut posed.content {
+            let mut layer = rk_chara::pose::Layer::default();
+            layer.fk.insert(
+                "cf_j_arm00_L".into(),
+                rk_chara::pose::BoneEdit {
+                    rot: glam::Quat::from_rotation_z(-1.0),
+                    ..Default::default()
+                },
+            );
+            *pose_layer = Some(Box::new(layer));
+        }
+        assert!(doc.edit(posed.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(text.contains("[objects.pose_layer.fk.cf_j_arm00_L]"), "{text}");
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, posed.content);
+        assert!(doc.undo());
+        assert_eq!(doc.scene().get(anna).unwrap().content, edited.content);
+
         // One step back: dressed and as built again.
         assert!(doc.undo());
         let Content::Character { clothes, animation, .. } = &doc.scene().get(anna).unwrap().content else {

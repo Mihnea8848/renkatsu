@@ -147,6 +147,10 @@ struct Cli {
     /// name, or "none". Without it the first `--card` character is.
     #[arg(long)]
     select: Option<String>,
+    /// Start on the Pose page of the selected character with this bone
+    /// chosen, to picture it.
+    #[arg(long, hide = true)]
+    pose_bone: Option<String>,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -661,6 +665,10 @@ impl Studio {
             .iter()
             .find(|o| o.kind() == kinds::Kind::Character)
             .map(|o| o.id);
+        if let Some(bone) = &cli.pose_bone {
+            state.pose_bone = Some(bone.clone());
+            state.property_tab = 2;
+        }
         state.doc.selected = match cli.select.as_deref() {
             None => first,
             Some(name) if name.eq_ignore_ascii_case("none") => None,

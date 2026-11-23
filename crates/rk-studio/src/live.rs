@@ -778,6 +778,27 @@ impl Live {
         self.actors.iter().find(|a| a.id == id).map(Actor::subject)
     }
 
+    /// A built character's joints, the bones a pose edits: the nodes named
+    /// `cf_j_` below `cf_j_root`, in tree order, each with its depth among
+    /// them.
+    pub fn joints(&self, id: ObjectId) -> Option<Vec<(usize, String)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let scene = &actor.chara.scene;
+        let root = scene.find(actor.chara.animator, "cf_j_root")?;
+        let mut out = Vec::new();
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
+            let n = &scene.nodes[node];
+            let joint = n.name.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("cf_j_"));
+            if joint {
+                out.push((depth, n.name.clone()));
+            }
+            let below = depth + usize::from(joint);
+            stack.extend(n.children.iter().rev().map(|&c| (c, below)));
+        }
+        Some(out)
+    }
+
     pub fn built(&self, id: ObjectId) -> Option<Built> {
         self.actors.iter().find(|a| a.id == id).map(|a| Built {
             outfits: a.outfits,
