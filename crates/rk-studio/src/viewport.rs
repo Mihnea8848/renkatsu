@@ -1189,6 +1189,25 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     index += 1;
                     continue;
                 }
+                if *name == "Bake animation" || *name == "Reset pose" {
+                    let bake = *name == "Bake animation";
+                    let ready = if bake {
+                        animated(st)
+                    } else {
+                        fk_layer(st).is_some_and(|l| !l.fk.is_empty())
+                    };
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() && ready {
+                        if bake {
+                            bake_animation(st);
+                        } else {
+                            edit_fk_layer(st, |l| l.fk.clear());
+                        }
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 // Only the Select mode's rows are states; the others act.
                 let on = st.mode == 0 && st.mode_tool[st.mode] == index;
                 let resp = widgets::tool_row(ui, k, row, id, g, name, on);
@@ -1291,6 +1310,50 @@ pub fn mirror(st: &mut State, copy: bool) {
     });
 }
 
+/// Whether the selected character plays an animation.
+fn animated(st: &State) -> bool {
+    matches!(
+        st.doc.selection().map(|o| &o.content),
+        Some(crate::scene::Content::Character { animation: Some(_), .. })
+    )
+}
+
+/// Bakes the selected character's animation into its pose by hand: the
+/// pose of the frame is held over the bones as loaded, the animation is
+/// taken off and FK switched on with the parts the pose turns, as one step
+/// of the history.
+pub fn bake_animation(st: &mut State) {
+    let Some(id) = st.doc.selected else { return };
+    let Some((found, parts)) = st.live.as_mut().and_then(|l| l.baked_edits(id)) else {
+        return;
+    };
+    let Some(mut object) = st.doc.selection().cloned() else {
+        return;
+    };
+    let crate::scene::Content::Character {
+        animation, pose_layer, ..
+    } = &mut object.content
+    else {
+        return;
+    };
+    *animation = None;
+    let layer = pose_layer.get_or_insert_with(Default::default);
+    layer.fk_on = true;
+    for part in parts {
+        if !layer.fk_parts.contains(&part) {
+            layer.fk_parts.push(part);
+        }
+    }
+    for (name, edit) in found {
+        if edit.is_identity() {
+            layer.fk.remove(&name);
+        } else {
+            layer.fk.insert(name, edit);
+        }
+    }
+    st.doc.edit(object, false);
+}
+
 /// The FK parts as boxes to tick, one to a row, under the category's
 /// name.
 fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
@@ -1318,11 +1381,40 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
                 }
             });
         }
+        // A part with bones turned can be put back.
+        let Some(id) = st.doc.selected else { continue };
+        let bones = st.live.as_ref().map(|l| l.part_bones(id, part)).unwrap_or_default();
+        if !bones.iter().any(|b| layer.fk.contains_key(b)) {
+            continue;
+        }
+        let side = palette_row(k) - 6.0;
+        let button = Rect::from_center_size(
+            Pos2::new(area.right() - 8.0 - side / 2.0, cell.center().y),
+            Vec2::splat(side),
+        );
+        let resp = ui
+            .interact(button, ui.id().with(("fk part reset", part.label())), Sense::click())
+            .on_hover_text("Reset");
+        if resp.hovered() {
+            ui.painter().rect_filled(button, k.radius(), k.t.hover);
+        }
+        let color = if resp.hovered() { k.t.text_bright } else { k.t.text_dim };
+        glyph(
+            ui.painter(),
+            k,
+            button.center(),
+            icon::ARROW_COUNTER_CLOCKWISE,
+            14.0,
+            color,
+        );
+        if resp.clicked() {
+            edit_fk_layer(st, |l| l.fk.retain(|name, _| !bones.contains(name)));
+        }
     }
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 23] = [
+const LATER_TOOLS: [&str; 22] = [
     "Replace",
     "Reload",
     "Accessories",
@@ -1331,7 +1423,6 @@ const LATER_TOOLS: [&str; 23] = [
     "Inverse kinematics",
     "Load pose",
     "Save pose",
-    "Reset pose",
     "Hands",
     "Look at camera",
     "Depth of field",

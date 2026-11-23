@@ -136,6 +136,16 @@ impl BoneEdit {
             scale: base.scale * self.scale,
         }
     }
+
+    /// The edit that takes a bone from `base` to `posed`: `on` undone, to
+    /// hold a pose over the bones as loaded.
+    pub fn baked(base: Trs, posed: Trs) -> BoneEdit {
+        BoneEdit {
+            rot: (base.rot.inverse() * posed.rot).normalize(),
+            pos: posed.pos - base.pos,
+            scale: posed.scale / base.scale,
+        }
+    }
 }
 
 fn no_turn() -> Quat {
@@ -392,6 +402,24 @@ mod tests {
             right.abs_diff_eq(Vec3::new(-left.x, left.y, left.z), 1e-4),
             "{left} {right}"
         );
+    }
+
+    #[test]
+    fn a_baked_edit_gives_the_pose_it_was_baked_from() {
+        let base = Trs {
+            pos: Vec3::new(0.1, 0.9, -0.02),
+            rot: Quat::from_euler(glam::EulerRot::ZXY, 0.3, -0.7, 1.1),
+            scale: Vec3::new(1.0, 0.95, 1.05),
+        };
+        let posed = Trs {
+            pos: Vec3::new(0.12, 0.7, 0.05),
+            rot: Quat::from_euler(glam::EulerRot::ZXY, -1.2, 0.4, 0.2),
+            scale: Vec3::new(1.1, 1.0, 0.9),
+        };
+        let back = BoneEdit::baked(base, posed).on(base);
+        assert!(back.pos.abs_diff_eq(posed.pos, 1e-6));
+        assert!(back.rot.dot(posed.rot).abs() > 1.0 - 1e-6);
+        assert!(back.scale.abs_diff_eq(posed.scale, 1e-6));
     }
 
     #[test]

@@ -162,6 +162,10 @@ struct Cli {
     /// picture it.
     #[arg(long, hide = true)]
     mirror_pose: bool,
+    /// Bake the selected character's animation into its pose once it is
+    /// built, to picture it.
+    #[arg(long, hide = true)]
+    bake_pose: bool,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -704,6 +708,7 @@ impl Studio {
         };
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
+        state.bake_pending = cli.bake_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }
@@ -1100,6 +1105,22 @@ impl eframe::App for Studio {
             if ready {
                 viewport::mirror(&mut self.state, false);
                 self.state.mirror_pending = false;
+            }
+        }
+
+        // A bake asked for at the start, once the animation poses her.
+        if self.state.bake_pending {
+            let id = self.state.doc.selected;
+            let ready = id.is_some_and(|id| {
+                self.state
+                    .live
+                    .as_mut()
+                    .and_then(|l| l.baked_edits(id))
+                    .is_some_and(|(_, parts)| !parts.is_empty())
+            });
+            if ready {
+                viewport::bake_animation(&mut self.state);
+                self.state.bake_pending = false;
             }
         }
 

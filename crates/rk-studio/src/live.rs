@@ -32,8 +32,10 @@ use crate::state::{Log, Playback};
 use anyhow::{Context, Result};
 use eframe::egui_wgpu::{self, wgpu};
 use glam::{Mat4, Quat, Vec3};
+use rk_chara::bone_info::Part;
 use rk_chara::clothes_state::{self as cs, States};
 use rk_chara::motion::{self, Bound, Motion};
+use rk_chara::pose::BoneEdit;
 use rk_chara::scene::{ShadowCasting, Trs};
 use rk_chara::Image;
 use rk_render::{bounds, Camera, DrawLight, Environment, Renderer, StudioEffects};
@@ -720,6 +722,9 @@ pub struct Outline {
     pub width: f32,
 }
 
+/// Edits by bone name and the FK parts they need, from `Live::baked_edits`.
+pub type Baked = (Vec<(String, BoneEdit)>, Vec<Part>);
+
 impl Live {
     /// A renderer on the window's device, with nothing to draw yet.
     /// Gives back the picture egui was shown, when this renderer goes
@@ -917,6 +922,62 @@ impl Live {
                 .map(|(n, rot)| (scene.nodes[n].name.clone(), rot))
                 .collect(),
         )
+    }
+
+    /// The names of a built character's FK bones in `part`.
+    pub fn part_bones(&self, id: ObjectId, part: Part) -> Vec<String> {
+        self.actors
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| {
+                a.fk.iter()
+                    .filter(|b| b.info.parts().contains(&part))
+                    .map(|b| b.info.bone.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The edits that hold a character's pose of the frame once its
+    /// animation is gone: each bone the animation writes or the hand
+    /// edited, from the bones as loaded, by bone name (an edit that does
+    /// nothing too, to clear one); and the FK parts the bones turned lie
+    /// in, to switch on. Read with the heels off, as the
+    /// frame is posed before they go on; the bones are left as they were.
+    pub fn baked_edits(&mut self, id: ObjectId) -> Option<Baked> {
+        let actor = self.actors.iter_mut().find(|a| a.id == id)?;
+        let mut nodes: Vec<usize> = actor.playing.as_ref().map(|p| p.bound.nodes()).unwrap_or_default();
+        nodes.extend(actor.edits.iter().map(|&(n, _)| n));
+        nodes.sort_unstable();
+        nodes.dedup();
+        let chara = &mut actor.chara;
+        let saved: Vec<Trs> = chara.scene.nodes.iter().map(|n| n.local).collect();
+        if let Some(heels) = &chara.heels {
+            heels.reset(&mut chara.scene);
+        }
+        for &(node, _) in &actor.edits {
+            chara.scene.nodes[node].local = actor.rest[node];
+        }
+        if let (Some(playing), Some(phase)) = (&actor.playing, actor.phase) {
+            playing.bound.apply(&mut chara.scene, phase);
+        }
+        rk_chara::pose::apply(&mut chara.scene, &actor.edits);
+        let mut parts = Vec::new();
+        let mut found = Vec::new();
+        for node in nodes {
+            let edit = BoneEdit::baked(actor.rest[node], chara.scene.nodes[node].local);
+            let name = chara.scene.nodes[node].name.clone();
+            if let Some(b) = actor.fk.iter().find(|b| b.node == node).filter(|_| !edit.is_identity()) {
+                parts.extend(b.info.parts());
+            }
+            found.push((name, edit));
+        }
+        for (node, local) in chara.scene.nodes.iter_mut().zip(saved) {
+            node.local = local;
+        }
+        parts.sort_unstable();
+        parts.dedup();
+        Some((found, parts))
     }
 
     /// Where a built character's bone is and how it is turned: its place

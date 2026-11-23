@@ -313,6 +313,8 @@ pub struct State {
     /// Mirror the selected character's pose once she is built, for
     /// pictures.
     pub mirror_pending: bool,
+    /// `--bake-pose`: bake the animation once the character is built.
+    pub bake_pending: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
@@ -832,6 +834,7 @@ impl State {
             sun_turning: false,
             sun_preview: false,
             mirror_pending: false,
+            bake_pending: false,
             pose_bone: None,
             fk_open: false,
             animator_search: String::new(),
