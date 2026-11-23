@@ -152,6 +152,9 @@ struct Cli {
     /// chosen, to picture it.
     #[arg(long, hide = true)]
     pose_bone: Option<String>,
+    /// Start on this page of Properties, by its place, to picture it.
+    #[arg(long, hide = true)]
+    property_tab: Option<usize>,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -692,6 +695,9 @@ impl Studio {
                 )
             }
         };
+        if let Some(tab) = cli.property_tab {
+            state.property_tab = tab;
+        }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
                 .iter()

@@ -75,8 +75,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // then who it is. A card whose profile could not be read still has
     // the first two.
     let pages: &[&str] = match &shown {
-        Some(p) if p.male => &["Scene", "Animation", "Profile", H_PAGE],
-        Some(_) => &["Scene", "Animation", "Profile", "Likes", "H Traits", H_PAGE],
+        Some(_) => &["Scene", "Animation", "Profile", H_PAGE],
         None if kind == Kind::Character => &["Scene", "Animation", H_PAGE],
         None => &[],
     };
@@ -178,15 +177,15 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
-        let profile_page_index = match page_name {
-            "Profile" => Some(1),
-            "Likes" => Some(2),
-            "H Traits" => Some(3),
-            _ => None,
-        };
-        if let (Some(p), Some(n)) = (shown.as_mut(), profile_page_index) {
+        // Who the character is, what she likes and what she is like in
+        // bed, as sections of one page, and a way back to the card's.
+        if let (Some(p), "Profile") = (shown.as_mut(), page_name) {
             if let Some(card) = &card_profile {
-                profile_page(ui, k, st, p, card, n);
+                let parts = if p.male { 1 } else { 3 };
+                for n in 1..=parts {
+                    profile_page(ui, k, st, p, n);
+                }
+                card_data(ui, k, st, p, card);
             }
             return;
         }
@@ -1324,12 +1323,11 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
     }
 }
 
-/// Who the character is (page 1), what it likes (page 2) or what it is
-/// like in bed (page 3). The values
-/// start as the card's; changing one keeps the change in the scene, for
-/// this character only. Each page ends with the way back to the card's
-/// values for what it shows.
-fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &Profile, page: usize) {
+/// Who the character is (part 1), what it likes (part 2) or what it is
+/// like in bed (part 3), as sections of the Profile page. The values start
+/// as the card's; changing one keeps the change in the scene, for this
+/// character only.
+fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, page: usize) {
     let id = ui.id().with("profile");
     if page == 1 {
         if section(ui, k, st, 7, "Name") {
@@ -1409,7 +1407,7 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &P
             section_end(ui, k);
         }
     } else {
-        if section(ui, k, st, 12, "Traits") {
+        if section(ui, k, st, 12, "H traits") {
             let grid = Grid {
                 items: &profile::H_TRAITS,
                 hint: Some("Add custom field"),
@@ -1442,33 +1440,15 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &P
             section_end(ui, k);
         }
     }
-    // The page's values as the card has them, with the other pages' left
-    // as they are now.
-    let mut from_card = p.clone();
-    match page {
-        2 => {
-            from_card.likes = card.likes.clone();
-            from_card.custom_likes = card.custom_likes.clone();
-        }
-        3 => {
-            from_card.h_traits = card.h_traits.clone();
-            from_card.custom_h_traits = card.custom_h_traits.clone();
-            from_card.denial = card.denial.clone();
-            from_card.weak_point = card.weak_point;
-        }
-        _ => {
-            from_card = Profile {
-                likes: p.likes.clone(),
-                custom_likes: p.custom_likes.clone(),
-                h_traits: p.h_traits.clone(),
-                custom_h_traits: p.custom_h_traits.clone(),
-                denial: p.denial.clone(),
-                weak_point: p.weak_point,
-                ..card.clone()
-            };
-        }
-    }
+}
+
+/// The way back to the card's own profile, likes and traits.
+fn card_data(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, card: &Profile) {
     if section(ui, k, st, 11, "Card data") {
+        let from_card = Profile {
+            male: p.male,
+            ..card.clone()
+        };
         let changed = from_card != *p;
         let why = (!changed).then_some("No changes");
         row(ui, k, "Values", why, |ui, rect| {
