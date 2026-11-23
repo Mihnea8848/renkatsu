@@ -299,14 +299,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let bar = toolbar(ui, k, |ui| {
         match top {
             project::CHARACTERS => {
-                if flat_button(ui, k, None, "Import card", false, false).clicked() {
+                if flat_button(ui, k, Some(icon::DOWNLOAD_SIMPLE), "Import card", false, false).clicked() {
                     asks.commands.push(Command::ImportCard);
                 }
-                if flat_button(ui, k, None, "From library", false, false).clicked() {
+                if flat_button(ui, k, Some(icon::BOOKS), "From library", false, false).clicked() {
                     asks.commands.push(Command::ImportFromPackage);
                 }
                 let card = st.asset.clone().filter(|a| slashes(a).to_lowercase().ends_with(".png"));
-                let add = flat_button(ui, k, None, "Add to scene", false, false);
+                let add = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false);
                 let add = if card.is_none() {
                     add.on_hover_text("No character selected")
                 } else {
@@ -320,14 +320,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             project::ANIMATIONS => animation_tools(ui, k, st, &mut asks),
             crate::maps::MAPS => {
-                if flat_button(ui, k, None, "Import from file", false, false).clicked() {
+                if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false).clicked() {
                     asks.commands.push(Command::ImportMapFile);
                 }
-                if flat_button(ui, k, None, "Import from library", false, false).clicked() {
+                if flat_button(ui, k, Some(icon::BOOKS), "Import from library", false, false).clicked() {
                     asks.commands.push(Command::MapLibrary);
                 }
                 let map = st.asset.clone().filter(|a| is_sidecar(&slashes(a)));
-                let add = flat_button(ui, k, None, "Add to scene", false, false);
+                let add = flat_button(ui, k, Some(icon::PLUS), "Add to scene", false, false);
                 let add = if map.is_none() {
                     add.on_hover_text("No map selected")
                 } else {
@@ -444,10 +444,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// The toolbar of the Animations folder.
 fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
-    if flat_button(ui, k, None, "Import from file", false, false).clicked() {
+    if flat_button(ui, k, Some(icon::FILE), "Import from file", false, false).clicked() {
         asks.commands.push(Command::ImportAnimationFile);
     }
-    if flat_button(ui, k, None, "Import from library", false, false).clicked() {
+    if flat_button(ui, k, Some(icon::BOOKS), "Import from library", false, false).clicked() {
         asks.commands.push(Command::ImportAnimations);
     }
     let character = st.doc.selection().is_some_and(|o| o.kind() == Kind::Character);
@@ -462,7 +462,7 @@ fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
         (true, true) => None,
     };
     ui.add_enabled_ui(why.is_none(), |ui| {
-        let apply = flat_button(ui, k, None, "Apply to selection", false, false);
+        let apply = flat_button(ui, k, Some(icon::PLAY), "Apply to selection", false, false);
         let apply = match why {
             Some(why) => apply.on_hover_text(why).on_disabled_hover_text(why),
             None => apply,

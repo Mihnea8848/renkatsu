@@ -16,7 +16,7 @@ use crate::camera::{Focus, RightDrag, View};
 use crate::design::Overlays;
 use crate::keymap::Action;
 use crate::kinds::Kind;
-use crate::modes::{actions, pipeline_missing, Pipeline, MODES, PIPELINES, TOOLS};
+use crate::modes::{actions, pipeline_missing, Pipeline, LATER, MODES, PIPELINES, TOOLS};
 use crate::panels::{dragged_over, dropped, DragCard};
 use crate::scene::ObjectId;
 use crate::state::{Command, Look, Rail, State};
@@ -315,7 +315,7 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
         Pos2::new(full.left() + m, strip.bottom() + m),
         Vec2::new(
             rail_width(k, st, shape),
-            MODES.len() as f32 * rail_cell(k, st, shape) + 22.0,
+            (MODES.len() + LATER.len()) as f32 * rail_cell(k, st, shape) + LATER_GAP + 22.0,
         ),
     );
     block(ui, k, rail_rect);
@@ -445,9 +445,9 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         map_items(ui, k, st);
         return;
     }
-    for (_, text, menu) in actions(kind) {
+    for (g, text, menu) in actions(kind) {
         use crate::kinds::Kind;
-        // What nothing stands behind yet is left out.
+        // What nothing stands behind yet is shown greyed.
         let works = matches!(
             (kind, *text),
             (_, "Load card" | "Add")
@@ -456,9 +456,12 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
                 | (Kind::Light, "Shadows" | "Type" | "Colour")
         );
         if !works {
+            ui.add_enabled_ui(false, |ui| flat_button(ui, k, Some(g), text, *menu, false))
+                .response
+                .on_disabled_hover_text("Not available yet");
             continue;
         }
-        let mut resp = flat_button(ui, k, None, text, *menu, false);
+        let mut resp = flat_button(ui, k, Some(g), text, *menu, false);
         if *text == "Load card" {
             resp = resp.on_hover_text("Import card");
         }
@@ -586,8 +589,8 @@ fn map_items(ui: &mut Ui, k: &Look, st: &mut State) {
     };
     let file = st.map_pictures.sidecar(&st.project.resolve(map));
     let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
-    let change = flat_button(ui, k, None, "Change map", false, false).clicked();
-    let resp = flat_button(ui, k, None, "Time of day", true, false);
+    let change = flat_button(ui, k, Some(icon::SWAP), "Change map", false, false).clicked();
+    let resp = flat_button(ui, k, Some(icon::SUN_HORIZON), "Time of day", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         for when in MapTime::ALL {
             let has = times.contains(&when);
@@ -775,7 +778,7 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     bar_divider(ui, k);
     crate::gizmo::grid_button(ui, k, st);
-    let resp = flat_button(ui, k, None, "Lit", true, false);
+    let resp = flat_button(ui, k, Some(icon::SUN), "Lit", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         if widgets::check_item(ui, k, true, "Lit", "").clicked() {
             ui.close();
@@ -789,7 +792,7 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     });
     // The lens is perspective and only that; the other two turn the
     // camera to look in down an axis, which is what they are for.
-    let resp = flat_button(ui, k, None, "Perspective", true, false);
+    let resp = flat_button(ui, k, Some(icon::CUBE_FOCUS), "Perspective", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         if widgets::check_item(ui, k, true, "Perspective", "").clicked() {
             ui.close();
@@ -805,7 +808,7 @@ fn view_items(ui: &mut Ui, k: &Look, st: &mut State) {
     });
     // The rendering pipeline, by its abbreviation: the bar has little room.
     let active = &PIPELINES[0];
-    let resp = flat_button(ui, k, None, active.short, true, false)
+    let resp = flat_button(ui, k, Some(icon::STACK), active.short, true, false)
         .on_hover_text(format!("Rendering pipeline: {}", active.name));
     egui::Popup::menu(&resp).show(|ui| {
         for pipeline in &PIPELINES {
@@ -840,6 +843,9 @@ fn rail_cell(k: &Look, st: &State, shape: RailShape) -> f32 {
         (RailShape::Rows, _) => k.d.row + 6.0,
     }
 }
+
+/// The room between the modes and the ones to come.
+const LATER_GAP: f32 = 5.0;
 
 /// The named modes in `rect`, with the chevron that shrinks the rail to
 /// icons at its bottom. The caller paints what lies behind.
@@ -928,6 +934,49 @@ pub fn rail(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect, shape: RailShape)
                 widgets::label(p, k, Pos2::new(cell.left() + 30.0, cell.center().y), mode.name, color);
             }
             (RailShape::Rows, false) => glyph(p, k, cell.center(), mode.glyph, 16.0, tint),
+        }
+    }
+
+    // The modes to come, greyed, below a hairline.
+    let top = rect.top() + MODES.len() as f32 * cell_h;
+    hair_h(
+        ui.painter(),
+        rect.left() + 6.0,
+        rect.right() - 6.0,
+        top + (LATER_GAP / 2.0).floor(),
+        Theme::glass(k.t.hover, 90),
+    );
+    for (i, (g, name)) in LATER.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(rect.left(), top + LATER_GAP + i as f32 * cell_h),
+            Vec2::new(rect.width(), cell_h),
+        );
+        let tip = if named {
+            "Not available yet".to_owned()
+        } else {
+            format!("{name} mode, not available yet")
+        };
+        ui.interact(cell, ui.id().with(("later", i)), Sense::hover())
+            .on_hover_text(tip);
+        let faint = Theme::glass(k.t.text_dim, 130);
+        let p = ui.painter();
+        match (shape, named) {
+            (RailShape::Stacked, true) => {
+                glyph(p, k, Pos2::new(cell.center().x, cell.top() + 20.0), g, 20.0, faint);
+                p.text(
+                    Pos2::new(cell.center().x, cell.top() + 39.0),
+                    Align2::CENTER_CENTER,
+                    *name,
+                    k.small(),
+                    faint,
+                );
+            }
+            (RailShape::Stacked, false) => glyph(p, k, cell.center(), g, 20.0, faint),
+            (RailShape::Rows, true) => {
+                glyph(p, k, Pos2::new(cell.left() + 15.0, cell.center().y), g, 16.0, faint);
+                widgets::label(p, k, Pos2::new(cell.left() + 30.0, cell.center().y), name, faint);
+            }
+            (RailShape::Rows, false) => glyph(p, k, cell.center(), g, 16.0, faint),
         }
     }
 
@@ -1060,7 +1109,13 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
                 if LATER_TOOLS.contains(name) {
-                    // Left out until they do something.
+                    // Shown, greyed, until they do something.
+                    ui.interact(row, id, Sense::hover()).on_hover_text("Not available yet");
+                    let faint = Theme::glass(k.t.text_dim, 150);
+                    let p = ui.painter();
+                    glyph(p, k, Pos2::new(row.left() + 16.0, row.center().y), g, 16.0, faint);
+                    widgets::label(p, k, Pos2::new(row.left() + 32.0, row.center().y), name, faint);
+                    y += palette_row(k);
                     index += 1;
                     continue;
                 }

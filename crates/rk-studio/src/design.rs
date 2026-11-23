@@ -186,7 +186,7 @@ impl Design {
                 status_height: 24.0,
                 separator: 2.0,
                 tabs: Tabs::Filled,
-                tab_icons: false,
+                tab_icons: true,
                 overlays: Overlays::Blocks,
                 props: Props::Details,
                 tree: Tree::Guides,

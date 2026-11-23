@@ -205,7 +205,7 @@ pub fn panel(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
             Vec2::new(area.width() - 20.0, k.field()),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(place));
-        if flat_button(&mut child, k, None, "Add map", false, false).clicked() {
+        if flat_button(&mut child, k, Some(icon::PLUS), "Add map", false, false).clicked() {
             st.open_map_library();
         }
         return;
@@ -258,7 +258,7 @@ pub fn panel(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
             .max_rect(change)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
-    if flat_button(&mut child, k, None, "Change map", false, false).clicked() {
+    if flat_button(&mut child, k, Some(icon::SWAP), "Change map", false, false).clicked() {
         st.open_map_library();
     }
 

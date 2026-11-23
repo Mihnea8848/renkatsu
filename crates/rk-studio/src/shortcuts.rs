@@ -61,10 +61,12 @@ pub fn show(ctx: &egui::Context, k: &Look, st: &mut State) {
     widgets::window(ctx, k, "Keyboard shortcuts", WIDTH, &mut open, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let reset = widgets::flat_width(ui, k, None, "Reset all", false);
+            let reset = widgets::flat_width(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false);
             widgets::search(ui, k, &mut st.shortcuts_search, "Search", WIDTH - reset - 6.0);
             let changed = st.keys != Keymap::default();
-            let button = ui.add_enabled_ui(changed, |ui| flat_button(ui, k, None, "Reset all", false, false));
+            let button = ui.add_enabled_ui(changed, |ui| {
+                flat_button(ui, k, Some(icon::ARROW_COUNTER_CLOCKWISE), "Reset all", false, false)
+            });
             if button.inner.clicked() {
                 ask = Some(Ask::ResetAll);
             }

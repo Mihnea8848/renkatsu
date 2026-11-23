@@ -207,7 +207,7 @@ pub fn menu_row(ui: &mut Ui, k: &Look, st: &mut State, dock: &mut DockState<Pane
             .layout(Layout::right_to_left(Align::Center)),
     );
     right.spacing_mut().item_spacing.x = 6.0;
-    let resp = flat_button(&mut right, k, None, "Layout", true, false);
+    let resp = flat_button(&mut right, k, Some(icon::LAYOUT), "Layout", true, false);
     egui::Popup::menu(&resp).show(|ui| {
         if ui.button("Reset layout").clicked() {
             *reset = true;
@@ -779,8 +779,9 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     let small =
         |x: f32, align: Align2, text: &str, color: Color32| p.text(Pos2::new(x, y), align, text, k.small(), color);
 
-    let (_, tool, _) = TOOLS[st.tool];
-    let x = small(rect.left() + 12.0, Align2::LEFT_CENTER, tool, t.text).right();
+    let (tool_glyph, tool, _) = TOOLS[st.tool];
+    glyph(p, k, Pos2::new(rect.left() + 17.0, y), tool_glyph, 13.0, t.text);
+    let x = small(rect.left() + 29.0, Align2::LEFT_CENTER, tool, t.text).right();
     if st.playback != Playback::Stopped {
         let text = if st.playback == Playback::Playing {
             "Scene playing"

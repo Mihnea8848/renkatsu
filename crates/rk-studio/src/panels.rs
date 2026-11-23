@@ -1036,7 +1036,7 @@ fn console(ui: &mut Ui, k: &Look, st: &mut State) {
         (icon::X_CIRCLE, "Errors", t.stop),
     ];
     toolbar(ui, k, |ui| {
-        if flat_button(ui, k, None, "Clear", false, false).clicked() {
+        if flat_button(ui, k, Some(icon::BROOM), "Clear", false, false).clicked() {
             st.log.lines.clear();
         }
         bar_divider(ui, k);
