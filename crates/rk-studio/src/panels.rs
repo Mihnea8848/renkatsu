@@ -26,16 +26,18 @@ pub enum Panel {
     Content,
     Console,
     Timeline,
+    Animator,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 6] = [
+    pub const ALL: [Panel; 7] = [
         Panel::Viewport,
         Panel::Outliner,
         Panel::Properties,
         Panel::Content,
         Panel::Console,
         Panel::Timeline,
+        Panel::Animator,
     ];
 
     pub fn title(self) -> &'static str {
@@ -46,6 +48,7 @@ impl Panel {
             Panel::Content => "Content",
             Panel::Console => "Console",
             Panel::Timeline => "Timeline",
+            Panel::Animator => "Animator",
         }
     }
 
@@ -57,6 +60,7 @@ impl Panel {
             Panel::Content => icon::FOLDER_SIMPLE,
             Panel::Console => icon::TERMINAL_WINDOW,
             Panel::Timeline => icon::FILM_STRIP,
+            Panel::Animator => icon::PERSON_ARMS_SPREAD,
         }
     }
 }
@@ -92,7 +96,7 @@ pub fn default_layout(bottom: Panel) -> DockState<Panel> {
     let surface = state.main_surface_mut();
     let [left, right] = surface.split_right(NodeIndex::root(), 0.795, vec![Panel::Outliner]);
     surface.split_below(right, 0.44, vec![Panel::Properties]);
-    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline];
+    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline, Panel::Animator];
     let active = tabs.iter().position(|p| *p == bottom).unwrap_or(0);
     let [top, below] = surface.split_below(left, 0.75, tabs);
     let path = |node| egui_dock::NodePath {
@@ -207,6 +211,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Content => crate::content_panel::show(ui, k, st),
             Panel::Console => console(ui, k, st),
             Panel::Timeline => timeline(ui, k),
+            Panel::Animator => crate::animator::show(ui, k, st),
         }
     }
 
@@ -323,16 +328,6 @@ struct Row {
     bone: Option<String>,
     /// How many map pieces a folder of them holds.
     count: Option<usize>,
-    /// A row of a character's skeleton rather than of an object.
-    skeleton: Option<Skeleton>,
-}
-
-/// The rows of a character's skeleton, shown while its FK is on: a row to
-/// unfold it, then its bones.
-#[derive(Clone)]
-enum Skeleton {
-    Fold(ObjectId),
-    Bone(ObjectId, String),
 }
 
 /// What a frame of the Outliner asks for, carried out once it is drawn.
@@ -344,10 +339,6 @@ enum Act {
     /// command that acts on the selection.
     Keep(ObjectId),
     Fold(Option<ObjectId>),
-    /// Unfold a character's skeleton, or fold it.
-    FoldSkeleton(ObjectId),
-    /// Choose a bone of a character.
-    Bone(ObjectId, String),
     Eye(ObjectId),
     Rename(ObjectId),
     Renamed(ObjectId, String),
@@ -374,7 +365,6 @@ fn rows(st: &State) -> Vec<Row> {
         folded: st.scene_folded,
         bone: None,
         count: None,
-        skeleton: None,
     }];
     let mut hide_below: Option<usize> = st.scene_folded.then_some(0);
     for (depth, id) in scene.rows() {
@@ -398,127 +388,13 @@ fn rows(st: &State) -> Vec<Row> {
             name: object.name.clone(),
             visible: object.visible,
             shown: scene.shown(id),
-            // A character posed by hand holds its skeleton.
-            parent: scene.has_children(id)
-                || matches!(
-                    &object.content,
-                    crate::scene::Content::Character { pose_layer: Some(l), .. } if l.fk_on
-                ),
+            parent: scene.has_children(id),
             folded: st.folded.contains(&id),
             bone: object.bone.as_deref().map(|bone| crate::bones::label(bone).to_owned()),
             count: pieces_in(scene, id),
-            skeleton: None,
         });
-        // A character posed by hand shows its skeleton, folded at first.
-        let fk_on = matches!(
-            &object.content,
-            crate::scene::Content::Character { pose_layer: Some(l), .. } if l.fk_on
-        );
-        let joints = if fk_on {
-            st.live.as_ref().and_then(|l| l.joints(id))
-        } else {
-            None
-        };
-        let Some(joints) = joints else { continue };
-        let bone_row = |depth: usize, name: &str| Row {
-            depth,
-            id: None,
-            kind: Kind::Character,
-            glyph: icon::BONE,
-            label: "Bone",
-            color: Kind::Character.color(),
-            name: crate::bones::pose_label(name),
-            visible: true,
-            shown: scene.shown(id),
-            parent: false,
-            folded: false,
-            bone: None,
-            count: None,
-            skeleton: Some(Skeleton::Bone(id, name.to_owned())),
-        };
-        if !search.is_empty() {
-            for (_, name) in joints.iter().filter(|(_, n)| n.to_lowercase().contains(&search)) {
-                rows.push(bone_row(1, name));
-            }
-            continue;
-        }
-        if st.folded.contains(&id) {
-            continue;
-        }
-        let open = st.skeleton_open.contains(&id);
-        rows.push(Row {
-            depth: depth + 1,
-            id: None,
-            kind: Kind::Character,
-            glyph: icon::BONE,
-            label: "Skeleton",
-            color: Kind::Character.color(),
-            name: "Skeleton".to_owned(),
-            visible: true,
-            shown: scene.shown(id),
-            parent: true,
-            folded: !open,
-            bone: None,
-            count: None,
-            skeleton: Some(Skeleton::Fold(id)),
-        });
-        if open {
-            for (d, name) in &joints {
-                rows.push(bone_row(depth + 2 + d, name));
-            }
-        }
     }
     rows
-}
-
-/// A row of a character's skeleton: the row that unfolds it, or a bone,
-/// which a click chooses as a click on its ball does.
-fn skeleton_row(ui: &mut Ui, k: &Look, st: &State, row: &Row, skeleton: &Skeleton, indent: f32, acts: &mut Vec<Act>) {
-    let t = &k.t;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-    let chosen = match skeleton {
-        Skeleton::Bone(id, name) => st.doc.selected == Some(*id) && st.pose_bone.as_deref() == Some(name.as_str()),
-        Skeleton::Fold(_) => false,
-    };
-    let p = ui.painter();
-    if chosen {
-        p.rect_filled(rect, 0.0, t.select);
-    } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, t.row_hover);
-    }
-    let text = if chosen {
-        Color32::WHITE
-    } else if row.shown {
-        t.text
-    } else {
-        t.text_dim
-    };
-    let faint = if chosen { on_selection(t.select) } else { t.text_dim };
-    let x = rect.left() + 6.0 + row.depth as f32 * indent;
-    let y = rect.center().y;
-    if let Skeleton::Fold(id) = skeleton {
-        let g = if row.folded {
-            icon::CARET_RIGHT
-        } else {
-            icon::CARET_DOWN
-        };
-        glyph(p, k, Pos2::new(x + 7.0, y), g, 10.0, faint);
-        if resp.clicked() {
-            acts.push(Act::FoldSkeleton(*id));
-        }
-    }
-    glyph(p, k, Pos2::new(x + 24.0, y), row.glyph, 14.0, faint);
-    widgets::label(p, k, Pos2::new(x + 36.0, y), &row.name, text);
-    if let Skeleton::Bone(id, name) = skeleton {
-        let resp = if row.name != *name {
-            resp.on_hover_text(name)
-        } else {
-            resp
-        };
-        if resp.clicked() {
-            acts.push(Act::Bone(*id, name.clone()));
-        }
-    }
 }
 
 /// How many map pieces a folder holds, when it holds map pieces only.
@@ -593,10 +469,6 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
         .max_height(area.height())
         .show(ui, |ui| {
             for row in &rows {
-                if let Some(skeleton) = &row.skeleton {
-                    skeleton_row(ui, k, st, row, skeleton, indent, &mut acts);
-                    continue;
-                }
                 let (rect, resp) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click_and_drag());
                 let adding = ui.input(|i| i.modifiers.command);
@@ -816,16 +688,6 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                     all.extend(st.doc.selected_all().into_iter().filter(|other| *other != id));
                 }
                 st.doc.select_many(&all);
-            }
-            Act::FoldSkeleton(id) => {
-                if !st.skeleton_open.remove(&id) {
-                    st.skeleton_open.insert(id);
-                }
-            }
-            Act::Bone(id, name) => {
-                st.doc.selected = Some(id);
-                st.pose_bone = Some(name);
-                st.property_tab = 2;
             }
             Act::Fold(None) => st.scene_folded = !st.scene_folded,
             Act::Fold(Some(id)) => {

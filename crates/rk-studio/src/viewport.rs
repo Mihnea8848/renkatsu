@@ -1249,6 +1249,7 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
     if ticked != on {
         edit_fk_layer(st, |l| l.fk_on = ticked);
         st.fk_open = ticked;
+        st.show_animator |= ticked;
     } else if resp.clicked() {
         st.fk_open = !st.fk_open;
     }

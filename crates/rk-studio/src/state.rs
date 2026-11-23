@@ -313,8 +313,8 @@ pub struct State {
     /// Whether Forward kinematics is open in the Pose palette, showing its
     /// parts.
     pub fk_open: bool,
-    /// Characters whose skeleton is unfolded in the Outliner.
-    pub skeleton_open: HashSet<ObjectId>,
+    /// What the Animator panel's skeleton is searched by.
+    pub animator_search: String,
     /// The project that is open; `Project::none()` while the project
     /// selector shows.
     pub project: Project,
@@ -373,6 +373,9 @@ pub struct State {
     pub renaming: Option<(ObjectId, String)>,
     /// The Content panel was asked for and should come to the front.
     pub show_content: bool,
+    /// Something asked for the Animator panel: it is opened if it is not
+    /// shown, and brought forward.
+    pub show_animator: bool,
     /// The folder open in the Content panel, relative to the project: one
     /// of the project's folders or a folder the user made below one.
     pub subfolder: String,
@@ -824,7 +827,7 @@ impl State {
             sun_turning: false,
             pose_bone: None,
             fk_open: false,
-            skeleton_open: HashSet::new(),
+            animator_search: String::new(),
             library: Library::new(&project),
             project,
             selector: None,
@@ -853,6 +856,7 @@ impl State {
             scene_folded: false,
             renaming: None,
             show_content: false,
+            show_animator: false,
             subfolder: project::FOLDERS[0].to_owned(),
             folder_back: Vec::new(),
             folder_forward: Vec::new(),

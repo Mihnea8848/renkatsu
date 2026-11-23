@@ -12,6 +12,7 @@
 mod about;
 mod anim_import;
 mod animations;
+mod animator;
 mod bones;
 mod brand;
 mod camera;
@@ -669,6 +670,7 @@ impl Studio {
             state.pose_bone = Some(bone.clone());
             state.property_tab = 2;
             state.fk_open = true;
+            state.show_animator = true;
         }
         state.doc.selected = match cli.select.as_deref() {
             None => first,
@@ -690,9 +692,6 @@ impl Studio {
                 )
             }
         };
-        if let (Some(_), Some(id)) = (&cli.pose_bone, state.doc.selected) {
-            state.skeleton_open.insert(id);
-        }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
                 .iter()
@@ -1070,6 +1069,14 @@ impl eframe::App for Studio {
             self.bottom = Panel::Content;
             panels::open(&mut self.dock, Panel::Content);
             if let Some(tab) = self.dock.find_tab(&Panel::Content) {
+                let _ = self.dock.set_active_tab(tab);
+            }
+        }
+
+        // Posing by hand was switched on: the Animator panel comes forward.
+        if std::mem::take(&mut self.state.show_animator) {
+            panels::open(&mut self.dock, Panel::Animator);
+            if let Some(tab) = self.dock.find_tab(&Panel::Animator) {
                 let _ = self.dock.set_active_tab(tab);
             }
         }
