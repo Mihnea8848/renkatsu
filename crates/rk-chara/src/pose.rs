@@ -138,12 +138,21 @@ impl BoneEdit {
     }
 
     /// The edit that takes a bone from `base` to `posed`: `on` undone, to
-    /// hold a pose over the bones as loaded.
+    /// hold a pose over the bones as loaded. What is left of rounding, far
+    /// below what shows, is dropped.
     pub fn baked(base: Trs, posed: Trs) -> BoneEdit {
+        const CRUMB: f32 = 1e-6;
+        let tidy =
+            |v: Vec3, to: f32| Vec3::from_array(v.to_array().map(|x| if (x - to).abs() < CRUMB { to } else { x }));
+        let rot = (base.rot.inverse() * posed.rot).normalize();
         BoneEdit {
-            rot: (base.rot.inverse() * posed.rot).normalize(),
-            pos: posed.pos - base.pos,
-            scale: posed.scale / base.scale,
+            rot: if rot.xyz().length() < CRUMB {
+                Quat::IDENTITY
+            } else {
+                rot
+            },
+            pos: tidy(posed.pos - base.pos, 0.0),
+            scale: tidy(posed.scale / base.scale, 1.0),
         }
     }
 }
@@ -420,6 +429,11 @@ mod tests {
         assert!(back.pos.abs_diff_eq(posed.pos, 1e-6));
         assert!(back.rot.dot(posed.rot).abs() > 1.0 - 1e-6);
         assert!(back.scale.abs_diff_eq(posed.scale, 1e-6));
+        let crumbs = Trs {
+            pos: base.pos + Vec3::splat(4e-10),
+            ..base
+        };
+        assert!(BoneEdit::baked(base, crumbs).is_identity());
     }
 
     #[test]

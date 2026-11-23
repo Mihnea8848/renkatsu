@@ -116,7 +116,7 @@ fn is_folder(project: &Project, rel: &str) -> bool {
 
 /// A name in `dir` that is free: `stem`, or `stem` with the first free
 /// number, with the extension when there is one.
-fn free_name(dir: &Path, stem: &str, extension: Option<&str>) -> String {
+pub fn free_name(dir: &Path, stem: &str, extension: Option<&str>) -> String {
     let named = |n: u32| {
         let stem = if n == 1 { stem.to_owned() } else { format!("{stem} {n}") };
         match extension {

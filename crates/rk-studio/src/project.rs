@@ -49,7 +49,7 @@ pub const EXTENSION: &str = "rkproj";
 pub const CHARACTERS: &str = "Characters";
 pub const ANIMATIONS: &str = "Animations";
 /// Where Renkatsu 0.1.4 kept its links to animations, and where poses
-/// made by hand will go.
+/// made by hand go.
 pub const POSES: &str = "Poses";
 pub const SCENES: &str = "Scenes";
 /// The extension of a scene file.
@@ -463,6 +463,7 @@ impl Project {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case(OLD_LINK)))
+            .filter(|p| !crate::poses::is_pose_file(p))
             .collect();
         if links.is_empty() {
             return;

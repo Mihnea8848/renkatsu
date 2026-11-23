@@ -1227,6 +1227,12 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     beside(&resp).show(|ui| outfit_menu(ui, k, st));
                 } else if *name == "Shoes" {
                     beside(&resp).show(|ui| shoes_menu(ui, k, st));
+                } else if *name == "Save pose" {
+                    if resp.clicked() && st.doc.selection().is_some_and(|o| o.kind() == Kind::Character) {
+                        st.run(Command::SavePose);
+                    }
+                } else if *name == "Load pose" {
+                    beside(&resp).show(|ui| pose_menu(ui, k, st));
                 } else if *name == "Load clip" {
                     beside(&resp).show(|ui| {
                         if let Some(chosen) = crate::panels::animation_items(ui, k, st, st.doc.selected) {
@@ -1308,6 +1314,22 @@ pub fn mirror(st: &mut State, copy: bool) {
             }
         }
     });
+}
+
+/// The project's poses, to give the selected character one.
+fn pose_menu(ui: &mut Ui, k: &Look, st: &mut State) {
+    let character = st.doc.selection().is_some_and(|o| o.kind() == Kind::Character);
+    let poses = crate::poses::scan(&st.project);
+    if poses.is_empty() {
+        widgets::menu_item(ui, k, Kind::Pose.glyph(), "No poses", "", false);
+    }
+    for rel in poses {
+        let name = crate::content::stem(&rel).to_owned();
+        if widgets::menu_item(ui, k, Kind::Pose.glyph(), &name, "", character) {
+            st.run(Command::LoadPose(rel));
+            ui.close();
+        }
+    }
 }
 
 /// Whether the selected character plays an animation.
@@ -1414,15 +1436,13 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 22] = [
+const LATER_TOOLS: [&str; 20] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
     "Inverse kinematics",
-    "Load pose",
-    "Save pose",
     "Hands",
     "Look at camera",
     "Depth of field",

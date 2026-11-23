@@ -514,12 +514,16 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                             acts.push(Act::Run(command));
                         }
                     });
-                    // An animation of the project dropped on a character.
+                    // An animation or a pose of the project dropped on a
+                    // character.
                     if row.kind == Kind::Character {
                         if let Some(file) = resp.dnd_release_payload::<crate::content_panel::DragFile>() {
                             if let Some(item) = st.animations.find(&file.0) {
                                 acts.push(Act::Select(Some(id)));
                                 acts.push(Act::Run(Command::Animate(Some(item.reference()))));
+                            } else if file.0.to_lowercase().ends_with(".rkpose") {
+                                acts.push(Act::Select(Some(id)));
+                                acts.push(Act::Run(Command::LoadPose(file.0.clone())));
                             }
                         }
                     }

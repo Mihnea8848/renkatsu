@@ -924,6 +924,11 @@ impl Live {
         )
     }
 
+    /// Where a built character's animation was last posed, in passes.
+    pub fn phase(&self, id: ObjectId) -> Option<f32> {
+        self.actors.iter().find(|a| a.id == id)?.phase
+    }
+
     /// The names of a built character's FK bones in `part`.
     pub fn part_bones(&self, id: ObjectId, part: Part) -> Vec<String> {
         self.actors

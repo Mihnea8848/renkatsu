@@ -41,6 +41,7 @@ mod mods;
 mod mugshot;
 mod packages;
 mod panels;
+mod poses;
 mod preferences;
 mod profile;
 mod project;
@@ -166,6 +167,14 @@ struct Cli {
     /// built, to picture it.
     #[arg(long, hide = true)]
     bake_pose: bool,
+    /// Save the selected character's pose once she is built (after a
+    /// bake asked for), to picture it.
+    #[arg(long, hide = true)]
+    save_pose: bool,
+    /// Give the selected character this pose file of the project at the
+    /// start, to picture it.
+    #[arg(long, hide = true)]
+    load_pose: Option<String>,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -709,6 +718,7 @@ impl Studio {
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
         state.bake_pending = cli.bake_pose;
+        state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }
@@ -774,6 +784,9 @@ impl Studio {
             // The project's own copy when it has one.
             let own = state.animations.of(&named).map(|i| i.reference());
             state.run(Command::Animate(Some(own.unwrap_or(named))));
+        }
+        if let Some(rel) = &cli.load_pose {
+            state.run(Command::LoadPose(rel.clone()));
         }
         if let Some(seconds) = cli.scene_time {
             state.playback = Playback::Paused;
@@ -1121,6 +1134,19 @@ impl eframe::App for Studio {
             if ready {
                 viewport::bake_animation(&mut self.state);
                 self.state.bake_pending = false;
+            }
+        }
+
+        // A save asked for at the start, once the character is built.
+        if self.state.save_pose_pending && !self.state.bake_pending {
+            let built = self
+                .state
+                .doc
+                .selected
+                .is_some_and(|id| self.state.live.as_ref().is_some_and(|l| l.joints(id).is_some()));
+            if built {
+                self.state.run(Command::SavePose);
+                self.state.save_pose_pending = false;
             }
         }
 
