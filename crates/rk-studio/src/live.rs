@@ -89,6 +89,8 @@ struct Actor {
     /// bones' nodes.
     layer: Option<rk_chara::pose::Layer>,
     edits: Vec<(usize, rk_chara::pose::BoneEdit)>,
+    /// The bones CharaStudio poses by hand (FK), as found on it.
+    fk: Vec<rk_chara::bone_info::FkBone>,
     /// Its textures are on the GPU: it can be drawn without a wait.
     warm: bool,
     /// Seconds the build took.
@@ -564,6 +566,13 @@ impl Actor {
     }
 }
 
+/// CharaStudio's table of FK bones, read from the game once.
+fn fk_table(game: &rk_vfs::Game) -> &'static std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo> {
+    static TABLE: std::sync::OnceLock<std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| rk_chara::bone_info::read(game))
+}
+
 /// The animation file of the project that a scene's animation names,
 /// when it names one that is there. A link of Renkatsu 0.1.4 is no such
 /// file: it plays from what is installed.
@@ -776,6 +785,27 @@ impl Live {
     /// What the camera can focus on for an object: a built character.
     pub fn subject(&self, id: ObjectId) -> Option<Focus> {
         self.actors.iter().find(|a| a.id == id).map(Actor::subject)
+    }
+
+    /// Where a built character's FK bones of the parts shown are in the
+    /// world, by name: the handles the Pose tool shows.
+    pub fn fk_handles(&self, id: ObjectId) -> Option<Vec<(String, Vec3)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let (world, active) = actor.chara.scene.world();
+        Some(
+            actor
+                .fk
+                .iter()
+                .filter(|b| active.get(b.node).copied().unwrap_or(false))
+                // CharaStudio's FK starts with the body and the neck on;
+                // the other parts show once they can be switched on.
+                .filter(|b| {
+                    use rk_chara::bone_info::Part;
+                    b.info.parts().iter().any(|p| matches!(p, Part::Body | Part::Neck))
+                })
+                .map(|b| (b.info.bone.clone(), world[b.node].w_axis.truncate()))
+                .collect(),
+        )
     }
 
     /// A built character's joints, the bones a pose edits: the nodes named
@@ -1654,6 +1684,8 @@ impl Live {
             ..Default::default()
         };
         let chara = rk_chara::build(game, &card, &options)?;
+        let fk =
+            rk_chara::bone_info::on_character(fk_table(game), &chara.scene, chara.animator, chara.top, card.sex() == 1);
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
@@ -1675,6 +1707,7 @@ impl Live {
             playing: None,
             animation_problem: None,
             phase: None,
+            fk,
             warm: false,
             took: 0.0,
         })

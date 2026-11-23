@@ -128,6 +128,8 @@ pub struct Gizmos {
     band: Option<Pos2>,
     /// The icons drawn last frame, which clicks pick from.
     shown: Vec<Shown>,
+    /// The bone handles the Pose tool drew last frame, near ones last.
+    balls: Vec<Ball>,
     /// Whether each icon was behind something, for the camera's eye and
     /// the icon's place it was worked out for.
     behind: std::collections::HashMap<ObjectId, (Vec3, Vec3, bool)>,
@@ -934,7 +936,17 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
         return true;
     }
 
-    let selecting = (1..=SCALE).contains(&tool);
+    // The Pose tool: a click on a bone's ball chooses the bone, and shows
+    // it on the Pose page; elsewhere it selects as the Select tool does.
+    if tool == crate::viewport::POSE_TOOL && scene.clicked_by(PointerButton::Primary) && !alt {
+        if let Some(ball) = pos.and_then(|pos| ball_at(st, pos)).cloned() {
+            st.pose_bone = Some(ball.bone);
+            st.property_tab = 2;
+            st.doc.selected = Some(ball.character);
+            return true;
+        }
+    }
+    let selecting = (1..=SCALE).contains(&tool) || tool == crate::viewport::POSE_TOOL;
     let at = if (MOVE..=SCALE).contains(&tool) {
         frame(st, &view, tool)
     } else {
@@ -1105,6 +1117,86 @@ fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, look: &IconLook, selected: boo
         size * 14.0 / 11.0,
         Theme::glass(look.tint, alpha(255)),
     );
+}
+
+/// A bone's handle as the Pose tool shows it: CharaStudio's ball on each
+/// bone it poses by hand.
+#[derive(Debug, Clone)]
+struct Ball {
+    character: ObjectId,
+    bone: String,
+    at: Pos2,
+    radius: f32,
+}
+
+/// A ball's radius in the world, and the least and most it shows at.
+const BALL_SIZE: f32 = 0.03;
+const BALL_SMALLEST: f32 = 3.5;
+const BALL_LARGEST: f32 = 9.0;
+
+/// The handles of the selected characters' FK bones, far ones first.
+fn balls(st: &State, view: &View) -> Vec<Ball> {
+    let Some(live) = st.live.as_ref() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(f32, Ball)> = Vec::new();
+    for id in st.doc.selected_all() {
+        let Some(handles) = live.fk_handles(id) else { continue };
+        for (bone, world) in handles {
+            let depth = (world - view.eye).dot(view.forward);
+            let (Some(at), Some(edge)) = (view.screen(world), view.screen(world + Vec3::Y * BALL_SIZE)) else {
+                continue;
+            };
+            if depth <= 0.0 {
+                continue;
+            }
+            let radius = (edge - at).length().clamp(BALL_SMALLEST, BALL_LARGEST);
+            out.push((
+                depth,
+                Ball {
+                    character: id,
+                    bone,
+                    at,
+                    radius,
+                },
+            ));
+        }
+    }
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, b)| b).collect()
+}
+
+/// The ball under a point, the nearest of those it touches.
+fn ball_at(st: &State, pos: Pos2) -> Option<&Ball> {
+    st.gizmo
+        .balls
+        .iter()
+        .rev()
+        .find(|b| b.at.distance(pos) <= b.radius + 2.0)
+}
+
+/// Draws the balls as CharaStudio's guide does: the group's colour (white
+/// by default) at three quarters and a quarter seen through, full under
+/// the pointer and for the bone chosen.
+fn draw_balls(p: &egui::Painter, k: &Look, st: &State, pointer: Option<Pos2>) {
+    let hot = pointer
+        .and_then(|pos| ball_at(st, pos))
+        .map(|b| (b.character, b.bone.clone()));
+    let chosen = st.pose_bone.as_deref();
+    for b in &st.gizmo.balls {
+        let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
+        let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
+        let fill = if lit || on {
+            Color32::WHITE
+        } else {
+            Color32::from_rgba_unmultiplied(191, 191, 191, 64)
+        };
+        p.circle_filled(b.at, b.radius, fill);
+        p.circle_stroke(b.at, b.radius, Stroke::new(1.0, Color32::from_black_alpha(90)));
+        if on {
+            p.circle_stroke(b.at, b.radius + 2.0, Stroke::new(1.5, k.t.select_bright));
+        }
+    }
 }
 
 /// An icon as the viewport shows it this frame: for its object and the
@@ -1344,8 +1436,14 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
 
     draw_lamp_reach(&p, st, &view);
     let pointer = ui.ctx().pointer_hover_pos();
+    st.gizmo.balls = if tool == crate::viewport::POSE_TOOL {
+        balls(st, &view)
+    } else {
+        Vec::new()
+    };
     let shown = shown_icons(st, &view, pointer);
     draw_icons(&p, k, st, &view, &shown);
+    draw_balls(&p, k, st, pointer);
     st.gizmo.shown = shown;
 
     let shown = match &st.gizmo.drag {

@@ -1643,15 +1643,8 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
             keys if keys.is_empty() => format!("{name} ({key})"),
             keys => format!("{name} ({keys})"),
         };
-        let later = i == POSE_TOOL;
-        let sense = if later { Sense::hover() } else { Sense::click() };
-        let tip = if later {
-            format!("{name}: not available yet")
-        } else {
-            tip
-        };
         let resp = ui
-            .interact(r, ui.id().with(("tool-strip", i)), sense)
+            .interact(r, ui.id().with(("tool-strip", i)), Sense::click())
             .on_hover_text(tip);
         if resp.clicked() {
             st.tool = i;
@@ -1663,13 +1656,7 @@ fn tool_strip(ui: &mut Ui, k: &Look, st: &mut State, origin: Pos2, vertical: boo
         } else if resp.hovered() {
             p.rect_filled(r.shrink(3.0), 2.0, k.t.control);
         }
-        let color = if later {
-            Theme::glass(k.t.text_dim, 150)
-        } else if on || resp.hovered() {
-            Color32::WHITE
-        } else {
-            k.t.text
-        };
+        let color = if on || resp.hovered() { Color32::WHITE } else { k.t.text };
         glyph(p, k, r.center(), g, 16.0, color);
         // A hairline sets the navigation tools and the pose tool apart.
         if i == 2 || i == 5 {
