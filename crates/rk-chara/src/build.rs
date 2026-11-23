@@ -2884,10 +2884,25 @@ impl Character {
     /// Writes one frame of a motion to the bones: the heels come off, the
     /// motion writes the bones it names, and the heels go on again.
     pub fn animate(&mut self, motion: &crate::motion::Bound, phase: f32, states: &crate::clothes_state::States) {
+        self.pose_frame(Some((motion, phase)), &[], states);
+    }
+
+    /// Poses one frame: the heels come off, the motion (if any) writes the
+    /// bones it names, the edits made by hand go on top of that
+    /// (`crate::pose`), and the heels go on again.
+    pub fn pose_frame(
+        &mut self,
+        motion: Option<(&crate::motion::Bound, f32)>,
+        edits: &[(usize, crate::pose::BoneEdit)],
+        states: &crate::clothes_state::States,
+    ) {
         if let Some(heels) = &self.heels {
             heels.reset(&mut self.scene);
         }
-        motion.apply(&mut self.scene, phase);
+        if let Some((motion, phase)) = motion {
+            motion.apply(&mut self.scene, phase);
+        }
+        crate::pose::apply(&mut self.scene, edits);
         self.wear_heels(states);
     }
 }

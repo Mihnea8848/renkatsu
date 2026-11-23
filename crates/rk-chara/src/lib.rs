@@ -34,6 +34,7 @@ pub mod more_outfits;
 pub mod motion;
 pub mod overlays;
 pub mod physics;
+pub mod pose;
 pub mod pregnancy;
 pub mod pushup;
 pub mod scene;

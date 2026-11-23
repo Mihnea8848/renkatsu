@@ -750,6 +750,7 @@ fn preview_content(st: &State) -> Option<Content> {
             liquid: *liquid,
             liquid_clothes: *liquid_clothes,
             animation: None,
+            pose_layer: None,
             profile: None,
             light_group: None,
         }),

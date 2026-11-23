@@ -242,6 +242,10 @@ pub enum Content {
         /// call it `pose`.
         #[serde(default, alias = "pose", skip_serializing_if = "Option::is_none")]
         animation: Option<Box<Animation>>,
+        /// The pose made by hand, over the animation or over the
+        /// character as built (`rk_chara::pose`); none for no edits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose_layer: Option<Box<rk_chara::pose::Layer>>,
         /// Who the character is, as changed in this scene; none keeps the
         /// card's. The card itself is never written.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +420,7 @@ impl Content {
             liquid: [0; rk_chara::siru::PARTS],
             liquid_clothes: true,
             animation: None,
+            pose_layer: None,
             profile: None,
             light_group: None,
         }

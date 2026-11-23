@@ -85,6 +85,10 @@ struct Actor {
     animation_problem: Option<String>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
+    /// The edits made by hand the bones were last posed with, and their
+    /// bones' nodes.
+    layer: Option<rk_chara::pose::Layer>,
+    edits: Vec<(usize, rk_chara::pose::BoneEdit)>,
     /// Its textures are on the GPU: it can be drawn without a wait.
     warm: bool,
     /// Seconds the build took.
@@ -396,6 +400,20 @@ impl Actor {
         Some(self.applied.unwrap_or_default().inverse() * world[node])
     }
 
+    /// Poses one frame: the animation at `phase` when there is one, and
+    /// the edits made by hand on top. The edited bones start from how they
+    /// were loaded, so that a bone the animation does not move takes its
+    /// edit once, not once more every frame.
+    fn pose_frame(&mut self, phase: Option<f32>, states: &States) {
+        for &(node, _) in &self.edits {
+            if let (Some(n), Some(rest)) = (self.chara.scene.nodes.get_mut(node), self.rest.get(node)) {
+                n.local = *rest;
+            }
+        }
+        let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
+        self.chara.pose_frame(motion, &self.edits, states);
+    }
+
     /// Puts the bones back as they were loaded.
     fn back_to_rest(&mut self) {
         for (node, rest) in self.chara.scene.nodes.iter_mut().zip(&self.rest) {
@@ -422,6 +440,7 @@ impl Actor {
             liquid,
             liquid_clothes,
             animation: pose,
+            pose_layer,
             ..
         } = &object.content
         else {
@@ -488,6 +507,16 @@ impl Actor {
             again = true;
         }
 
+        // Edits made by hand: a change poses the character again from
+        // the bones as loaded, so a bone no longer edited goes back.
+        let layer = pose_layer.as_deref().filter(|l| !l.is_empty());
+        if layer != self.layer.as_ref() {
+            self.layer = layer.cloned();
+            self.edits = layer.map_or_else(Vec::new, |l| l.resolve(&self.chara.scene, self.chara.top));
+            self.back_to_rest();
+            again = true;
+        }
+
         let phase = match (&self.playing, pose) {
             (Some(playing), Some(pose)) => Some(playing.phase(pose, clock.time)),
             _ => None,
@@ -500,9 +529,7 @@ impl Actor {
             if *simulate {
                 self.chara.physics.begin_frame(&mut self.chara.scene);
             }
-            if let (Some(playing), Some(phase)) = (&self.playing, phase) {
-                self.chara.animate(&playing.bound, phase, &states);
-            }
+            self.pose_frame(phase, &states);
             if *simulate {
                 self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
             }
@@ -516,15 +543,16 @@ impl Actor {
         self.back_to_rest();
         self.place(world, false);
         self.chara.refresh_heels(&states);
-        if let (Some(playing), Some(phase)) = (&self.playing, phase) {
-            self.chara.animate(&playing.bound, phase, &states);
+        let motion = self.playing.is_some() && phase.is_some();
+        if motion || !self.edits.is_empty() {
+            self.pose_frame(phase, &states);
             self.chara.physics.reset(&self.chara.scene);
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
                 for _ in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
-                    self.chara.animate(&playing.bound, phase, &states);
+                    self.pose_frame(phase, &states);
                     self.chara
                         .physics
                         .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
@@ -1621,6 +1649,8 @@ impl Live {
             clothes: [cs::ON; cs::KINDS],
             liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
+            layer: None,
+            edits: Vec::new(),
             playing: None,
             animation_problem: None,
             phase: None,
