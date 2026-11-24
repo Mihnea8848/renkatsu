@@ -45,6 +45,7 @@ pub mod pushup;
 pub mod scene;
 pub mod shape;
 pub mod siru;
+pub mod skin_effects;
 pub mod slider_unlocker;
 pub mod stiletto;
 pub mod uncensor_selector;

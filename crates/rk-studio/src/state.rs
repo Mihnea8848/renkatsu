@@ -467,7 +467,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 21],
+    pub sections: [bool; 22],
     /// The page of a character's Properties: the scene's settings, the
     /// card's profile or its likes.
     pub property_tab: usize,
@@ -931,7 +931,7 @@ impl State {
             clock: 0.0,
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true,
+                true, true, true, true, false,
             ],
             property_tab: 0,
             profiles: Default::default(),

@@ -583,6 +583,8 @@ impl Actor {
             if let Some(face) = &self.chara.face {
                 face.show(&mut self.chara.scene, self.layer.as_ref().and_then(|l| l.face.as_ref()));
             }
+            let skin = self.layer.as_ref().map(|l| l.skin).unwrap_or_default();
+            self.chara.show_skin_effects(&skin);
             again = true;
         }
         // A hand pattern not loaded yet is read once.

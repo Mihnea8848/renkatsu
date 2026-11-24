@@ -146,7 +146,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         // `siru`: a page of its own, since none of it is of the card.
         if Some(page) == h_page {
             let Content::Character {
-                liquid, liquid_clothes, ..
+                liquid,
+                liquid_clothes,
+                pose_layer,
+                ..
             } = &mut object.content
             else {
                 return;
@@ -177,6 +180,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 });
                 section_end(ui, k);
             }
+            let waiting = built.is_none().then_some("The character is not built");
+            skin_effects_section(ui, k, st, waiting, pose_layer);
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
@@ -1269,6 +1274,7 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
 /// Section numbers of the hands and the face.
 pub const HANDS_SECTION: usize = 19;
 pub const FACE_SECTION: usize = 20;
+pub const SKIN_SECTION: usize = 21;
 
 /// The hands' patterns and the face, as Studio's hand and face panels set
 /// them: each pattern a picture that opens a grid of the others.
@@ -1374,6 +1380,26 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 FINE,
             );
         });
+        row(ui, k, "Tears", waiting, |ui, rect| {
+            let options = [("None", true), ("Small", true), ("Middle", true), ("Large", true)];
+            let chosen = usize::from(face.tears.min(3));
+            if let Some(i) = choices(ui, k, rect, ui_id.with("tears"), Some(chosen), &options) {
+                face.tears = i as u8;
+            }
+        });
+        row(ui, k, "Blush", waiting, |ui, rect| {
+            widgets::number(
+                ui,
+                k,
+                rect,
+                ui_id.with("blush"),
+                &mut face.blush,
+                Marker::None,
+                true,
+                FINE,
+            );
+        });
+        face.blush = face.blush.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
         let shown = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
@@ -1382,6 +1408,40 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
         }
         section_end(ui, k);
     }
+    if next != layer {
+        *pose_layer = (!next.is_empty()).then_some(next);
+    }
+}
+
+/// KK_SkinEffects: a level for each of its effects, kept in the pose so
+/// that it can be keyed with it.
+fn skin_effects_section(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    waiting: Option<&str>,
+    pose_layer: &mut Option<Box<rk_chara::pose::Layer>>,
+) {
+    if !section(ui, k, st, SKIN_SECTION, "Skin effects") {
+        return;
+    }
+    let ui_id = ui.id().with("skin effects");
+    let layer = pose_layer.clone().unwrap_or_default();
+    let mut next = layer.clone();
+    for (i, effect) in rk_chara::skin_effects::EFFECTS.iter().enumerate() {
+        row(ui, k, effect.name, waiting, |ui, rect| {
+            let names = ["None", "1", "2", "3"];
+            let options: Vec<(&str, bool)> = names[..=usize::from(effect.levels)]
+                .iter()
+                .map(|n| (*n, true))
+                .collect();
+            let chosen = usize::from(next.skin[i].min(effect.levels));
+            if let Some(level) = choices(ui, k, rect, ui_id.with(i), Some(chosen), &options) {
+                next.skin[i] = level as u8;
+            }
+        });
+    }
+    section_end(ui, k);
     if next != layer {
         *pose_layer = (!next.is_empty()).then_some(next);
     }

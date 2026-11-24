@@ -152,6 +152,10 @@ pub struct Character {
     pub hands: [Option<crate::hand_pattern::HandClip>; 2],
     /// The face's controllers, to show another face.
     pub face: Option<crate::face::Rig>,
+    /// The body's and the face's skin textures before the skin effects,
+    /// with the renderers wearing them, and the levels shown.
+    skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
+    skin_shown: crate::skin_effects::Levels,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -179,6 +183,9 @@ struct Builder<'g> {
     unlocked: bool,
     /// The face controllers, once the head is loaded.
     face: Option<crate::face::Rig>,
+    /// The body's and the face's finished skin textures and the renderers
+    /// that wear them, for the skin effects to be laid over.
+    skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
     /// Renderers that a `ChaCopyBodyMaterial` component gives the body's
     /// material, with the queue it asks for (-1 keeps the body's).
     body_copies: Vec<(Vec<usize>, i32)>,
@@ -509,9 +516,16 @@ impl<'g> Builder<'g> {
         renderers: &[&str],
         draw: Option<crate::scene::MaterialInst>,
         image: Image,
-    ) {
+    ) -> (Vec<usize>, Arc<Image>) {
+        let image = Arc::new(image);
+        let worn: Vec<usize> = inst
+            .renderers
+            .iter()
+            .copied()
+            .filter(|&r| renderers.contains(&self.scene.renderers[r].name.as_str()))
+            .collect();
         let slot = TexSlot {
-            image: Arc::new(image),
+            image: image.clone(),
             scale: [1.0, 1.0],
             offset: [0.0, 0.0],
         };
@@ -528,6 +542,7 @@ impl<'g> Builder<'g> {
             }
             r.materials[0].textures.insert("_MainTex".into(), slot.clone());
         }
+        (worn, image)
     }
 
     /// Sets the values the game writes onto a skin material from the card:
@@ -1960,7 +1975,7 @@ impl<'g> Builder<'g> {
             .collect();
         let mut skinned = vec!["o_body_a"];
         skinned.extend(censored);
-        self.set_skin(inst, &skinned, draw, image);
+        self.skin_base[0] = Some(self.set_skin(inst, &skinned, draw, image));
         // Body detail: painted lines, the detail normal map and their
         // strength, and the shine sliders.
         let detail = self.skin_detail(
@@ -2117,7 +2132,7 @@ impl<'g> Builder<'g> {
             m.floats.insert("_nip".into(), 0.0);
         }
         let image = self.over(kind::FACE_OVER, image);
-        self.set_skin(inst, &["cf_O_face"], draw, image);
+        self.skin_base[1] = Some(self.set_skin(inst, &["cf_O_face"], draw, image));
         // Face detail: painted lines, the detail normal map and their
         // strength, cheek and lip shine.
         let detail = self.skin_detail(
@@ -2153,6 +2168,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         face: None,
+        skin_base: [None, None],
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -2934,6 +2950,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         ik_rig,
         hands: [None, None],
         face: b.face.take(),
+        skin_base: std::mem::take(&mut b.skin_base),
+        skin_shown: Default::default(),
         scene: b.scene,
         top,
         animator: anim.root,
@@ -3038,6 +3056,33 @@ impl Character {
     /// bones it names, the edits made by hand go on top of that
     /// (`crate::pose`), IK moves the body to the layer's targets while it
     /// is on (`crate::ik`), and the heels go on again.
+    /// Lays the skin effects at `levels` over the body and the face, as
+    /// KK_SkinEffects does; a part whose effects did not change keeps its
+    /// texture.
+    pub fn show_skin_effects(&mut self, levels: &crate::skin_effects::Levels) {
+        use crate::skin_effects::{paint, EFFECTS};
+        for (part, face) in [(0, false), (1, true)] {
+            let changed = EFFECTS
+                .iter()
+                .zip(levels.iter().zip(&self.skin_shown))
+                .any(|(e, (a, b))| e.face == face && a != b);
+            let Some((worn, base)) = self.skin_base[part].as_ref().filter(|_| changed) else {
+                continue;
+            };
+            let image = paint(base, levels, face).map_or_else(|| base.clone(), Arc::new);
+            for &r in worn {
+                if let Some(slot) = self.scene.renderers[r]
+                    .materials
+                    .first_mut()
+                    .and_then(|m| m.textures.get_mut("_MainTex"))
+                {
+                    slot.image = image.clone();
+                }
+            }
+        }
+        self.skin_shown = *levels;
+    }
+
     pub fn pose_frame(
         &mut self,
         motion: Option<(&crate::motion::Bound, f32)>,
