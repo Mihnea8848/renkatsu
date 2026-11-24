@@ -279,6 +279,9 @@ enum Cmd {
         /// Only the cases whose file name contains one of these texts.
         #[arg(long)]
         only: Vec<String>,
+        /// List the shaft's and her vagina's bones one by one.
+        #[arg(long)]
+        bones: bool,
     },
     CaptureCheck {
         /// Folder with the batch's .json files and pictures.
@@ -610,7 +613,7 @@ fn main() -> Result<()> {
             show,
             studio,
         } => bench::bench(&list, &captures, &out, &show, studio),
-        Cmd::BpCheck { dir, only } => bp_check::check(&dir, &only),
+        Cmd::BpCheck { dir, only, bones } => bp_check::check(&dir, &only, bones),
         Cmd::CaptureCheck {
             dir,
             out,

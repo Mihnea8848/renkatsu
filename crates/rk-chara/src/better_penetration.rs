@@ -617,7 +617,7 @@ pub struct MouthPull {
     /// How far the mouth is pushed in (positive) or pulled out (negative).
     pub amount: f32,
     /// The shaft's root's distance to the entry at the last pulling frame.
-    last_distance: f32,
+    pub last_distance: f32,
 }
 
 impl MouthPull {
@@ -633,6 +633,20 @@ impl MouthPull {
     /// Returns where the mouth bone goes, in the world's directions, when
     /// this frame moves it.
     pub fn step(&mut self, start: Vec3, entry: Vec3, base_length: f32, oral: bool, s: &Settings) -> Option<Vec3> {
+        self.step_by(start, entry, base_length, oral, s, PULL_STEP)
+    }
+
+    /// [`Self::step`] over a frame of `dt` seconds, as the plugin measures
+    /// it with Unity's frame time.
+    pub fn step_by(
+        &mut self,
+        start: Vec3,
+        entry: Vec3,
+        base_length: f32,
+        oral: bool,
+        s: &Settings,
+        dt: f32,
+    ) -> Option<Vec3> {
         let direction = unity::normalize(entry - start);
         let distance = unity::distance(start, entry);
         // Past the shaft's length, the mouth is not in reach.
@@ -641,7 +655,7 @@ impl MouthPull {
             return None;
         }
         let pulled = self.last_distance - distance;
-        self.amount += pulled * s.pull_rate * PULL_STEP;
+        self.amount += pulled * s.pull_rate * dt;
         if self.amount > s.max_push {
             self.amount = s.max_push;
         }

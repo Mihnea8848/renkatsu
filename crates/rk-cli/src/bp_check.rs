@@ -100,7 +100,7 @@ fn read(base: &Path) -> Result<Case> {
     })
 }
 
-pub fn check(dir: &Path, only: &[String]) -> Result<()> {
+pub fn check(dir: &Path, only: &[String], bones_listed: bool) -> Result<()> {
     let game = rk_vfs::Game::open_user(&[])?;
     let config = rk_core::Config::load()?;
     let mut bases: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -114,6 +114,7 @@ pub fn check(dir: &Path, only: &[String]) -> Result<()> {
     bases.sort();
     // The cases of one sequence share their characters, built once.
     let mut built: HashMap<String, (rk_chara::Character, rk_chara::Character)> = HashMap::new();
+    let mut pulls: HashMap<String, bp::MouthPull> = HashMap::new();
     for base in bases {
         let case = read(&base)?;
         let name = base.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
@@ -202,9 +203,29 @@ pub fn check(dir: &Path, only: &[String]) -> Result<()> {
             }
         }
         println!("  shaft points, mm off: {}", points.join(" "));
+        if bones_listed {
+            for &p in shaft.points.iter().chain(&shaft.virtual_points) {
+                let n = &him.scene.nodes[p].name;
+                if let Some(b) = him_bones.get(n) {
+                    let (os, or, _) = him_world[p].to_scale_rotation_translation();
+                    let (gs, gr, _) = b.world.to_scale_rotation_translation();
+                    println!(
+                        "      {n:<16} scale ours {os:.4} studio {gs:.4}  turn {:.2} deg",
+                        or.angle_between(gr).to_degrees()
+                    );
+                }
+            }
+        }
         println!("  shaft worst {:.2} mm at {}", worst.0, worst.1);
         // The colliders each of her dynamic bones got from him.
         let ours = shaft.partner_guests(&him.physics, &him.scene, &her.physics, &her.scene, mode, &settings);
+        // Several sit on one object, so they are told apart by their root.
+        let root_of = |b: usize| match &her.physics.bones[b] {
+            rk_chara::physics::Bone::Dynamic(d) => d.def.root.map(|r| her.scene.nodes[r].name.clone()),
+            _ => None,
+        };
+        let mut same = 0;
+        let mut differ = Vec::new();
         for db in case.him["her_dynamic_bones"]
             .as_array()
             .map(Vec::as_slice)
@@ -214,16 +235,80 @@ pub fn check(dir: &Path, only: &[String]) -> Result<()> {
             if !["Vagina", "cf_j_ana", "Belly"].iter().any(|k| db_name.contains(k)) {
                 continue;
             }
+            let root = db["root"].as_str().unwrap_or_default();
             let given = ours
                 .iter()
-                .find(|(b, _)| bp::bone_name(&her.physics, &her.scene, *b) == Some(db_name))
-                .map_or(0, |(_, g)| g.len());
+                .find(|(b, _)| {
+                    bp::bone_name(&her.physics, &her.scene, *b) == Some(db_name) && root_of(*b).as_deref() == Some(root)
+                })
+                .map_or(0, |(_, g)| g.len()) as i64;
+            let studio = db["colliders"].as_i64().unwrap_or(-1);
+            if studio == given {
+                same += 1;
+            } else {
+                differ.push(format!("{db_name} ({root}): Studio {studio}, ours {given}"));
+            }
+        }
+        println!("  her dynamic bones: {same} got the same colliders as in Studio");
+        for d in differ {
+            println!("    differs: {d}");
+        }
+        // Her vagina's bones once the dynamic bones settle on this pose,
+        // with his colliders and without: how far each lands from where the
+        // plugin's left it.
+        if mode == Mode::Vaginal {
+            let watched: Vec<(usize, String)> = her
+                .scene
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| {
+                    n.name.starts_with("cf_J_Vagina") && !n.name.contains("Pivot") && !n.name.contains("root")
+                })
+                .filter(|(_, n)| her_bones.contains_key(&n.name))
+                .map(|(i, n)| (i, n.name.clone()))
+                .collect();
+            let settled = |her: &mut rk_chara::Character, guests: rk_chara::physics::Guests| {
+                // As in Studio, she stands in the pose before the plugin
+                // links, so her particles are in place when the shaft comes.
+                pose(her, &her_bones);
+                her.physics.set_guests(Vec::new());
+                her.physics.settle(&mut her.scene, 120, rk_chara::physics::FRAME_TIME);
+                her.physics.set_guests(guests);
+                her.physics.settle(&mut her.scene, 120, rk_chara::physics::FRAME_TIME);
+                let (world, _) = her.scene.world();
+                let offs: Vec<f32> = watched
+                    .iter()
+                    .map(|(i, n)| (world[*i].w_axis - her_bones[n].world.w_axis).truncate().length() * 1000.0)
+                    .collect();
+                if bones_listed {
+                    for ((i, n), o) in watched.iter().zip(&offs) {
+                        let studio_local = her_bones[n].local.0;
+                        println!(
+                            "      {n:<28} {o:7.2} mm  ours local {:?}  studio local {:?}",
+                            her.scene.nodes[*i].local.pos, studio_local
+                        );
+                    }
+                }
+                let worst = offs.iter().copied().fold(0.0, f32::max);
+                let mean = offs.iter().sum::<f32>() / offs.len().max(1) as f32;
+                (worst, mean)
+            };
+            let with = settled(her, ours.clone());
+            let without = settled(her, Vec::new());
             println!(
-                "  her {db_name}: Studio {} colliders, ours {given}",
-                db["colliders"].as_i64().unwrap_or(-1)
+                "  her {} vagina bones, mm from Studio's: with the shaft worst {:.2}, mean {:.2}; without it worst {:.2}, mean {:.2}",
+                watched.len(),
+                with.0,
+                with.1,
+                without.0,
+                without.1
             );
         }
-        // Where the plugin held her mouth, along the shaft and across it.
+        // Her mouth through a sequence. The capture steps 1/30 s a frame
+        // and keeps every third; between two kept frames the plugin's pull
+        // adds up to the change of distance over them, unless it reached a
+        // limit on the way. The first frame sets where ours starts.
         if mode == Mode::Oral {
             let (Some(mouth), Some(node)) = (her_bones.get(bp::MOUTH_BONE), her.scene.find(her.top, bp::MOUTH_BONE))
             else {
@@ -232,11 +317,21 @@ pub fn check(dir: &Path, only: &[String]) -> Result<()> {
             let start = him_world[shaft.points[0]].w_axis.truncate();
             let along = bp::mouth_local(&her_world[node], (entry - start).normalize_or_zero());
             let at = mouth.local.0;
+            let studio = at.dot(along);
+            let distance = start.distance(entry);
+            let pull = pulls.entry(sequence.clone()).or_insert_with(|| {
+                let mut p = bp::MouthPull::new(shaft.base_length);
+                p.amount = studio;
+                p.last_distance = distance;
+                p
+            });
+            pull.step_by(start, entry, shaft.base_length, true, &settings, 1.0 / 30.0);
             println!(
-                "  mouth: Studio {:.2} mm along the shaft, {:.2} mm across; the shaft's root {:.1} mm from the entry",
-                at.dot(along) * 1000.0,
-                (at - along * at.dot(along)).length() * 1000.0,
-                start.distance(entry) * 1000.0
+                "  mouth: Studio {:.2} mm along the shaft ({:.2} across), ours {:.2} mm; the root {:.1} mm from the entry",
+                studio * 1000.0,
+                (at - along * studio).length() * 1000.0,
+                pull.amount * 1000.0,
+                distance * 1000.0
             );
         }
     }
