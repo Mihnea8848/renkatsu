@@ -26,9 +26,11 @@ struct Sub {
     triangles: u32,
     friction: vec2<f32>,
     thickness: f32,
-    pad0: u32,
-    pad1: u32,
-    pad2: u32,
+    // How much of its way from where it rests a point keeps in a substep.
+    keep: f32,
+    // How far off a cell of its own cloth a point is given it.
+    own_reach: f32,
+    pad: u32,
 }
 
 struct Point {
@@ -39,11 +41,14 @@ struct Point {
     tether: f32,
     inner: f32,
     anchor: u32,
-    // Bit 0: fixed. From bit 8: its net.
+    // Bit 0: fixed. Bit 1: the cell it is the first corner of has cloth.
+    // From bit 8: its net.
     bits: u32,
     turn: f32,
     pad: u32,
     around: vec4<u32>,
+    // Its net's first point, columns and rows.
+    grid: vec4<u32>,
 }
 
 struct Pose {
@@ -62,19 +67,21 @@ struct Bound {
 }
 
 @group(0) @binding(0) var<uniform> sub: Sub;
-// Places with how much each is pressed, speeds, predicted places.
+// Places with how much each is pressed, speeds, and per point two of
+// `next`: its predicted place and where it was when the substep began.
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> vel: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> next: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> points: array<Point>;
-// Per point 8 links (to, rest, soft, buckle) and 6 hinges (a, b, rest,
-// soft), floats as bits.
+// Per point 8 links (to, rest, soft, buckle) and 6 hinges of two each
+// (a, b, rest, soft; axis, axis, side), floats as bits.
 @group(0) @binding(5) var<storage, read> topo: array<vec4<u32>>;
 // Per shell 5 x 4 floats, then every shell's thicknesses.
 @group(0) @binding(6) var<storage, read> body: array<f32>;
 // Per boundary and slot.
 @group(0) @binding(7) var<storage, read> poses: array<Pose>;
-// Four planes of the map per point.
+// Per point four planes of the map, then the four triangles of its own
+// cloth it may meet, as numbers, -1 for none.
 @group(0) @binding(8) var<storage, read_write> planes: array<vec4<f32>>;
 // Three corners per triangle.
 @group(0) @binding(9) var<storage, read> triangles: array<vec4<f32>>;
@@ -86,8 +93,13 @@ struct Bound {
 const NONE: u32 = 0xffffffffu;
 const LINKS: u32 = 8u;
 const HINGES: u32 = 6u;
-const PER_POINT: u32 = 14u;
+const PER_POINT: u32 = 20u;
 const MAP_PLANES: u32 = 4u;
+const FOUND: u32 = 5u;
+const OWN: u32 = 4u;
+const OWN_NEAR: f32 = 0.01;
+const OWN_PIECE: u32 = 2u;
+const OWN_SPAN: f32 = 0.15;
 const BODY_PLANES: u32 = 16u;
 const ANGLES: u32 = 24u;
 const SHELL: u32 = 20u;
@@ -96,6 +108,7 @@ const GRAVITY: f32 = 9.81;
 const FASTEST: f32 = 4.0;
 const NEAR: f32 = 0.02;
 const HINGE_LEAST: f32 = 30.0;
+const HINGE_SKEW: vec2<f32> = vec2<f32>(0.2, 0.5);
 const FLATTEN: f32 = 0.8;
 const VERTEX_GAP: f32 = 0.003;
 
@@ -129,6 +142,62 @@ fn fixed(i: u32) -> bool {
 
 fn light(i: u32) -> f32 {
     return select(1.0, 0.0, fixed(i));
+}
+
+// Where point `i` is predicted to be, and where it was when the substep
+// began.
+fn ahead(i: u32) -> vec3<f32> {
+    return next[i * 2u].xyz;
+}
+
+fn was(i: u32) -> vec3<f32> {
+    return next[i * 2u + 1u].xyz;
+}
+
+// The corners of triangle `id` of the cloth: twice a cell's first point,
+// plus one for the cell's second triangle.
+fn corners(id: u32) -> vec3<u32> {
+    let j = id / 2u;
+    let g = points[j].grid;
+    let c = (j - g.x) % g.y;
+    let r = (j - g.x) / g.y;
+    let right = g.x + r * g.y + (c + 1u) % g.y;
+    if (id & 1u) == 0u {
+        return vec3<u32>(j, right, j + g.y);
+    }
+    return vec3<u32>(right, right + g.y, j + g.y);
+}
+
+fn round_apart(a: u32, b: u32, cols: u32) -> u32 {
+    let d = (a + cols - b % cols) % cols;
+    return min(d, cols - d);
+}
+
+fn rows_apart(a: u32, b: u32) -> u32 {
+    return max(a, b) - min(a, b);
+}
+
+// Whether the cell at point `j` is of one piece with point `i` of the
+// same net.
+fn own_piece(i: u32, j: u32) -> bool {
+    let g = points[i].grid;
+    let ci = (i - g.x) % g.y;
+    let ri = (i - g.x) / g.y;
+    let cj = (j - g.x) % g.y;
+    let rj = (j - g.x) / g.y;
+    let dc = min(round_apart(ci, cj, g.y), round_apart(ci, cj + 1u, g.y));
+    let dr = min(rows_apart(ri, rj), rows_apart(ri, rj + 1u));
+    return max(dc, dr) <= OWN_PIECE;
+}
+
+// The cloth's normal at a hinge and how much it is to be trusted.
+fn hinge_normal(a0: vec3<f32>, a1: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec4<f32> {
+    let u = a1 - a0;
+    let v = b - a;
+    let n = cross(u, v);
+    let sine = length(n) / max(length(u) * length(v), 1e-12);
+    let trust = clamp((sine - HINGE_SKEW.x) / (HINGE_SKEW.y - HINGE_SKEW.x), 0.0, 1.0);
+    return vec4<f32>(normalize_or_zero(n), trust);
 }
 
 // The pose of slot `k` at the substep's start (0) or end (1).
@@ -334,8 +403,45 @@ fn cs_find(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     for (var k = 0u; k < MAP_PLANES; k++) {
-        planes[i * MAP_PLANES + k] = best[k];
+        planes[i * FOUND + k] = best[k];
     }
+    // Its own cloth near it.
+    var mine = vec4<f32>(-1.0);
+    var apart = vec4<f32>(3.4e38);
+    if !fixed(i) {
+        let p = pos[i].xyz;
+        let g = points[i].grid;
+        let cells = g.y * (max(g.z, 1u) - 1u);
+        for (var j = g.x; j < g.x + cells; j++) {
+            if (points[j].bits & 2u) == 0u || own_piece(i, j) {
+                continue;
+            }
+            if length(pos[j].xyz - p) > sub.own_reach + OWN_SPAN {
+                continue;
+            }
+            for (var t = 0u; t < 2u; t++) {
+                let id = j * 2u + t;
+                let at = corners(id);
+                let dist = length(p - closest(p, pos[at.x].xyz, pos[at.y].xyz, pos[at.z].xyz));
+                if dist > sub.own_reach {
+                    continue;
+                }
+                var k = OWN;
+                while k > 0u && dist < apart[k - 1u] {
+                    k -= 1u;
+                }
+                if k < OWN {
+                    for (var m = OWN - 1u; m > k; m--) {
+                        apart[m] = apart[m - 1u];
+                        mine[m] = mine[m - 1u];
+                    }
+                    apart[k] = dist;
+                    mine[k] = f32(id);
+                }
+            }
+        }
+    }
+    planes[i * FOUND + MAP_PLANES] = mine;
 }
 
 @compute @workgroup_size(64)
@@ -344,11 +450,12 @@ fn cs_predict(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= sub.points {
         return;
     }
+    next[i * 2u + 1u] = pos[i];
     if fixed(i) {
-        next[i] = vec4<f32>(point_of(poses[waist_at(1u, i)].m, points[i].rest), 0.0);
+        next[i * 2u] = vec4<f32>(point_of(poses[waist_at(1u, i)].m, points[i].rest), 0.0);
     } else {
         let v = (vel[i].xyz + vec3<f32>(0.0, -GRAVITY, 0.0) * sub.h) * sub.damp;
-        next[i] = vec4<f32>(pos[i].xyz + v * sub.h, 0.0);
+        next[i * 2u] = vec4<f32>(pos[i].xyz + v * sub.h, 0.0);
     }
 }
 
@@ -360,7 +467,7 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let h = sub.h;
     let x0 = pos[i].xyz;
-    let y = next[i].xyz;
+    let y = ahead(i);
     if fixed(i) {
         vel[i] = vec4<f32>((y - x0) / h, 0.0);
         pos[i] = vec4<f32>(y, pos[i].w);
@@ -375,7 +482,7 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         if link.x == NONE {
             continue;
         }
-        let d = y - next[link.x].xyz;
+        let d = y - ahead(link.x);
         let len = length(d);
         if len < 1e-9 {
             continue;
@@ -396,12 +503,13 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
     // 2. Bends.
     var bend = vec3<f32>(0.0);
     for (var s = 0u; s < HINGES; s++) {
-        let hinge = topo[i * PER_POINT + LINKS + s];
+        let hinge = topo[i * PER_POINT + LINKS + s * 2u];
         if hinge.x == NONE {
             continue;
         }
-        let ya = next[hinge.x].xyz;
-        let yb = next[hinge.y].xyz;
+        let more = topo[i * PER_POINT + LINKS + s * 2u + 1u];
+        let ya = ahead(hinge.x);
+        let yb = ahead(hinge.y);
         let middle = s < 2u;
         var d = ya - (y + yb) * 0.5;
         var weights = light(hinge.x) + (1.0 + light(hinge.y)) * 0.25;
@@ -411,23 +519,48 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
             weights = 1.0 + (light(hinge.x) + light(hinge.y)) * 0.25;
             share = 1.0;
         }
-        let len = length(d);
+        var len = length(d);
+        if len < 1e-9 && more.x == NONE {
+            continue;
+        }
+        // Where the offset is to be: along the cloth's normal on the
+        // side the fold was made on, or where it is now at the length it
+        // had.
+        let rest = bitcast<f32>(hinge.z);
+        var aim = vec3<f32>(0.0);
+        if len >= 1e-9 {
+            aim = d * (abs(rest) / len);
+        }
+        if more.x != NONE {
+            var found = hinge_normal(ahead(more.x), ahead(more.y), ya, yb);
+            if !middle {
+                found = hinge_normal(ahead(more.x), ahead(more.y), y, yb);
+                found = vec4<f32>(found.xyz * bitcast<f32>(more.z), found.w);
+            }
+            aim = aim * (1.0 - found.w) + found.xyz * (rest * found.w);
+        }
+        d = d - aim;
+        len = length(d);
         if len < 1e-9 {
             continue;
         }
         let soft = max(bitcast<f32>(hinge.w) / (h * h), HINGE_LEAST);
-        let lambda = -(len - bitcast<f32>(hinge.z)) / (weights + soft);
-        bend += d * (lambda / len * share);
+        bend -= d * (share / (weights + soft));
     }
     x += bend;
     // 3. The tether.
     if p.anchor != NONE {
-        let top = next[p.anchor].xyz;
+        let top = ahead(p.anchor);
         let d = x - top;
         let len = length(d);
         if len > p.tether {
             x = top + d * (p.tether / len);
         }
+    }
+    // What stands by itself goes back to where it rests.
+    if sub.keep < 1.0 {
+        let home = point_of(poses[waist_at(1u, i)].m, p.rest);
+        x = home + (x - home) * sub.keep;
     }
     // 4. Contact: the planes of the body near the point.
     var held: array<Plane, 21>;
@@ -494,37 +627,72 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         held[bodies] = plane;
         bodies += 1u;
     }
-    // The middles of its links, by where they are predicted.
+    // Its own cloth, where each cell near it is as the substep begins.
+    let mine = planes[i * FOUND + MAP_PLANES];
+    for (var s = 0u; s < OWN; s++) {
+        if mine[s] < 0.0 || bodies == BODY_PLANES {
+            continue;
+        }
+        let at = corners(u32(mine[s]));
+        let a0 = was(at.x);
+        let n0 = normalize_or_zero(cross(was(at.y) - a0, was(at.z) - a0));
+        let height = dot(x0 - a0, n0);
+        let off = x0 - closest(x0, a0, was(at.y), was(at.z));
+        if all_zero(n0) || height == 0.0 || abs(height) > sub.thickness + OWN_NEAR
+            || length(off - n0 * height) > sub.thickness {
+            continue;
+        }
+        let nrm = n0 * sign(height);
+        let deep = sub.thickness - dot(x - a0, nrm);
+        if deep > 0.0 {
+            var plane: Plane;
+            plane.n = nrm;
+            plane.d = dot(x, nrm) + deep * 0.5;
+            plane.moved = vec3<f32>(0.0);
+            plane.began = dot(x0, nrm) + max(sub.thickness - abs(height), 0.0) * 0.5;
+            plane.pushed = 0.0;
+            held[bodies] = plane;
+            bodies += 1u;
+        }
+    }
+    // The middles of its links, each from where it was on the limb when
+    // the substep began.
     for (var s = 0u; s < LINKS; s++) {
         let link = topo[i * PER_POINT + s];
         if link.x == NONE || light(link.x) == 0.0 {
             continue;
         }
-        let other = next[link.x].xyz;
-        let middle = (x + other) * 0.5;
+        let began_at = (x0 + was(link.x)) * 0.5;
+        let middle = (x + ahead(link.x)) * 0.5;
         for (var k = 0u; k < sub.shells; k++) {
             let outside = shell_outside(k);
             if bodies == BODY_PLANES || (outside && (sub.flags & 1u) == 0u) {
                 continue;
             }
             let start = poses[pose_at(0u, k)];
-            let fin = poses[pose_at(1u, k)];
-            let scale = length(fin.m[0].xyz);
-            let o = on_shell(k, point_of(fin.inv, middle));
+            let fin = poses[pose_at(1u, k)].m;
+            let scale = length(fin[0].xyz);
+            let l = point_of(start.inv, began_at);
+            let o = on_shell(k, l);
             if !o.ok {
                 continue;
             }
             let gap = select(p.gap - p.allow, p.gap_out, outside);
             let skin = o.r * scale + gap;
-            let deep = skin - o.dist * scale;
+            let began = skin - o.dist * scale;
+            if began < -NEAR {
+                continue;
+            }
+            let nrm = normalize_or_zero(vector_of(fin, o.dir));
+            let deep = dot(point_of(fin, o.on), nrm) + skin - dot(middle, nrm);
             if deep <= 0.0 {
                 continue;
             }
             var plane: Plane;
-            plane.n = normalize_or_zero(vector_of(fin.m, o.dir));
-            plane.d = dot(x, plane.n) + deep;
-            plane.moved = point_of(fin.m, point_of(start.inv, x0)) - x0;
-            plane.began = -3.4028235e38;
+            plane.n = nrm;
+            plane.d = dot(x, nrm) + deep;
+            plane.moved = point_of(fin, l) - began_at;
+            plane.began = dot(x0, nrm) + began;
             plane.pushed = 0.0;
             held[bodies] = plane;
             bodies += 1u;
@@ -544,7 +712,7 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (sub.flags & 4u) != 0u {
         for (var k = 0u; k < MAP_PLANES; k++) {
-            let m = planes[i * MAP_PLANES + k];
+            let m = planes[i * FOUND + k];
             if all_zero(m.xyz) {
                 continue;
             }

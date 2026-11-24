@@ -32,6 +32,27 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The kinds of cloth `rk render --skirt-kind` takes.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SkirtKind {
+    Tight,
+    Pleated,
+    Flowing,
+    Fixed,
+}
+
+impl SkirtKind {
+    fn kind(self) -> rk_chara::physics::drape::Kind {
+        use rk_chara::physics::drape::Kind;
+        match self {
+            SkirtKind::Tight => Kind::Tight,
+            SkirtKind::Pleated => Kind::Pleated,
+            SkirtKind::Flowing => Kind::Flowing,
+            SkirtKind::Fixed => Kind::Fixed,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Inspect character cards.
@@ -104,6 +125,10 @@ enum Cmd {
         /// in place of Advanced Skirt Physics' net on the CPU.
         #[arg(long, conflicts_with = "game_skirts")]
         gpu_skirts: bool,
+        /// The kind of cloth the GPU solver makes the skirts of: tight,
+        /// pleated (as without this), flowing or fixed.
+        #[arg(long, requires = "gpu_skirts")]
+        skirt_kind: Option<SkirtKind>,
         /// A folder to write the skirts' cloth to after every frame
         /// played, one text per frame, for the walking score.
         #[arg(long)]
@@ -270,6 +295,9 @@ enum Cmd {
         /// Physics, to compare the rest with the game.
         #[arg(long)]
         game_skirts: bool,
+        /// Move the skirts' cloth with the solver that runs on the GPU.
+        #[arg(long, conflicts_with = "game_skirts")]
+        gpu_skirts: bool,
     },
     /// Compare every case of a capture batch (the plugin's `out/batch`
     /// folder) with our render of it: one line per case, with the camera,
@@ -605,7 +633,8 @@ fn main() -> Result<()> {
             show,
             studio,
             game_skirts,
-        } => bench::bench(&list, &captures, &out, &show, studio, game_skirts),
+            gpu_skirts,
+        } => bench::bench(&list, &captures, &out, &show, studio, game_skirts, gpu_skirts),
         Cmd::CaptureCheck {
             dir,
             out,
@@ -638,6 +667,7 @@ fn main() -> Result<()> {
             colliders,
             game_skirts,
             gpu_skirts,
+            skirt_kind,
             skirt_dump,
             skirt_time,
             at,
@@ -675,6 +705,7 @@ fn main() -> Result<()> {
             colliders: colliders.as_deref(),
             game_skirts,
             gpu_skirts,
+            skirt_kind: skirt_kind.map(SkirtKind::kind),
             skirt_dump: skirt_dump.as_deref(),
             skirt_time,
             at: at.as_deref(),

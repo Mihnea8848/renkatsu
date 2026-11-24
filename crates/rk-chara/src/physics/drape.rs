@@ -19,7 +19,9 @@
 //!      (Jacobi with averaging, Macklin et al. 2014 "Unified Particle
 //!      Physics"), and a link pushed together pushing back with its
 //!      buckling load;
-//!   2. bending, as hinges of three points in a row or a column;
+//!   2. bending, as hinges of three points in a row or a column, each
+//!      kept at the fold it has in the garment as it was made, with its
+//!      side (`Hinge`);
 //!   3. the tether to the fixed top of its column (Kim et al. 2012, "Long
 //!      Range Attachments");
 //!   4. contact, last (NvCloth, Houdini Vellum): one plane per body shell
@@ -28,8 +30,11 @@
 //!      on the limb when the substep began and carried with the limb to
 //!      the substep's end (Lewin 2018, "Cloth Self Collision with
 //!      Predictive Contacts"), so the point ends on the side it began on
-//!      however fast the limb goes. The middles of its links are kept
-//!      out of the shells too (NvCloth's virtual particles). Planes that
+//!      however fast the limb goes. The middles of its links and of
+//!      its cells are kept out of the shells the same way, each from
+//!      where that middle began (NvCloth's virtual particles), and the
+//!      point out of the cloth's own cells that were near it when the
+//!      frame began, on the side of each it began the substep on. Planes that
 //!      pull different ways are averaged (NvCloth), each by how deep the
 //!      point is behind it: cloth between two thighs sits between them.
 //!      What cannot give way, the floor and the map, has the last word.
@@ -47,8 +52,7 @@
 //! order, contacts and lengths meet in one place per point, and the twin
 //! does the same sums in the same order.
 //!
-//! Not here yet: the cloth's own collisions, resting fold angles and the
-//! kinds of cloth (step 2 fills `Material` per garment).
+//! What a garment is made of is its `Material`, by its `Kind`.
 
 use super::cloth::{Nearby, Obstacles};
 use super::net::{Binding, Net};
@@ -58,7 +62,39 @@ use crate::scene::Scene;
 use glam::{Mat4, Vec3};
 use std::sync::{Arc, Mutex};
 
-/// What a piece of cloth is made of. One for every garment for now.
+/// The kinds of skirt, each with its `Material`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kind {
+    /// Close on the hips and legs, as a pencil skirt.
+    Tight,
+    /// Holds the shape it was made in and comes back to it: pleats, a
+    /// flared or fluffy skirt.
+    #[default]
+    Pleated,
+    /// Soft cloth that hangs as gravity has it.
+    Flowing,
+    /// A shape that stands by itself, as a tutu.
+    Fixed,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Tight, Kind::Pleated, Kind::Flowing, Kind::Fixed];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Tight => "tight",
+            Kind::Pleated => "pleated",
+            Kind::Flowing => "flowing",
+            Kind::Fixed => "fixed",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.name() == name)
+    }
+}
+
+/// What a piece of cloth is made of.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Peirce's bending length in metres: bending stiffness per width
@@ -85,18 +121,57 @@ pub struct Material {
     /// How fast speed dies away, per second. The user's Unity demos take
     /// 0.05 of it per step of 1/90 s: -ln(0.95) x 90.
     pub damping: f32,
+    /// How fast a point goes back to where it rests on the waist, per
+    /// second: what a shape that stands by itself is held by. Nothing
+    /// for cloth that only hangs.
+    pub memory: f32,
 }
 
-impl Default for Material {
-    fn default() -> Self {
-        Material {
-            bending_length: 0.04,
+impl Material {
+    /// The cloth of a kind of skirt. Bending lengths: soft apparel cloth
+    /// is 1.5 to 2.5 cm and firm cloth 4 to 5 cm in Peirce's tables; a
+    /// skirt that stands out by itself is stiffened or has layers under
+    /// it and is given more (from memory, not measured on a garment).
+    pub fn of(kind: Kind) -> Self {
+        let pleated = Material {
+            bending_length: 0.07,
             shear: 56.0,
             weight: 0.2,
             thickness: 0.006,
             friction: [0.5, 0.4],
             damping: 4.6,
+            memory: 0.0,
+        };
+        match kind {
+            Kind::Pleated => pleated,
+            // Firm cloth cut close: it shears little, moves little by
+            // itself (three steps of the demos' damping in one) and
+            // stays by its cut.
+            Kind::Tight => Material {
+                bending_length: 0.05,
+                shear: 168.0,
+                damping: 13.8,
+                memory: 6.0,
+                ..pleated
+            },
+            Kind::Flowing => Material {
+                bending_length: 0.025,
+                ..pleated
+            },
+            // As stiff as the solver holds a hinge at this net's size
+            // (`HINGE_LEAST`), and back in its shape in a few frames.
+            Kind::Fixed => Material {
+                bending_length: 0.14,
+                memory: 40.0,
+                ..pleated
+            },
         }
+    }
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Material::of(Kind::default())
     }
 }
 
@@ -117,6 +192,19 @@ pub const FASTEST: f32 = 4.0;
 pub const LINKS: usize = 8;
 pub const HINGES: usize = 6;
 pub const MAP_PLANES: usize = 4;
+/// Cells of its own cloth kept per point.
+pub const OWN: usize = 4;
+/// How near a cell of its own cloth a point is kept off it: what two
+/// points at their fastest close in on each other in a substep,
+/// 2 x 4 m/s / 960, rounded up.
+pub const OWN_NEAR: f32 = 0.01;
+/// A cell with a corner within this many links of a point is the same
+/// piece of cloth as the point, which its lengths and bends keep: as
+/// the net before this (`net.rs` OWN).
+pub const OWN_PIECE: u32 = 2;
+/// A cell whose first corner is further than this past a point's reach
+/// is not looked at: more than a cell of twice the net's spacing spans.
+pub const OWN_SPAN: f32 = 0.15;
 pub const BODY_PLANES: usize = 16;
 /// No point.
 pub const NONE: u32 = u32::MAX;
@@ -132,6 +220,9 @@ pub const NEAR: f32 = 0.02;
 /// in cloth of 4 cm bending length is at 1250 and far from it; only a
 /// very fine net or very stiff cloth is made softer by this.
 pub const HINGE_LEAST: f32 = 30.0;
+/// The sines of the angle between the two lines of a hinge under which
+/// it holds nothing and from which it holds fully: 12 and 30 degrees.
+pub const HINGE_SKEW: (f32, f32) = (0.2, 0.5);
 /// How much of being pressed is left 1/60 s after the cloth came off,
 /// and how much of what a layer stands off the net by goes where it is
 /// pressed: as the net before this (`net.rs`).
@@ -174,6 +265,11 @@ pub struct Point {
     /// here (`round = (p[1] - p[0]) * turn`, `down = p[3] - p[2]`).
     pub around: [u32; 4],
     pub turn: f32,
+    /// Its net's first point, columns and rows.
+    pub grid: [u32; 3],
+    /// Whether the cell that has this point as its first corner (with
+    /// the next round the skirt and the two below) has cloth.
+    pub cell: bool,
 }
 
 /// A length kept between a point and one next to it.
@@ -194,12 +290,116 @@ pub struct Link {
 /// the midpoint for the centroid). In the first two slots of a point
 /// the point is the middle and `a`, `b` the ends; in the others it is
 /// an end, `a` the middle and `b` the other end.
+///
+/// With an `axis` the offset is to lie along the cloth's normal there,
+/// the cross of the line through the two points of `axis` (the other
+/// way of the grid) and the line from one end to the other, and `rest`
+/// has a sign: a fold stays on the side it was made on and is held as
+/// firmly past a right angle. What the offset has along the cloth is
+/// taken off as well, as it was when only its length was kept: that
+/// keeps a column's points apart where the cloth is pushed together,
+/// and without it a dress gathers in the lap of a sitting character
+/// (chair: hem to waist 0.69 of its length against 0.90). `side` is -1
+/// where the point is the second end, whose line to the other end runs
+/// backwards. Without an axis the offset's length is kept, whichever
+/// side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hinge {
     pub a: u32,
     pub b: u32,
     pub rest: f32,
     pub soft: f32,
+    pub axis: [u32; 2],
+    pub side: f32,
+}
+
+impl Hinge {
+    pub const NONE: Hinge = Hinge {
+        a: NONE,
+        b: NONE,
+        rest: 0.0,
+        soft: 0.0,
+        axis: [NONE; 2],
+        side: 1.0,
+    };
+}
+
+/// The cloth's normal at a hinge whose ends are at `a` and `b`, and how
+/// much it is to be trusted, 0 to 1: where the cloth is crumpled so that
+/// the two lines run nearly the same way (within `HINGE_SKEW`) the
+/// normal is anything, and the hinge lets go.
+fn hinge_normal(axis: [Vec3; 2], a: Vec3, b: Vec3) -> (Vec3, f32) {
+    let (u, v) = (axis[1] - axis[0], b - a);
+    let n = u.cross(v);
+    let sine = n.length() / (u.length() * v.length()).max(1e-12);
+    let trust = ((sine - HINGE_SKEW.0) / (HINGE_SKEW.1 - HINGE_SKEW.0)).clamp(0.0, 1.0);
+    (n.normalize_or_zero(), trust)
+}
+
+/// The three corners of one of the two triangles of a cell: `id` is
+/// twice the cell's first point, plus one for the second triangle.
+pub fn corners(points: &[Point], id: u32) -> [u32; 3] {
+    let j = id / 2;
+    let [first, cols, _] = points[j as usize].grid;
+    let (c, r) = ((j - first) % cols, (j - first) / cols);
+    let right = first + r * cols + (c + 1) % cols;
+    if id & 1 == 0 {
+        [j, right, j + cols]
+    } else {
+        [right, right + cols, j + cols]
+    }
+}
+
+/// Whether the cell at point `j` is of one piece with point `i` of the
+/// same net: a corner of it within `OWN_PIECE` links.
+fn own_piece(points: &[Point], i: u32, j: u32) -> bool {
+    let [first, cols, _] = points[i as usize].grid;
+    let (ci, ri) = ((i - first) % cols, (i - first) / cols);
+    let (cj, rj) = ((j - first) % cols, (j - first) / cols);
+    let round = |a: u32, b: u32| {
+        let d = (a + cols - b % cols) % cols;
+        d.min(cols - d)
+    };
+    let dc = round(ci, cj).min(round(ci, cj + 1));
+    let dr = ri.abs_diff(rj).min(ri.abs_diff(rj + 1));
+    dc.max(dr) <= OWN_PIECE
+}
+
+/// The cells of its own cloth a point at `p` may meet within a frame:
+/// the `OWN` nearest triangles within `reach` that are not of one piece
+/// with it, `NONE` for the rest.
+fn own_near(points: &[Point], pos: &[Vec3], i: usize, reach: f32, out: &mut [u32; OWN]) {
+    *out = [NONE; OWN];
+    let mut far = [f32::MAX; OWN];
+    let [first, cols, rows] = points[i].grid;
+    let p = pos[i];
+    for j in first..first + cols * rows.saturating_sub(1) {
+        if !points[j as usize].cell || own_piece(points, i as u32, j) {
+            continue;
+        }
+        if (pos[j as usize] - p).length() > reach + OWN_SPAN {
+            continue;
+        }
+        for id in [j * 2, j * 2 + 1] {
+            let [a, b, c] = corners(points, id).map(|k| pos[k as usize]);
+            let dist = (p - closest(p, a, b, c)).length();
+            if dist > reach {
+                continue;
+            }
+            let mut k = OWN;
+            while k > 0 && dist < far[k - 1] {
+                k -= 1;
+            }
+            if k < OWN {
+                for m in (k + 1..OWN).rev() {
+                    far[m] = far[m - 1];
+                    out[m] = out[m - 1];
+                }
+                far[k] = dist;
+                out[k] = id;
+            }
+        }
+    }
 }
 
 /// One net's part of the points.
@@ -282,6 +482,9 @@ pub struct State {
     /// frame, as its normal and how far along it the plane is; a zero
     /// normal for none.
     pub planes: Vec<[f32; 4]>,
+    /// Per point: the triangles of its own cloth it may meet this frame
+    /// (`corners`), `NONE` for none.
+    pub own: Vec<[u32; OWN]>,
 }
 
 impl State {
@@ -291,6 +494,7 @@ impl State {
             vel: vec![Vec3::ZERO; points],
             pressed: vec![0.0; points],
             planes: vec![[0.0; 4]; points * MAP_PLANES],
+            own: vec![[NONE; OWN]; points],
         }
     }
 }
@@ -471,13 +675,27 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
             _ => out.fill([0.0; 4]),
         }
     }
+    // Its own cloth near each point, the same way.
+    let own_reach = 2.0 * FASTEST * frame.dt + material.thickness;
+    for i in 0..n {
+        if setup.points[i].fixed {
+            state.own[i] = [NONE; OWN];
+        } else {
+            let mut out = [NONE; OWN];
+            own_near(&setup.points, &state.pos, i, own_reach, &mut out);
+            state.own[i] = out;
+        }
+    }
     let ends: Vec<[f32; 2]> = setup.shells.iter().map(Shell::ends).collect();
     let damp = (-material.damping * h).exp();
+    let keep = (-material.memory * h).exp();
+    let mut was = vec![Vec3::ZERO; n];
     let fade = PRESSED_FADE.powf(h * 60.0);
     let mut next = vec![Vec3::ZERO; n];
     for sub in 0..subs {
         let pose = |boundary: usize, k: usize| frame.poses[(sub + boundary) * slots + k];
         // Predict.
+        was.clone_from(&state.pos);
         for (i, p) in setup.points.iter().enumerate() {
             next[i] = if p.fixed {
                 waist(sub + 1, p.net).transform_point3(p.rest)
@@ -536,6 +754,33 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     ya - (y + yb) * 0.5
                 };
                 let len = d.length();
+                if len < 1e-9 && hinge.axis[0] == NONE {
+                    continue;
+                }
+                // Where the offset is to be: along the cloth's normal on
+                // the side the fold was made on, or, as far as the normal
+                // is not to be trusted and without an axis, where it is
+                // now at the length it had.
+                let mut aim = if len < 1e-9 {
+                    Vec3::ZERO
+                } else {
+                    d * (hinge.rest.abs() / len)
+                };
+                if hinge.axis[0] != NONE {
+                    let axis = hinge.axis.map(|k| next[k as usize]);
+                    let (nrm, trust) = if middle {
+                        hinge_normal(axis, ya, yb)
+                    } else {
+                        hinge_normal(axis, y, yb)
+                    };
+                    let nrm = if middle { nrm } else { nrm * hinge.side };
+                    aim = aim * (1.0 - trust) + nrm * (hinge.rest * trust);
+                }
+                // What is left of it is taken off, whichever way it
+                // points: along the cloth too, which keeps a column's
+                // points apart where its links are pushed together.
+                let d = d - aim;
+                let len = d.length();
                 if len < 1e-9 {
                     continue;
                 }
@@ -547,8 +792,7 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     light(hinge.a) + (1.0 + light(hinge.b)) * 0.25
                 };
                 let soft = (hinge.soft / (h * h)).max(HINGE_LEAST);
-                let lambda = -(len - hinge.rest) / (weights + soft);
-                bend += d * (lambda / len * if middle { 1.0 } else { -0.5 });
+                bend -= d * (if middle { 1.0 } else { -0.5 } / (weights + soft));
             }
             x += bend;
             // 3. The tether.
@@ -559,6 +803,11 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 if len > p.tether {
                     x = top + d * (p.tether / len);
                 }
+            }
+            // What stands by itself goes back to where it rests.
+            if material.memory > 0.0 {
+                let home = waist(sub + 1, p.net).transform_point3(p.rest);
+                x = home + (x - home) * keep;
             }
             // 4. Contact: the planes of the body near the point.
             let mut body = [Plane::default(); BODY_PLANES];
@@ -625,44 +874,84 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 body[bodies] = plane;
                 bodies += 1;
             }
-            // The middles of its links, between where its lengths put the
-            // point and where the other end is predicted: a
-            // limb thinner than the net is wide would come through a
-            // cell between points that go round it (NvCloth's virtual
-            // particles). A middle in a shell is put out of it by both
-            // ends alike. Not the links to the fixed top: it sits in
-            // the body where a thigh comes up, and its links with it.
+            // Its own cloth: each cell found near it when the frame
+            // began, where the cell is as the substep begins and on the
+            // side of it the point is on then. Where the cell will be is
+            // not known before its own corners are solved, and a guess
+            // that leaves out what holds them up lets cloth sink into
+            // cloth that lies on something. Both give way, so the point
+            // goes half of it.
+            for &id in &state.own[i] {
+                if id == NONE || bodies == BODY_PLANES {
+                    continue;
+                }
+                let [a0, b0, c0] = corners(&setup.points, id).map(|k| was[k as usize]);
+                let n0 = (b0 - a0).cross(c0 - a0).normalize_or_zero();
+                let height = (x0 - a0).dot(n0);
+                // Over the cell itself, not past its edge.
+                let off = x0 - closest(x0, a0, b0, c0);
+                if n0 == Vec3::ZERO
+                    || height == 0.0
+                    || height.abs() > material.thickness + OWN_NEAR
+                    || (off - n0 * height).length() > material.thickness
+                {
+                    continue;
+                }
+                let nrm = n0 * height.signum();
+                let deep = material.thickness - (x - a0).dot(nrm);
+                if deep > 0.0 {
+                    body[bodies] = Plane {
+                        n: nrm,
+                        d: x.dot(nrm) + deep * 0.5,
+                        moved: Vec3::ZERO,
+                        began: x0.dot(nrm) + (material.thickness - height.abs()).max(0.0) * 0.5,
+                        pushed: 0.0,
+                    };
+                    bodies += 1;
+                }
+            }
+            // The middles of its links, which with the diagonals are the
+            // middles of its cells too: a limb thinner than the net is
+            // wide would come through a cell between points that go
+            // round it (NvCloth's virtual particles). Each middle has its
+            // plane as a point has: from where it was on the limb when
+            // the substep began, carried with the limb, so that a middle
+            // that rests on the skin is held there without being given
+            // speed. Both ends go out by what the middle is in by. Not
+            // the links to the fixed top: it sits in the body where a
+            // thigh comes up, and its links with it.
             for link in &setup.links[i * LINKS..(i + 1) * LINKS] {
                 if link.to == NONE || light(link.to) == 0.0 {
                     continue;
                 }
-                let other = next[link.to as usize];
-                let middle = (x + other) * 0.5;
+                let began_at = (x0 + was[link.to as usize]) * 0.5;
+                let middle = (x + next[link.to as usize]) * 0.5;
                 for (k, s) in setup.shells.iter().enumerate() {
                     if bodies == BODY_PLANES || (s.outside && !frame.arms) {
                         continue;
                     }
                     let (from, to) = (pose(0, k), pose(1, k));
                     let scale = to.x_axis.truncate().length();
-                    let Some((_, dir, dist, r)) = on_shell(s, ends[k], to.inverse().transform_point3(middle)) else {
+                    let l = from.inverse().transform_point3(began_at);
+                    let Some((on, dir, dist, r)) = on_shell(s, ends[k], l) else {
                         continue;
                     };
                     let gap = if s.outside { p.gap_out } else { p.gap - p.allow };
                     let skin = r * scale + gap;
-                    let deep = skin - dist * scale;
-                    if deep <= 0.0 {
+                    let began = skin - dist * scale;
+                    if began < -NEAR {
                         continue;
                     }
                     let nrm = to.transform_vector3(dir).normalize_or_zero();
-                    // Each end goes out by as much as the middle is in:
-                    // nothing where it only just touches.
+                    let deep = to.transform_point3(on).dot(nrm) + skin - middle.dot(nrm);
+                    if deep <= 0.0 {
+                        continue;
+                    }
                     body[bodies] = Plane {
                         n: nrm,
                         d: x.dot(nrm) + deep,
-                        moved: to.transform_point3(from.inverse().transform_point3(x0)) - x0,
-                        // With its speed: a middle put out without it
-                        // (tried) keeps falling in and never rests.
-                        began: -f32::MAX,
+                        moved: to.transform_point3(l) - began_at,
+                        began: x0.dot(nrm) + began,
                         pushed: 0.0,
                     };
                     bodies += 1;
@@ -855,6 +1144,40 @@ pub struct Drape {
     map: Option<(usize, Arc<Vec<[Vec3; 3]>>)>,
     /// The fastest a shell's middle went in a frame so far, in metres.
     pub fastest: f32,
+    /// Per link whether it is a diagonal, and per hinge how long its two
+    /// links are at rest (their mean): what `set_material` needs.
+    diagonal: Vec<bool>,
+    spans: Vec<f32>,
+}
+
+/// How many rows of a net of `cols` by `rows` points resting at `rest`
+/// are above the point `at` of the body, `up` being the way up there.
+fn held_rows(rest: &[Vec3], cols: usize, rows: usize, at: Vec3, up: Vec3) -> usize {
+    (0..rows)
+        .take_while(|&r| rest[r * cols..(r + 1) * cols].iter().all(|p| (*p - at).dot(up) >= 0.0))
+        .count()
+        .clamp(1, rows.saturating_sub(2).max(1))
+}
+
+/// A link's compliance and buckling load in `material`.
+fn link_of(material: &Material, rest: f32, diagonal: bool) -> (f32, f32) {
+    // A diagonal stands for the shear of half a cell.
+    let soft = if diagonal {
+        material.weight * rest * rest * 0.5 / material.shear
+    } else {
+        0.0
+    };
+    // Euler's load of a strip as long as the link, per its weight.
+    let buckle = std::f32::consts::PI.powi(2) * GRAVITY * material.bending_length.powi(3) / rest.max(1e-4).powi(3);
+    (soft, buckle)
+}
+
+/// A hinge's compliance in `material`: for links of length L in cloth of
+/// bending length c, stiffness 4 B / L^3 per width on the middle's
+/// offset h (h = L x angle / 2, energy B angle^2 / 2L), B = weight x g x
+/// c^3, over a point's mass weight x L per width.
+fn hinge_soft(material: &Material, span: f32) -> f32 {
+    span.powi(4) / (4.0 * GRAVITY * material.bending_length.powi(3))
 }
 
 impl Clone for Drape {
@@ -876,11 +1199,32 @@ impl Clone for Drape {
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
+            diagonal: self.diagonal.clone(),
+            spans: self.spans.clone(),
         }
     }
 }
 
 impl Drape {
+    /// Makes the cloth of `material` and starts it again.
+    pub(super) fn set_material(&mut self, material: Material) {
+        let mut setup = self.live.setup.clone();
+        setup.material = material;
+        for (link, &diagonal) in setup.links.iter_mut().zip(&self.diagonal) {
+            if link.to != NONE {
+                (link.soft, link.buckle) = link_of(&material, link.rest, diagonal);
+            }
+        }
+        for (hinge, &span) in setup.hinges.iter_mut().zip(&self.spans) {
+            hinge.soft = hinge_soft(&material, span);
+        }
+        self.live = Arc::new(Live {
+            setup,
+            pending: Mutex::default(),
+        });
+        self.ready = false;
+    }
+
     /// The cloth of `nets` among `shells`, with the body as it was
     /// fitted: call in the pose both were made in. None without nets.
     pub(super) fn build(
@@ -894,7 +1238,30 @@ impl Drape {
             return None;
         }
         let fitted: Vec<_> = shells.iter().map(|s| s.in_world(&world(scene, s.node))).collect();
+        // How high a thigh reaches when it is raised level: the hip
+        // joint and the thigh's thickness there above it, up being the
+        // way the pelvis stands. The pelvis is the shell that is open at
+        // both ends, a thigh one that starts `HIP` of its length below
+        // its own node.
+        let hips = shells
+            .iter()
+            .find(|s| !s.outside && s.caps == [false, false])
+            .and_then(|pelvis| {
+                let up = world(scene, pelvis.node)
+                    .transform_vector3(pelvis.b - pelvis.a)
+                    .normalize_or_zero();
+                shells
+                    .iter()
+                    .filter(|s| !s.outside && s.caps == [true, true] && s.a.length() > 1e-4)
+                    .map(|s| {
+                        let m = world(scene, s.node);
+                        m.w_axis.truncate() + up * (s.ends()[0] * m.x_axis.truncate().length())
+                    })
+                    .max_by(|a, b| a.dot(up).total_cmp(&b.dot(up)))
+                    .map(|top| (top, up))
+            });
         let (mut points, mut links, mut hinges, mut parts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut diagonals, mut spans) = (Vec::new(), Vec::new());
         for (k, net) in nets.iter().enumerate() {
             let part = net.part();
             let first = points.len();
@@ -903,10 +1270,24 @@ impl Drape {
             let at = |c: usize, r: usize| r * cols + (c % cols);
             let none = |i: usize| part.open.get(i).is_some_and(|o| o & super::net::OPEN_POINT != 0);
             let joined = |i: usize| part.open.get(i).is_none_or(|o| o & super::net::OPEN_ROUND == 0);
-            let fixed = |i: usize| i < part.fixed * cols || none(i);
+            // The rows fixed to the body: those a raised thigh does not
+            // reach. There a skirt lies on the body, and only what is
+            // below hangs (the user's Unity demos fix theirs down to the
+            // widest part of the hips, which is lower: a thigh that comes
+            // up goes through rows fixed there). The waist's own row
+            // always, and never the two lowest.
+            let held = hips.map_or(part.fixed, |(at, up)| held_rows(part.rest, cols, rows, at, up));
+            let fixed = |i: usize| i < held * cols || none(i);
+            let cell = |i: usize| {
+                let (c, r) = (i % cols, i / cols);
+                r + 1 < rows
+                    && joined(i)
+                    && joined(i + cols)
+                    && ![i, at(c + 1, r), i + cols, at(c + 1, r + 1)].into_iter().any(none)
+            };
             // How far down its column each point is from the fixed top.
             let mut tether = vec![0.0f32; count];
-            for i in part.fixed * cols..count {
+            for i in held * cols..count {
                 tether[i] = tether[i - cols] + (part.rest[i] - part.rest[i - cols]).length();
             }
             for (i, &tether) in tether.iter().enumerate() {
@@ -938,12 +1319,14 @@ impl Drape {
                     anchor: if fixed(i) {
                         NONE
                     } else {
-                        (first + at(c, part.fixed - 1)) as u32
+                        (first + at(c, held - 1)) as u32
                     },
                     tether,
                     inner: (material.thickness - part.gap[i]) * part.outward,
                     around: [round[0], round[1], down[0], down[1]].map(|j| (first + j) as u32),
                     turn,
+                    grid: [first as u32, cols as u32, rows as u32],
+                    cell: cell(i),
                 });
             }
             // The links of each point.
@@ -956,45 +1339,33 @@ impl Drape {
                 };
                 count * LINKS
             ];
-            let buckle = |rest: f32| {
-                std::f32::consts::PI.powi(2) * GRAVITY * material.bending_length.powi(3) / rest.max(1e-4).powi(3)
-            };
+            let mut diagonal = vec![false; count * LINKS];
             for &(a, b, kind) in part.links {
                 let (a, b) = (a as usize, b as usize);
                 if fixed(a) && fixed(b) {
                     continue;
                 }
                 let rest = (part.rest[a] - part.rest[b]).length();
-                // A diagonal stands for the shear of half a cell.
-                let soft = if kind == super::net::DIAGONAL {
-                    material.weight * rest * rest * 0.5 / material.shear
-                } else {
-                    0.0
-                };
+                let (soft, buckle) = link_of(&material, rest, kind == super::net::DIAGONAL);
                 for (from, to) in [(a, b), (b, a)] {
                     let slots = &mut mine[from * LINKS..(from + 1) * LINKS];
-                    if let Some(slot) = slots.iter_mut().find(|l| l.to == NONE) {
-                        *slot = Link {
+                    if let Some(k) = slots.iter().position(|l| l.to == NONE) {
+                        slots[k] = Link {
                             to: (first + to) as u32,
                             rest,
                             soft,
-                            buckle: buckle(rest),
+                            buckle,
                         };
+                        diagonal[from * LINKS + k] = kind == super::net::DIAGONAL;
                     }
                 }
             }
+            diagonals.extend(diagonal);
             links.extend(mine);
             // The hinges: each bend of the net at its middle point and at
             // its two ends.
-            let mut mine = vec![
-                Hinge {
-                    a: NONE,
-                    b: NONE,
-                    rest: 0.0,
-                    soft: 0.0
-                };
-                count * HINGES
-            ];
+            let mut mine = vec![Hinge::NONE; count * HINGES];
+            let mut span = vec![0.0f32; count * HINGES];
             for bend in part.bends {
                 let [a, b] = bend.ends.map(|e| e as usize);
                 let m = bend.at as usize;
@@ -1002,37 +1373,40 @@ impl Drape {
                     continue;
                 }
                 let (pa, pm, pb) = (part.rest[a], part.rest[m], part.rest[b]);
-                let rest = (pm - (pa + pb) * 0.5).length();
-                // A hinge of links of length L in cloth of bending length
-                // c: stiffness 4 B / L^3 per width on the middle's offset
-                // h (h = L x angle / 2, energy B angle^2 / 2L), B = weight
-                // x g x c^3, over a point's mass weight x L per width.
+                // The fold the garment was made with here, with its side.
+                let (nrm, trust) = hinge_normal(bend.axis.map(|k| part.rest[k as usize]), pa, pb);
+                let (rest, axis) = if nrm == Vec3::ZERO || trust < 1.0 {
+                    ((pm - (pa + pb) * 0.5).length(), [NONE; 2])
+                } else {
+                    ((pm - (pa + pb) * 0.5).dot(nrm), bend.axis.map(|k| first as u32 + k))
+                };
                 let len = ((pm - pa).length() + (pm - pb).length()) * 0.5;
-                let soft = len.powi(4) / (4.0 * GRAVITY * material.bending_length.powi(3));
-                let hinge = |a: usize, b: usize| Hinge {
+                let soft = hinge_soft(&material, len);
+                let hinge = |a: usize, b: usize, side: f32| Hinge {
                     a: (first + a) as u32,
                     b: (first + b) as u32,
                     rest,
                     soft,
+                    axis,
+                    side,
                 };
                 let mut put = |at: usize, range: std::ops::Range<usize>, hinge: Hinge| {
-                    if let Some(slot) = mine[at * HINGES..(at + 1) * HINGES][range]
-                        .iter_mut()
-                        .find(|h| h.a == NONE)
-                    {
-                        *slot = hinge;
+                    if let Some(k) = range.clone().find(|&k| mine[at * HINGES + k].a == NONE) {
+                        mine[at * HINGES + k] = hinge;
+                        span[at * HINGES + k] = len;
                     }
                 };
-                put(m, 0..2, hinge(a, b));
-                put(a, 2..HINGES, hinge(m, b));
-                put(b, 2..HINGES, hinge(m, a));
+                put(m, 0..2, hinge(a, b, 1.0));
+                put(a, 2..HINGES, hinge(m, b, 1.0));
+                put(b, 2..HINGES, hinge(m, a, -1.0));
             }
             hinges.extend(mine);
+            spans.extend(span);
             parts.push(Part {
                 first,
                 cols,
                 rows,
-                fixed: part.fixed,
+                fixed: held,
                 open: part.open.to_vec(),
             });
         }
@@ -1067,6 +1441,8 @@ impl Drape {
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
+            diagonal: diagonals,
+            spans,
         })
     }
 
@@ -1214,7 +1590,11 @@ pub mod sample {
     /// with a body shell of `thick` round the line from `a` to `b`: a
     /// small net with everything the solver has.
     pub fn tube(cols: usize, rows: usize, radius: f32, thick: f32, a: Vec3, b: Vec3) -> Setup {
-        let material = Material::default();
+        // Firm apparel cloth, whatever the kinds are set to.
+        let material = Material {
+            bending_length: 0.04,
+            ..Material::default()
+        };
         let spacing = std::f32::consts::TAU * radius / cols as f32;
         let at = |c: usize, r: usize| r * cols + (c % cols);
         let place = |i: usize| {
@@ -1233,15 +1613,7 @@ pub mod sample {
             buckle: 0.0,
         };
         let mut links = vec![none_link; count * LINKS];
-        let mut hinges = vec![
-            Hinge {
-                a: NONE,
-                b: NONE,
-                rest: 0.0,
-                soft: 0.0
-            };
-            count * HINGES
-        ];
+        let mut hinges = vec![Hinge::NONE; count * HINGES];
         let mut points = Vec::new();
         for i in 0..count {
             let (c, r) = (i % cols, i / cols);
@@ -1263,6 +1635,8 @@ pub mod sample {
                 ]
                 .map(|j| j as u32),
                 turn: 1.0,
+                grid: [0, cols as u32, rows as u32],
+                cell: r + 1 < rows,
             });
             let mut near = vec![(at(c + 1, r), false), (at(c + cols - 1, r), false)];
             if r > 0 {
@@ -1293,34 +1667,43 @@ pub mod sample {
                 };
             }
             let soft = spacing.powi(4) / (4.0 * GRAVITY * material.bending_length.powi(3));
-            // A hinge with `m` in the middle of `e` and `f`, as this
-            // point holds it.
-            let hinge = |m: usize, e: usize, f: usize| {
-                let rest = (place(m) - (place(e) + place(f)) * 0.5).length();
-                let (a, b) = if m == i {
-                    (e, f)
+            // A hinge with `m` in the middle of `e` and `f`, measured
+            // round the line through `axis`, as this point holds it.
+            let hinge = |m: usize, e: usize, f: usize, axis: [usize; 2]| {
+                let nrm = hinge_normal(axis.map(place), place(e), place(f)).0;
+                let rest = (place(m) - (place(e) + place(f)) * 0.5).dot(nrm);
+                let (a, b, side) = if m == i {
+                    (e, f, 1.0)
+                } else if e == i {
+                    (m, f, 1.0)
                 } else {
-                    (m, if e == i { f } else { e })
+                    (m, e, -1.0)
                 };
                 Hinge {
                     a: a as u32,
                     b: b as u32,
                     rest,
                     soft,
+                    axis: axis.map(|k| k as u32),
+                    side,
                 }
             };
+            // Round the skirt, measured round the line down it at the
+            // middle point, and down it, round the line round it.
+            let down = |c: usize, r: usize| [at(c, r.saturating_sub(1)), at(c, (r + 1).min(rows - 1))];
+            let round = |c: usize, r: usize| [at(c + cols - 1, r), at(c + 1, r)];
             let (next, last) = (at(c + 1, r), at(c + cols - 1, r));
-            hinges[i * HINGES] = hinge(i, last, next);
-            hinges[i * HINGES + 2] = hinge(next, i, at(c + 2, r));
-            hinges[i * HINGES + 3] = hinge(last, i, at(c + cols - 2, r));
+            hinges[i * HINGES] = hinge(i, last, next, down(c, r));
+            hinges[i * HINGES + 2] = hinge(next, i, at(c + 2, r), down(c + 1, r));
+            hinges[i * HINGES + 3] = hinge(last, at(c + cols - 2, r), i, down(c + cols - 1, r));
             if r > 0 && r + 1 < rows {
-                hinges[i * HINGES + 1] = hinge(i, at(c, r - 1), at(c, r + 1));
+                hinges[i * HINGES + 1] = hinge(i, at(c, r - 1), at(c, r + 1), round(c, r));
             }
             if r + 2 < rows {
-                hinges[i * HINGES + 4] = hinge(at(c, r + 1), i, at(c, r + 2));
+                hinges[i * HINGES + 4] = hinge(at(c, r + 1), i, at(c, r + 2), round(c, r + 1));
             }
             if r >= 2 {
-                hinges[i * HINGES + 5] = hinge(at(c, r - 1), i, at(c, r - 2));
+                hinges[i * HINGES + 5] = hinge(at(c, r - 1), at(c, r - 2), i, round(c, r - 1));
             }
         }
         let stations = 3;
@@ -1393,14 +1776,8 @@ mod tests {
             soft: 0.0,
             buckle: 0.0,
         };
-        let none_hinge = Hinge {
-            a: NONE,
-            b: NONE,
-            rest: 0.0,
-            soft: 0.0,
-        };
         let mut links = vec![none_link; count * LINKS];
-        let mut hinges = vec![none_hinge; count * HINGES];
+        let mut hinges = vec![Hinge::NONE; count * HINGES];
         let link = |to: usize| Link {
             to: to as u32,
             rest: spacing,
@@ -1421,6 +1798,8 @@ mod tests {
                 inner: 0.0,
                 around: [0; 4],
                 turn: 1.0,
+                grid: [0, 1, count as u32],
+                cell: false,
             });
             if i > 0 {
                 links[i * LINKS] = link(i - 1);
@@ -1433,6 +1812,7 @@ mod tests {
                 b: b as u32,
                 rest: 0.0,
                 soft,
+                ..Hinge::NONE
             };
             if i > 0 && i + 1 < count {
                 hinges[i * HINGES] = hinge(i - 1, i + 1);
@@ -1469,7 +1849,10 @@ mod tests {
         // B = weight x g x c^3 (Peirce), against weight x L x g per
         // point times its distance out. So c^3 sin(angle) / L^2 is the
         // sum of the distances.
-        let material = Material::default();
+        let material = Material {
+            bending_length: 0.04,
+            ..Material::default()
+        };
         for spacing in [0.02, 0.03] {
             let free = (2.0 * material.bending_length / spacing).round() as usize;
             let setup = strip(free + 2, spacing, material);
@@ -1537,8 +1920,14 @@ mod tests {
 
     #[test]
     fn cloth_lies_on_the_floor_and_stays() {
-        // The floor 10 cm under the top of a tube 30 cm long.
-        let setup = tube(12, 8, 0.1, 0.03, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.2, 0.0));
+        // The floor 10 cm under the top of a tube 30 cm long, of soft
+        // cloth: stiffer cloth has no room to lie in there.
+        let mut setup = tube(12, 8, 0.1, 0.03, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.2, 0.0));
+        soften(&mut setup, 0.04);
+        // Without its own collisions: 30 cm of tube in 10 cm of room is
+        // a heap that has to cross itself, and one that may not never
+        // comes to rest.
+        setup.points.iter_mut().for_each(|p| p.cell = false);
         let floor = Some((Vec3::new(0.0, -0.1, 0.0), Vec3::Y));
         let mut state = State::new(setup.points.len());
         run(&setup, &mut state, &still(&setup, Begin::Reset, None));
@@ -1666,6 +2055,180 @@ mod tests {
         // Past its edge and a little above: a plane that leans out.
         map_planes(Vec3::new(1.03, 0.03, 0.0), &tri, 0.07, 0.006, &mut out);
         assert!(out[0][0] > 0.5 && out[0][1] > 0.5, "{:?}", out[0]);
+    }
+
+    /// Makes the cloth of `setup` of bending length `c`.
+    fn soften(setup: &mut Setup, c: f32) {
+        setup.material.bending_length = c;
+        let material = setup.material;
+        for link in setup.links.iter_mut().filter(|l| l.to != NONE) {
+            link.buckle = link_of(&material, link.rest, false).1;
+        }
+        let spacing = setup.links[0].rest;
+        for hinge in &mut setup.hinges {
+            hinge.soft = hinge_soft(&material, spacing);
+        }
+    }
+
+    /// A tube with its limb out of the way.
+    fn free_tube(cols: usize, rows: usize) -> Setup {
+        tube(
+            cols,
+            rows,
+            0.1,
+            0.01,
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::new(0.0, 6.0, 0.0),
+        )
+    }
+
+    fn settle(setup: &Setup, state: &mut State, frames: u32) {
+        for _ in 0..frames {
+            run(setup, state, &still(setup, Begin::Keep, None));
+        }
+    }
+
+    #[test]
+    fn a_fold_turned_inside_out_comes_back_to_its_side() {
+        // One column of a tube put on the inside of the line through its
+        // neighbours: its lengths are as they were, the folds round the
+        // tube are on the wrong side.
+        let (cols, rows) = (12, 5);
+        let setup = free_tube(cols, rows);
+        let mut state = State::new(setup.points.len());
+        run(&setup, &mut state, &still(&setup, Begin::Reset, None));
+        settle(&setup, &mut state, 60);
+        let hung = state.pos.clone();
+        for r in 1..rows {
+            let (i, a, b) = (r * cols + 3, r * cols + 2, r * cols + 4);
+            let middle = (state.pos[a] + state.pos[b]) * 0.5;
+            state.pos[i] = middle - (state.pos[i] - middle);
+            state.vel[i] = Vec3::ZERO;
+        }
+        settle(&setup, &mut state, 120);
+        for r in 1..rows {
+            let i = r * cols + 3;
+            assert!(
+                (state.pos[i] - hung[i]).length() < 0.003,
+                "row {r}: {} for {}",
+                state.pos[i],
+                hung[i]
+            );
+        }
+    }
+
+    #[test]
+    fn cloth_does_not_go_through_itself() {
+        // A point cut loose inside a tube and thrown at its far wall.
+        let (cols, rows) = (12, 6);
+        let mut setup = free_tube(cols, rows);
+        let i = 3 * cols;
+        for k in 0..setup.points.len() {
+            for slot in 0..LINKS {
+                let link = &mut setup.links[k * LINKS + slot];
+                if k == i || link.to == i as u32 {
+                    link.to = NONE;
+                }
+            }
+            for slot in 0..HINGES {
+                let hinge = &mut setup.hinges[k * HINGES + slot];
+                if k == i || hinge.a == i as u32 || hinge.b == i as u32 || hinge.axis.contains(&(i as u32)) {
+                    *hinge = Hinge::NONE;
+                }
+            }
+        }
+        setup.points[i].anchor = NONE;
+        let mut state = State::new(setup.points.len());
+        run(&setup, &mut state, &still(&setup, Begin::Reset, None));
+        // The far wall is at x = -0.1 round column 6.
+        state.pos[i] = Vec3::new(-0.07, state.pos[i].y, 0.0);
+        state.vel[i] = Vec3::new(-3.0, 0.0, 0.0);
+        for _ in 0..3 {
+            run(&setup, &mut state, &still(&setup, Begin::Keep, None));
+            let wall = (state.pos[3 * cols + 6].x + state.pos[2 * cols + 6].x) * 0.5;
+            assert!(state.pos[i].x > wall, "{} is past the wall at {wall}", state.pos[i]);
+        }
+        assert!(state.own[i].iter().any(|&id| id != NONE));
+    }
+
+    #[test]
+    fn the_cells_next_to_a_point_are_its_own_piece() {
+        let setup = free_tube(12, 6);
+        let p = &setup.points;
+        // Point (0, 3): the cells from two columns back to two on, by
+        // their first corner three back to two on, and rows 0 to 5.
+        assert!(own_piece(p, 36, 36 + 2) && own_piece(p, 36, 36 + 9) && own_piece(p, 36, 12 + 11));
+        assert!(!own_piece(p, 36, 36 + 3) && !own_piece(p, 36, 36 + 8));
+        assert!(own_piece(p, 36, 2) && own_piece(p, 36, 60));
+        assert_eq!(corners(p, 2 * 11), [11, 0, 23]);
+        assert_eq!(corners(p, 2 * 11 + 1), [0, 12, 23]);
+    }
+
+    #[test]
+    fn cloth_over_a_thin_limb_rests_on_it() {
+        // A limb thinner than the net is wide comes out of the tube
+        // level and stays, its end 5 cm past the wall: the cloth hangs
+        // over it, held by the middles of its links where no point
+        // touches, and comes to rest.
+        let (a, b) = (Vec3::new(-0.05, -0.12, 0.0), Vec3::new(0.07, -0.12, 0.0));
+        let setup = tube(24, 10, 0.1, 0.01, a, b);
+        let mut state = State::new(setup.points.len());
+        let out = Mat4::from_translation(Vec3::new(0.08, 0.0, 0.0));
+        for frame in sweep(&setup, Mat4::IDENTITY, out, 30, None) {
+            run(&setup, &mut state, &frame);
+        }
+        for mut frame in sweep(&setup, out, out, 180, None) {
+            frame.begin = Begin::Keep;
+            run(&setup, &mut state, &frame);
+        }
+        let speed = state.vel.iter().map(|v| v.length()).sum::<f32>() / state.vel.len() as f32;
+        assert!(speed < 0.005, "{speed}");
+        let shell = setup.shells[0].in_world(&out);
+        for (i, point) in setup.points.iter().enumerate() {
+            for link in &setup.links[i * LINKS..(i + 1) * LINKS] {
+                if point.fixed || link.to == NONE || setup.points[link.to as usize].fixed {
+                    continue;
+                }
+                let middle = (state.pos[i] + state.pos[link.to as usize]) * 0.5;
+                assert!(
+                    shell.depth(middle, 0.0) < 0.002,
+                    "a link's middle is in the limb at {middle}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stiffer_kinds_of_cloth_hold_a_strip_out_further() {
+        let low = |kind: Kind| {
+            let setup = strip(8, 0.03, Material::of(kind));
+            let mut state = State::new(setup.points.len());
+            run(&setup, &mut state, &still(&setup, Begin::Reset, None));
+            settle(&setup, &mut state, 300);
+            state.pos[7].y
+        };
+        let (flowing, pleated, fixed) = (low(Kind::Flowing), low(Kind::Pleated), low(Kind::Fixed));
+        assert!(
+            flowing < pleated - 0.01 && pleated < fixed - 0.01,
+            "{flowing} {pleated} {fixed}"
+        );
+        // What stands by itself stays within a few millimetres.
+        assert!(fixed > -0.01, "{fixed}");
+        for kind in Kind::ALL {
+            assert_eq!(Kind::named(kind.name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn the_rows_above_the_hips_are_held() {
+        // Four columns, six rows 5 cm apart from y = 1 down.
+        let rest: Vec<Vec3> = (0..24)
+            .map(|i| Vec3::new((i % 4) as f32, 1.0 - (i / 4) as f32 * 0.05, 0.0))
+            .collect();
+        assert_eq!(held_rows(&rest, 4, 6, Vec3::new(0.0, 0.88, 0.0), Vec3::Y), 3);
+        // The waist's own row always, and never the two lowest.
+        assert_eq!(held_rows(&rest, 4, 6, Vec3::new(0.0, 2.0, 0.0), Vec3::Y), 1);
+        assert_eq!(held_rows(&rest, 4, 6, Vec3::new(0.0, 0.0, 0.0), Vec3::Y), 4);
     }
 
     #[test]

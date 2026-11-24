@@ -528,6 +528,13 @@ impl Cloth {
         }
     }
 
+    /// Makes the skirts' cloth for the GPU solver of `material`.
+    pub(super) fn set_material(&mut self, material: super::drape::Material) {
+        if let Some(drape) = &mut self.drape {
+            drape.set_material(material);
+        }
+    }
+
     /// The cloth for the GPU solver, once it has a frame to run.
     pub(super) fn drape(&self) -> Option<Arc<super::drape::Live>> {
         self.drape

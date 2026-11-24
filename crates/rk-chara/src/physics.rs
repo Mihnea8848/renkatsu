@@ -1996,6 +1996,13 @@ impl Physics {
         }
     }
 
+    /// Makes the skirts' cloth of `kind` for the GPU solver.
+    pub fn set_skirt_kind(&mut self, kind: drape::Kind) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.set_material(drape::Material::of(kind));
+        }
+    }
+
     /// The fastest a part of the body went in a frame since the GPU
     /// solver started, as seen from the waist, in metres.
     pub fn fastest_limb(&self) -> f32 {
