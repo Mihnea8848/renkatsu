@@ -1259,7 +1259,7 @@ impl eframe::App for Studio {
                 }
             }
         }
-        if self.state.settings.frame_rate.continuous() {
+        if self.state.settings.frame_rate.continuous() || self.state.live.as_ref().is_some_and(live::Live::settling) {
             ctx.request_repaint();
         }
         let dt = ctx.input(|i| i.unstable_dt);

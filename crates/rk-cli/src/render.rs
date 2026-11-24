@@ -218,6 +218,9 @@ pub fn render(a: Args) -> Result<()> {
             bound.unbound
         );
     }
+    for line in chara.physics.skirts(&chara.scene) {
+        println!("skirt: {line}");
+    }
     let draws = chara.scene.pose();
     if a.list {
         for d in &draws {

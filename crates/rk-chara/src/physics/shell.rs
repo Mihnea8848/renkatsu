@@ -206,6 +206,19 @@ impl WorldShell {
         Some((way, s))
     }
 
+    /// The way from `p` to the shell's line, and how far `p` is from
+    /// the skin on that way (less than zero inside it).
+    pub fn towards(&self, p: Vec3) -> Option<(Vec3, f32)> {
+        let t = ((p - self.a).dot(self.axis) / self.len2).clamp(0.0, 1.0);
+        let off = self.a + self.axis * t - p;
+        let dist = off.length();
+        if dist < 1e-6 {
+            return None;
+        }
+        let r = self.radius(t, (-off).dot(self.e2).atan2((-off).dot(self.e1)));
+        Some((off / dist, dist - r))
+    }
+
     /// How deep `p` is inside the shell grown by `gap`, or zero.
     pub fn depth(&self, p: Vec3, gap: f32) -> f32 {
         self.inside(p, gap).map_or(0.0, |(_, _, dist, r)| r - dist)
@@ -500,27 +513,6 @@ pub fn fit(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Shell> {
             }
         }
     }
-    if std::env::var("RK_NET_DEBUG").is_ok() {
-        for s in &out {
-            let scale = world(scene, s.node).x_axis.truncate().length();
-            let rings: Vec<String> = s
-                .radii
-                .chunks(ANGLES)
-                .map(|ring| {
-                    let (lo, hi) = ring
-                        .iter()
-                        .fold((f32::MAX, 0.0f32), |(lo, hi), &r| (lo.min(r), hi.max(r)));
-                    format!("{:.1}-{:.1}", lo * scale * 100.0, hi * scale * 100.0)
-                })
-                .collect();
-            eprintln!(
-                "shell {} long {:.1} cm, rings cm {}",
-                scene.nodes[s.node].name,
-                (s.b - s.a).length() * scale * 100.0,
-                rings.join(" ")
-            );
-        }
-    }
     out
 }
 
@@ -589,6 +581,18 @@ mod tests {
         let mut p = Vec3::new(0.0, 0.01, 0.5);
         shell.push_along(&mut p, 0.0, -Vec3::Y).expect("inside");
         assert!((p.y + 0.05).abs() < 1e-4, "{p}");
+    }
+
+    #[test]
+    fn the_way_to_a_shell_is_to_its_line_and_tells_how_far_the_skin_is() {
+        // The slab is 5 cm thick above and below its line.
+        let shell = slab_shell();
+        let (way, off) = shell.towards(Vec3::new(0.0, 0.2, 0.5)).expect("off the line");
+        assert!((way + Vec3::Y).length() < 1e-4, "{way}");
+        assert!((off - 0.15).abs() < 1e-3, "{off}");
+        // Inside it the distance is below zero.
+        let (_, off) = shell.towards(Vec3::new(0.0, 0.02, 0.5)).expect("off the line");
+        assert!((off + 0.03).abs() < 1e-3, "{off}");
     }
 
     #[test]
