@@ -1297,25 +1297,14 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
     let mut toggled = Vec::new();
     if section(ui, k, st, HANDS_SECTION, "Hands") {
         for (side, name) in ["Left", "Right"].into_iter().enumerate() {
-            let label_of = |n: i32| -> String {
-                if n == 0 {
-                    return "Animation".to_owned();
-                }
-                crate::live::hand_lists_read()
-                    .and_then(|l| l[side].get(&n))
-                    .map_or_else(|| format!("Pattern {n}"), |a| a.label())
-            };
             let mark = keyed.mark(Channel::Hand(side));
-            let picked = pattern_row(
+            let picked = hand_row(
                 ui,
                 k,
-                st,
-                id,
-                Pictures::Hand(side),
                 name,
                 waiting,
                 ui_id.with(("hand", side)),
-                &label_of,
+                side,
                 &mut next.hands[side],
                 mark,
             );
@@ -1928,6 +1917,57 @@ fn preset_row(
             }
         }
     }
+}
+
+/// A hand's pattern as CharaStudio steps through them, arrows to either
+/// side (`PatternInfo`), with the patterns by name in a list between; 0
+/// is the animation's own hand. Returns whether the key mark was clicked.
+#[allow(clippy::too_many_arguments)]
+fn hand_row(
+    ui: &mut Ui,
+    k: &Look,
+    name: &str,
+    off: Option<&str>,
+    ui_id: egui::Id,
+    side: usize,
+    value: &mut i32,
+    key: (bool, bool),
+) -> bool {
+    let mut options: Vec<(i32, String)> = vec![(0, "Animation".to_owned())];
+    if let Some(lists) = crate::live::hand_lists_read() {
+        options.extend(lists[side].iter().map(|(n, a)| (*n, a.label())));
+    }
+    if !options.iter().any(|(n, _)| n == value) {
+        options.push((*value, format!("Pattern {value}")));
+    }
+    let mut clicked = false;
+    row(ui, k, name, off, |ui, rect| {
+        let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
+        clicked = click;
+        let side_w = rect.height();
+        let left = Rect::from_min_size(rect.min, Vec2::splat(side_w));
+        let right = Rect::from_min_size(Pos2::new(rect.right() - side_w, rect.top()), Vec2::splat(side_w));
+        let field = Rect::from_min_max(
+            Pos2::new(left.right() + 2.0, rect.top()),
+            Pos2::new(right.left() - 2.0, rect.bottom()),
+        );
+        let at = options.iter().position(|(n, _)| n == value).unwrap_or(0);
+        for (cell, step, glyph) in [(left, -1i32, icon::CARET_LEFT), (right, 1, icon::CARET_RIGHT)] {
+            let resp = ui.interact(cell, ui_id.with(("step", step)), Sense::click());
+            widgets::icon_cell(ui, k, cell, &resp, glyph, false);
+            if resp.clicked() {
+                let count = options.len() as i32;
+                *value = options[(at as i32 + step).rem_euclid(count) as usize].0;
+            }
+        }
+        let mut chosen = at;
+        let names: Vec<&str> = options.iter().map(|(_, s)| s.as_str()).collect();
+        widgets::combo(ui, k, field, ui_id.with("list"), &mut chosen, &names);
+        if chosen != at {
+            *value = options[chosen].0;
+        }
+    });
+    clicked
 }
 
 /// A pattern as its picture, which opens a grid of all the pictures to

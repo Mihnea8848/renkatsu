@@ -1195,17 +1195,13 @@ pub enum Pictures {
     Eyebrows,
     Eyes,
     Mouth,
-    /// A hand's patterns, 0 left and 1 right.
-    Hand(usize),
 }
 
 impl Pictures {
     /// The picture's size in pixels.
     pub fn size(self) -> [u32; 2] {
-        match self {
-            Pictures::Hand(_) => [64, 64],
-            _ => [96, 48],
-        }
+        let _ = self;
+        [96, 48]
     }
 }
 
@@ -1225,7 +1221,7 @@ impl Live {
 
     /// Makes the pictures asked for: the character with each pattern in
     /// turn, seen up close, then as she was.
-    fn make_pictures(&mut self, scene: &Scene, games: &mut Games, mods: &Path) {
+    fn make_pictures(&mut self, scene: &Scene) {
         for at in 0..self.actors.len() {
             let Some(set) = self.actors[at].pictures_wanted.pop() else {
                 continue;
@@ -1234,82 +1230,44 @@ impl Live {
             let size = set.size();
             let actor = &mut self.actors[at];
             let mut made = Vec::new();
-            match set {
-                Pictures::Hand(side) => {
-                    let (Ok(game), Some(camera)) = (games.get(mods), hand_camera(&actor.chara, side)) else {
-                        actor.pictures.insert(set, Vec::new());
-                        continue;
-                    };
-                    let lists = hand_lists(game);
-                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
-                    let was: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
-                    // The animation's own fingers first, as the list's 0.
-                    let mut patterns: Vec<i32> = vec![0];
-                    patterns.extend(lists[side].keys().copied());
-                    for pattern in patterns {
-                        if let Some(anime) = lists[side].get(&pattern) {
-                            let chara = &actor.chara;
-                            let clip =
-                                rk_chara::hand_pattern::HandClip::load(game, anime, &chara.scene, chara.top, side);
-                            match clip {
-                                Ok(clip) => clip.apply(&mut actor.chara.scene, 0.0),
-                                Err(_) => continue,
-                            }
-                        }
-                        let draws = actor.chara.scene.pose();
-                        if let Ok(rgba) =
-                            self.renderer
-                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
-                        {
-                            made.push((pattern, picture(size, &rgba)));
-                        }
-                        drop(draws);
-                        for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&was) {
-                            node.local = *local;
-                        }
+            let face_set = set;
+            let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set)) else {
+                actor.pictures.insert(set, Vec::new());
+                continue;
+            };
+            lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
+            let now = actor.layer.as_ref().and_then(|l| l.face);
+            let base = now.unwrap_or(rig.start);
+            let (eyebrows, mouths) = rig.counts();
+            let patterns: Vec<i32> = match face_set {
+                Pictures::Eyebrows => (0..eyebrows as i32).collect(),
+                Pictures::Eyes => rig.eye_choices(),
+                _ => (0..mouths as i32).collect(),
+            };
+            for pattern in patterns {
+                let mut face = base;
+                match face_set {
+                    Pictures::Eyebrows => face.eyebrows = pattern,
+                    Pictures::Eyes => {
+                        face.eyes = pattern;
+                        face.blink = true;
+                    }
+                    _ => {
+                        face.mouth = pattern;
+                        // Open enough for the pattern's shape to show.
+                        face.mouth_open = face.mouth_open.max(0.5);
                     }
                 }
-                face_set => {
-                    let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set))
-                    else {
-                        actor.pictures.insert(set, Vec::new());
-                        continue;
-                    };
-                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
-                    let now = actor.layer.as_ref().and_then(|l| l.face);
-                    let base = now.unwrap_or(rig.start);
-                    let (eyebrows, mouths) = rig.counts();
-                    let patterns: Vec<i32> = match face_set {
-                        Pictures::Eyebrows => (0..eyebrows as i32).collect(),
-                        Pictures::Eyes => rig.eye_choices(),
-                        _ => (0..mouths as i32).collect(),
-                    };
-                    for pattern in patterns {
-                        let mut face = base;
-                        match face_set {
-                            Pictures::Eyebrows => face.eyebrows = pattern,
-                            Pictures::Eyes => {
-                                face.eyes = pattern;
-                                face.blink = true;
-                            }
-                            _ => {
-                                face.mouth = pattern;
-                                // Open enough for the pattern's shape to show.
-                                face.mouth_open = face.mouth_open.max(0.5);
-                            }
-                        }
-                        rig.show(&mut actor.chara.scene, Some(&face));
-                        let draws = actor.chara.scene.pose();
-                        if let Ok(rgba) =
-                            self.renderer
-                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
-                        {
-                            made.push((pattern, picture(size, &rgba)));
-                        }
-                    }
-                    rig.show(&mut actor.chara.scene, now.as_ref());
+                rig.show(&mut actor.chara.scene, Some(&face));
+                let draws = actor.chara.scene.pose();
+                if let Ok(rgba) = self
+                    .renderer
+                    .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
+                {
+                    made.push((pattern, picture(size, &rgba)));
                 }
             }
+            rig.show(&mut actor.chara.scene, now.as_ref());
             actor.pictures.insert(set, made);
         }
     }
@@ -1378,24 +1336,6 @@ fn face_camera(chara: &rk_chara::Character, set: Pictures) -> Option<Camera> {
         target,
         fov_y_deg,
         up: tilted,
-    })
-}
-
-/// A camera on a hand, from in front of the character and a little above.
-fn hand_camera(chara: &rk_chara::Character, side: usize) -> Option<Camera> {
-    let (world, _) = chara.scene.world();
-    let hand = world[chara.scene.find(chara.top, rk_chara::hand_pattern::HAND_NODES[side])?]
-        .w_axis
-        .truncate();
-    let body = world[chara.top];
-    let forward = body.z_axis.truncate().normalize_or_zero();
-    let up = body.y_axis.truncate().normalize_or_zero();
-    // In the body's own space, whatever way the character is turned.
-    Some(Camera {
-        eye: hand + (forward + up * 0.4).normalize_or_zero() * 0.4,
-        target: hand,
-        fov_y_deg: 17.0,
-        up,
     })
 }
 
@@ -2394,7 +2334,7 @@ impl Live {
                 .chain(actor.vagina.iter().map(|&b| (b, fingers.clone())))
                 .collect();
         }
-        self.make_pictures(scene, games, &mods);
+        self.make_pictures(scene);
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
         self.send_doors(scene, &clock);
