@@ -43,8 +43,20 @@
 //!      push (Macklin et al. 2014).
 //!
 //! The speed is what the point moved by over the substep (PBD, Mueller
-//! et al. 2007). A point that began the substep inside something is put
-//! out without speed (Macklin et al. 2014, pre-stabilisation).
+//! et al. 2007), but being pushed gives it no speed of its own: the way
+//! the contacts moved it, it ends no faster than what pushed it goes, or
+//! than it went that way before (Mueller et al. 2020, "Detailed Rigid
+//! Body Simulation with Extended Position Based Dynamics", the speed at
+//! a contact after the solve, without bounce; from memory). A point put
+//! out of something it was in does not fly off, and one that two things
+//! press on which cannot both have their way lies still.
+//!
+//! Before that a point that began a substep inside something was moved
+//! out first and its speed counted from there (Macklin et al. 2014,
+//! pre-stabilisation). A point that its tether or links held back then
+//! had the speed of that pull in every substep without moving: cloth
+//! between a thigh and the floor shook, and a dress under a hand on a
+//! lap went up the thighs.
 //!
 //! One round of this per substep and many substeps (Macklin et al. 2019,
 //! "Small Steps in Physics Simulation"). Jacobi rather than colours: two
@@ -206,6 +218,11 @@ pub const OWN_PIECE: u32 = 2;
 /// is not looked at: more than a cell of twice the net's spacing spans.
 pub const OWN_SPAN: f32 = 0.15;
 pub const BODY_PLANES: usize = 16;
+/// A push shorter than this has no way to speak of. Not higher: a
+/// resting point is pushed by 1e-5 m a substep (g h^2) and less where
+/// several things share it, and with 1e-6 here kneeling and lying
+/// cloth did not come to rest (0.02 to 0.07 m/s against 0.004 to 0.02).
+pub const PUSH_LEAST: f32 = 1e-9;
 /// No point.
 pub const NONE: u32 = u32::MAX;
 /// How near a shell's skin a point is given its plane: twice what the
@@ -551,8 +568,6 @@ struct Plane {
     d: f32,
     /// How the thing moved at the point over the substep.
     moved: Vec3,
-    /// Where the plane was along `n` when the substep began.
-    began: f32,
     /// What it pushed the point by.
     pushed: f32,
 }
@@ -833,11 +848,9 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     n: to.transform_vector3(dir).normalize_or_zero(),
                     d: 0.0,
                     moved,
-                    began: 0.0,
                     pushed: 0.0,
                 };
                 plane.d = to.transform_point3(on).dot(plane.n) + skin;
-                plane.began = x0.dot(plane.n) + began;
                 if s.outside && began > 0.0 {
                     // Inside an arm or a hand the cloth leaves it
                     // towards the body: it is under a hand on a lap.
@@ -867,7 +880,6 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                         let along = off.dot(way);
                         let out = -along + (along * along + skin * skin - off.length_squared()).max(0.0).sqrt();
                         plane.n = way;
-                        plane.began = (x0 + way * out).dot(way);
                         plane.d = (x0 + way * out + moved).dot(way);
                     }
                 }
@@ -904,7 +916,6 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                         n: nrm,
                         d: x.dot(nrm) + deep * 0.5,
                         moved: Vec3::ZERO,
-                        began: x0.dot(nrm) + (material.thickness - height.abs()).max(0.0) * 0.5,
                         pushed: 0.0,
                     };
                     bodies += 1;
@@ -951,7 +962,6 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                         n: nrm,
                         d: x.dot(nrm) + deep,
                         moved: to.transform_point3(l) - began_at,
-                        began: x0.dot(nrm) + began,
                         pushed: 0.0,
                     };
                     bodies += 1;
@@ -965,7 +975,6 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 ground[grounds] = Plane {
                     n: up,
                     d,
-                    began: d,
                     ..Default::default()
                 };
                 grounds += 1;
@@ -979,34 +988,14 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 ground[grounds] = Plane {
                     n: nrm,
                     d,
-                    began: d,
                     ..Default::default()
                 };
                 grounds += 1;
             }
-            // A point that began inside something is put out of it
-            // without speed: where it began is taken through the planes
-            // as they were then, and the point moved by as much.
-            let mut started = x0;
-            for _ in 0..2 {
-                for set in [&body[..bodies], &ground[..grounds]] {
-                    let (mut sum, mut count) = (Vec3::ZERO, 0.0f32);
-                    for plane in set {
-                        let c = started.dot(plane.n) - plane.began;
-                        if c < 0.0 {
-                            sum += plane.n * (c * c);
-                            count -= c;
-                        }
-                    }
-                    if count > 0.0 {
-                        started += sum / count;
-                    }
-                }
-            }
-            x += started - x0;
             // Two rounds: the body's planes averaged, then the ground's.
             // Each plane counts by how deep the point is behind it, so
             // that one it barely touches does not halve the others.
+            let free = x;
             for _ in 0..2 {
                 for set in [&mut body[..bodies], &mut ground[..grounds]] {
                     let (mut sum, mut count) = (Vec3::ZERO, 0.0f32);
@@ -1028,14 +1017,16 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     }
                 }
             }
+            let push = x - free;
             // 5. Friction, against each thing that pushed.
-            let (mut rub, mut rubs) = (Vec3::ZERO, 0.0f32);
+            let (mut rub, mut rubs, mut carried) = (Vec3::ZERO, 0.0f32, Vec3::ZERO);
             for plane in body[..bodies].iter().chain(&ground[..grounds]) {
                 if plane.pushed <= 0.0 {
                     continue;
                 }
                 rubs += plane.pushed;
-                let slid = x - started - plane.moved;
+                carried += plane.moved * plane.pushed;
+                let slid = x - x0 - plane.moved;
                 let across = slid - plane.n * slid.dot(plane.n);
                 let far = across.length();
                 if far < 1e-9 {
@@ -1051,7 +1042,26 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
             if rubs > 0.0 {
                 x += rub / rubs;
             }
-            let mut v = (x - started) / h;
+            // The speed is what the point moved by (PBD), but being
+            // pushed gives it no speed of its own: the way the contacts
+            // moved it, it ends no faster than what pushed it goes, or
+            // than it went that way before (Mueller et al. 2020,
+            // "Detailed Rigid Body Simulation with Extended Position
+            // Based Dynamics", the contact's speed after the solve with
+            // no bounce). So a point put out of what it was in does not
+            // fly off, and one held where two things press on it that
+            // cannot both have their way lies still.
+            let mut v = (x - x0) / h;
+            let far = push.length();
+            if rubs > 0.0 && far > PUSH_LEAST {
+                let way = push / far;
+                let base = carried / (rubs * h);
+                let away = (v - base).dot(way);
+                if away > 0.0 {
+                    let before = ((y - x0) / h - base).dot(way);
+                    v -= way * (away - before.clamp(0.0, away));
+                }
+            }
             let speed = v.length();
             if speed > FASTEST {
                 v *= FASTEST / speed;
@@ -1980,12 +1990,8 @@ mod tests {
     fn cloth_between_two_things_sits_between_them() {
         // A point between the floor and a limb pressed 2 cm into it: the
         // floor has the last word.
-        let (a, b) = (Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0));
-        let mut setup = tube(8, 2, 0.05, 0.05, a, b);
         // One free point under the limb's middle, held by nothing.
-        setup.links.iter_mut().for_each(|l| l.to = NONE);
-        setup.hinges.iter_mut().for_each(|h| h.a = NONE);
-        setup.points.iter_mut().for_each(|p| p.anchor = NONE);
+        let setup = one_point_by_a_limb();
         let floor = Some((Vec3::new(0.0, -0.03, 0.0), Vec3::Y));
         let mut state = State::new(setup.points.len());
         let mut frame = still(&setup, Begin::Reset, None);
@@ -2001,7 +2007,87 @@ mod tests {
         }
         let p = state.pos[8];
         assert!((p.y - (-0.03 + setup.material.thickness)).abs() < 1e-4, "{p}");
-        assert!(state.vel[8].length() < 1e-3);
+        assert!(state.vel[8].length() < 1e-3, "{}", state.vel[8]);
+    }
+
+    /// A limb along x through the origin, 5 cm thick, and the points of
+    /// a tube's second row free of each other and of the first: point 8
+    /// is the one the tests place. Without cells, which would be between
+    /// points put in one place.
+    fn one_point_by_a_limb() -> Setup {
+        let (a, b) = (Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0));
+        let mut setup = tube(8, 2, 0.05, 0.05, a, b);
+        setup.links.iter_mut().for_each(|l| l.to = NONE);
+        setup.hinges.iter_mut().for_each(|h| h.a = NONE);
+        setup.points.iter_mut().for_each(|p| p.anchor = NONE);
+        setup.points.iter_mut().for_each(|p| p.cell = false);
+        setup
+    }
+
+    #[test]
+    fn cloth_held_under_a_limb_on_the_floor_rests() {
+        // A limb pressed 2 cm into the floor, and under its side a point
+        // that the limb puts out sideways and its tether, to a point
+        // fixed on the limb's line, pulls back under it: the two cannot
+        // both have their way. The point is to lie still on the floor,
+        // without speed: pushed out with no speed and pulled back with
+        // speed, it had the speed of the pull in every substep.
+        let mut setup = one_point_by_a_limb();
+        let floor = -0.03;
+        let at = Vec3::new(0.05, floor + setup.material.thickness, 0.03);
+        setup.points[8].anchor = 0;
+        setup.points[8].tether = (at - setup.points[0].rest).length();
+        let mut state = State::new(setup.points.len());
+        let mut frame = still(&setup, Begin::Reset, None);
+        run(&setup, &mut state, &frame);
+        frame.begin = Begin::Keep;
+        frame.floor = Some((Vec3::new(0.0, floor, 0.0), Vec3::Y));
+        for i in 8..16 {
+            state.pos[i] = at;
+            state.vel[i] = Vec3::ZERO;
+        }
+        for _ in 0..30 {
+            run(&setup, &mut state, &frame);
+        }
+        let before = state.pos[8];
+        run(&setup, &mut state, &frame);
+        let p = state.pos[8];
+        assert!((p.y - at.y).abs() < 1e-4, "{p}");
+        assert!((p - before).length() < 1e-5, "{before} to {p}");
+        assert!(state.vel[8].length() < 1e-3, "{}", state.vel[8]);
+        // The two do pull against each other there: contact comes last,
+        // and the point is further from its anchor than its tether.
+        let reach = (p - setup.points[0].rest).length();
+        assert!(reach > setup.points[8].tether + 0.005, "{reach}");
+    }
+
+    #[test]
+    fn a_point_put_out_of_a_limb_is_given_no_speed() {
+        // A point 2 cm inside the top of a limb is on its skin after one
+        // frame and stays there: being put out gave it no speed.
+        let setup = one_point_by_a_limb();
+        let skin = 0.05 + setup.material.thickness;
+        let mut state = State::new(setup.points.len());
+        let mut frame = still(&setup, Begin::Reset, None);
+        run(&setup, &mut state, &frame);
+        frame.begin = Begin::Keep;
+        for i in 8..16 {
+            state.pos[i] = Vec3::new(0.0, skin - 0.02, 0.0);
+            state.vel[i] = Vec3::ZERO;
+        }
+        run(&setup, &mut state, &frame);
+        assert!((state.pos[8].y - skin).abs() < 1e-4, "{}", state.pos[8]);
+        assert!(state.vel[8].length() < 1e-3, "{}", state.vel[8]);
+        // A limb that comes up under it takes it along at its own speed
+        // and no faster: 1 cm in a frame.
+        let slots = setup.slots();
+        let subs = frame.substeps as usize;
+        for k in 0..=subs {
+            frame.poses[k * slots] = Mat4::from_translation(Vec3::Y * (0.01 * k as f32 / subs as f32));
+        }
+        run(&setup, &mut state, &frame);
+        assert!((state.pos[8].y - skin - 0.01).abs() < 1e-4, "{}", state.pos[8]);
+        assert!((state.vel[8].y - 0.6).abs() < 0.02, "{}", state.vel[8]);
     }
 
     #[test]

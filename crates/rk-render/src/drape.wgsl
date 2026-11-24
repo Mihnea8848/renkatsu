@@ -101,6 +101,7 @@ const OWN_NEAR: f32 = 0.01;
 const OWN_PIECE: u32 = 2u;
 const OWN_SPAN: f32 = 0.15;
 const BODY_PLANES: u32 = 16u;
+const PUSH_LEAST: f32 = 1e-9;
 const ANGLES: u32 = 24u;
 const SHELL: u32 = 20u;
 const TAU: f32 = 6.2831855;
@@ -285,7 +286,6 @@ struct Plane {
     n: vec3<f32>,
     d: f32,
     moved: vec3<f32>,
-    began: f32,
     pushed: f32,
 }
 
@@ -590,7 +590,6 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         plane.moved = moved;
         plane.pushed = 0.0;
         plane.d = dot(point_of(fin, o.on), plane.n) + skin;
-        plane.began = dot(x0, plane.n) + began;
         if outside && began > 0.0 {
             var clear = 3.4e38;
             var way = vec3<f32>(0.0);
@@ -620,7 +619,6 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
                 let along = dot(off, way);
                 let far = -along + sqrt(max(along * along + skin * skin - dot(off, off), 0.0));
                 plane.n = way;
-                plane.began = dot(x0 + way * far, way);
                 plane.d = dot(x0 + way * far + moved, way);
             }
         }
@@ -649,7 +647,6 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
             plane.n = nrm;
             plane.d = dot(x, nrm) + deep * 0.5;
             plane.moved = vec3<f32>(0.0);
-            plane.began = dot(x0, nrm) + max(sub.thickness - abs(height), 0.0) * 0.5;
             plane.pushed = 0.0;
             held[bodies] = plane;
             bodies += 1u;
@@ -692,7 +689,6 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
             plane.n = nrm;
             plane.d = dot(x, nrm) + deep;
             plane.moved = point_of(fin, l) - began_at;
-            plane.began = dot(x0, nrm) + began;
             plane.pushed = 0.0;
             held[bodies] = plane;
             bodies += 1u;
@@ -705,7 +701,6 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         plane.n = sub.floor.xyz;
         plane.d = sub.floor.w + p.gap;
         plane.moved = vec3<f32>(0.0);
-        plane.began = plane.d;
         plane.pushed = 0.0;
         held[total] = plane;
         total += 1u;
@@ -720,34 +715,13 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
             plane.n = m.xyz;
             plane.d = m.w + p.gap;
             plane.moved = vec3<f32>(0.0);
-            plane.began = plane.d;
             plane.pushed = 0.0;
             held[total] = plane;
             total += 1u;
         }
     }
-    // A point that began inside something is put out of it without speed.
-    var started = x0;
-    for (var turn = 0u; turn < 2u; turn++) {
-        for (var half = 0u; half < 2u; half++) {
-            let lo = select(0u, bodies, half == 1u);
-            let hi = select(bodies, total, half == 1u);
-            var push = vec3<f32>(0.0);
-            var pushes = 0.0;
-            for (var k = lo; k < hi; k++) {
-                let c = dot(started, held[k].n) - held[k].began;
-                if c < 0.0 {
-                    push += held[k].n * (c * c);
-                    pushes -= c;
-                }
-            }
-            if pushes > 0.0 {
-                started += push / pushes;
-            }
-        }
-    }
-    x += started - x0;
     // Two rounds: the body's planes averaged, then the ground's.
+    let free = x;
     for (var turn = 0u; turn < 2u; turn++) {
         for (var half = 0u; half < 2u; half++) {
             let lo = select(0u, bodies, half == 1u);
@@ -773,14 +747,17 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     // 5. Friction, against each thing that pushed.
+    let push = x - free;
     var rub = vec3<f32>(0.0);
     var rubs = 0.0;
+    var carried = vec3<f32>(0.0);
     for (var k = 0u; k < total; k++) {
         if held[k].pushed <= 0.0 {
             continue;
         }
         rubs += held[k].pushed;
-        let slid = x - started - held[k].moved;
+        carried += held[k].moved * held[k].pushed;
+        let slid = x - x0 - held[k].moved;
         let across = slid - held[k].n * dot(slid, held[k].n);
         let far = length(across);
         if far < 1e-9 {
@@ -795,7 +772,20 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
     if rubs > 0.0 {
         x += rub / rubs;
     }
-    var v = (x - started) / h;
+    // Being pushed gives the point no speed of its own: the way the
+    // contacts moved it, it ends no faster than what pushed it goes, or
+    // than it went that way before.
+    var v = (x - x0) / h;
+    let far = length(push);
+    if rubs > 0.0 && far > PUSH_LEAST {
+        let way = push / far;
+        let base = carried / (rubs * h);
+        let away = dot(v - base, way);
+        if away > 0.0 {
+            let before = dot((y - x0) / h - base, way);
+            v -= way * (away - clamp(before, 0.0, away));
+        }
+    }
     let speed = length(v);
     if speed > FASTEST {
         v *= FASTEST / speed;

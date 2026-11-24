@@ -647,8 +647,12 @@ mod tests {
             // a point on the edge of sticking can fall either way: the
             // GPU is put back on the twin each frame, so that what is
             // compared is one frame's work and not which way such a
-            // point went thirty frames ago.
-            assert!(far < 2e-5, "frame {k}: {far} m apart");
+            // point went thirty frames ago. The way a point was pushed
+            // is the sum of pushes that may nearly cancel, and the speed
+            // taken off along it differs by more than rounding where
+            // they do: 46 um at the worst point of one frame here, 20
+            // um before that rule.
+            assert!(far < 1e-4, "frame {k}: {far} m apart");
             assert_eq!(speeds.len(), state.vel.len());
             let places: Vec<[f32; 4]> = state
                 .pos
@@ -691,9 +695,15 @@ mod tests {
         // Where the hem is heaped on the floor a point is on one side of
         // its own cloth or the other by the last bit of a sum, and the
         // few that fall differently end centimetres apart: nine in ten
-        // are held to, not the worst.
+        // are held to, not the worst. The cloth is thrown by the limb
+        // and still swings at the end; since being pushed out of
+        // something no longer moves a point without speed first, the
+        // first hem point that falls differently (frame 8) takes more
+        // of the cloth with it by frame 30: the middle was 0.8 mm and
+        // is 8 mm, nine in ten were 5 mm and are 22 mm. The same with
+        // plain PBD speeds, so it is the scene and not the rule.
         assert!(
-            middle < 1e-3 && most < 5e-3,
+            middle < 2e-2 && most < 5e-2,
             "middle {middle}, nine in ten {most}, worst {worst}"
         );
     }
