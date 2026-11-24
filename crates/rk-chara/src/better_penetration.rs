@@ -10,6 +10,7 @@
 //! `OnReload`): extended data `BetterPenetrationController`, version 1.
 //! A value the data does not hold keeps the controller's default.
 
+use crate::physics::Physics;
 use crate::scene::{Scene, Trs};
 use glam::{Mat4, Quat, Vec3};
 use rk_card::{ExtData, Value};
@@ -136,6 +137,14 @@ pub struct Shaft {
     pub base_length: f32,
     /// Each point's local scale as found (`DanPoint.defaultLocalScale`).
     pub scales: Vec<Vec3>,
+    /// The shaft's colliders (names with `cm_J_dan`) and the virtual
+    /// points' (`cm_J_vdan`), with their radius and height as authored,
+    /// by their place in the physics' colliders (`InitializeDan`).
+    pub colliders: Vec<(usize, f32, f32)>,
+    pub virtual_colliders: Vec<usize>,
+    /// The balls' dynamic bones (`cm_J_dan_Pivot_f_L`, `_R`), by their place
+    /// in the physics' bones, when both are there (`InitializeTama`).
+    pub balls: Vec<usize>,
 }
 
 /// The shaft bones' names in order (`BoneNames.DanBones`).
@@ -179,6 +188,9 @@ impl Shaft {
             end: find("cm_J_dan119_00"),
             base_length,
             scales,
+            colliders: Vec::new(),
+            virtual_colliders: Vec::new(),
+            balls: Vec::new(),
         })
     }
 
@@ -396,6 +408,160 @@ impl Shaft {
                 scale: t.local_scale,
             };
         }
+    }
+}
+
+/// The body colliders the balls meet on a partner, and of which only the
+/// waist's on their own character (`BoneNames.BodyColliders`,
+/// `MidSectionColliders`).
+pub const BODY_COLLIDERS: [&str; 21] = [
+    "cf_hit_thigh01_L",
+    "cf_hit_thigh01_R",
+    "cf_hit_thigh02_L",
+    "cf_hit_thigh02_R",
+    "cf_hit_waist_L",
+    "cf_hit_berry",
+    "cf_hit_waist01",
+    "cf_hit_waist02",
+    "cf_hit_spine01",
+    "cf_hit_spine02",
+    "cf_hit_spine03",
+    "cf_hit_spine03_2",
+    "cf_hit_bust00",
+    "cf_hit_bust02_L",
+    "cf_hit_bust02_R",
+    "cf_hit_neck",
+    "cf_hit_head",
+    "cf_hit_arm_L",
+    "cf_hit_arm_R",
+    "cf_hit_shoulder_L",
+    "cf_hit_shoulder_R",
+];
+
+/// A dynamic bone's name: the object its component sits on.
+fn bone_name<'a>(physics: &Physics, scene: &'a Scene, bone: usize) -> Option<&'a str> {
+    match physics.bones.get(bone)? {
+        crate::physics::Bone::Dynamic(d) => Some(scene.nodes[d.def.node].name.as_str()),
+        _ => None,
+    }
+}
+
+impl Shaft {
+    /// Finds the shaft's colliders and the balls' dynamic bones in the
+    /// character's physics, and gives the balls the colliders the plugin
+    /// gives them on their own character: the first two of the shaft and
+    /// the waist's (`InitializeTama`, `AddTamaColliders`).
+    pub fn wire(&mut self, physics: &mut Physics, scene: &Scene) {
+        let name = |c: &crate::physics::Collider| scene.nodes[c.node].name.as_str();
+        self.colliders = physics
+            .colliders
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| name(c).contains("cm_J_dan"))
+            .map(|(i, c)| (i, c.radius, c.height))
+            .collect();
+        self.virtual_colliders = physics
+            .colliders
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| name(c).contains("cm_J_vdan"))
+            .map(|(i, _)| i)
+            .collect();
+        let balls: Vec<Option<usize>> = ["cm_J_dan_Pivot_f_L", "cm_J_dan_Pivot_f_R"]
+            .iter()
+            .map(|want| (0..physics.bones.len()).find(|&b| bone_name(physics, scene, b) == Some(want)))
+            .collect();
+        self.balls = balls.iter().flatten().copied().collect();
+        if self.balls.len() != 2 {
+            self.balls.clear();
+            return;
+        }
+        let mut own: Vec<usize> = if self.points.len() > 2 && self.colliders.len() >= 2 {
+            vec![self.colliders[0].0, self.colliders[1].0]
+        } else {
+            self.colliders.first().map(|c| c.0).into_iter().collect()
+        };
+        own.extend(physics.colliders.iter().position(|c| name(c) == "cf_hit_waist02"));
+        for &b in &self.balls {
+            if let crate::physics::Bone::Dynamic(d) = &mut physics.bones[b] {
+                d.def.colliders.extend(own.iter().copied());
+            }
+        }
+    }
+
+    /// Sizes the shaft's colliders by the settings, and the virtual ones as
+    /// the shaft's first (`UpdateDanColliders`).
+    pub fn size_colliders(&self, physics: &mut Physics, s: &Settings) {
+        if self.colliders.is_empty() || self.colliders.len() >= self.points.len() {
+            return;
+        }
+        for &(i, radius, height) in &self.colliders {
+            physics.colliders[i].radius = radius * s.collider_radius_scale;
+            physics.colliders[i].height = height * s.collider_length_scale;
+        }
+        if self.virtual_colliders.len() <= self.colliders.len() {
+            for (j, &v) in self.virtual_colliders.iter().enumerate() {
+                let (radius, height) = (
+                    physics.colliders[self.colliders[j].0].radius,
+                    physics.colliders[self.colliders[j].0].height,
+                );
+                physics.colliders[v].radius = radius;
+                physics.colliders[v].height = height;
+            }
+        }
+    }
+
+    /// The colliders a partner's dynamic bones meet, placed where the
+    /// shaft is (`AddDanCollidersToTargetKokan`, `...Belly`, `...Ana`):
+    /// the shaft's for those named with `cf_J_Vagina` when vaginal or
+    /// `cf_j_ana` when anal, the virtual points' for those with
+    /// `cf_J_Belly` when vaginal with the belly bulge on. Oral gives none.
+    pub fn partner_guests(
+        &self,
+        physics: &Physics,
+        scene: &Scene,
+        partner: &Physics,
+        partner_scene: &Scene,
+        mode: Mode,
+        s: &Settings,
+    ) -> crate::physics::Guests {
+        let shapes = |list: &mut dyn Iterator<Item = usize>| -> Vec<crate::physics::Shape> {
+            list.map(|i| physics.colliders[i].scaled_shape(scene, 1.0, 1.0))
+                .collect()
+        };
+        let shaft = shapes(&mut self.colliders.iter().map(|c| c.0));
+        let virtual_ = shapes(&mut self.virtual_colliders.iter().copied());
+        let mut out = Vec::new();
+        for b in 0..partner.bones.len() {
+            let Some(name) = bone_name(partner, partner_scene, b) else {
+                continue;
+            };
+            let given = match mode {
+                Mode::Vaginal if name.contains("cf_J_Vagina") => &shaft,
+                Mode::Vaginal if s.belly_bulge && name.contains("cf_J_Belly") => &virtual_,
+                Mode::Anal if name.contains("cf_j_ana") => &shaft,
+                _ => continue,
+            };
+            if !given.is_empty() {
+                out.push((b, given.clone()));
+            }
+        }
+        out
+    }
+
+    /// The partner's body colliders the balls meet while linked to her,
+    /// placed where she is (`AddTamaColliders` with `midSectionOnly` off).
+    pub fn ball_guests(&self, partner: &Physics, partner_scene: &Scene) -> crate::physics::Guests {
+        let shapes: Vec<crate::physics::Shape> = partner
+            .colliders
+            .iter()
+            .filter(|c| c.enabled && BODY_COLLIDERS.contains(&partner_scene.nodes[c.node].name.as_str()))
+            .map(|c| c.scaled_shape(partner_scene, 1.0, 1.0))
+            .collect();
+        if shapes.is_empty() {
+            return Vec::new();
+        }
+        self.balls.iter().map(|&b| (b, shapes.clone())).collect()
     }
 }
 
@@ -653,6 +819,83 @@ mod tests {
             (solved.points.last().unwrap().z - 0.08).abs() < 1e-4,
             "no further than the end"
         );
+    }
+
+    #[test]
+    fn an_aimed_shaft_pushes_a_partners_vagina_bones() {
+        let Ok(game) = rk_vfs::Game::open_user(&[]) else {
+            eprintln!("skipped: no game");
+            return;
+        };
+        let Some(dir) = rk_core::Config::load().ok().map(|c| c.game_dir) else {
+            return;
+        };
+        let load = |path: &str, body: Option<&str>| {
+            let card = rk_card::Card::load(dir.join(path)).ok()?;
+            let opts = crate::BuildOptions {
+                clothes: false,
+                accessories: false,
+                uncensor_body: body.map(str::to_owned),
+                ..Default::default()
+            };
+            crate::build(&game, &card, &opts).ok()
+        };
+        let (Some(mut him), Some(her)) = (
+            load("UserData/chara/male/Gallagher.png", None),
+            load("UserData/chara/female/Simple.png", Some("bp.profundis_nt")),
+        ) else {
+            eprintln!("skipped: no Gallagher.png, Simple.png or BP Profundis");
+            return;
+        };
+        let shaft = him.shaft.clone().expect("a BP shaft");
+        assert_eq!(shaft.colliders.len(), 4, "dan102, 104, 106, 108");
+        assert_eq!(shaft.balls.len(), 2);
+        let s = Settings::default();
+        shaft.size_colliders(&mut him.physics, &s);
+        // Her in front of him, her vagina a little ahead of his shaft's root.
+        let (world, _) = her.scene.world();
+        let names = bones_by_name(&her.scene, her.top);
+        let (entry, end) = targets(Mode::Vaginal, &world, |n| names.get(n).copied()).expect("her targets");
+        shaft.aim(&mut him.scene, entry, end, &s, true);
+        let guests = shaft.partner_guests(&him.physics, &him.scene, &her.physics, &her.scene, Mode::Vaginal, &s);
+        assert!(!guests.is_empty(), "her vagina dynamic bones meet the shaft");
+        assert!(guests.iter().all(|(_, g)| g.len() == 4));
+        assert!(
+            shaft
+                .ball_guests(&her.physics, &her.scene)
+                .iter()
+                .all(|(_, g)| g.len() > 5),
+            "the balls meet her body"
+        );
+        assert!(shaft
+            .partner_guests(&him.physics, &him.scene, &her.physics, &her.scene, Mode::Oral, &s)
+            .is_empty());
+        // Her vagina bones after a few frames with and without the shaft.
+        let settle = |mut chara: crate::build::Character, guests: crate::physics::Guests| {
+            chara.physics.set_guests(guests);
+            for _ in 0..30 {
+                chara.physics.begin_frame(&mut chara.scene);
+                chara.physics.end_frame(&mut chara.scene, crate::physics::FRAME_TIME);
+            }
+            let (world, _) = chara.scene.world();
+            let named = bones_by_name(&chara.scene, chara.top);
+            // The pivots are the chains' roots and stay; the bones below them move.
+            ["cf_J_Vagina_L.003", "cf_J_Vagina_R.003", "cf_J_Vagina_B"]
+                .iter()
+                .filter_map(|n| named.get(*n).map(|&i| world[i].w_axis.truncate()))
+                .collect::<Vec<Vec3>>()
+        };
+        let again = load("UserData/chara/female/Simple.png", Some("bp.profundis_nt")).expect("built before");
+        let pushed = settle(her, guests);
+        let alone = settle(again, Vec::new());
+        assert_eq!(pushed.len(), alone.len());
+        let moved = pushed
+            .iter()
+            .zip(&alone)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0, f32::max);
+        eprintln!("the shaft moves her vagina bones by up to {moved} m");
+        assert!(moved > 1e-4, "the shaft pushes her vagina bones");
     }
 
     #[test]

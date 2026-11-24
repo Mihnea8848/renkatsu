@@ -71,6 +71,12 @@ struct Actor {
     /// character was last posed with.
     aim_job: Option<AimJob>,
     aim_posed: Option<AimJob>,
+    /// Other characters' colliders this character's dynamic bones meet
+    /// from its next update: a partner's shaft, the partner's body for the
+    /// balls (`rk_chara::physics::Physics::set_guests`).
+    guests_next: Option<rk_chara::physics::Guests>,
+    /// The ones a partner's shaft gave last frame.
+    received: rk_chara::physics::Guests,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -518,6 +524,14 @@ impl Actor {
             self.aim_posed = self.aim_job;
             again = true;
         }
+        // Another character's colliders, new or gone, settle the dynamic
+        // bones again.
+        if let Some(guests) = self.guests_next.take() {
+            if guests.as_slice() != self.chara.physics.guests() {
+                self.chara.physics.set_guests(guests);
+                again = true;
+            }
+        }
 
         // The states the scene asks for, as far as the outfit has them.
         let states = cs::fitted(clothes, &self.chara.clothes.worn);
@@ -813,6 +827,22 @@ impl Live {
     /// nearest the settings' auto-target finds, then the two targets on her
     /// bones. The actors with a shaft are updated after the others, so a
     /// partner is posed for this frame.
+    /// BetterPenetration's settings of the actor at `at`: the scene's, or
+    /// its card's.
+    fn settings_of(&self, at: usize, scene: &Scene) -> Option<rk_chara::better_penetration::Settings> {
+        let actor = &self.actors[at];
+        actor.chara.shaft.as_ref()?;
+        match scene.get(actor.id).map(|o| &o.content) {
+            Some(Content::Character { better_penetration, .. }) => Some(
+                better_penetration
+                    .as_deref()
+                    .copied()
+                    .unwrap_or(actor.chara.better_penetration),
+            ),
+            _ => None,
+        }
+    }
+
     fn aim_of(&self, at: usize, scene: &Scene) -> Option<(Aim, AimJob)> {
         use rk_chara::better_penetration as bp;
         let actor = &self.actors[at];
@@ -1779,8 +1809,23 @@ impl Live {
             if let Some((aim, _)) = aim {
                 self.aims.push((self.actors[at].id, aim));
             }
+            // The balls meet the partner's body while linked to her.
+            let balls = aim
+                .and_then(|(aim, _)| {
+                    let shaft = self.actors[at].chara.shaft.as_ref()?;
+                    let her = self.actors.iter().find(|a| a.id == aim.partner)?;
+                    Some(shaft.ball_guests(&her.chara.physics, &her.chara.scene))
+                })
+                .unwrap_or_default();
+            let settings = self.settings_of(at, scene);
             let actor = &mut self.actors[at];
             actor.aim_job = aim.map(|(_, job)| job);
+            if let (Some(shaft), Some(settings)) = (actor.chara.shaft.as_ref(), settings) {
+                shaft.size_colliders(&mut actor.chara.physics, &settings);
+            }
+            let mut guests = actor.received.clone();
+            guests.extend(balls);
+            actor.guests_next = Some(guests);
             // A map that came or changed has the skirts settle on it.
             actor.among_changed |= actor.chara.physics.set_obstacles(obstacles.clone());
             let Some(object) = scene.get(actor.id) else { continue };
@@ -1849,6 +1894,36 @@ impl Live {
                     }
                 }
             }
+        }
+        // Each aimed shaft's colliders for its partner's dynamic bones,
+        // which she meets from her next update.
+        let mut given: Vec<(ObjectId, rk_chara::physics::Guests)> = Vec::new();
+        for &(him, aim) in &self.aims {
+            let Some(he) = self.actors.iter().find(|a| a.id == him) else {
+                continue;
+            };
+            let Some(her) = self.actors.iter().find(|a| a.id == aim.partner) else {
+                continue;
+            };
+            let (Some(shaft), Some(job)) = (he.chara.shaft.as_ref(), he.aim_job) else {
+                continue;
+            };
+            let guests = shaft.partner_guests(
+                &he.chara.physics,
+                &he.chara.scene,
+                &her.chara.physics,
+                &her.chara.scene,
+                aim.mode,
+                &job.settings,
+            );
+            given.push((aim.partner, guests));
+        }
+        for actor in &mut self.actors {
+            actor.received = given
+                .iter()
+                .filter(|(id, _)| *id == actor.id)
+                .flat_map(|(_, g)| g.iter().cloned())
+                .collect();
         }
         self.make_pictures(scene, games, &mods);
         self.follow_map(scene, project, jobs, log);
@@ -2541,6 +2616,8 @@ impl Live {
             shake_since: std::time::Instant::now(),
             aim_job: None,
             aim_posed: None,
+            guests_next: None,
+            received: Vec::new(),
             phase: None,
             fk,
             warm: false,

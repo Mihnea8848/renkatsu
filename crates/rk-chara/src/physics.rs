@@ -201,9 +201,12 @@ impl Default for Collider {
     }
 }
 
+/// Colliders lent to dynamic bones by their place in `Physics::bones`.
+pub type Guests = Vec<(usize, Vec<Shape>)>;
+
 /// A collider placed in the world for one update.
-#[derive(Debug, Clone, Copy)]
-struct Shape {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shape {
     p0: Vec3,
     p1: Vec3,
     radius: f32,
@@ -213,15 +216,22 @@ struct Shape {
 
 impl Collider {
     fn shape(&self, scene: &Scene) -> Shape {
+        self.scaled_shape(scene, 1.0, 1.0)
+    }
+
+    /// Where the collider is in the world, its radius and height times
+    /// these, for another character's dynamic bones to meet.
+    pub fn scaled_shape(&self, scene: &Scene, radius_scale: f32, height_scale: f32) -> Shape {
         let m = world(scene, self.node);
-        let radius = self.radius * lossy_scale_z(scene, self.node).abs();
-        let half = (self.height - self.radius) * 0.5;
+        let (radius, height) = (self.radius * radius_scale, self.height * height_scale);
+        let radius_world = radius * lossy_scale_z(scene, self.node).abs();
+        let half = (height - radius) * 0.5;
         if half <= 0.0 {
             let c = m.transform_point3(self.center);
             return Shape {
                 p0: c,
                 p1: c,
-                radius,
+                radius: radius_world,
                 capsule: false,
                 inside: self.inside,
             };
@@ -233,7 +243,7 @@ impl Collider {
         Shape {
             p0: m.transform_point3(c0),
             p1: m.transform_point3(c1),
-            radius,
+            radius: radius_world,
             capsule: true,
             inside: self.inside,
         }
@@ -655,8 +665,9 @@ impl DynamicBone {
         }
     }
 
-    /// `UpdateDynamicBones`.
-    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], dt: f32) {
+    /// `UpdateDynamicBones`, `guests` met after the component's own
+    /// colliders.
+    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], guests: &[Shape], dt: f32) {
         let Some(root) = self.def.root else { return };
         if self.particles.is_empty() {
             return;
@@ -668,7 +679,8 @@ impl DynamicBone {
         let n = loops(&mut self.time, self.def.update_rate, dt, 3);
         if n > 0 {
             let mats = rest_mats(scene, &self.particles);
-            let shapes = shapes(scene, colliders, &self.def.colliders, false);
+            let mut shapes = shapes(scene, colliders, &self.def.colliders, false);
+            shapes.extend_from_slice(guests);
             let root_rot = rotation(scene, root);
             for _ in 0..n {
                 self.update_particles1(&mats, root_rot);
@@ -1825,6 +1837,9 @@ pub struct Physics {
     cloth_held: bool,
     /// Which of `bones` ran in the last `end_frame`.
     ran: Vec<bool>,
+    /// Another character's colliders that dynamic bones meet too, by the
+    /// bone's place in `bones` (`set_guests`).
+    guests: Guests,
 }
 
 impl Physics {
@@ -1940,6 +1955,18 @@ impl Physics {
         self.still = still.to_vec();
     }
 
+    /// Colliders of another character that dynamic bones meet as well as
+    /// their own, placed in the world, by the bone's place in `bones`;
+    /// they stay until set again.
+    pub fn set_guests(&mut self, guests: Guests) {
+        self.guests = guests;
+    }
+
+    /// The guests set last.
+    pub fn guests(&self) -> &[(usize, Vec<Shape>)] {
+        &self.guests
+    }
+
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
@@ -1950,13 +1977,14 @@ impl Physics {
             cloth.begin(scene, &self.bones);
         }
         let mut live = vec![false; self.bones.len()];
-        for ((b, moves), live) in self.bones.iter_mut().zip(moving).zip(&mut live) {
+        for (i, ((b, moves), live)) in self.bones.iter_mut().zip(moving).zip(&mut live).enumerate() {
             if !moves {
                 continue;
             }
             match b {
                 Bone::Dynamic(d) if d.running() => {
-                    d.late_update(scene, &self.colliders, dt);
+                    let guests = self.guests.iter().find(|(b, _)| *b == i).map_or(&[][..], |(_, g)| g);
+                    d.late_update(scene, &self.colliders, guests, dt);
                     *live = true;
                 }
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),

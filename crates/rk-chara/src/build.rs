@@ -2993,7 +2993,11 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let shaft = {
         let (world, _) = b.scene.world();
         let named = crate::better_penetration::bones_by_name(&b.scene, top);
-        crate::better_penetration::Shaft::find(&b.scene, &world, |n| named.get(n).copied())
+        let mut shaft = crate::better_penetration::Shaft::find(&b.scene, &world, |n| named.get(n).copied());
+        if let Some(shaft) = shaft.as_mut() {
+            shaft.wire(&mut physics, &b.scene);
+        }
+        shaft
     };
     Ok(Character {
         ik_rig,
