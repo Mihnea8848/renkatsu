@@ -57,12 +57,25 @@ run it, and start a project.
   English, with a live preview before you add them.
 - Play, pause and stop run the animations and the physics together.
 
+### Pose and animate them
+
+- Pose a character by hand. Turn any bone with its handle, as in
+  CharaStudio's FK, or move her hands, feet, elbows, knees and body with
+  IK and let the rest follow. IK is CharaStudio's own solver, so a pose
+  lands where it would in the game.
+- Start from any frame of an animation, mirror a pose or copy one side to
+  the other, and keep your poses in the project to use again.
+- Set keys on bones and IK targets and play them on the timeline, with
+  smooth, even or held easing. Play one character's animation on its
+  own while you work on it, and save it to give to another character.
+
 ### Build the scene
 
 - CharaStudio's 42 maps, from the classrooms and the pool to the park and
   the train, at day, evening or night, with their lighting, shadows, sky,
   reflections and walls that get out of the camera's way.
-- Move a map's furniture, open and close its doors, and turn its sun.
+- Move a map's furniture, open and close its doors, and turn its sun with
+  Ctrl+L.
 - Lamps of your own that cast shadows, characters that shade the map, and
   CharaStudio's look: colour filters, bloom, ambient occlusion, fog, depth
   of field, sun shafts and mirrors.
@@ -77,18 +90,11 @@ run it, and start a project.
 - Undo and redo for everything, and shortcuts you can change.
 - Renkatsu tells you when a new version is out and installs it for you.
 
-## Coming in the next version
+## Coming next
 
-- Posing by hand: turn any bone, mirror a pose or copy one side to the
-  other, start from any frame of an animation, and keep your poses in the
-  project to use again.
-- An Animator panel with the character's skeleton.
-- A sun you can turn in the viewport, and lamps that show how far they
-  reach.
-- News with pictures on the home page, so you can see new features at work.
-
-After that comes inverse kinematics (moving a hand or a foot and letting
-the arm or the leg follow), then characters stored whole in the project.
+Hand shapes, facial expressions and where a character looks, then
+characters stored whole in the project, so a project opens the same
+without Koikatsu or its mods.
 
 ## Why I made this
 
@@ -115,11 +121,11 @@ later Renkatsu Character Maker with everything the Koikatsu maker can do.
    overlays and the other plugin data that cards depend on. Done in 0.1.0,
    with CharaStudio's screen effects in 0.1.2
 2. The studio: a docked editor with a viewport, scene tree and inspector,
-   and scene and project files stored as readable text, done in 0.1.1. Next
-   in this step: posing characters (static poses and CharaStudio's FK and
-   IK) and characters kept in the project in Renkatsu's own format.
+   and scene and project files stored as readable text, done in 0.1.1.
    Packages and Starter Content, so Renkatsu works without Koikatsu, came
-   in 0.1.2
+   in 0.1.2, and posing by hand with CharaStudio's FK and IK in 0.2.3.
+   Next in this step: hands, faces and gaze, and characters kept in the
+   project in Renkatsu's own format
 3. The Ren'Py link: baked images and video that are rendered again when a
    character changes
 4. Animation
@@ -136,8 +142,8 @@ lighting than the game has.
 
 ## Known problems
 
-- Characters can't be posed by hand in 0.2.2; posing comes in the next
-  version, and community pose files can't be imported yet
+- Hand shapes, facial expressions and gaze can't be posed yet, and
+  CharaStudio's pose files can't be imported
 - Without a Koikatsu install, characters come from Starter Content only.
   Cards that use mods need the mods, which come with a Koikatsu install
 - Maps from mods are not read yet
@@ -145,7 +151,7 @@ lighting than the game has.
 
 ## Version history
 
-The latest version is 0.2.2, on the
+The latest version is 0.2.3, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 <details>
@@ -194,6 +200,15 @@ The latest version is 0.2.2, on the
   characters shading the map, CharaStudio's colour filters, fog, depth of
   field, sun shafts and mirrors. A map's furniture can be moved and its
   doors opened, and night scenes darken the map for lamps to light.
+- 0.2.3 poses characters by hand. Bones turn with handles as in
+  CharaStudio's FK, and IK moves the hands, feet, elbows, knees and body
+  with CharaStudio's own solver, ported to land within a hundredth of a
+  millimetre of the game. Poses mirror, copy to the other side, bake from
+  an animation and keep in the project. Keys on bones and IK targets play
+  on a timeline, an Animator panel holds the skeleton and its keys, and a
+  character's animation plays alone and saves to reuse. The map's sun
+  turns by hand, directional lamps cast shadows, news shows pictures, and
+  updates install themselves.
 
 </details>
 
