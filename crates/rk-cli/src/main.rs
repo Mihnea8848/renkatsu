@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod audit;
 mod bench;
+mod bp_check;
 mod bundle;
 mod capture_check;
 mod card;
@@ -269,6 +270,16 @@ enum Cmd {
     /// folder) with our render of it: one line per case, with the camera,
     /// light, outfit, clothing states and pose the capture recorded. Cases
     /// taken in a map are listed with what they recorded.
+    /// BetterPenetration against CharaStudio captures with a partner: both
+    /// characters posed from the capture, then our targets, shaft aim,
+    /// colliders and mouth measured against the plugin's, in millimetres
+    BpCheck {
+        /// Folder with the cases' .json and .partner.json files.
+        dir: PathBuf,
+        /// Only the cases whose file name contains one of these texts.
+        #[arg(long)]
+        only: Vec<String>,
+    },
     CaptureCheck {
         /// Folder with the batch's .json files and pictures.
         dir: PathBuf,
@@ -599,6 +610,7 @@ fn main() -> Result<()> {
             show,
             studio,
         } => bench::bench(&list, &captures, &out, &show, studio),
+        Cmd::BpCheck { dir, only } => bp_check::check(&dir, &only),
         Cmd::CaptureCheck {
             dir,
             out,

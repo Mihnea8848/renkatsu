@@ -439,7 +439,7 @@ pub const BODY_COLLIDERS: [&str; 21] = [
 ];
 
 /// A dynamic bone's name: the object its component sits on.
-fn bone_name<'a>(physics: &Physics, scene: &'a Scene, bone: usize) -> Option<&'a str> {
+pub fn bone_name<'a>(physics: &Physics, scene: &'a Scene, bone: usize) -> Option<&'a str> {
     match physics.bones.get(bone)? {
         crate::physics::Bone::Dynamic(d) => Some(scene.nodes[d.def.node].name.as_str()),
         _ => None,
