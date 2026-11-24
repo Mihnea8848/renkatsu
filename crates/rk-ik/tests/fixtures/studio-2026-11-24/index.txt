@@ -1,0 +1,13 @@
+Simple.ik-on	ok	3.998516 s	Simple.png | name=ik-on | pose=0/0/1 | time=0.5 | ik=on | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.ik-lhand	ok	2.60006332 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=ik-lhand | pose=0/0/1 | time=0.5 | ik=LeftHand:0,0.15,0.1 | view=body,side | plain
+Simple.ik-rhand-turn	ok	1.68780136 s	Simple.png | name=ik-rhand-turn | pose=0/0/1 | time=0.5 | ik=RightHand:-0.1,0.2,0:0,45,0 | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.ik-body	ok	1.99747086 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=ik-body | pose=0/0/1 | time=0.5 | ik=Body:0,-0.12,0 | view=body,side | plain
+Simple.ik-lfoot	ok	1.70606613 s	Simple.png | name=ik-lfoot | pose=0/0/1 | time=0.5 | ik=LeftFoot:0.1,0.15,0.05 | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.ik-elbow	ok	1.96631622 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=ik-elbow | pose=0/0/1 | time=0.5 | ik=LeftArmChain:0,0,0.2 | view=body,side | plain
+Simple.ik-knee	ok	1.71602249 s	Simple.png | name=ik-knee | pose=0/0/1 | time=0.5 | ik=RightLegChain:0.2,0,0 | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.ik-many	ok	1.9126358 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=ik-many | pose=0/0/1 | time=0.5 | ik=LeftHand:0.05,0.3,0.15 | ik=RightFoot:-0.1,0.1,0.1 | ik=Body:0.05,-0.08,0 | ik=RightShoulder:0,0.05,0 | view=body,side | plain
+Simple.ik-maker	ok	1.60754013 s	Simple.png | name=ik-maker | pose=maker | ik=RightHand:0.1,0.25,0.15:30,0,0 | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.fk-on	ok	1.97802734 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=fk-on | pose=0/0/1 | time=0.5 | fk=on | view=body,side | plain
+Simple.fk-neck	ok	1.67385864 s	Simple.png | name=fk-neck | pose=0/0/1 | time=0.5 | fk=cf_j_neck:0,30,0 | view=body,side | plain
+Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.fk-arm	ok	1.65185165 s	Koikatu_F_20260212221008843_Sakurai Nonaka_Mihnea8848.png | name=fk-arm | pose=0/0/1 | time=0.5 | fk=cf_j_arm00_L:0,0,-40 | fk=cf_j_forearm01_L:0,-60,0 | view=body,side | plain
+# 12 of 12 cases in 24.5481529 s

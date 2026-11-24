@@ -39,8 +39,10 @@ mod maps;
 mod modes;
 mod mods;
 mod mugshot;
+mod news_pictures;
 mod packages;
 mod panels;
+mod poses;
 mod preferences;
 mod profile;
 mod project;
@@ -162,6 +164,18 @@ struct Cli {
     /// picture it.
     #[arg(long, hide = true)]
     mirror_pose: bool,
+    /// Bake the selected character's animation into its pose once it is
+    /// built, to picture it.
+    #[arg(long, hide = true)]
+    bake_pose: bool,
+    /// Save the selected character's pose once she is built (after a
+    /// bake or a mirror asked for), to picture it.
+    #[arg(long, hide = true)]
+    save_pose: bool,
+    /// Give the selected character this pose file of the project at the
+    /// start, to picture it.
+    #[arg(long, hide = true)]
+    load_pose: Option<String>,
     /// Start with the mode's tool palette open.
     #[arg(long)]
     palette_open: bool,
@@ -272,6 +286,10 @@ struct Cli {
     /// Start with the Maps library open, to picture it.
     #[arg(long, hide = true)]
     map_library: bool,
+    /// Start with a news post, once opened, scrolled down by this many
+    /// points, to picture its pictures.
+    #[arg(long, hide = true)]
+    news_scroll: Option<f32>,
     /// Start with the Maps library scrolled down by this many points.
     #[arg(long, hide = true)]
     map_scroll: Option<f32>,
@@ -579,6 +597,10 @@ impl Studio {
         state.scripted = cli.screenshot.is_some();
         state.jobs.wake = Some(cc.egui_ctx.clone());
         state.fetch_feed();
+        if let Some(y) = cli.news_scroll {
+            cc.egui_ctx
+                .data_mut(|d| d.insert_temp(egui::Id::new(crate::landing::SCROLL_START), y));
+        }
         if let Some(files) = &cli.pretend_news {
             let (posts, releases) = files.split_once(',').unwrap_or((files, ""));
             let read = |file: &str| std::fs::read_to_string(file).with_context(|| format!("reading {file}"));
@@ -704,6 +726,8 @@ impl Studio {
         };
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
+        state.bake_pending = cli.bake_pose;
+        state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }
@@ -769,6 +793,9 @@ impl Studio {
             // The project's own copy when it has one.
             let own = state.animations.of(&named).map(|i| i.reference());
             state.run(Command::Animate(Some(own.unwrap_or(named))));
+        }
+        if let Some(rel) = &cli.load_pose {
+            state.run(Command::LoadPose(rel.clone()));
         }
         if let Some(seconds) = cli.scene_time {
             state.playback = Playback::Paused;
@@ -1100,6 +1127,35 @@ impl eframe::App for Studio {
             if ready {
                 viewport::mirror(&mut self.state, false);
                 self.state.mirror_pending = false;
+            }
+        }
+
+        // A bake asked for at the start, once the animation poses her.
+        if self.state.bake_pending {
+            let id = self.state.doc.selected;
+            let ready = id.is_some_and(|id| {
+                self.state
+                    .live
+                    .as_mut()
+                    .and_then(|l| l.baked_edits(id))
+                    .is_some_and(|(_, parts)| !parts.is_empty())
+            });
+            if ready {
+                viewport::bake_animation(&mut self.state);
+                self.state.bake_pending = false;
+            }
+        }
+
+        // A save asked for at the start, once the character is built.
+        if self.state.save_pose_pending && !self.state.bake_pending && !self.state.mirror_pending {
+            let built = self
+                .state
+                .doc
+                .selected
+                .is_some_and(|id| self.state.live.as_ref().is_some_and(|l| l.joints(id).is_some()));
+            if built {
+                self.state.run(Command::SavePose);
+                self.state.save_pose_pending = false;
             }
         }
 

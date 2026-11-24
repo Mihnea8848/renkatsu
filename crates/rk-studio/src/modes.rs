@@ -109,6 +109,7 @@ pub const MODES: [Mode; 7] = [
                     (icon::TARGET, "Inverse kinematics"),
                     (icon::FLIP_HORIZONTAL, "Mirror pose"),
                     (icon::COPY_SIMPLE, "Copy to other side"),
+                    (icon::FILM_STRIP, "Bake animation"),
                 ],
             ),
             (

@@ -144,6 +144,11 @@ pub enum Command {
     /// Give the selected character an animation, or take its animation
     /// off.
     Animate(Option<crate::scene::Animation>),
+    /// Give the selected character the pose saved in this file of the
+    /// project.
+    LoadPose(String),
+    /// Save the selected character's pose in the project's Poses folder.
+    SavePose,
     /// Choose animations of the installed packages, of Koikatsu and of
     /// mods, and copy them into the project.
     ImportAnimations,
@@ -313,6 +318,10 @@ pub struct State {
     /// Mirror the selected character's pose once she is built, for
     /// pictures.
     pub mirror_pending: bool,
+    /// `--bake-pose`: bake the animation once the character is built.
+    pub bake_pending: bool,
+    /// `--save-pose`: save the pose once the character is built.
+    pub save_pose_pending: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
@@ -832,6 +841,8 @@ impl State {
             sun_turning: false,
             sun_preview: false,
             mirror_pending: false,
+            bake_pending: false,
+            save_pose_pending: false,
             pose_bone: None,
             fk_open: false,
             animator_search: String::new(),
@@ -1105,6 +1116,8 @@ impl State {
                     }
                 }
             }
+            Command::LoadPose(rel) => self.load_pose(&rel),
+            Command::SavePose => self.save_pose(),
             Command::Save => {
                 self.save();
             }
@@ -1737,6 +1750,80 @@ impl State {
             self.asset = None;
             return;
         }
+    }
+
+    /// Gives the selected character a saved pose: its layer, over its
+    /// animation or none, as one step of the history.
+    fn load_pose(&mut self, rel: &str) {
+        let pose = match crate::poses::read(&self.project.root.join(rel)) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log.error(format!("The pose could not be read: {e:#}"));
+                return;
+            }
+        };
+        let Some(mut object) = self.doc.selection().cloned() else {
+            return;
+        };
+        let Content::Character {
+            animation, pose_layer, ..
+        } = &mut object.content
+        else {
+            return;
+        };
+        *animation = pose.base.map(Box::new);
+        *pose_layer = Some(Box::new(pose.layer)).filter(|l| !l.is_empty());
+        self.doc.edit(object, false);
+    }
+
+    /// Saves the selected character's pose in the Poses folder, named
+    /// after her, its animation starting where it is now; the file is
+    /// shown in the Content panel, ready to be renamed.
+    fn save_pose(&mut self) {
+        if self.project.is_none() {
+            return;
+        }
+        let Some(object) = self.doc.selection() else {
+            return;
+        };
+        let Content::Character {
+            animation, pose_layer, ..
+        } = &object.content
+        else {
+            return;
+        };
+        let mut base = animation.as_deref().cloned();
+        if let (Some(base), Some(phase)) = (&mut base, self.live.as_ref().and_then(|l| l.phase(object.id))) {
+            base.start = phase;
+        }
+        let pose = crate::poses::Pose::new(base, pose_layer.as_deref().cloned().unwrap_or_default());
+        let stem: String = object
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_'()".contains(c) {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let stem = stem.trim();
+        let stem = if stem.is_empty() { "Pose" } else { stem };
+        let dir = self.project.folder(project::POSES);
+        let name = content::free_name(&dir, stem, Some(crate::poses::EXTENSION));
+        let written = std::fs::create_dir_all(&dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| crate::poses::write(&dir.join(&name), &pose));
+        if let Err(e) = written {
+            self.log.error(format!("The pose could not be saved: {e:#}"));
+            return;
+        }
+        let rel = format!("{}/{name}", project::POSES);
+        self.open_folder(project::POSES);
+        self.asset = Some(PathBuf::from(&rel));
+        self.content_renaming = Some((rel.clone(), content::stem(&rel).to_owned()));
+        self.show_content = true;
     }
 
     pub fn open_folder(&mut self, rel: &str) {

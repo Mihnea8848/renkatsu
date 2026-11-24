@@ -143,6 +143,8 @@ pub struct Character {
     pub clothes: crate::clothes_state::Rig,
     /// The heels Stiletto put on, when the worn shoes have some.
     pub heels: Option<crate::stiletto::Heels>,
+    /// The body's FullBodyBipedIK as the prefab stores it.
+    pub ik: Option<crate::fbbik::Settings>,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -1033,6 +1035,20 @@ impl<'g> Builder<'g> {
                 }
             }
         }
+    }
+
+    /// The FullBodyBipedIK component of a prefab, its bones as scene nodes.
+    fn read_fbbik(&self, inst: &crate::scene::Instance) -> Option<crate::fbbik::Settings> {
+        let (_, script) = inst
+            .scripts
+            .iter()
+            .find(|(_, s)| self.script_class(s).as_deref() == Some("FullBodyBipedIK"))?;
+        let obj = script.read().ok()?;
+        let node = |p: rk_unityfs::PPtr| {
+            let target = self.game.assets.deref(&script.file, p)?;
+            inst.transform_nodes.get(&target.key()).copied()
+        };
+        Some(crate::fbbik::read(&obj, &node))
     }
 
     /// First value of a script field on the prefab, e.g. a `useColor01` flag.
@@ -2101,6 +2117,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .scene
         .find(anim.root, "cf_j_root")
         .context("skeleton has no cf_j_root")?;
+    let ik = b.read_fbbik(&anim);
     let mut bones = b.scene.name_map(body_root);
     // Root bone of every mesh the game rebinds (`RefObjKey.A_ROOTBONE`).
     let hips = bones.get("cf_j_hips").copied();
@@ -2839,6 +2856,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         parameters: crate::motion::Parameters::of(&card.body.shape_value_body),
         clothes: rig,
         heels,
+        ik,
         bones,
         ramp,
         material_edits,

@@ -186,6 +186,11 @@ fn file_menu(ui: &mut Ui, k: &Look, st: &State, rel: &str, asks: &mut Asks) {
             asks.commands.push(Command::AddCard(PathBuf::from(rel)));
         }
         project::CHARACTERS => {}
+        project::POSES
+            if is_pose(rel) && widgets::menu_item(ui, k, icon::PLAY, "Apply to selected character", "", character) =>
+        {
+            asks.commands.push(Command::LoadPose(rel.to_owned()));
+        }
         project::ANIMATIONS => {
             let item = st.animations.find(rel);
             if widgets::menu_item(
@@ -1225,15 +1230,23 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
             icon::PACKAGE
         } else if lower.ends_with(".rkscene") || lower.ends_with(".toml") {
             Kind::Scene.glyph()
+        } else if lower.ends_with(".rkpose") {
+            Kind::Pose.glyph()
         } else {
             icon::FILE
         };
-        let size = std::fs::metadata(st.project.root.join(rel)).map_or(0, |m| m.len());
-        let size = crate::mods::size_text(size);
+        // A pose shows by its name and kind, as an animation does; other
+        // files by their file name and size.
+        let pose = is_pose(rel);
+        let caption = if pose {
+            "Pose".to_owned()
+        } else {
+            crate::mods::size_text(std::fs::metadata(st.project.root.join(rel)).map_or(0, |m| m.len()))
+        };
         let text = TileText {
             rel,
-            name: content::leaf(rel),
-            caption: &size,
+            name: if pose { content::stem(rel) } else { content::leaf(rel) },
+            caption: &caption,
             caption_color: None,
         };
         draw_tile(
@@ -1252,9 +1265,20 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
         if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
             asks.select = Some(rel.clone());
         }
+        if resp.double_clicked() && is_pose(rel) && character_chosen(st) {
+            asks.commands.push(Command::LoadPose(rel.clone()));
+        }
         resp.context_menu(|ui| file_menu(ui, k, st, rel, asks));
         resp.on_hover_text(rel.as_str());
     });
+}
+
+fn is_pose(rel: &str) -> bool {
+    content::top(rel) == project::POSES && rel.to_lowercase().ends_with(".rkpose")
+}
+
+fn character_chosen(st: &State) -> bool {
+    st.doc.selection().is_some_and(|o| o.kind() == Kind::Character)
 }
 
 #[cfg(test)]

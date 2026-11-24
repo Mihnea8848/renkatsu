@@ -468,6 +468,12 @@ struct SkinHeader {
     has_tangents: u32,
     node: [f32; 16],
     normal: [f32; 16],
+    /// Advanced Skirt Physics' push-out (`PushDraw`): how many capsules,
+    /// and whether there is a floor.
+    push: [u32; 4],
+    floor: [f32; 4],
+    /// Each capsule's ends, with the radius in the fourth float.
+    capsules: [[f32; 8]; rk_chara::scene::PUSH_CAPSULES],
 }
 
 /// One bone of a skinning pass's pose buffer.
@@ -497,13 +503,36 @@ fn skin_pose(d: &DrawMesh) -> Vec<u8> {
             Mat4::IDENTITY,
             matrices
                 .iter()
-                .map(|m| SkinBone {
+                .enumerate()
+                .map(|(i, m)| SkinBone {
                     matrix: m.unwrap_or(Mat4::ZERO).to_cols_array(),
-                    valid: [m.is_some() as u32, 0, 0, 0],
+                    valid: [
+                        m.is_some() as u32,
+                        d.push
+                            .as_ref()
+                            .is_some_and(|p| p.skirt_slots.get(i).copied().unwrap_or(false))
+                            as u32,
+                        0,
+                        0,
+                    ],
                 })
                 .collect(),
         ),
     };
+    let mut capsules = [[0.0; 8]; rk_chara::scene::PUSH_CAPSULES];
+    let mut push = [0u32; 4];
+    let mut floor = [0.0; 4];
+    if let Some(p) = &d.push {
+        for (out, [a, b]) in capsules.iter_mut().zip(&p.capsules) {
+            out[..4].copy_from_slice(&a.to_array());
+            out[4..].copy_from_slice(&b.to_array());
+        }
+        push[0] = p.capsules.len().min(rk_chara::scene::PUSH_CAPSULES) as u32;
+        if let Some(f) = p.floor {
+            push[1] = 1;
+            floor = f.to_array();
+        }
+    }
     let header = SkinHeader {
         mode,
         count: d.base_positions.len() as u32,
@@ -511,6 +540,9 @@ fn skin_pose(d: &DrawMesh) -> Vec<u8> {
         has_tangents: (mesh.tangents.len() == mesh.positions.len()) as u32,
         node: node.to_cols_array(),
         normal: normal.to_cols_array(),
+        push,
+        floor,
+        capsules,
     };
     let mut out = bytemuck::bytes_of(&header).to_vec();
     // A storage array needs at least one element; an empty one is invalid.
@@ -2890,7 +2922,7 @@ mod tests {
         assert_eq!(floats(std::mem::size_of::<Vertex>()), 22);
         assert_eq!(floats(std::mem::offset_of!(Vertex, normal)), 3);
         assert_eq!(floats(std::mem::offset_of!(Vertex, tangent)), 18);
-        assert_eq!(std::mem::size_of::<SkinHeader>(), 144);
+        assert_eq!(std::mem::size_of::<SkinHeader>(), 1200);
         assert_eq!(std::mem::size_of::<SkinBone>(), 80);
     }
 
