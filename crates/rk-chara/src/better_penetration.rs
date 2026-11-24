@@ -809,6 +809,123 @@ pub fn vagina_bones(physics: &Physics, scene: &Scene) -> Vec<usize> {
         .collect()
 }
 
+/// The bones a vaginal stroke pulls, each with its share
+/// (`BoneNames.KokanPullBones` and the first of `KokanPullWeights`, which
+/// lists more shares than bones).
+pub const VAGINA_PULL: [(&str, f32); 11] = [
+    ("cf_J_Vagina_L.011", 0.1),
+    ("cf_J_Vagina_R.011", 0.25),
+    ("cf_J_Vagina_L.012", 0.25),
+    ("cf_J_Vagina_R.012", 0.5),
+    ("cf_J_Vagina_L.013", 0.5),
+    ("cf_J_Vagina_R.013", 0.5),
+    ("cf_J_Vagina_L.014", 0.5),
+    ("cf_J_Vagina_L.015", 0.5),
+    ("cf_J_Vagina_R.014", 0.5),
+    ("cf_J_Vagina_R.015", 0.5),
+    ("cf_J_Vagina_B.010", 0.5),
+];
+
+/// The bones an anal stroke pulls (`AnaPullBones`, `AnaPullWeights`).
+pub const ANUS_PULL: [(&str, f32); 8] = [
+    ("cf_J_Ana_s_F", 1.0),
+    ("cf_J_Ana_s_B", 1.0),
+    ("cf_J_Ana_s_L", 1.0),
+    ("cf_J_Ana_s_R", 1.0),
+    ("cf_J_Ana_s_F_L", 1.0),
+    ("cf_J_Ana_s_F_R", 1.0),
+    ("cf_J_Ana_s_B_L", 1.0),
+    ("cf_J_Ana_s_B_R", 1.0),
+];
+
+/// The bone a stroke turns to the shaft inside her: `m_innerKokan` for
+/// the vagina, `m_bpAnaTarget` for the anus.
+pub fn inner_bone(mode: Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Vaginal => Some("cf_J_Vagina_Inner"),
+        Mode::Anal => Some("cf_J_Ana_Root"),
+        Mode::Oral => None,
+    }
+}
+
+/// The bones a stroke in `mode` pulls.
+pub fn pull_bones(mode: Mode) -> &'static [(&'static str, f32)] {
+    match mode {
+        Mode::Vaginal => &VAGINA_PULL,
+        Mode::Anal => &ANUS_PULL,
+        Mode::Oral => &[],
+    }
+}
+
+/// Whether a body has the bones a vaginal or anal pull moves.
+pub fn has_pull_bones(scene: &Scene, top: usize) -> bool {
+    let names = bones_by_name(scene, top);
+    VAGINA_PULL
+        .iter()
+        .chain(&ANUS_PULL)
+        .any(|(n, _)| names.contains_key(*n))
+}
+
+/// A vaginal or anal pull on her for one frame (`PullKokanBones`,
+/// `PullAnaBone` and their returns), in the world's directions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HolePull {
+    pub mode: Mode,
+    pub amount: f32,
+    /// The bones' direction: the average of the shaft's way in and its way
+    /// inside her (`TargetType.Average`, the default for `outer`).
+    pub direction: Vec3,
+    /// The inner bone's up: the way inside her (`TargetType.Inside`).
+    pub inside: Vec3,
+    /// No stroke is in her: the bones return along their own up, and the
+    /// inner bone turns back (`ReturnKokanBones`).
+    pub returning: bool,
+}
+
+/// The directions of a stroke: from the shaft's root to the entry and from
+/// the entry to the end (`AdjustPullBones`' `danDirection` and
+/// `insideDirection`), as the pull bones and the inner bone take them.
+pub fn hole_directions(start: Vec3, entry: Vec3, end: Vec3) -> (Vec3, Vec3) {
+    let outer = unity::normalize(entry - start);
+    let inside = unity::normalize(end - entry);
+    (unity::normalize(outer + inside), inside)
+}
+
+/// Places her pull bones and turns her inner bone for a pull. Bones she
+/// lacks are passed over.
+pub fn apply_hole_pull(scene: &mut Scene, top: usize, pull: &HolePull) {
+    let names = bones_by_name(scene, top);
+    let (world, _) = scene.world();
+    // The return writes only while there is a pull left, as the plugin does.
+    if !(pull.returning && pull.amount.abs() < 1e-4) {
+        for &(name, share) in pull_bones(pull.mode) {
+            let Some(&node) = names.get(name) else { continue };
+            let local = if pull.returning {
+                share * pull.amount * Vec3::Y
+            } else {
+                share * pull.amount * mouth_local(&world[node], pull.direction)
+            };
+            scene.nodes[node].local.pos = local;
+        }
+    }
+    let Some(&inner) = inner_bone(pull.mode).and_then(|n| names.get(n)) else {
+        return;
+    };
+    if pull.returning {
+        scene.nodes[inner].local.rot = Quat::IDENTITY;
+        return;
+    }
+    // `transform.rotation = LookRotation(transform.forward, up)`.
+    let (_, rotation, _) = world[inner].to_scale_rotation_translation();
+    let forward = unity::rotate(rotation, Vec3::Z);
+    let turned = unity::look_rotation(forward, pull.inside);
+    let parent = scene.nodes[inner]
+        .parent
+        .map(|p| world[p].to_scale_rotation_translation().1)
+        .unwrap_or(Quat::IDENTITY);
+    scene.nodes[inner].local.rot = unity::mul(unity::inverse(parent), turned);
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -849,6 +966,11 @@ pub struct Settings {
     /// waist as in Studio.
     #[serde(default = "yes")]
     pub body_collision: bool,
+    /// The vaginal and anal pulls (`enableKokanPush`, `enableAnaPush`),
+    /// which both builds of the plugin leave off; for bodies with the pull
+    /// bones. They take the same push, pull and rates as the mouth.
+    #[serde(default)]
+    pub pull_holes: bool,
 }
 
 fn yes() -> bool {
@@ -874,6 +996,7 @@ impl Default for Settings {
             belly_bulge_scale: 1.0,
             auto_link: true,
             body_collision: true,
+            pull_holes: false,
         }
     }
 }
@@ -1312,6 +1435,35 @@ mod tests {
             !vagina_bones(&her.physics, &her.scene).is_empty(),
             "BP Profundis has vagina bones"
         );
+    }
+
+    #[test]
+    fn a_stroke_pulls_the_bones_by_their_shares_and_returns_along_up() {
+        let mut scene = Scene::default();
+        let top = scene.add_node("top", None, Trs::default());
+        let a = scene.add_node("cf_J_Vagina_L.011", Some(top), Trs::default());
+        let b = scene.add_node("cf_J_Vagina_R.012", Some(top), Trs::default());
+        let (direction, inside) = hole_directions(Vec3::ZERO, Vec3::Z * 0.1, Vec3::new(0.0, 0.1, 0.1));
+        assert!((direction - Vec3::new(0.0, 1.0, 1.0).normalize()).length() < 1e-6);
+        assert_eq!(inside, Vec3::Y);
+        let mut pull = HolePull {
+            mode: Mode::Vaginal,
+            amount: 0.002,
+            direction,
+            inside,
+            returning: false,
+        };
+        apply_hole_pull(&mut scene, top, &pull);
+        assert!((scene.nodes[a].local.pos - 0.1 * 0.002 * direction).length() < 1e-9);
+        assert!((scene.nodes[b].local.pos - 0.5 * 0.002 * direction).length() < 1e-9);
+        pull.returning = true;
+        pull.amount = 0.001;
+        apply_hole_pull(&mut scene, top, &pull);
+        assert!(
+            (scene.nodes[b].local.pos - Vec3::new(0.0, 0.0005, 0.0)).length() < 1e-9,
+            "the return goes along up"
+        );
+        assert_eq!(pull_bones(Mode::Oral).len(), 0);
     }
 
     #[test]

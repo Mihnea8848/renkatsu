@@ -77,6 +77,20 @@ struct Actor {
     guests_next: Option<rk_chara::physics::Guests>,
     /// The ones a partner's shaft gave last frame.
     received: rk_chara::physics::Guests,
+    /// The vaginal or anal pull this character's shaft has on a partner,
+    /// with the partner and the place; the end the shaft was last aimed
+    /// at; and a pull on this character from a partner's shaft, the new
+    /// one from the last frame first.
+    hole_pull: Option<(
+        ObjectId,
+        rk_chara::better_penetration::Mode,
+        rk_chara::better_penetration::MouthPull,
+    )>,
+    aimed_end: Option<Vec3>,
+    hole_next: Option<rk_chara::better_penetration::HolePull>,
+    hole_at: Option<rk_chara::better_penetration::HolePull>,
+    /// The body has the pull bones or the inner bones a stroke moves.
+    hole_bones: bool,
     /// The finger bones whose colliders push vaginas, and this character's
     /// vagina dynamic bones they push.
     fingers: Vec<usize>,
@@ -499,11 +513,16 @@ impl Actor {
                 }
                 _ => job.end,
             };
+            self.aimed_end = Some(end);
             shaft.aim(&mut self.chara.scene, job.entry, end, &job.settings, job.vaginal);
         }
         // A partner's shaft holds the mouth where it last pulled it.
         if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
             self.chara.scene.nodes[node].local.pos = self.rest[node].pos + at;
+        }
+        // And her vagina or anus where its stroke pulls them.
+        if let Some(pull) = self.hole_at {
+            rk_chara::better_penetration::apply_hole_pull(&mut self.chara.scene, self.chara.top, &pull);
         }
     }
 
@@ -581,6 +600,31 @@ impl Actor {
         if let Some(scale) = self.bulge_next.take() {
             if rk_chara::better_penetration::bulge(&mut self.chara.physics, &self.chara.scene, scale) {
                 again = true;
+            }
+        }
+        // A partner's stroke that pulls her vagina or anus poses her again;
+        // with none, the bones go back to how they were loaded.
+        match self.hole_next.take() {
+            Some(pull) => {
+                if self.hole_at != Some(pull) {
+                    self.hole_at = Some(pull);
+                    again |= clock.now != Playback::Playing;
+                }
+            }
+            None => {
+                if let Some(pull) = self.hole_at.take() {
+                    let names = rk_chara::better_penetration::bones_by_name(&self.chara.scene, self.chara.top);
+                    let inner = rk_chara::better_penetration::inner_bone(pull.mode);
+                    let bones = rk_chara::better_penetration::pull_bones(pull.mode)
+                        .iter()
+                        .map(|(n, _)| *n);
+                    for name in bones.chain(inner) {
+                        if let Some(&node) = names.get(name) {
+                            self.chara.scene.nodes[node].local = self.rest[node];
+                        }
+                    }
+                    again = true;
+                }
             }
         }
         // A partner's shaft that moved the mouth poses the face again.
@@ -1421,6 +1465,8 @@ pub struct Built {
     pub better_penetration: Option<rk_chara::better_penetration::Settings>,
     /// The body has belly bones a BetterPenetration bulge pushes.
     pub belly: bool,
+    /// The body has the bones a vaginal or anal pull moves.
+    pub pull_bones: bool,
 }
 
 pub struct Live {
@@ -1857,6 +1903,7 @@ impl Live {
             liquid_mask: a.chara.liquid_mask(),
             better_penetration: a.chara.shaft.as_ref().map(|_| a.chara.better_penetration),
             belly: rk_chara::better_penetration::has_belly(&a.chara.physics, &a.chara.scene),
+            pull_bones: rk_chara::better_penetration::has_pull_bones(&a.chara.scene, a.chara.top),
         })
     }
 
@@ -2255,6 +2302,71 @@ impl Live {
             if let Some(world) = pull.step(start, entry, base_length, oral, &settings) {
                 pulled.push((partner, world, settings.return_rate));
             }
+        }
+        // The vaginal and anal pulls, by the same rule as the mouth's; with
+        // them off, a vaginal stroke still turns her inner bone back each
+        // frame, as Studio's `ReturnKokanBones` does.
+        let mut holes: Vec<(ObjectId, rk_chara::better_penetration::HolePull)> = Vec::new();
+        for &(him, aim) in &self.aims {
+            use rk_chara::better_penetration as bp;
+            let pulled_body = self.actors.iter().any(|a| a.id == aim.partner && a.hole_bones);
+            if aim.mode == bp::Mode::Oral || !pulled_body {
+                continue;
+            }
+            let Some(he) = self.actors.iter_mut().find(|a| a.id == him) else {
+                continue;
+            };
+            let (Some(shaft), Some(job)) = (he.chara.shaft.as_ref(), he.aim_job) else {
+                continue;
+            };
+            let Some(&root) = shaft.points.first() else {
+                continue;
+            };
+            let start = he.chara.scene.world().0[root].w_axis.truncate();
+            let base_length = shaft.base_length;
+            let end = he.aimed_end.unwrap_or(job.end);
+            let (direction, inside) = bp::hole_directions(start, aim.entry, end);
+            let settings = job.settings;
+            if !settings.pull_holes {
+                he.hole_pull = None;
+                holes.push((
+                    aim.partner,
+                    bp::HolePull {
+                        mode: aim.mode,
+                        amount: 0.0,
+                        direction,
+                        inside,
+                        returning: true,
+                    },
+                ));
+                continue;
+            }
+            let pull = match &mut he.hole_pull {
+                Some((p, m, pull)) if *p == aim.partner && *m == aim.mode => pull,
+                slot => &mut slot.insert((aim.partner, aim.mode, bp::MouthPull::new(base_length))).2,
+            };
+            let stroking = start.distance(aim.entry) < base_length;
+            if stroking {
+                pull.step(start, aim.entry, base_length, true, &settings);
+            } else if playing {
+                pull.last_distance = base_length;
+                pull.release(&settings, bp::PULL_STEP);
+            } else {
+                pull.last_distance = base_length;
+            }
+            holes.push((
+                aim.partner,
+                bp::HolePull {
+                    mode: aim.mode,
+                    amount: pull.amount,
+                    direction,
+                    inside,
+                    returning: !stroking,
+                },
+            ));
+        }
+        for actor in &mut self.actors {
+            actor.hole_next = holes.iter().find(|(id, _)| *id == actor.id).map(|h| h.1);
         }
         for (partner, world, rate) in pulled {
             let Some(her) = self.actors.iter_mut().find(|a| a.id == partner) else {
@@ -2949,10 +3061,19 @@ impl Live {
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
         // Fingers push vaginas, this character's own and others'.
         let fingers = rk_chara::better_penetration::finger_nodes(&chara.scene, chara.top);
+        let hole_bones = rk_chara::better_penetration::has_pull_bones(&chara.scene, chara.top)
+            || ["cf_J_Vagina_Inner", "cf_J_Ana_Root"]
+                .iter()
+                .any(|n| chara.scene.find(chara.top, n).is_some());
         let vagina = rk_chara::better_penetration::vagina_bones(&chara.physics, &chara.scene);
         Ok(Actor {
+            hole_bones,
             fingers,
             vagina,
+            hole_pull: None,
+            aimed_end: None,
+            hole_next: None,
+            hole_at: None,
             id,
             recipe: recipe.clone(),
             chara,

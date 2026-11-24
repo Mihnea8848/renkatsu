@@ -1633,6 +1633,17 @@ fn penetration_section(
         .filter(|o| o.kind() == Kind::Character && o.id != object.id)
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    // The partners whose body has the bones a vaginal or anal pull moves.
+    let pullable: Vec<crate::scene::ObjectId> = others
+        .iter()
+        .filter(|(id, _)| {
+            st.live
+                .as_ref()
+                .and_then(|l| l.built(*id))
+                .is_some_and(|b| b.pull_bones)
+        })
+        .map(|(id, _)| *id)
+        .collect();
     // The partners whose body has belly bones a bulge can push.
     let bellies: Vec<crate::scene::ObjectId> = others
         .iter()
@@ -1733,7 +1744,16 @@ fn penetration_section(
         ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
         ("Hit length", &mut s.collider_length_scale, 0.5, 1.5),
     ]);
-    if aimed == Some(Mode::Oral) {
+    let pull_rows = match penetration_target {
+        Some(t) => pullable.contains(&t.partner),
+        None => !pullable.is_empty(),
+    } && matches!(aimed, Some(Mode::Vaginal | Mode::Anal));
+    if pull_rows {
+        row(ui, k, "Pull", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("pull holes"), &mut s.pull_holes, "On");
+        });
+    }
+    if aimed == Some(Mode::Oral) || (pull_rows && s.pull_holes) {
         sliders.extend([
             ("Max push", &mut s.max_push, 0.0, 0.3),
             ("Max pull", &mut s.max_pull, 0.0, 0.3),
