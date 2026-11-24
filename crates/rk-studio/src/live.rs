@@ -87,6 +87,9 @@ struct Actor {
     /// pulls it, from the partner's settings.
     mouth_next: Option<(Vec3, f32)>,
     mouth_return: f32,
+    /// The size a partner's shaft gives this character's belly bulge from
+    /// its next update, 1 for none.
+    bulge_next: Option<f32>,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -556,6 +559,12 @@ impl Actor {
         if let Some(guests) = self.guests_next.take() {
             if guests.as_slice() != self.chara.physics.guests() {
                 self.chara.physics.set_guests(guests);
+                again = true;
+            }
+        }
+        // A belly bulge of another size settles the belly again.
+        if let Some(scale) = self.bulge_next.take() {
+            if rk_chara::better_penetration::bulge(&mut self.chara.physics, &self.chara.scene, scale) {
                 again = true;
             }
         }
@@ -1232,6 +1241,8 @@ pub struct Built {
     /// BetterPenetration's settings from the card, when the body has a
     /// shaft.
     pub better_penetration: Option<rk_chara::better_penetration::Settings>,
+    /// The body has belly bones a BetterPenetration bulge pushes.
+    pub belly: bool,
 }
 
 pub struct Live {
@@ -1658,6 +1669,7 @@ impl Live {
             parameters: a.chara.parameters,
             liquid_mask: a.chara.liquid_mask(),
             better_penetration: a.chara.shaft.as_ref().map(|_| a.chara.better_penetration),
+            belly: rk_chara::better_penetration::has_belly(&a.chara.physics, &a.chara.scene),
         })
     }
 
@@ -1994,6 +2006,22 @@ impl Live {
                 oral,
                 job.settings,
             ));
+        }
+        // The belly bulge's size each partner takes, while a shaft with it
+        // on is in her vagina.
+        let bulges: Vec<(ObjectId, f32)> = self
+            .aims
+            .iter()
+            .filter(|(_, aim)| aim.mode == rk_chara::better_penetration::Mode::Vaginal)
+            .filter_map(|&(him, aim)| {
+                let job = self.actors.iter().find(|a| a.id == him)?.aim_job?;
+                job.settings
+                    .belly_bulge
+                    .then_some((aim.partner, job.settings.belly_bulge_scale))
+            })
+            .collect();
+        for actor in &mut self.actors {
+            actor.bulge_next = Some(bulges.iter().find(|(id, _)| *id == actor.id).map_or(1.0, |b| b.1));
         }
         let playing = clock.now == Playback::Playing;
         let mut pulled: Vec<(ObjectId, Vec3, f32)> = Vec::new();
@@ -2737,6 +2765,7 @@ impl Live {
             mouth_at: None,
             mouth_next: None,
             mouth_return: 0.0,
+            bulge_next: None,
             phase: None,
             fk,
             warm: false,

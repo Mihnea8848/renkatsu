@@ -701,6 +701,28 @@ pub fn mouth_local(bone_world: &Mat4, pull: Vec3) -> Vec3 {
     unity::rotate(unity::inverse(rotation), pull)
 }
 
+/// Whether a character's body has the belly dynamic bones a bulge pushes.
+/// None of the BP bodies installed here as of 2026-11 has them.
+pub fn has_belly(physics: &Physics, scene: &Scene) -> bool {
+    (0..physics.bones.len()).any(|b| bone_name(physics, scene, b).is_some_and(|n| n.contains("cf_J_Belly")))
+}
+
+/// Sizes a character's belly dynamic bones (`cf_J_Belly`) for a bulge:
+/// their particles' radius times `scale`, as `UpdateBellyBones` sets it.
+/// Returns whether anything changed.
+pub fn bulge(physics: &mut Physics, scene: &Scene, scale: f32) -> bool {
+    let bellies: Vec<usize> = (0..physics.bones.len())
+        .filter(|&b| bone_name(physics, scene, b).is_some_and(|n| n.contains("cf_J_Belly")))
+        .collect();
+    let mut changed = false;
+    for b in bellies {
+        if let crate::physics::Bone::Dynamic(d) = &mut physics.bones[b] {
+            changed |= d.set_radius_scale(scale);
+        }
+    }
+    changed
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -1052,7 +1074,10 @@ mod tests {
         // Out of reach: 0.03 m/s, so 0.0005 m a frame at 60 frames a second.
         let moved = pull.step(Vec3::ZERO, at(0.25), base, true, &s).unwrap();
         assert!((pull.amount - (0.002 - 0.03 / 60.0)).abs() < 1e-7, "{}", pull.amount);
-        assert!((moved - Vec3::new(0.0, 0.0, pull.amount)).length() < 1e-7, "along the last pull");
+        assert!(
+            (moved - Vec3::new(0.0, 0.0, pull.amount)).length() < 1e-7,
+            "along the last pull"
+        );
         for _ in 0..10 {
             pull.release(&s, PULL_STEP);
         }
@@ -1065,6 +1090,73 @@ mod tests {
         let bone = Mat4::from_rotation_translation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::ONE);
         let local = mouth_local(&bone, Vec3::new(0.0, 0.0, 0.002));
         assert!((local - Vec3::new(-0.002, 0.0, 0.0)).length() < 1e-6, "{local:?}");
+    }
+
+    #[test]
+    fn a_bigger_bulge_pushes_the_belly_further() {
+        let Ok(game) = rk_vfs::Game::open_user(&[]) else {
+            return;
+        };
+        let Some(dir) = rk_core::Config::load().ok().map(|c| c.game_dir) else {
+            return;
+        };
+        let load = |path: &str, body: Option<&str>| {
+            let card = rk_card::Card::load(dir.join(path)).ok()?;
+            let opts = crate::BuildOptions {
+                clothes: false,
+                accessories: false,
+                uncensor_body: body.map(str::to_owned),
+                ..Default::default()
+            };
+            crate::build(&game, &card, &opts).ok()
+        };
+        let Some(mut him) = load("UserData/chara/male/Gallagher.png", None) else {
+            return;
+        };
+        let s = Settings {
+            belly_bulge: true,
+            ..Settings::default()
+        };
+        let shaft = him.shaft.clone().expect("a BP shaft");
+        shaft.size_colliders(&mut him.physics, &s);
+        // The belly as it settles with the shaft deep in her, at a size.
+        let mut belly = |scale: f32| -> Option<Vec<Vec3>> {
+            let mut her = load("UserData/chara/female/Simple.png", Some("bp.profundis_nt"))?;
+            let (world, _) = her.scene.world();
+            let names = bones_by_name(&her.scene, her.top);
+            let (entry, end) = targets(Mode::Vaginal, &world, |n| names.get(n).copied())?;
+            shaft.aim(&mut him.scene, entry, end, &s, true);
+            let guests = shaft.partner_guests(&him.physics, &him.scene, &her.physics, &her.scene, Mode::Vaginal, &s);
+            bulge(&mut her.physics, &her.scene, scale);
+            her.physics.settle(&mut her.scene, 60, crate::physics::FRAME_TIME);
+            her.physics.set_guests(guests);
+            her.physics.settle(&mut her.scene, 120, crate::physics::FRAME_TIME);
+            let (world, _) = her.scene.world();
+            Some(
+                her.scene
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.name.starts_with("cf_J_Belly"))
+                    .map(|(i, _)| world[i].w_axis.truncate())
+                    .collect(),
+            )
+        };
+        let (Some(rest), Some(one), Some(two)) = (belly(0.01), belly(1.0), belly(2.0)) else {
+            eprintln!("skipped: no Simple.png or BP Profundis");
+            return;
+        };
+        if rest.is_empty() {
+            eprintln!("skipped: BP Profundis here has no belly bones");
+            return;
+        }
+        let moved = |a: &[Vec3]| a.iter().zip(&rest).map(|(a, b)| a.distance(*b)).fold(0.0, f32::max);
+        eprintln!(
+            "belly moved {:.2} mm at size 1, {:.2} mm at size 2",
+            moved(&one) * 1000.0,
+            moved(&two) * 1000.0
+        );
+        assert!(moved(&two) > moved(&one) + 1e-4, "a bigger bulge pushes further");
     }
 
     #[test]

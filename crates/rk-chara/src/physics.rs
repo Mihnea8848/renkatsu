@@ -530,6 +530,9 @@ pub struct DynamicBone {
     object_scale: f32,
     time: f32,
     weight: f32,
+    /// A scale on the particles' radius, which BetterPenetration's belly
+    /// bulge sets (`UpdateBellyBones`).
+    radius_scale: f32,
 }
 
 impl DynamicBone {
@@ -545,7 +548,25 @@ impl DynamicBone {
             object_scale: 1.0,
             time: 0.0,
             weight,
+            radius_scale: 1.0,
         }
+    }
+
+    /// Scales the particles' radius from what the bone gives them. The
+    /// game's DynamicBone reads `m_Radius` only when it sets up its
+    /// particles, so in Studio the plugin's later change is lost; here it
+    /// takes at once. Returns whether anything changed.
+    pub fn set_radius_scale(&mut self, scale: f32) -> bool {
+        let scale = scale.max(0.01);
+        if scale == self.radius_scale {
+            return false;
+        }
+        let ratio = scale / self.radius_scale;
+        for p in &mut self.particles {
+            p.radius *= ratio;
+        }
+        self.radius_scale = scale;
+        true
     }
 
     /// `SetupParticles`.
@@ -559,12 +580,13 @@ impl DynamicBone {
         self.bone_total_length = 0.0;
         self.append(scene, Some(root), None, 0.0);
         let d = &self.def;
+        let radius_scale = self.radius_scale;
         for p in &mut self.particles {
             p.damping = d.damping;
             p.elasticity = d.elasticity;
             p.stiffness = d.stiffness;
             p.inert = d.inert;
-            p.radius = d.radius;
+            p.radius = d.radius * radius_scale;
             if self.bone_total_length > 0.0 {
                 let t = p.bone_length / self.bone_total_length;
                 p.damping *= Curve::scale(&d.damping_distrib, t);

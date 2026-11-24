@@ -1633,6 +1633,12 @@ fn penetration_section(
         .filter(|o| o.kind() == Kind::Character && o.id != object.id)
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    // The partners whose body has belly bones a bulge can push.
+    let bellies: Vec<crate::scene::ObjectId> = others
+        .iter()
+        .filter(|(id, _)| st.live.as_ref().and_then(|l| l.built(*id)).is_some_and(|b| b.belly))
+        .map(|(id, _)| *id)
+        .collect();
     if !section(ui, k, st, PENETRATION_SECTION, "Penetration") {
         return;
     }
@@ -1728,10 +1734,31 @@ fn penetration_section(
     }
     // The plugin keeps this on the card without a control in Studio: the
     // shaft's deeper points push her belly's dynamic bone.
-    if aimed == Some(Mode::Vaginal) {
+    let belly = match penetration_target {
+        Some(t) => bellies.contains(&t.partner),
+        None => !bellies.is_empty(),
+    };
+    if aimed == Some(Mode::Vaginal) && belly {
         row(ui, k, "Belly", off, |ui, rect| {
             widgets::checkbox(ui, k, rect, ui_id.with("belly"), &mut s.belly_bulge, "Bulge");
         });
+        // The plugin has no range for it; Renkatsu offers up to three times.
+        if s.belly_bulge {
+            row(ui, k, "Bulge size", off, |ui, rect| {
+                widgets::number_to(
+                    ui,
+                    k,
+                    rect,
+                    ui_id.with("bulge size"),
+                    &mut s.belly_bulge_scale,
+                    Marker::None,
+                    true,
+                    FINE,
+                    3,
+                );
+                s.belly_bulge_scale = s.belly_bulge_scale.clamp(0.5, 3.0);
+            });
+        }
     }
     section_end(ui, k);
     *better_penetration = (s != card).then(|| Box::new(s));
