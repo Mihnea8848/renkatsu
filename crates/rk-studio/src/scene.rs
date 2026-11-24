@@ -258,6 +258,10 @@ pub enum Content {
         /// scene has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         light_group: Option<String>,
+        /// BetterPenetration's settings as changed in this scene; none
+        /// keeps the card's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        better_penetration: Option<Box<rk_chara::better_penetration::Settings>>,
     },
     Light {
         /// What the light lights and how it shines. Scenes of Renkatsu
@@ -426,6 +430,7 @@ impl Content {
             game_skirts: Vec::new(),
             animation: None,
             pose_layer: None,
+            better_penetration: None,
             profile: None,
             light_group: None,
         }

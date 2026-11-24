@@ -9,6 +9,7 @@ pub mod accessory_clothes;
 pub mod accessory_states;
 pub mod animation_file;
 pub mod animations;
+pub mod better_penetration;
 pub mod bone_info;
 pub mod build;
 pub mod channels;

@@ -156,6 +156,8 @@ pub struct Character {
     pub hands: [Option<crate::hand_pattern::HandClip>; 2],
     /// The face's controllers, to show another face.
     pub face: Option<crate::face::Rig>,
+    /// BetterPenetration's settings as the card holds them.
+    pub better_penetration: crate::better_penetration::Settings,
     /// The body's and the face's skin textures before the skin effects,
     /// with the renderers wearing them, and the levels shown.
     skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
@@ -2989,6 +2991,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         ik_rig,
         hands: [None, None],
         face: b.face.take(),
+        better_penetration: crate::better_penetration::read(&card.ext),
         skin_base: std::mem::take(&mut b.skin_base),
         skin_shown: Default::default(),
         scene: b.scene,
