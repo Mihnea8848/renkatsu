@@ -92,7 +92,14 @@ impl Rig {
             out.child_constraints = c
                 .child_constraints
                 .iter()
-                .filter_map(|k| Some(ChildConstraint::new(k.bone1?, k.bone2?, k.push_elasticity, k.pull_elasticity)))
+                .filter_map(|k| {
+                    Some(ChildConstraint::new(
+                        k.bone1?,
+                        k.bone2?,
+                        k.push_elasticity,
+                        k.pull_elasticity,
+                    ))
+                })
                 .collect();
             chain.push(out);
         }
@@ -338,7 +345,11 @@ mod tests {
         layer.ik = rig.targets_on_bones(&chara.scene, chara.top);
         chara.pose_frame(None, &[], Some(&layer), &Default::default());
         let still = world(&chara, hand);
-        assert!(still.distance(before) < 0.002, "targets on the bones keep the hand: {}", still.distance(before));
+        assert!(
+            still.distance(before) < 0.002,
+            "targets on the bones keep the hand: {}",
+            still.distance(before)
+        );
         // A point the arm reaches: a third of the way to the shoulder and
         // up a little.
         let shoulder = world(&chara, rig.sources[1]);
@@ -347,7 +358,11 @@ mod tests {
         layer.ik[3].pos = own.transform_point3(want);
         chara.pose_frame(None, &[], Some(&layer), &Default::default());
         let moved = world(&chara, hand);
-        assert!(moved.distance(want) < 0.002, "the hand goes where its target went: {} m off", moved.distance(want));
+        assert!(
+            moved.distance(want) < 0.002,
+            "the hand goes where its target went: {} m off",
+            moved.distance(want)
+        );
         // A target out of reach: the arm reaches towards it, straight.
         layer.ik[3].pos += Vec3::new(0.0, 0.5, 0.0);
         chara.pose_frame(None, &[], Some(&layer), &Default::default());
