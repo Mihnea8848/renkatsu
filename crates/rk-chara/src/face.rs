@@ -13,14 +13,84 @@
 //! `Lerp(OpenMin, max, openRate)`; a fixed rate of 0 or more replaces that
 //! lerp.
 //!
-//! Studio's eye pattern is a `cha_eyeset` item whose `EyesPtn` is the
-//! controller's pattern (`ChaControl.ChangeEyesPtn`).
+//! Studio's eye pattern is a `cha_eyeset` item (`ChaControl.ChangeEyesPtn`):
+//! its `EyesPtn` is the controller's pattern, `EyeBase` and `EyeHitomi`
+//! show the eye white and the pupils, `EyeObjNo` one of the three gag eye
+//! meshes, and `EpsTex` a picture in the irises (`_expression`, at
+//! `_exppower` 1). Mouth pattern 21 puts the tongue out
+//! (`ChangeMouthPtn` sets tongue state 1, and `UpdateVisible` then hides
+//! the face's tongue and shows the body's).
 
 use crate::expression::Controller;
-use crate::scene::Scene;
+use crate::scene::{Image, Scene, TexSlot};
 use rk_card::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// The mouth pattern that puts the tongue out.
+pub const TONGUE_OUT: i32 = 21;
+
+/// A `cha_eyeset` item.
+#[derive(Debug, Clone, Default)]
+pub struct EyeRow {
+    /// The eye controller's pattern.
+    pub pattern: i32,
+    /// The eye white and the pupils show.
+    pub base: bool,
+    pub pupils: bool,
+    /// The gag eye mesh shown, 1 to 3, or 0 for none.
+    pub gag: i32,
+    /// The picture in the irises.
+    pub expression: Option<Arc<Image>>,
+}
+
+/// The game's eye patterns by the names given here, from their Japanese
+/// ones.
+pub fn eye_label(id: i32) -> Option<&'static str> {
+    const NAMES: [&str; 39] = [
+        "Default",
+        "Closed",
+        "Smile",
+        "Smile, closed",
+        "Slight smile",
+        "Wink left",
+        "Wink right",
+        "Aching",
+        "Shy",
+        "Angry",
+        "Serious",
+        "Bored",
+        "Pained",
+        "Disgusted",
+        "Thinking",
+        "Sad",
+        "Crying",
+        "Flustered",
+        "Dejected",
+        "Troubled",
+        "Smug",
+        "Swirls 1",
+        "Swirls 2",
+        "Swirls 3",
+        "Stars",
+        "Hearts",
+        "Heart eyes",
+        "Fire in the eyes",
+        "Cartoon wink",
+        "Upright lines",
+        "Cartoon closed",
+        "Flat lines",
+        "Cartoon crying",
+        "Left shut tight",
+        "Right shut tight",
+        "Shut tight",
+        "Left shut tight 2",
+        "Right shut tight 2",
+        "Shut tight 2",
+    ];
+    usize::try_from(id).ok().and_then(|i| NAMES.get(i)).copied()
+}
 
 /// The face's settings, as `ChaFileStatus` and Studio's face panel hold
 /// them.
@@ -167,8 +237,15 @@ pub struct Rig {
     pub mouth: Option<Part>,
     /// `FaceBlendShape.EyeLookUpCorrect`.
     pub up_correct: f32,
-    /// The `cha_eyeset` items: Studio's eye pattern to the controller's.
-    pub eyesets: BTreeMap<i32, i32>,
+    /// The `cha_eyeset` items, by number.
+    pub eyesets: BTreeMap<i32, EyeRow>,
+    /// The eye white's and the pupils' nodes (`n_eyebase`, `n_hitomi`).
+    pub eye_base: Option<usize>,
+    pub pupils: Option<usize>,
+    /// The irises' renderers (`rendEye`).
+    pub irises: Vec<usize>,
+    /// The face's tongue and the body's, by renderer.
+    pub tongues: [Vec<usize>; 2],
     /// The face the character was built with.
     pub start: Face,
     /// The eyes' open rate it was built with: EyeControl turns blinking
@@ -195,20 +272,68 @@ impl Rig {
             // frame the limit is at most `1 - EyeLookUpCorrect`, with the
             // eyes looking straight ahead.
             let limit = crate::eye_control::open_limit(face.eyes_open, self.up_correct);
-            // A pattern missing from the list shows item 0's
-            // (`ChangeEyesPtn`).
-            let pattern = self
-                .eyesets
-                .get(&face.eyes)
-                .or_else(|| self.eyesets.get(&0))
-                .copied()
-                .unwrap_or(0);
+            let pattern = self.eye_row(face.eyes).map_or(0, |r| r.pattern);
             part.show(scene, pattern, lerp(c.open_min, limit, eyes_rate));
         }
+        self.show_eye_row(scene, face.eyes);
         if let Some(part) = &self.mouth {
             // Studio fixes the mouth at its slider (`FixedRate`).
             part.show(scene, face.mouth, face.mouth_open.clamp(0.0, 1.0));
         }
+        let out = face.mouth == TONGUE_OUT;
+        for (tongue, shown) in self.tongues.iter().zip([!out, out]) {
+            for &r in tongue {
+                scene.renderers[r].enabled = shown;
+            }
+        }
+    }
+
+    /// An eye pattern's item; one missing from the list shows item 0's
+    /// (`ChangeEyesPtn`).
+    pub fn eye_row(&self, id: i32) -> Option<&EyeRow> {
+        self.eyesets.get(&id).or_else(|| self.eyesets.get(&0))
+    }
+
+    /// The eye white, the pupils and the irises' picture of an eye
+    /// pattern.
+    fn show_eye_row(&self, scene: &mut Scene, id: i32) {
+        let Some(row) = self.eye_row(id) else { return };
+        for (node, shown) in [(self.eye_base, row.base), (self.pupils, row.pupils)] {
+            if let Some(n) = node {
+                scene.nodes[n].active = shown;
+            }
+        }
+        for &r in &self.irises {
+            for m in &mut scene.renderers[r].materials {
+                match &row.expression {
+                    Some(image) => {
+                        m.set_texture(
+                            "_expression",
+                            TexSlot {
+                                image: image.clone(),
+                                scale: [1.0, 1.0],
+                                offset: [0.0, 0.0],
+                            },
+                        );
+                        m.set_float("_exppower", 1.0);
+                    }
+                    None => {
+                        m.textures.remove("_expression");
+                        m.set_float("_exppower", 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The eye patterns that can be shown: the gag eyes' meshes are not
+    /// drawn yet.
+    pub fn eye_choices(&self) -> Vec<i32> {
+        self.eyesets
+            .iter()
+            .filter(|(_, r)| r.gag == 0)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// The eyes' open rate for a face set in Studio's panel, which sets
@@ -264,6 +389,62 @@ mod tests {
         assert_eq!((face.eyes_open, face.blink, face.mouth_open), (0.5, false, 0.8));
         assert_eq!("2,0,5".parse::<Face>().unwrap().eyes_open, 1.0);
         assert!("1,2".parse::<Face>().is_err());
+    }
+
+    #[test]
+    fn eye_patterns_switch_the_eyes_and_mouth_21_swaps_the_tongues() {
+        let Ok(game) = rk_vfs::Game::open_user(&[]) else {
+            eprintln!("skipped: no game");
+            return;
+        };
+        let Some(dir) = rk_core::Config::load().ok().map(|c| c.game_dir) else {
+            return;
+        };
+        let Ok(card) = rk_card::Card::load(dir.join("UserData/chara/female/Simple.png")) else {
+            eprintln!("skipped: no Simple.png");
+            return;
+        };
+        let options = crate::BuildOptions {
+            clothes: false,
+            accessories: false,
+            physics: false,
+            ..Default::default()
+        };
+        let mut chara = crate::build(&game, &card, &options).expect("Simple builds");
+        let rig = chara.face.clone().expect("the head has its face controllers");
+        assert_eq!(rig.irises.len(), 2);
+        assert!(
+            rig.tongues.iter().all(|t| !t.is_empty()),
+            "a tongue in the face and one in the body"
+        );
+        assert!(rig.eyesets[&25].expression.is_some(), "hearts in the eyes");
+        assert!(rig.eye_choices().contains(&25) && !rig.eye_choices().contains(&21));
+        let base = rig.eye_base.expect("n_eyebase");
+
+        rig.show(
+            &mut chara.scene,
+            Some(&Face {
+                eyes: 21,
+                mouth: TONGUE_OUT,
+                ..Face::default()
+            }),
+        );
+        assert!(!chara.scene.nodes[base].active, "a gag eye hides the eye white");
+        assert!(!chara.scene.renderers[rig.tongues[0][0]].enabled);
+        assert!(chara.scene.renderers[rig.tongues[1][0]].enabled);
+
+        rig.show(
+            &mut chara.scene,
+            Some(&Face {
+                eyes: 25,
+                ..Face::default()
+            }),
+        );
+        assert!(chara.scene.nodes[base].active);
+        assert!(chara.scene.renderers[rig.tongues[0][0]].enabled);
+        let iris = &chara.scene.renderers[rig.irises[0]].materials[0];
+        assert!(iris.textures.contains_key("_expression"));
+        assert_eq!(iris.floats.get("_exppower"), Some(&1.0));
     }
 
     #[test]

@@ -1475,7 +1475,7 @@ fn face_now(st: &State) -> Option<(rk_chara::face::Face, Vec<i32>, (usize, usize
     let id = st.doc.selected?;
     let rig = st.live.as_ref()?.face_rig(id)?;
     let face = fk_layer(st).and_then(|l| l.face).unwrap_or(rig.start);
-    Some((face, rig.eyesets.keys().copied().collect(), rig.counts()))
+    Some((face, rig.eye_choices(), rig.counts()))
 }
 
 /// Studio's face panel: the eyebrow, eye and mouth patterns, how open the
@@ -1497,10 +1497,16 @@ fn face_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
             Pos2::new(row.right(), row.bottom() - 2.0),
         )
     };
-    let pick = |ui: &mut Ui, i: usize, label: &str, numbers: &[i32], value: &mut i32| {
+    let pick = |ui: &mut Ui, i: usize, label: &str, numbers: &[i32], named: bool, value: &mut i32| {
         let row = cell(i);
         widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);
-        let names: Vec<String> = numbers.iter().map(i32::to_string).collect();
+        let names: Vec<String> = numbers
+            .iter()
+            .map(|n| match rk_chara::face::eye_label(*n).filter(|_| named) {
+                Some(name) => name.to_owned(),
+                None => n.to_string(),
+            })
+            .collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut chosen = numbers.iter().position(|n| n == value).unwrap_or(0);
         widgets::combo(ui, k, field(row), ui.id().with(("face", label)), &mut chosen, &names);
@@ -1509,9 +1515,9 @@ fn face_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
         }
     };
     let count = |n: usize| (0..n as i32).collect::<Vec<_>>();
-    pick(ui, 0, "Eyebrows", &count(eyebrows), &mut next.eyebrows);
-    pick(ui, 1, "Eyes", &eyesets, &mut next.eyes);
-    pick(ui, 2, "Mouth", &count(mouths), &mut next.mouth);
+    pick(ui, 0, "Eyebrows", &count(eyebrows), false, &mut next.eyebrows);
+    pick(ui, 1, "Eyes", &eyesets, true, &mut next.eyes);
+    pick(ui, 2, "Mouth", &count(mouths), false, &mut next.mouth);
     let amount = |ui: &mut Ui, i: usize, label: &str, value: &mut f32| {
         let row = cell(i);
         widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);

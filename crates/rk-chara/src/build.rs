@@ -1042,17 +1042,43 @@ impl<'g> Builder<'g> {
                 }
             }
         }
-        // Studio's eye patterns are the `cha_eyeset` items.
+        // Studio's eye patterns are the `cha_eyeset` items. Studio's
+        // characters are high poly, so the pictures have no `_low`.
         for id in self.game.items.vanilla_ids(cat::CHA_EYESET) {
-            if let Some(ptn) = self
-                .game
-                .items
-                .vanilla(cat::CHA_EYESET, id)
-                .and_then(|i| i.int("EyesPtn"))
-            {
-                rig.eyesets.insert(id, ptn);
-            }
+            let Some(item) = self.game.items.vanilla(cat::CHA_EYESET, id) else {
+                continue;
+            };
+            let Some(pattern) = item.int("EyesPtn") else { continue };
+            let expression = match (item.get("EpsTexAB"), item.get("EpsTex")) {
+                (Some(bundle), Some(name)) if bundle != "0" && name != "0" => {
+                    self.loader.image_by_name(bundle, name, None)
+                }
+                _ => None,
+            };
+            rig.eyesets.insert(
+                id,
+                crate::face::EyeRow {
+                    pattern,
+                    base: item.int("EyeBase") == Some(1),
+                    pupils: item.int("EyeHitomi").unwrap_or(0) != 0,
+                    gag: item.int("EyeObjNo").unwrap_or(0),
+                    expression,
+                },
+            );
         }
+        rig.eye_base = self.scene.find(inst.root, "n_eyebase");
+        rig.pupils = self.scene.find(inst.root, "n_hitomi");
+        rig.irises = inst
+            .renderers
+            .iter()
+            .copied()
+            .filter(|&r| {
+                matches!(
+                    self.scene.renderers[r].name.as_str(),
+                    "cf_Ohitomi_L02" | "cf_Ohitomi_R02"
+                )
+            })
+            .collect();
         rig.show(&mut self.scene, None);
         rig
     }
@@ -2775,12 +2801,25 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             )),
         }
     }
-    // ChaControl.UpdateVisible: tongue state 0, where Studio starts since it
-    // loads cards without their status, shows the face's tongue (S_TongueF)
-    // and hides the body's (S_TongueB, shown only in state 1).
-    for r in b.scene.renderers.iter_mut() {
-        if r.name == "o_tang" && r.part == Part::Body {
-            r.enabled = false;
+    // ChaControl.UpdateVisible: tongue state 0 shows the face's tongue
+    // (S_TongueF) and hides the body's (S_TongueB); mouth pattern 21 sets
+    // state 1, the other way round.
+    let tongue = |part: Part| -> Vec<usize> {
+        b.scene
+            .renderers
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.name == "o_tang" && r.part == part)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let tongues = [tongue(Part::Head), tongue(Part::Body)];
+    if let Some(face) = &mut b.face {
+        face.tongues = tongues;
+        face.show(&mut b.scene, None);
+    } else {
+        for &r in &tongues[1] {
+            b.scene.renderers[r].enabled = false;
         }
     }
     // MaterialEditor overrides come last, so they win over everything the

@@ -411,6 +411,7 @@ impl MaterialDesc {
         let mut st_alpha = st_main;
         let mut st_gloss = st_main;
         let mut st_over = [st_main; 2];
+        let mut st_expression = st_main;
         let mut st_normal = st_main;
         let mut st_ramp = st_main;
         let mut st_color_mask = st_main;
@@ -431,6 +432,8 @@ impl MaterialDesc {
             // take the first two.
             let name = match *name {
                 "_overtex1" if kind == Kind::Hair => "_HairGloss",
+                // toon_eye: the picture in the iris (its texture t1).
+                "_overtex3" if kind == Kind::Eye => "_expression",
                 // main_skin has no colour mask and no patterns; its two
                 // liquid textures take those slots, its normal maps and
                 // liquid mask the last three.
@@ -470,6 +473,7 @@ impl MaterialDesc {
                     "_HairGloss" => st_gloss = st,
                     "_overtex1" => st_over[0] = st,
                     "_overtex2" => st_over[1] = st,
+                    "_expression" => st_expression = st,
                     "_NormalMap" => st_normal = st,
                     "_NormalMapDetail" => st_normal_detail = st,
                     "_Texture2" => {
@@ -601,7 +605,10 @@ impl MaterialDesc {
             } else {
                 color("_overcolor2", [1.0; 4])
             },
-            over3: if mapped {
+            // The iris: the scale and offset of its picture.
+            over3: if kind == Kind::Eye {
+                st_expression
+            } else if mapped {
                 [
                     float("_rimpower", if emission { 0.0 } else { 0.5 }),
                     float("_rimV", if sheer { 0.75 } else { 0.5 }),
@@ -652,8 +659,9 @@ impl MaterialDesc {
                 ]
             } else if kind == Kind::Eye {
                 // The game switches highlights on unless the character hides
-                // them; the stored value is not used.
-                [1.0, float("_rotation", 0.0), 0.0, 0.0]
+                // them; the stored value is not used. Then how strongly the
+                // picture shows.
+                [1.0, float("_rotation", 0.0), float("_exppower", 0.0), 0.0]
             } else if kind == Kind::Overlay {
                 let nose = mat.shader.to_lowercase().contains("nose");
                 [if nose { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]

@@ -709,6 +709,19 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
         let d = i.uv0 - 0.5;
         let uv = vec2<f32>(dot(d, vec2<f32>(cos(turn), sin(turn))), dot(d, vec2<f32>(-sin(turn), cos(turn)))) + 0.5;
         let iris = textureSample(main_tex, samp, uv * m.st_main.xy + m.st_main.zw);
+        // The picture in the iris (_expression), a little under the surface:
+        // moved against the view across the surface, then laid over the
+        // iris by its alpha times _exppower.
+        var picture = 0.0;
+        var under = iris.rgb;
+        if (has(HAS_OVER3)) {
+            let view = normalize(g.eye.xyz - i.world);
+            let across = vec2<f32>(dot(i.tangent, view), dot(i.bitangent, view));
+            let at = (across * -0.0599999987 + i.uv0) * m.over3.xy + m.over3.zw;
+            let e = textureSample(over3_tex, samp, at);
+            picture = e.a * m.p3.z;
+            under = mix(iris.rgb, e.rgb, picture);
+        }
         var over = vec4<f32>(0.0);
         if (has(HAS_OVER1)) {
             over = textureSample(over1_tex, samp, i.uv1 * m.color2.xy + m.color2.zw).a * m.over1;
@@ -717,14 +730,14 @@ fn shade(i: VsOut, front: bool) -> vec4<f32> {
             over = max(over, textureSample(over2_tex, samp, i.uv2 * m.color3.xy + m.color3.zw).a * m.over2);
         }
         let highlight = over.a * m.p3.x;
-        let base = mix(iris.rgb, over.rgb, highlight);
+        let base = mix(under, over.rgb, highlight);
         let shade = overlay(scene_shadow(), m.shadow.rgb);
         let dark = shade * base;
         let lambert = max(dot(normalize(g.light_dir.xyz), normalize(i.normal)), 0.0);
-        let lit = clamp(highlight + lambert, 0.0, 1.0);
+        let lit = clamp(highlight + lambert + picture, 0.0, 1.0);
         let rgb = lit * (base - dark) + dark;
         let out = clamp(rgb * max(light_color(), g.ambient_shadow.rgb), vec3<f32>(0.0), vec3<f32>(1.0));
-        return vec4<f32>(out, max(iris.a, highlight));
+        return vec4<f32>(out, max(picture, max(iris.a, highlight)));
     }
 
     let s = read_surface(i);
