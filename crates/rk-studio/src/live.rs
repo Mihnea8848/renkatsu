@@ -91,6 +91,8 @@ struct Actor {
     hole_at: Option<rk_chara::better_penetration::HolePull>,
     /// The body has the pull bones or the inner bones a stroke moves.
     hole_bones: bool,
+    /// The card is a male's.
+    male: bool,
     /// A partner's shaft is in this character's mouth, which then holds
     /// it; as of this frame and the last one.
     mouth_held: bool,
@@ -138,7 +140,11 @@ struct Actor {
     liquid: (rk_chara::siru::Levels, bool),
     /// The animation of the scene the actor last looked for, by its file
     /// in the project, bundle, controller and state.
-    pose: Option<[String; 5]>,
+    pose: Option<[String; 6]>,
+    /// The body height the animation plays at in place of the character's
+    /// own: the female's, while it plays the male's half of her H position,
+    /// as the main game's H scenes set it.
+    paired_height: Option<f32>,
     /// That animation, when it could be read.
     playing: Option<Playing>,
     /// Why it could not be read.
@@ -698,6 +704,7 @@ impl Actor {
                 p.controller.clone(),
                 p.state.clone(),
                 p.options.map(|[a, b]| format!("{a} {b}")).unwrap_or_default(),
+                self.paired_height.map(|h| h.to_string()).unwrap_or_default(),
             ]
         });
         if key != self.pose {
@@ -1131,8 +1138,7 @@ impl Live {
     /// nearest character in reach; none when that state has him out of
     /// her; and for an animation the game does not know, the nearest of
     /// the three places in reach. The link of the last frame holds while
-    /// its place stays in reach. A shaft hidden by the Son switch does not
-    /// link on its own.
+    /// its place stays in reach. Only a male's shown shaft links on its own.
     fn auto_link(
         &self,
         at: usize,
@@ -1141,9 +1147,10 @@ impl Live {
     ) -> Option<(ObjectId, rk_chara::better_penetration::Mode)> {
         use rk_chara::better_penetration as bp;
         let actor = &self.actors[at];
-        // Only a shaft that is shown links on its own: a body may carry
-        // the bones with CharaStudio's Son switch off.
-        if !actor.chara.clothes.son.switched_on {
+        // Only a male's shown shaft links on its own: a body may carry the
+        // bones with CharaStudio's Son switch off, and a female's card says
+        // on where Studio starts her off. A female's links by hand.
+        if !actor.male || !actor.chara.clothes.son.switched_on {
             return None;
         }
         let wanted = actor
@@ -1208,6 +1215,78 @@ impl Live {
         // Not cached before the list is read, so that it is tried again.
         if self.h_library.is_some() {
             self.h_positions.insert(file, found.clone());
+        }
+        found
+    }
+
+    /// The heights H pairs play at: a character playing the male's half of
+    /// an H position plays it at the height of the one playing the female's
+    /// half of the same position, as `HActionBase` sets the male's `height`
+    /// to the female's body. CharaStudio leaves each at its own, so the two
+    /// halves of a pair of different heights miss each other.
+    fn pair_heights(&mut self, scene: &Scene, project: &Project, games: &mut Games, mods: &Path) {
+        let halves: Vec<Option<(bool, String)>> = (0..self.actors.len())
+            .map(|i| match scene.get(self.actors[i].id).map(|o| &o.content) {
+                Some(Content::Character { animation: Some(a), .. }) => self.h_half_of(project, a, games, mods),
+                _ => None,
+            })
+            .collect();
+        for i in 0..self.actors.len() {
+            let paired = match &halves[i] {
+                Some((false, position)) => halves
+                    .iter()
+                    .position(|h| h.as_ref().is_some_and(|(female, p)| *female && p == position))
+                    .map(|j| self.actors[j].chara.parameters.height),
+                _ => None,
+            };
+            self.actors[i].paired_height = paired;
+        }
+    }
+
+    /// Whether an animation is the female's half of an H position, and the
+    /// position by its category's name: named in CharaStudio's list for one
+    /// played from the game, or in its file.
+    fn h_half_of(
+        &mut self,
+        project: &Project,
+        a: &crate::scene::Animation,
+        games: &mut Games,
+        mods: &Path,
+    ) -> Option<(bool, String)> {
+        let file = own_file(project, a);
+        if let Some(known) = file.as_ref().and_then(|f| self.h_halves.get(f)) {
+            return known.clone();
+        }
+        if file.is_none() && a.override_controller.is_empty() {
+            return None;
+        }
+        if self.h_library.is_none() {
+            let game = games.get(mods).ok()?;
+            self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
+        }
+        let library = self.h_library.clone()?;
+        let half = |group: &str, category: &str| {
+            let category = category.rsplit(": ").next().unwrap_or(category).to_owned();
+            (group.starts_with("Female"), category)
+        };
+        let found = match &file {
+            Some(f) => rk_chara::animation_file::read_meta(f)
+                .ok()
+                .filter(|m| m.h)
+                .map(|m| half(&m.group, &m.category)),
+            None => library
+                .entries
+                .iter()
+                .find(|e| e.h && e.override_controller == a.override_controller && e.state == a.state)
+                .map(|e| {
+                    half(
+                        &library.group_name(e.group),
+                        &library.category_name(e.group, e.category),
+                    )
+                }),
+        };
+        if let Some(f) = file {
+            self.h_halves.insert(f, found.clone());
         }
         found
     }
@@ -1452,6 +1531,9 @@ pub struct Live {
     dan_aims: Option<std::sync::Arc<rk_chara::dan_look::Aims>>,
     h_library: Option<std::sync::Arc<rk_chara::animations::Library>>,
     h_positions: std::collections::HashMap<std::path::PathBuf, Option<(String, String)>>,
+    /// The half and the position of each animation file an H pair plays,
+    /// once found.
+    h_halves: std::collections::HashMap<std::path::PathBuf, Option<(bool, String)>>,
     /// The map as the characters' skirts rest on it, and what it was made
     /// from, so that it is made again only when the map moves.
     obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
@@ -1539,6 +1621,7 @@ impl Live {
             dan_aims: None,
             h_library: None,
             h_positions: Default::default(),
+            h_halves: Default::default(),
             smooth_edges: true,
             renderer,
             render_state: render_state.clone(),
@@ -2076,6 +2159,7 @@ impl Live {
                 self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
             }
         }
+        self.pair_heights(scene, project, games, &mods);
         for i in 0..self.actors.len() {
             if self.actors[i].chara.shaft.is_none() {
                 continue;
@@ -2118,7 +2202,10 @@ impl Live {
                 Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
                 _ => None,
             };
-            let parameters = actor.chara.parameters.with_options(options);
+            let mut parameters = actor.chara.parameters.with_options(options);
+            if let Some(height) = actor.paired_height {
+                parameters.height = height;
+            }
             let mut read = |what: Load| -> Result<Motion> {
                 if let Load::Hand(side, pattern) = what {
                     let game = games.get(&mods)?;
@@ -2756,6 +2843,17 @@ impl Live {
         self.renderer.map_sun()
     }
 
+    /// Puts the camera at a view and makes it the one to go back to, at
+    /// once, focused on nothing.
+    pub fn place_camera(&mut self, camera: &Camera) {
+        let glide = std::mem::replace(&mut self.cam.glide_time, 0.0);
+        self.cam.rehome(Orbit::from_camera(camera), None);
+        self.cam.release();
+        self.cam.glide_time = glide;
+        self.framed = true;
+        self.view_checked = true;
+    }
+
     /// Puts the camera at CharaStudio's starting view, which a new map is
     /// first seen from, and makes it the view to go back to. A character
     /// built after leaves it there.
@@ -3043,6 +3141,7 @@ impl Live {
                 .any(|n| chara.scene.find(chara.top, n).is_some());
         let vagina = rk_chara::better_penetration::vagina_bones(&chara.physics, &chara.scene);
         Ok(Actor {
+            male: card.sex() == 0,
             mouth_held: false,
             mouth_held_next: false,
             hole_bones,
@@ -3067,6 +3166,7 @@ impl Live {
             clothes: [cs::ON; cs::KINDS],
             liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
+            paired_height: None,
             layer: None,
             edits: Vec::new(),
             playing: None,

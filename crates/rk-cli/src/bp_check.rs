@@ -185,7 +185,21 @@ pub fn check(dir: &Path, only: &[String], bones_listed: bool) -> Result<()> {
             println!("  his body has no BetterPenetration shaft here");
             continue;
         };
-        let settings = him.better_penetration;
+        // As Studio had them: its controller's defaults where the card
+        // stores none.
+        let card_has = rk_card::Card::load(
+            config
+                .game_dir
+                .join("UserData/chara/male")
+                .join(field(&line, "partner").unwrap_or_default()),
+        )
+        .map(|c| c.ext.get(bp::KEY).is_some())
+        .unwrap_or(false);
+        let settings = if card_has {
+            him.better_penetration
+        } else {
+            bp::Settings::studio()
+        };
         // Renkatsu's body-following end, against Studio's at her waist.
         if mode != Mode::Oral {
             use rk_chara::body_collision as bc;

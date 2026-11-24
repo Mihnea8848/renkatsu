@@ -983,8 +983,24 @@ fn yes() -> bool {
 }
 
 impl Default for Settings {
-    /// The controller's defaults in `OnReload`.
+    /// For a card that stores no settings: Studio's controller's, with the
+    /// mouth's pull as the plugin sets it in the main game ("Oral
+    /// Push/Pull": pull rate 18, at most 6 mm out). Studio's rate of 1.8
+    /// moves the lips about a millimetre and a half a stroke, too little to
+    /// see.
     fn default() -> Self {
+        Settings {
+            max_pull: 0.006,
+            pull_rate: 18.0,
+            ..Settings::studio()
+        }
+    }
+}
+
+impl Settings {
+    /// The Studio controller's defaults in `OnReload`, which a card saved in
+    /// Studio starts from.
+    pub fn studio() -> Self {
         Settings {
             enabled: true,
             length_squish: 0.6,
@@ -1009,8 +1025,10 @@ impl Default for Settings {
 
 /// A card's settings, the defaults where it holds none.
 pub fn read(ext: &ExtData) -> Settings {
-    let mut s = Settings::default();
-    let Some(p) = ext.get(KEY) else { return s };
+    let Some(p) = ext.get(KEY) else {
+        return Settings::default();
+    };
+    let mut s = Settings::studio();
     let float = |key: &str, into: &mut f32| {
         if let Some(v) = p.data.get(key).and_then(Value::as_f64) {
             *into = v as f32;
@@ -1260,7 +1278,7 @@ mod tests {
         // Studio's hold: no return.
         let s = Settings {
             return_rate: 0.0,
-            ..Settings::default()
+            ..Settings::studio()
         };
         let base = 0.19;
         let mut pull = MouthPull::new(base);
@@ -1470,6 +1488,14 @@ mod tests {
             "the return goes along up"
         );
         assert_eq!(pull_bones(Mode::Oral).len(), 0);
+    }
+
+    #[test]
+    fn a_card_without_settings_pulls_the_mouth_as_the_main_game_does() {
+        let s = read(&ExtData::default());
+        assert_eq!((s.pull_rate, s.max_pull, s.max_push), (18.0, 0.006, 0.002));
+        let studio = Settings::studio();
+        assert_eq!((studio.pull_rate, studio.max_pull), (1.8, 0.01));
     }
 
     #[test]

@@ -232,6 +232,10 @@ struct Cli {
     /// X,Y points, to picture a view that left its starting framing.
     #[arg(long, value_parser = parse_point, allow_hyphen_values = true)]
     camera_turn: Option<egui::Pos2>,
+    /// Start with the camera here, as `EYE:TARGET`, each `x,y,z` in
+    /// metres, focused on nothing, to picture a close view.
+    #[arg(long, hide = true, value_parser = parse_camera, allow_hyphen_values = true)]
+    camera: Option<(glam::Vec3, glam::Vec3)>,
     /// Start with the camera focused on nothing.
     #[arg(long)]
     free_camera: bool,
@@ -416,6 +420,16 @@ fn parse_wheel(text: &str) -> Result<(egui::Pos2, f32), String> {
         parse_point(point)?,
         dy.trim().parse().map_err(|_| "the turn is a number".to_owned())?,
     ))
+}
+
+fn parse_camera(text: &str) -> Result<(glam::Vec3, glam::Vec3), String> {
+    let point = |t: &str| -> Option<glam::Vec3> {
+        let v: Vec<f32> = t.split(',').map(|n| n.trim().parse().ok()).collect::<Option<_>>()?;
+        (v.len() == 3).then(|| glam::Vec3::new(v[0], v[1], v[2]))
+    };
+    text.split_once(':')
+        .and_then(|(eye, target)| Some((point(eye)?, point(target)?)))
+        .ok_or_else(|| "a camera must look like 0,1.5,1:0,1.4,0".to_owned())
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -906,6 +920,15 @@ impl Studio {
         if let Some(live) = state.live.as_mut() {
             if let Some(drag) = cli.camera_turn {
                 live.cam.orbit_drag(drag.to_vec2());
+            }
+            if let Some((eye, target)) = cli.camera {
+                let fov_y_deg = live.cam.orbit.fov_y_deg;
+                live.place_camera(&rk_render::Camera {
+                    eye,
+                    target,
+                    fov_y_deg,
+                    up: glam::Vec3::Y,
+                });
             }
             if cli.free_camera {
                 live.cam.release();
