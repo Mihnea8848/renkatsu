@@ -28,6 +28,7 @@ pub fn keyed(st: &State, id: ObjectId, bone: &str) -> bool {
 }
 
 /// The edit a bone shows: its keys' at the playhead, or the pose layer's.
+/// An IK target (`ik/LeftHand`) shows its place and turn as an edit.
 pub fn shown(st: &State, id: ObjectId, bone: &str) -> BoneEdit {
     if let Some(edit) = track(st, id)
         .and_then(|t| t.keys.get(bone))
@@ -38,7 +39,10 @@ pub fn shown(st: &State, id: ObjectId, bone: &str) -> BoneEdit {
     match st.doc.scene().get(id).map(|o| &o.content) {
         Some(Content::Character {
             pose_layer: Some(l), ..
-        }) => l.fk.get(bone).copied().unwrap_or_default(),
+        }) => match rk_chara::pose::ik_key_target(bone) {
+            Some(target) => l.ik.get(target).map(|t| t.as_edit()).unwrap_or_default(),
+            None => l.fk.get(bone).copied().unwrap_or_default(),
+        },
         _ => BoneEdit::default(),
     }
 }
@@ -62,7 +66,11 @@ pub fn write(st: &mut State, id: ObjectId, bone: &str, edit: BoneEdit, held: boo
         return;
     };
     let layer = pose_layer.get_or_insert_with(Default::default);
-    if edit.is_identity() {
+    if let Some(target) = rk_chara::pose::ik_key_target(bone) {
+        if let Some(t) = layer.ik.get_mut(target) {
+            *t = rk_chara::pose::IkTarget::of_edit(edit);
+        }
+    } else if edit.is_identity() {
         layer.fk.remove(bone);
     } else {
         layer.fk.insert(bone.to_owned(), edit);
@@ -188,16 +196,26 @@ pub fn paste_key(st: &mut State, id: ObjectId, bone: &str, edit: BoneEdit) {
     st.doc.edit_sequence(sequence, false);
 }
 
-/// The bones a palette's key buttons act on: the chosen bone, or every
-/// bone the character's pose has an edit or a key for.
+/// The bones a palette's key buttons act on: the chosen IK target or
+/// bone, or every bone the character's pose has an edit or a key for and,
+/// while IK is on, every target.
 pub fn bones_to_key(st: &State, id: ObjectId) -> Vec<String> {
+    if let Some(target) = st.pose_ik {
+        return vec![rk_chara::pose::ik_key(target)];
+    }
     if let Some(bone) = st.pose_bone.clone() {
         return vec![bone];
     }
     let mut bones: Vec<String> = match st.doc.scene().get(id).map(|o| &o.content) {
         Some(Content::Character {
             pose_layer: Some(l), ..
-        }) => l.fk.keys().cloned().collect(),
+        }) => {
+            let mut all: Vec<String> = l.fk.keys().cloned().collect();
+            if l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS {
+                all.extend((0..rk_chara::pose::IK_TARGETS).map(rk_chara::pose::ik_key));
+            }
+            all
+        }
         _ => Vec::new(),
     };
     if let Some(t) = track(st, id) {
@@ -287,5 +305,44 @@ mod tests {
         set_keys(&mut st, her, std::slice::from_ref(&neck));
         clear_keys(&mut st, her);
         assert!(st.doc.scene().sequence.tracks.is_empty());
+    }
+
+    #[test]
+    fn an_ik_target_keys_like_a_bone() {
+        let mut st = State::new(Project::none(), Scene::new());
+        let her = st.doc.add_character("Her", "Characters/her.png".into());
+        let mut object = st.doc.scene().get(her).unwrap().clone();
+        if let Content::Character { pose_layer, .. } = &mut object.content {
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            layer.ik_on = true;
+            layer.ik = vec![
+                rk_chara::pose::IkTarget {
+                    pos: glam::Vec3::ZERO,
+                    rot: Quat::IDENTITY,
+                };
+                rk_chara::pose::IK_TARGETS
+            ];
+        }
+        st.doc.edit(object, false);
+        let hand = rk_chara::pose::ik_key(3);
+        st.pose_ik = Some(3);
+        assert_eq!(bones_to_key(&st, her), [hand.clone()]);
+        st.clock = 1.0;
+        set_keys(&mut st, her, std::slice::from_ref(&hand));
+        st.clock = 2.0;
+        let up = BoneEdit {
+            pos: glam::Vec3::new(0.0, 0.3, 0.0),
+            ..BoneEdit::default()
+        };
+        write(&mut st, her, &hand, up, false);
+        assert_eq!(st.doc.scene().sequence.track(her).unwrap().keys[&hand].len(), 2);
+        st.clock = 1.5;
+        assert!((shown(&st, her, &hand).pos.y - 0.15).abs() < 1e-5, "half way, smooth");
+        // The target in the pose layer is as it was.
+        let layer = match &st.doc.scene().get(her).unwrap().content {
+            Content::Character { pose_layer, .. } => pose_layer.clone().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(layer.ik[3].pos, glam::Vec3::ZERO);
     }
 }

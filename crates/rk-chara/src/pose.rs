@@ -134,6 +134,40 @@ pub struct IkTarget {
     pub rot: Quat,
 }
 
+/// The prefix of an IK target's name among a character's keys, beside
+/// her bones': `ik/LeftHand`.
+pub const IK_KEY: &str = "ik/";
+
+/// The name an IK target's keys go by.
+pub fn ik_key(target: usize) -> String {
+    format!("{IK_KEY}{}", IK_TARGET_NAMES[target])
+}
+
+/// The target a key name is of, when it is an IK target's.
+pub fn ik_key_target(name: &str) -> Option<usize> {
+    let target = name.strip_prefix(IK_KEY)?;
+    IK_TARGET_NAMES.iter().position(|n| *n == target)
+}
+
+/// An IK target as people call it.
+pub fn ik_label(target: usize) -> &'static str {
+    [
+        "Body (IK)",
+        "Left shoulder (IK)",
+        "Left elbow (IK)",
+        "Left hand (IK)",
+        "Right shoulder (IK)",
+        "Right elbow (IK)",
+        "Right hand (IK)",
+        "Left thigh (IK)",
+        "Left knee (IK)",
+        "Left foot (IK)",
+        "Right thigh (IK)",
+        "Right knee (IK)",
+        "Right foot (IK)",
+    ][target]
+}
+
 /// Whether a target has a turn of its own, as the hands and feet do;
 /// the others are points (CharaStudio's `usedRot`).
 pub fn ik_target_turns(target: usize) -> bool {
@@ -172,7 +206,42 @@ fn is_start_parts(parts: &Vec<Part>) -> bool {
     sorted == start
 }
 
+impl IkTarget {
+    /// As the edit its keys hold: a place and a turn.
+    pub fn as_edit(self) -> BoneEdit {
+        BoneEdit {
+            pos: self.pos,
+            rot: self.rot,
+            ..BoneEdit::default()
+        }
+    }
+
+    pub fn of_edit(edit: BoneEdit) -> IkTarget {
+        IkTarget {
+            pos: edit.pos,
+            rot: edit.rot,
+        }
+    }
+}
+
 impl Layer {
+    /// Lays keyed edits over the layer: bones' over FK, IK targets' over
+    /// the targets.
+    pub fn with_keys(&mut self, keyed: BTreeMap<String, BoneEdit>) {
+        for (name, edit) in keyed {
+            match ik_key_target(&name) {
+                Some(target) => {
+                    if let Some(t) = self.ik.get_mut(target) {
+                        *t = IkTarget::of_edit(edit);
+                    }
+                }
+                None => {
+                    self.fk.insert(name, edit);
+                }
+            }
+        }
+    }
+
     /// Whether the layer holds nothing: FK off, its parts as they start and
     /// no edits kept.
     pub fn is_empty(&self) -> bool {
@@ -558,6 +627,30 @@ mod tests {
             ..base
         };
         assert!(BoneEdit::baked(base, crumbs).is_identity());
+    }
+
+    #[test]
+    fn keys_lay_over_the_bones_and_the_ik_targets() {
+        let mut layer = Layer {
+            ik: vec![
+                IkTarget {
+                    pos: Vec3::ZERO,
+                    rot: Quat::IDENTITY,
+                };
+                IK_TARGETS
+            ],
+            ..Layer::default()
+        };
+        let lift = BoneEdit {
+            pos: Vec3::Y,
+            ..BoneEdit::default()
+        };
+        layer.with_keys(BTreeMap::from([(ik_key(9), lift), ("cf_j_neck".to_owned(), lift)]));
+        assert_eq!(layer.ik[9].pos, Vec3::Y);
+        assert_eq!(layer.fk["cf_j_neck"], lift);
+        assert!(!layer.fk.contains_key(&ik_key(9)));
+        assert_eq!(ik_key_target("ik/LeftFoot"), Some(9));
+        assert_eq!(ik_key_target("cf_j_neck"), None);
     }
 
     #[test]

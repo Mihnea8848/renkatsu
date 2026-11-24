@@ -161,7 +161,16 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         say(ui, "Select a character");
         return;
     };
-    if !fk_on {
+    // IK's targets while it is on, then the skeleton while FK is.
+    let ik_groups: Option<Vec<bool>> = match st.doc.selection().map(|o| &o.content) {
+        Some(Content::Character {
+            pose_layer: Some(l), ..
+        }) if l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS => {
+            Some((0..rk_chara::pose::IK_TARGETS).map(|i| l.ik_group_on(i)).collect())
+        }
+        _ => None,
+    };
+    if !fk_on && ik_groups.is_none() {
         say(ui, "Forward kinematics is off");
         return;
     }
@@ -170,9 +179,17 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         return;
     };
     let needle = st.animator_search.trim().to_lowercase();
-    let rows: Vec<(usize, &String, String)> = joints
+    let targets = ik_groups.iter().flat_map(|on| {
+        (0..rk_chara::pose::IK_TARGETS)
+            .filter(|i| on[*i])
+            .map(|i| (0, rk_chara::pose::ik_key(i), rk_chara::pose::ik_label(i).to_owned()))
+    });
+    let bones = joints
         .iter()
-        .map(|(depth, name)| (*depth, name, crate::bones::pose_label(name)))
+        .filter(|_| fk_on)
+        .map(|(depth, name)| (*depth, name.clone(), crate::bones::pose_label(name)));
+    let rows: Vec<(usize, String, String)> = targets
+        .chain(bones)
         .filter(|(_, name, shown)| {
             needle.is_empty() || shown.to_lowercase().contains(&needle) || name.to_lowercase().contains(&needle)
         })
@@ -245,7 +262,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let listed = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         for (i, (depth, name, shown)) in rows.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
-            let on = st.pose_bone.as_deref() == Some(name.as_str());
+            let target = rk_chara::pose::ik_key_target(name);
+            let on = match target {
+                Some(i) => st.pose_ik == Some(i),
+                None => st.pose_ik.is_none() && st.pose_bone.as_deref() == Some(name.as_str()),
+            };
             let p = ui.painter();
             let tree = Rect::from_min_max(rect.min, Pos2::new(rect.left() + tree_w, rect.bottom()));
             // The bone's row of the sheet, every other one a shade darker.
@@ -269,7 +290,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             } else {
                 (t.text, t.text_dim)
             };
-            glyph(p, k, Pos2::new(x + 6.0, y), icon::BONE, 13.0, faint);
+            let mark = if target.is_some() { icon::TARGET } else { icon::BONE };
+            glyph(p, k, Pos2::new(x + 6.0, y), mark, 13.0, faint);
             widgets::label(p, k, Pos2::new(x + 18.0, y), shown, text);
             // The bone's keys, a diamond each; a click goes to the key.
             for key in keys.get(name.as_str()).into_iter().flatten() {
@@ -318,7 +340,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                 });
             }
-            let resp = if shown != *name {
+            let resp = if shown != name {
                 resp.on_hover_text(name.as_str())
             } else {
                 resp
@@ -355,8 +377,17 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         egui::Stroke::new(1.5, t.accent),
     );
     if let Some(name) = chosen {
-        st.pose_bone = Some(name);
-        st.property_tab = 1;
+        match rk_chara::pose::ik_key_target(&name) {
+            Some(i) => {
+                st.pose_ik = Some(i);
+                st.pose_bone = None;
+            }
+            None => {
+                st.pose_bone = Some(name);
+                st.pose_ik = None;
+                st.property_tab = 1;
+            }
+        }
     }
     // Moving the playhead holds the scene there, and ends playing alone.
     if let Some(time) = go_to {

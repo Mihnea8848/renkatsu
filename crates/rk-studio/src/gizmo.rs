@@ -1041,8 +1041,17 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                         st.doc.edit(object, true);
                     }
                     Grip::Ik(id, target) => {
-                        if let Some(object) = drag.moved_target(start, *id, *target, st) {
-                            st.doc.edit(object, true);
+                        // Through the keys, so a keyed target keys itself.
+                        let moved = drag
+                            .moved_target(start, *id, *target, st)
+                            .and_then(|o| match o.content {
+                                crate::scene::Content::Character {
+                                    pose_layer: Some(l), ..
+                                } => l.ik.get(*target).copied(),
+                                _ => None,
+                            });
+                        if let Some(t) = moved {
+                            crate::keying::write(st, *id, &rk_chara::pose::ik_key(*target), t.as_edit(), true);
                         }
                     }
                     Grip::Bone(id, name) => {

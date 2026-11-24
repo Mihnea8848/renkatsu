@@ -548,10 +548,10 @@ impl Actor {
         // Edits made by hand: a change poses the character again from
         // the bones as loaded, so a bone no longer edited goes back.
         // The keys of the scene's sequence at the clock's time, over the
-        // pose by hand, while FK is on.
+        // pose by hand and the IK targets, while FK or IK is on.
         let keyed = pose_layer
             .as_deref()
-            .filter(|l| l.fk_on)
+            .filter(|l| l.fk_on || l.ik_on)
             .zip(keys.filter(|k| !k.is_empty()))
             .map(|(l, k)| {
                 let mut l = l.clone();
@@ -559,7 +559,7 @@ impl Actor {
                     Some((solo, time)) if solo == self.id => time,
                     _ => clock.time,
                 };
-                l.fk.extend(rk_chara::keys::pose_at(k, time));
+                l.with_keys(rk_chara::keys::pose_at(k, time));
                 l
             });
         let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());
