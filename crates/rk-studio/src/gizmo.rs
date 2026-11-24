@@ -1011,9 +1011,16 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                         object.transform = drag.moved(start);
                         st.doc.edit(object, true);
                     }
-                    Grip::Bone(_, name) => {
-                        if let Some(object) = drag.turned_bone(start, name) {
-                            st.doc.edit(object, true);
+                    Grip::Bone(id, name) => {
+                        let turned = drag.turned_bone(start, name);
+                        let edit = turned.and_then(|o| match o.content {
+                            crate::scene::Content::Character {
+                                pose_layer: Some(l), ..
+                            } => l.fk.get(name).copied(),
+                            _ => None,
+                        });
+                        if let Some(edit) = edit {
+                            crate::keying::write(st, *id, name, edit, true);
                         }
                     }
                 }
@@ -1268,12 +1275,8 @@ fn bone_start(st: &State) -> Option<Start> {
     let (id, name) = chosen_bone(st)?;
     let (place, _, parent_turn, local) = st.live.as_ref()?.bone_turns(id, &name)?;
     let object = st.doc.scene().get(id)?.clone();
-    let edit = match &object.content {
-        crate::scene::Content::Character {
-            pose_layer: Some(l), ..
-        } => l.fk.get(&name).copied().unwrap_or_default(),
-        _ => Default::default(),
-    };
+    // What the bone shows: its keys at the playhead when it has keys.
+    let edit = crate::keying::shown(st, id, &name);
     Some(Start {
         grip: Grip::Bone(id, name),
         bone: Some((local, edit)),

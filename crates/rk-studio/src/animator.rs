@@ -77,23 +77,35 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         })
         .collect();
 
-    // The time the keys lie in: one pass of the character's animation, or
-    // ten seconds while she holds a pose; the playhead at the scene's time.
-    let pass = st
-        .live
-        .as_ref()
-        .and_then(|l| l.built(id))
-        .and_then(|b| b.animation)
-        .filter(|(still, _, seconds)| !still && *seconds > 0.1)
-        .map_or(10.0, |(_, _, seconds)| seconds);
-    let now = st.clock.rem_euclid(pass);
+    // The time the keys lie in: the scene's sequence; the playhead at the
+    // scene's time.
+    let pass = st.doc.scene().sequence.length.max(0.1);
+    let now = st.clock.clamp(0.0, pass);
+    let keys = st
+        .doc
+        .scene()
+        .sequence
+        .track(id)
+        .map(|t| t.keys.clone())
+        .unwrap_or_default();
 
     let area = ui.available_rect_before_wrap();
     let tree_w = (area.width() * 0.3).clamp(200.0, 320.0);
-    let (ruler, _) = ui.allocate_exact_size(Vec2::new(area.width(), 22.0), Sense::hover());
+    let (ruler, scrub) = ui.allocate_exact_size(Vec2::new(area.width(), 22.0), Sense::click_and_drag());
     let sheet_x = |r: Rect| (r.left() + tree_w + 8.0, r.right() - 12.0);
     let (x0, x1) = sheet_x(ruler);
     let at = |time: f32| x0 + (x1 - x0) * (time / pass);
+    let time_at = |x: f32| (x - x0) / (x1 - x0).max(1.0) * pass;
+    // A click or a drag on the ruler moves the playhead, on the frames.
+    let mut go_to: Option<f32> = None;
+    if scrub.clicked() || scrub.dragged() {
+        if let Some(pos) = scrub.interact_pointer_pos().filter(|p| p.x >= x0 - 6.0) {
+            go_to = Some(time_at(pos.x));
+        }
+    }
+    if scrub.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
     // A tick each second, a finer one each quarter while there is room.
     let per_second = (x1 - x0) / pass;
     let step = if per_second > 160.0 {
@@ -157,6 +169,39 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             };
             glyph(p, k, Pos2::new(x + 6.0, y), icon::BONE, 13.0, faint);
             widgets::label(p, k, Pos2::new(x + 18.0, y), shown, text);
+            // The bone's keys, a diamond each; a click goes to the key.
+            for key in keys.get(name.as_str()).into_iter().flatten() {
+                let centre = Pos2::new(at(key.time).round() + 0.5, y);
+                let hit = Rect::from_center_size(centre, Vec2::splat(12.0));
+                let resp = ui.interact(
+                    hit,
+                    ui.id().with(("key", name.as_str(), key.time.to_bits())),
+                    Sense::click(),
+                );
+                let r = if resp.hovered() { 5.5 } else { 4.5 };
+                let fill = if on {
+                    t.accent
+                } else if resp.hovered() {
+                    t.text_bright
+                } else {
+                    t.text
+                };
+                let diamond = vec![
+                    centre + Vec2::new(0.0, -r),
+                    centre + Vec2::new(r, 0.0),
+                    centre + Vec2::new(0.0, r),
+                    centre + Vec2::new(-r, 0.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    diamond,
+                    fill,
+                    egui::Stroke::new(1.0, Color32::from_black_alpha(140)),
+                ));
+                if resp.clicked() {
+                    chosen = Some((*name).clone());
+                    go_to = Some(key.time);
+                }
+            }
             let resp = if shown != *name {
                 resp.on_hover_text(name.as_str())
             } else {
@@ -178,5 +223,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     if let Some(name) = chosen {
         st.pose_bone = Some(name);
         st.property_tab = 1;
+    }
+    // Moving the playhead holds the scene there.
+    if let Some(time) = go_to {
+        st.clock = st.doc.scene().sequence.snap(time);
+        st.playback = crate::state::Playback::Paused;
     }
 }

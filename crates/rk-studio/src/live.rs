@@ -457,6 +457,7 @@ impl Actor {
         world: Mat4,
         game: &mut dyn FnMut() -> Result<Motion>,
         clock: &Clock,
+        keys: Option<&rk_chara::keys::Keys>,
         log: &mut Log,
     ) -> bool {
         let Content::Character {
@@ -542,7 +543,18 @@ impl Actor {
 
         // Edits made by hand: a change poses the character again from
         // the bones as loaded, so a bone no longer edited goes back.
-        let layer = pose_layer.as_deref().filter(|l| !l.is_empty());
+        // The keys of the scene's sequence at the clock's time, over the
+        // pose by hand, while FK is on.
+        let keyed = pose_layer
+            .as_deref()
+            .filter(|l| l.fk_on)
+            .zip(keys.filter(|k| !k.is_empty()))
+            .map(|(l, k)| {
+                let mut l = l.clone();
+                l.fk.extend(rk_chara::keys::pose_at(k, clock.time));
+                l
+            });
+        let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());
         if layer != self.layer.as_ref() {
             self.layer = layer.cloned();
             // A bone of CharaStudio's FK table takes its edit while one of
@@ -1267,7 +1279,8 @@ impl Live {
                 )
             };
             let world = scene.world_by(actor.id, &self.poses);
-            if actor.update(object, world, &mut read, &clock, log) {
+            let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
+            if actor.update(object, world, &mut read, &clock, keys, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
             }
             // The bones that objects follow, now that they are posed.

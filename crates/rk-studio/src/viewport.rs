@@ -1189,6 +1189,23 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     index += 1;
                     continue;
                 }
+                if *name == "Set key" || *name == "Delete key" {
+                    // The chosen bone, or every bone the pose has an edit
+                    // or a key for, at the playhead.
+                    let who = fk_layer(st).filter(|l| l.fk_on).and(st.doc.selected);
+                    let bones = who.map(|w| crate::keying::bones_to_key(st, w)).unwrap_or_default();
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if let (true, Some(who), false) = (resp.clicked(), who, bones.is_empty()) {
+                        if *name == "Set key" {
+                            crate::keying::set_keys(st, who, &bones);
+                        } else {
+                            crate::keying::delete_keys(st, who, &bones);
+                        }
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 if *name == "Bake animation" || *name == "Reset pose" {
                     let bake = *name == "Bake animation";
                     let ready = if bake {
@@ -1436,7 +1453,7 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 20] = [
+const LATER_TOOLS: [&str; 18] = [
     "Replace",
     "Reload",
     "Accessories",
@@ -1446,9 +1463,7 @@ const LATER_TOOLS: [&str; 20] = [
     "Hands",
     "Look at camera",
     "Depth of field",
-    "Set key",
     "Auto key",
-    "Delete key",
     "Bake physics",
     "New shot from view",
     "Shot list",

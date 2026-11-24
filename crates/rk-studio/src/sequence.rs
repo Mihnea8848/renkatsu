@@ -62,8 +62,6 @@ impl Default for Sequence {
     }
 }
 
-// Setting and showing keys comes with the Animator's key strips.
-#[allow(dead_code)]
 impl Sequence {
     /// The track of an object, when it has one.
     pub fn track(&self, object: ObjectId) -> Option<&Track> {

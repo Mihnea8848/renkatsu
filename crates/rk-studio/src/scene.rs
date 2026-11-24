@@ -2319,6 +2319,20 @@ impl Document {
         true
     }
 
+    /// Replaces the scene's sequence, as `edit` does an object: a step of
+    /// the history, or with `held` part of the drag's step.
+    pub fn edit_sequence(&mut self, sequence: crate::sequence::Sequence, held: bool) -> bool {
+        if self.scene.sequence == sequence {
+            return false;
+        }
+        if !self.gesture {
+            self.checkpoint();
+        }
+        self.gesture = held;
+        self.scene.sequence = sequence;
+        true
+    }
+
     /// The pointer was let go: the next edit starts a new step.
     pub fn end_gesture(&mut self) {
         self.gesture = false;
