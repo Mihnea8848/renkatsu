@@ -204,6 +204,20 @@ impl Default for Collider {
 /// Colliders lent to dynamic bones by their place in `Physics::bones`.
 pub type Guests = Vec<(usize, Vec<Shape>)>;
 
+/// Guests with one list per bone, in the bones' order, as several givers
+/// may lend to the same bone.
+pub fn merged(guests: Guests) -> Guests {
+    let mut out: Guests = Vec::new();
+    for (bone, shapes) in guests {
+        match out.iter_mut().find(|(b, _)| *b == bone) {
+            Some((_, list)) => list.extend(shapes),
+            None => out.push((bone, shapes)),
+        }
+    }
+    out.sort_by_key(|(b, _)| *b);
+    out
+}
+
 /// A collider placed in the world for one update.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shape {
@@ -1981,7 +1995,7 @@ impl Physics {
     /// their own, placed in the world, by the bone's place in `bones`;
     /// they stay until set again.
     pub fn set_guests(&mut self, guests: Guests) {
-        self.guests = guests;
+        self.guests = merged(guests);
     }
 
     /// The guests set last.
@@ -2902,6 +2916,25 @@ mod tests {
         physics.settle(&mut scene, 300, FRAME_TIME);
         assert!(physics.speed() < 1e-6);
         assert!(position(&scene, b2).y < before.y - 0.005);
+    }
+
+    #[test]
+    fn guests_for_one_bone_from_several_givers_join() {
+        let shape = |r: f32| Shape {
+            p0: Vec3::ZERO,
+            p1: Vec3::ZERO,
+            radius: r,
+            capsule: false,
+            inside: false,
+        };
+        let joined = merged(vec![
+            (3, vec![shape(1.0)]),
+            (1, vec![shape(2.0)]),
+            (3, vec![shape(3.0)]),
+        ]);
+        assert_eq!(joined.len(), 2);
+        assert_eq!(joined[0].0, 1);
+        assert_eq!(joined[1].1.iter().map(|s| s.radius).collect::<Vec<_>>(), vec![1.0, 3.0]);
     }
 
     #[test]

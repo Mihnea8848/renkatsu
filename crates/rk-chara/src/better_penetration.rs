@@ -749,6 +749,66 @@ pub fn nearest_place<T: Copy + PartialEq>(
         .map(|&(w, m, _)| (w, m))
 }
 
+/// The finger bones whose colliders push a vagina's dynamic bones. The
+/// plugin lists the right hand's (`BoneNames.FingerColliders`) for the
+/// fingering positions of AI Shoujo and HoneySelect 2, which its Koikatsu
+/// build never sets up; Renkatsu gives both hands to every vagina.
+pub const FINGER_BONES: [&str; 12] = [
+    "cf_j_index02_R",
+    "cf_j_index03_R",
+    "cf_j_middle02_R",
+    "cf_j_middle03_R",
+    "cf_j_ring02_R",
+    "cf_j_ring03_R",
+    "cf_j_index02_L",
+    "cf_j_index03_L",
+    "cf_j_middle02_L",
+    "cf_j_middle03_L",
+    "cf_j_ring02_L",
+    "cf_j_ring03_L",
+];
+
+/// A finger collider's radius and length before the bone's scale
+/// (`InitializeFingerColliders(0.0055f, 0.018f)`).
+pub const FINGER_RADIUS: f32 = 0.0055;
+pub const FINGER_LENGTH: f32 = 0.018;
+
+/// The finger bones a character has.
+pub fn finger_nodes(scene: &Scene, top: usize) -> Vec<usize> {
+    let names = bones_by_name(scene, top);
+    FINGER_BONES.iter().filter_map(|n| names.get(*n).copied()).collect()
+}
+
+/// The fingers' colliders where the character is posed: a capsule along
+/// each bone's X axis, sized by its scale as `Tools.InitializeCollider`
+/// is given it.
+pub fn finger_shapes(scene: &Scene, fingers: &[usize]) -> Vec<crate::physics::Shape> {
+    let (world, _) = scene.world();
+    fingers
+        .iter()
+        .map(|&node| {
+            let (scale, _, _) = world[node].to_scale_rotation_translation();
+            let scale = scale.abs();
+            crate::physics::Collider {
+                node,
+                radius: FINGER_RADIUS * (scale.y + scale.z) / 2.0,
+                height: FINGER_LENGTH * scale.x,
+                direction: 0,
+                ..Default::default()
+            }
+            .scaled_shape(scene, 1.0, 1.0)
+        })
+        .collect()
+}
+
+/// A character's vagina dynamic bones (`m_kokanDynamicBones`), by their
+/// place in its physics.
+pub fn vagina_bones(physics: &Physics, scene: &Scene) -> Vec<usize> {
+    (0..physics.bones.len())
+        .filter(|&b| bone_name(physics, scene, b).is_some_and(|n| n.contains("cf_J_Vagina")))
+        .collect()
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -1222,6 +1282,36 @@ mod tests {
             Some((1, Mode::Vaginal))
         );
         assert_eq!(nearest_place(at(2.0), 0.19, None, &places), None);
+    }
+
+    #[test]
+    fn fingers_find_both_hands_and_a_bp_vagina_its_bones() {
+        let Ok(game) = rk_vfs::Game::open_user(&[]) else {
+            return;
+        };
+        let Some(dir) = rk_core::Config::load().ok().map(|c| c.game_dir) else {
+            return;
+        };
+        let Ok(card) = rk_card::Card::load(dir.join("UserData/chara/female/Simple.png")) else {
+            return;
+        };
+        let opts = crate::BuildOptions {
+            clothes: false,
+            accessories: false,
+            uncensor_body: Some("bp.profundis_nt".into()),
+            ..Default::default()
+        };
+        let Ok(her) = crate::build(&game, &card, &opts) else {
+            return;
+        };
+        let fingers = finger_nodes(&her.scene, her.top);
+        assert_eq!(fingers.len(), 12);
+        let shapes = finger_shapes(&her.scene, &fingers);
+        assert_eq!(shapes.len(), 12);
+        assert!(
+            !vagina_bones(&her.physics, &her.scene).is_empty(),
+            "BP Profundis has vagina bones"
+        );
     }
 
     #[test]

@@ -77,6 +77,10 @@ struct Actor {
     guests_next: Option<rk_chara::physics::Guests>,
     /// The ones a partner's shaft gave last frame.
     received: rk_chara::physics::Guests,
+    /// The finger bones whose colliders push vaginas, and this character's
+    /// vagina dynamic bones they push.
+    fingers: Vec<usize>,
+    vagina: Vec<usize>,
     /// The H position this character plays, as its male controller and
     /// state, when it plays one the game lists.
     h_position: Option<(String, String)>,
@@ -567,6 +571,7 @@ impl Actor {
         // Another character's colliders, new or gone, settle the dynamic
         // bones again.
         if let Some(guests) = self.guests_next.take() {
+            let guests = rk_chara::physics::merged(guests);
             if guests.as_slice() != self.chara.physics.guests() {
                 self.chara.physics.set_guests(guests);
                 again = true;
@@ -2261,11 +2266,20 @@ impl Live {
             let bone = her.chara.scene.world().0[node];
             her.mouth_next = Some((rk_chara::better_penetration::mouth_local(&bone, world), rate));
         }
+        // Every character's fingers for every vagina, as posed this frame.
+        let any_vagina = self.actors.iter().any(|a| !a.vagina.is_empty());
+        let fingers: Vec<rk_chara::physics::Shape> = self
+            .actors
+            .iter()
+            .filter(|a| any_vagina && !a.fingers.is_empty())
+            .flat_map(|a| rk_chara::better_penetration::finger_shapes(&a.chara.scene, &a.fingers))
+            .collect();
         for actor in &mut self.actors {
             actor.received = given
                 .iter()
                 .filter(|(id, _)| *id == actor.id)
                 .flat_map(|(_, g)| g.iter().cloned())
+                .chain(actor.vagina.iter().map(|&b| (b, fingers.clone())))
                 .collect();
         }
         self.make_pictures(scene, games, &mods);
@@ -2933,7 +2947,12 @@ impl Live {
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
+        // Fingers push vaginas, this character's own and others'.
+        let fingers = rk_chara::better_penetration::finger_nodes(&chara.scene, chara.top);
+        let vagina = rk_chara::better_penetration::vagina_bones(&chara.physics, &chara.scene);
         Ok(Actor {
+            fingers,
+            vagina,
             id,
             recipe: recipe.clone(),
             chara,
