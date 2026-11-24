@@ -3,6 +3,7 @@ reference/
 renkatsu.toml
 *.png
 !docs/**/*.png
+!news/images/*.png
 tools/reference-capture/bin/
 tools/reference-capture/obj/
 notes/

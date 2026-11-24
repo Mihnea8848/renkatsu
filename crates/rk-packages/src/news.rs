@@ -95,6 +95,45 @@ fn with_pictures(body: &str) -> String {
         .join("\n\n")
 }
 
+/// A body with the pictures of a post's `pictures` key put in: each
+/// `{ file, caption, after }` goes after paragraph number `after` of the
+/// body (0 before it, none or past its end after it). Versions of
+/// Renkatsu before pictures ignore the key and show the body alone.
+fn place_pictures(body: &str, list: Option<&toml::Value>) -> String {
+    let listed: Vec<(usize, String)> = list
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let file = p.get("file")?.as_str()?;
+            let caption = p.get("caption").and_then(toml::Value::as_str).unwrap_or_default();
+            let after = p
+                .get("after")
+                .and_then(toml::Value::as_integer)
+                .map_or(usize::MAX, |n| n.max(0) as usize);
+            Some((after, format!("![{}]({})", plain(caption, TITLE_CHARS), file.trim())))
+        })
+        .collect();
+    if listed.is_empty() {
+        return body.to_owned();
+    }
+    let paragraphs: Vec<&str> = body.split("\n\n").filter(|p| !p.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for at in 0..=paragraphs.len() {
+        let last = at == paragraphs.len();
+        out.extend(
+            listed
+                .iter()
+                .filter(|(after, _)| *after == at || (last && *after > at))
+                .map(|(_, shown)| shown.clone()),
+        );
+        if let Some(p) = paragraphs.get(at) {
+            out.push((*p).to_owned());
+        }
+    }
+    out.join("\n\n")
+}
+
 /// The picture a line of release notes is: markdown's `![alt](address)`
 /// or the `<img>` GitHub writes for a pasted one; as a paragraph of the
 /// body.
@@ -311,11 +350,13 @@ pub fn parse_posts(text: &str, running: &str, today: &str) -> Result<Vec<Post>> 
             url: link(text("url")),
             title_ja: short("title_ja", TITLE_CHARS),
             summary_ja: short("summary_ja", SUMMARY_CHARS),
+            // A post with pictures and no body shows its summary above them.
             body: text("body")
-                .map(|t| with_pictures(&paragraphs(t, BODY_CHARS)))
+                .or(entry.get("pictures").and(text("summary")))
+                .map(|t| with_pictures(&place_pictures(&paragraphs(t, BODY_CHARS), entry.get("pictures"))))
                 .unwrap_or_default(),
             body_ja: text("body_ja")
-                .map(|t| with_pictures(&paragraphs(t, BODY_CHARS)))
+                .map(|t| with_pictures(&place_pictures(&paragraphs(t, BODY_CHARS), entry.get("pictures"))))
                 .filter(|t| !t.is_empty()),
         });
     }
@@ -886,5 +927,45 @@ mod tests {
     fn only_pictures_of_the_news_are_fetched() {
         assert!(picture_file("https://example.org/a.png").is_err());
         assert!(picture_file(&format!("{PICTURES}../x.png")).is_err());
+    }
+
+    #[test]
+    fn listed_pictures_go_after_the_paragraph_they_name() {
+        let file = r#"
+            [[post]]
+            date = 2026-11-18
+            title = "Starter Content"
+            body = """
+            One.
+
+            Two.
+            """
+            pictures = [
+                { file = "images/end.png" },
+                { file = "images/first.png", caption = "Before all", after = 0 },
+                { file = "images/two.png", caption = "After one", after = 1 },
+            ]
+
+            [[post]]
+            date = 2026-11-17
+            title = "Summary only"
+            summary = "Short."
+            pictures = [{ file = "images/s.png" }]
+        "#;
+        let posts = parse_posts(file, "1.0.0", "2026-11-18").unwrap();
+        let order: Vec<String> = posts[0]
+            .body
+            .split("\n\n")
+            .map(|p| picture(p).map_or(p.to_owned(), |p| p.url.trim_start_matches(PICTURES).to_owned()))
+            .collect();
+        assert_eq!(
+            order,
+            ["images/first.png", "One.", "images/two.png", "Two.", "images/end.png"]
+        );
+        assert_eq!(
+            picture(posts[0].body.split("\n\n").nth(2).unwrap()).unwrap().caption,
+            "After one"
+        );
+        assert_eq!(posts[1].body, format!("Short.\n\n![]({PICTURES}images/s.png)"));
     }
 }

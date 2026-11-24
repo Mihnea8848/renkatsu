@@ -169,7 +169,7 @@ struct Cli {
     #[arg(long, hide = true)]
     bake_pose: bool,
     /// Save the selected character's pose once she is built (after a
-    /// bake asked for), to picture it.
+    /// bake or a mirror asked for), to picture it.
     #[arg(long, hide = true)]
     save_pose: bool,
     /// Give the selected character this pose file of the project at the
@@ -1147,7 +1147,7 @@ impl eframe::App for Studio {
         }
 
         // A save asked for at the start, once the character is built.
-        if self.state.save_pose_pending && !self.state.bake_pending {
+        if self.state.save_pose_pending && !self.state.bake_pending && !self.state.mirror_pending {
             let built = self
                 .state
                 .doc

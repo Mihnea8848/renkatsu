@@ -2,6 +2,31 @@
 # The format is described in README.md, beside this file.
 
 [[post]]
+date = 2026-11-24
+title = "Posing by hand works"
+summary = "Turn any bone, mirror a pose, start from any frame of an animation and keep your poses in the project. It comes with the next version."
+body = """
+Posing by hand works in my builds now, and it comes with the next version.
+
+Choose the Pose mode, select a character and switch on Forward kinematics in the palette. Every bone gets a handle. Click one and turn it with the rotate rings, or type its angles in Properties. As in CharaStudio, the parts can be switched on one at a time: hair, neck, breasts, body, each hand and the skirt.
+
+The easiest way to start is from one of the game's animations. Bake animation keeps the frame on screen as a pose and takes the animation off, so you can fix the pose from there.
+
+Mirror pose flips a whole pose from one side to the other, and Copy to other side copies one arm or leg onto its twin.
+
+Poses you like can be saved into the project's Poses folder with Save pose. Load pose gives one to any character, and so does a double click on it or dropping it on the character in the Outliner.
+
+The Animator panel under the viewport lists the character's skeleton with readable names and a search. Later on it will also hold the keys of animations you make yourself.
+
+Inverse kinematics is next: moving a hand or a foot and letting the arm or the leg follow. I am porting the solver CharaStudio itself uses and checking it against poses captured in CharaStudio, so that a pose made in one looks the same in the other.
+"""
+pictures = [
+    { file = "images/2026-11-24-pose-mode.jpg", caption = "Turning the left upper arm of a pose baked from Sit on desk", after = 2 },
+    { file = "images/2026-11-24-mirror-pose.png", caption = "Mirror pose: the legs cross the other way and the head tilts to the other side", after = 4 },
+    { file = "images/2026-11-24-pose-library.jpg", caption = "A saved pose in the project's Poses folder", after = 5 },
+]
+
+[[post]]
 date = 2026-11-19
 title = "Posing comes next"
 summary = "I am working on FK and IK posing now. Baked characters come after that."
@@ -22,6 +47,9 @@ After posing come baked characters. Today a character is built from its card eve
 
 I will post here again when posing is ready to try.
 """
+pictures = [
+    { file = "images/2026-11-19-animation-importer.jpg", caption = "The animation importer, with a preview of each animation", after = 1 },
+]
 
 [[post]]
 date = 2026-11-18
@@ -45,3 +73,8 @@ Starter Content is the vanilla game only. Cards that use mods still need those m
 
 You can also make packages of your own with the rk command line tool that comes with Renkatsu. The packages page in the documentation shows how.
 """
+pictures = [
+    { file = "images/2026-11-18-import-characters.jpg", caption = "Characters from Starter Content, ready to import into a project", after = 3 },
+    { file = "images/2026-11-18-maps-library.jpg", caption = "CharaStudio's maps in the Maps library", after = 5 },
+    { file = "images/2026-11-18-packages.jpg", caption = "The Packages window", after = 6 },
+]

@@ -1235,12 +1235,18 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
         } else {
             icon::FILE
         };
-        let size = std::fs::metadata(st.project.root.join(rel)).map_or(0, |m| m.len());
-        let size = crate::mods::size_text(size);
+        // A pose shows by its name and kind, as an animation does; other
+        // files by their file name and size.
+        let pose = is_pose(rel);
+        let caption = if pose {
+            "Pose".to_owned()
+        } else {
+            crate::mods::size_text(std::fs::metadata(st.project.root.join(rel)).map_or(0, |m| m.len()))
+        };
         let text = TileText {
             rel,
-            name: content::leaf(rel),
-            caption: &size,
+            name: if pose { content::stem(rel) } else { content::leaf(rel) },
+            caption: &caption,
             caption_color: None,
         };
         draw_tile(

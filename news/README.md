@@ -31,7 +31,21 @@ Only `date` and `title` are needed. The other keys:
 ## Pictures
 
 A post can show what it is about. Put the picture in `images/`, beside
-this file, and give it a paragraph of its own in the body:
+this file, and list it in the post's `pictures`:
+
+```toml
+pictures = [
+    { file = "images/2026-11-24-pose-mode.jpg", caption = "Turning an arm", after = 2 },
+]
+```
+
+`after` is the number of paragraphs of the body the picture comes after:
+0 puts it before the text, and leaving it out puts it at the end. Renkatsu
+0.2.2 and older ignore the key and show the post without its pictures.
+
+Inside the body a picture can also be a paragraph of its own. Older
+versions show that paragraph as text, so use it only in a post with
+`since` set to a version that shows pictures:
 
 ```toml
 body = """
@@ -43,8 +57,8 @@ Copy to other side does the same for one arm or leg.
 """
 ```
 
-- The text in the brackets is the caption, shown small under the picture.
-  Leave it empty for none: `![](images/x.png)`.
+- The caption, or the text in the brackets, shows small under the
+  picture. Leave it out or empty for none.
 - PNG or JPEG, at most 8 MB. An animated PNG plays, so a feature can be
   shown moving. Make one from a screen recording with
   `ffmpeg -i clip.mp4 -vf "fps=15,scale=1280:-1" -plays 0 -f apng clip.png`.
