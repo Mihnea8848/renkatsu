@@ -29,6 +29,14 @@ pub struct Args<'a> {
     pub no_physics: bool,
     pub colliders: Option<&'a str>,
     pub game_skirts: bool,
+    /// Move the skirts' cloth with the GPU solver.
+    pub gpu_skirts: bool,
+    /// The kind of cloth the GPU solver makes the skirts of.
+    pub skirt_kind: Option<rk_chara::physics::drape::Kind>,
+    /// Where the cloth is written after every frame played.
+    pub skirt_dump: Option<&'a Path>,
+    /// Measure a frame of the GPU solver with this many substeps.
+    pub skirt_time: Option<u32>,
     pub at: Option<&'a str>,
     pub turn: f32,
     pub list: bool,
@@ -159,6 +167,12 @@ pub fn render(a: Args) -> Result<()> {
             *level = digit.to_digit(10).context("skin effect levels are digits")? as u8;
         }
         chara.show_skin_effects(&levels);
+    }
+    if a.gpu_skirts {
+        chara.physics.solve_skirts_on_gpu(true);
+    }
+    if let Some(kind) = a.skirt_kind {
+        chara.physics.set_skirt_kind(kind);
     }
     let t_build = t.elapsed();
     // Where she stands, with her hair and skirts carried along.
@@ -324,6 +338,30 @@ pub fn render(a: Args) -> Result<()> {
             if !a.no_physics {
                 chara.physics.end_frame(&mut chara.scene, dt);
             }
+            // The cloth on the GPU moves on with each frame, drawn or
+            // not.
+            let cloth = match &chara.scene.drape {
+                Some(live) if a.skirt_dump.is_some() => Some(renderer.drape_state(live)?),
+                Some(live) => {
+                    renderer.run_drape(live);
+                    None
+                }
+                None => None,
+            };
+            if let Some(dir) = a.skirt_dump {
+                let cloth = cloth.as_ref().map(|(places, speeds)| (&places[..], &speeds[..]));
+                for (k, text) in chara.physics.skirt_dump(&chara.scene, cloth).iter().enumerate() {
+                    // The first net in the folder itself, as the score
+                    // reads it; the others each in a folder of its own.
+                    let dir = if k == 0 {
+                        dir.to_path_buf()
+                    } else {
+                        dir.join(format!("net{k}"))
+                    };
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::write(dir.join(format!("{frame:04}.txt")), text)?;
+                }
+            }
             if a.every > 0 && frame % a.every == 0 && frame != a.play {
                 let stem = a.out.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
                 let path = a.out.with_file_name(format!("{stem}-{frame:03}.png"));
@@ -344,6 +382,19 @@ pub fn render(a: Args) -> Result<()> {
         t.elapsed().as_secs_f32(),
         a.out.display()
     );
+    if let Some(live) = &chara.scene.drape {
+        let setup = &live.setup;
+        println!(
+            "cloth on the GPU: {} points in {} nets, fastest limb {:.1} cm a frame",
+            setup.points.len(),
+            setup.nets.len(),
+            chara.physics.fastest_limb() * 100.0
+        );
+        if let Some(substeps) = a.skirt_time {
+            let (ms, substeps, triangles) = renderer.time_drape(live, substeps, 300)?;
+            println!("  a frame of {substeps} substeps among {triangles} map triangles: {ms:.3} ms");
+        }
+    }
     let e = chara.material_edits;
     if e != Default::default() {
         println!(

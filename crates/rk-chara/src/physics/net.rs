@@ -173,11 +173,11 @@ fn between(from: &Mat4, to: &Mat4, f: f32) -> Mat4 {
 /// The kinds of link, which give its compliance and its length.
 /// Bits per point of `Net::open`: no cloth to the next point round the
 /// skirt, and none at the point at all.
-const OPEN_ROUND: u8 = 1;
-const OPEN_POINT: u8 = 2;
+pub(super) const OPEN_ROUND: u8 = 1;
+pub(super) const OPEN_POINT: u8 = 2;
 const DOWN: u8 = 0;
 const ACROSS: u8 = 1;
-const DIAGONAL: u8 = 2;
+pub(super) const DIAGONAL: u8 = 2;
 
 /// The links of a ring grid: each pair of points whose distance is kept,
 /// with its kind.
@@ -1047,6 +1047,22 @@ pub struct Net {
     nearby: Nearby,
 }
 
+/// A net as it was built, for `drape`.
+pub(super) struct NetPart<'a> {
+    pub cols: usize,
+    pub rows: usize,
+    pub fixed: usize,
+    pub waist: usize,
+    pub rest: &'a [Vec3],
+    pub rest_on_waist: &'a [Vec3],
+    pub open: &'a [u8],
+    pub links: &'a [(u32, u32, u8)],
+    pub bends: &'a [Bend],
+    pub gap: &'a [f32],
+    pub gap_out: &'a [f32],
+    pub outward: f32,
+}
+
 /// Where the particles of a chain rest, as `Cloth::begin` takes them.
 fn chain_rest(scene: &Scene, ps: &[Particle]) -> Option<Vec<Vec3>> {
     let mut points = Vec::with_capacity(ps.len());
@@ -1320,6 +1336,30 @@ impl Net {
     /// Has `solver` run the net's steps from now on; none for `run`.
     pub(super) fn solve_with(&mut self, solver: Option<SharedSolver>) {
         self.solver = solver;
+    }
+
+    /// What the GPU solver (`drape`) takes from the net: its grid, where
+    /// it rests and what its points are joined by.
+    pub(super) fn part(&self) -> NetPart<'_> {
+        NetPart {
+            cols: self.cols,
+            rows: self.rows,
+            fixed: self.fixed,
+            waist: self.waist,
+            rest: &self.rest,
+            rest_on_waist: &self.rest_on_waist,
+            open: &self.open,
+            links: &self.links,
+            bends: &self.bends,
+            gap: &self.gap,
+            gap_out: &self.gap_out,
+            outward: self.outward,
+        }
+    }
+
+    /// Its points, their speeds and how much each is pressed.
+    pub(super) fn state(&self) -> (Vec<Vec3>, Vec<Vec3>, Vec<f32>) {
+        (self.pos.clone(), self.vel.clone(), self.pressed.clone())
     }
 
     /// Its columns and rows.

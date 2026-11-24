@@ -95,6 +95,9 @@ pub struct BuildOptions {
     /// Advanced Skirt Physics: Renkatsu's own pass that keeps legs, arms
     /// and the floor out of skirts. Off moves them exactly as the game.
     pub advanced_skirts: bool,
+    /// Have the cloth solver on the GPU (`physics::drape`) move the
+    /// skirts in place of Advanced Skirt Physics' net on the CPU.
+    pub skirts_on_gpu: bool,
     /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
     /// and turns the lower legs, feet and toes.
     pub stiletto: bool,
@@ -129,6 +132,7 @@ impl Default for BuildOptions {
             colliders: true,
             collider_switches: None,
             advanced_skirts: true,
+            skirts_on_gpu: false,
             stiletto: true,
         }
     }
@@ -2973,6 +2977,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         physics.start(&mut b.scene);
         // Advanced Skirt Physics is fitted to the body as built.
         physics.fit_cloth(&b.scene, &bones, opts.advanced_skirts);
+        if opts.skirts_on_gpu {
+            physics.solve_skirts_on_gpu(true);
+        }
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
     }

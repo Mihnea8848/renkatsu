@@ -4,6 +4,7 @@
 //! wgpu renderer for assembled characters. Scene data stays in the stored
 //! conventions: left-handed, Y up, clockwise front faces.
 
+pub mod drape;
 pub mod effects;
 pub mod highlight;
 pub mod lamp_shadow;
@@ -445,6 +446,17 @@ pub struct Renderer {
     map: Option<map::Pipelines>,
     /// The map drawn with the characters, uploaded by `set_map`.
     map_scene: Option<map::MapGpu>,
+    /// The cloth solver's passes, once a character's cloth came, and
+    /// each character's cloth by the address of what it is.
+    drape_passes: Option<drape::Pipelines>,
+    drapes: HashMap<usize, Draped>,
+}
+
+/// A character's cloth on the GPU.
+struct Draped {
+    /// Holds it so that its address, the key, is not reused.
+    live: Arc<rk_chara::physics::drape::Live>,
+    gpu: drape::Gpu,
 }
 
 struct MeshBuffers {
@@ -460,6 +472,9 @@ struct MeshBuffers {
     /// Whether `base` holds blend-shaped vertices rather than the mesh's own.
     shaped: bool,
     used: u64,
+    /// The pass that puts its vertices on a character's cloth, and how
+    /// many it puts: by the cloth's address and the binding.
+    dress: Option<((usize, usize), wgpu::BindGroup, u32)>,
 }
 
 /// The header of a skinning pass's pose buffer, as `skin.wgsl` reads it.
@@ -1102,6 +1117,8 @@ impl Renderer {
             highlight: None,
             map: None,
             map_scene: None,
+            drape_passes: None,
+            drapes: HashMap::new(),
         })
     }
 
@@ -1581,6 +1598,8 @@ impl Renderer {
         let mut seen: HashMap<usize, u32> = HashMap::new();
         // The skinning pass of each mesh: its bind group and vertex count.
         let mut skins = Vec::new();
+        // The same for the meshes on a character's cloth.
+        let mut dresses: Vec<(wgpu::BindGroup, u32)> = Vec::new();
         // What the characters' shadows depend on, hashed: their meshes,
         // poses and shapes. A mesh uploaded this frame counts as a change.
         let mut posed = std::hash::DefaultHasher::new();
@@ -1696,8 +1715,33 @@ impl Renderer {
                         skin_group,
                         shaped,
                         used: frame,
+                        dress: None,
                     },
                 );
+            }
+            // A skirt on the cloth solver: its cloth runs the frames that
+            // wait, and its vertices are put on it after skinning.
+            if let Some(dress) = &d.drape {
+                if self.run_drape(&dress.live) > 0 {
+                    fresh = true;
+                }
+                let from = Arc::as_ptr(&dress.live) as usize;
+                let m = self.meshes.get_mut(&key).expect("made above");
+                if let (Some(draped), Some(passes)) = (self.drapes.get_mut(&from), &self.drape_passes) {
+                    if draped.gpu.ran {
+                        let of = (from, dress.binding);
+                        if m.dress.as_ref().is_none_or(|(was, ..)| *was != of) {
+                            let (group, bound) =
+                                draped
+                                    .gpu
+                                    .dress(&self.device, passes, &dress.live.setup, dress.binding, &m.vb);
+                            m.dress = Some((of, group, bound));
+                        }
+                        if let Some((_, group, bound)) = &m.dress {
+                            dresses.push((group.clone(), *bound));
+                        }
+                    }
+                }
             }
             let m = &self.meshes[&key];
             let (vb, ib) = (m.vb.clone(), m.ib.clone());
@@ -1821,6 +1865,17 @@ impl Renderer {
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
         }
+        if let Some(passes) = self.drape_passes.as_ref().filter(|_| !dresses.is_empty()) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("dress"),
+                timestamp_writes: None,
+            });
+            for (group, count) in &dresses {
+                drape::Gpu::dress_pass(&mut pass, passes, group, *count);
+            }
+        }
+        // Cloth whose character is gone is let go.
+        self.drapes.retain(|_, d| Arc::strong_count(&d.live) > 1);
         // The lamps that cast shadows, by slot.
         let lamp_slots = lamp_shadow::by_slot(env.lamps.iter().chain(&env.map_lamps));
         let lamp_shadows = lamp_slots.iter().any(Option::is_some);
@@ -2630,6 +2685,67 @@ impl Renderer {
             mask: make(MASK_FORMAT, 1, attachment),
             highlight: make(DEPTH_TEXTURE_FORMAT, 1, attachment),
         }
+    }
+
+    /// Runs the frames that wait for a character's cloth on the GPU
+    /// (`drape`), and says how many they were. Drawing does this for the
+    /// cloth it draws; call it for cloth that moves on while nothing is
+    /// drawn.
+    pub fn run_drape(&mut self, live: &Arc<rk_chara::physics::drape::Live>) -> usize {
+        let frames = live.take();
+        let from = Arc::as_ptr(live) as usize;
+        let passes = self
+            .drape_passes
+            .get_or_insert_with(|| drape::Pipelines::new(&self.device));
+        let draped = self.drapes.entry(from).or_insert_with(|| Draped {
+            live: live.clone(),
+            gpu: drape::Gpu::new(&self.device, passes, &live.setup),
+        });
+        for frame in &frames {
+            draped.gpu.run(&self.device, &self.queue, passes, &live.setup, frame);
+        }
+        frames.len()
+    }
+
+    /// A character's cloth as the GPU has it after the frames that
+    /// wait: each point's place with how much it is pressed, and its
+    /// speed. Waits for the GPU; for measurements, not for drawing.
+    pub fn drape_state(&mut self, live: &Arc<rk_chara::physics::drape::Live>) -> Result<drape::Cloth> {
+        self.run_drape(live);
+        let draped = &self.drapes[&(Arc::as_ptr(live) as usize)];
+        draped.gpu.read(&self.device, &self.queue)
+    }
+
+    /// What one frame of a character's cloth costs: runs its last
+    /// frame again `times` times with the body still, cut into
+    /// `substeps` (0 for as many as it had), and waits for the GPU.
+    /// Gives the milliseconds per frame by the clock, the substeps and
+    /// the map triangles the frame had. The cloth is not the same after.
+    pub fn time_drape(
+        &mut self,
+        live: &Arc<rk_chara::physics::drape::Live>,
+        substeps: u32,
+        times: u32,
+    ) -> Result<(f64, u32, usize)> {
+        self.run_drape(live);
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        let from = Arc::as_ptr(live) as usize;
+        let (Some(passes), Some(draped)) = (&self.drape_passes, self.drapes.get_mut(&from)) else {
+            return Ok((0.0, 0, 0));
+        };
+        let Some(frame) = draped.gpu.still(&live.setup, substeps) else {
+            return Ok((0.0, 0, 0));
+        };
+        let start = std::time::Instant::now();
+        for _ in 0..times {
+            draped.gpu.run(&self.device, &self.queue, passes, &live.setup, &frame);
+        }
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        Ok((
+            start.elapsed().as_secs_f64() * 1000.0 / f64::from(times.max(1)),
+            frame.substeps,
+            frame.map.as_ref().map_or(0, |m| m.len()),
+        ))
     }
 
     /// Renders posed meshes to an RGBA8 image, top row first.

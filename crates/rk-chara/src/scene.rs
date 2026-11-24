@@ -421,6 +421,9 @@ pub struct Scene {
     /// Advanced Skirt Physics' cloth nets, which the skirts' vertices are
     /// put on after skinning. Set by the physics.
     pub cloth: Option<crate::physics::net::ClothDraw>,
+    /// The same nets when the GPU solver runs them: the renderer moves
+    /// them and puts the vertices on them. Set by the physics.
+    pub drape: Option<std::sync::Arc<crate::physics::drape::Live>>,
 }
 
 /// Most capsules a skinned mesh is pushed out of; the shader holds a
@@ -609,6 +612,8 @@ pub struct DrawMesh<'a> {
     /// Tangents of vertices already in the world, for a mesh posed on the
     /// CPU (a skirt on a cloth net); `None` takes the mesh's own.
     pub base_tangents: Option<Vec<[f32; 4]>>,
+    /// The mesh's place on the GPU solver's cloth, for a skirt on it.
+    pub drape: Option<crate::physics::drape::Dress>,
 }
 
 /// How a posed mesh's vertices reach the world.
@@ -740,6 +745,19 @@ impl Scene {
             if let Some(cloth) = &self.cloth {
                 cloth.dress(ri, &mut d);
             }
+            if let Some(live) = &self.drape {
+                let mesh = std::sync::Arc::as_ptr(&d.renderer.mesh) as *const u8 as usize;
+                d.drape = live
+                    .setup
+                    .bindings
+                    .iter()
+                    .position(|b| b.renderer == ri && b.mesh == mesh)
+                    .filter(|_| matches!(d.skinning, Skinning::Bones { .. }))
+                    .map(|binding| crate::physics::drape::Dress {
+                        live: live.clone(),
+                        binding,
+                    });
+            }
             out.push(d);
         }
         out
@@ -828,6 +846,7 @@ impl Scene {
                 bounds,
                 push,
                 base_tangents: None,
+                drape: None,
             }
         }
     }
