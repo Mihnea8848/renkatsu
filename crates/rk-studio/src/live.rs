@@ -607,7 +607,7 @@ impl Actor {
             self.mouth_next = None;
         }
         // A new aim, or none where there was one, poses the shaft again.
-        if self.aim_job != self.aim_posed {
+        if !AimJob::near(self.aim_job.as_ref(), self.aim_posed.as_ref()) {
             self.aim_posed = self.aim_job;
             again = true;
         }
@@ -615,7 +615,7 @@ impl Actor {
         // bones again.
         if let Some(guests) = self.guests_next.take() {
             let guests = rk_chara::physics::merged(guests);
-            if guests.as_slice() != self.chara.physics.guests() {
+            if !rk_chara::physics::guests_near(&guests, self.chara.physics.guests(), STILL) {
                 self.chara.physics.set_guests(guests);
                 again = true;
             }
@@ -657,7 +657,7 @@ impl Actor {
         let playing = clock.now == Playback::Playing;
         if let Some((at, rate)) = self.mouth_next.take() {
             self.mouth_return = rate;
-            if self.mouth_at != Some(at) {
+            if self.mouth_at.is_none_or(|was| was.distance(at) > STILL * 0.1) {
                 self.mouth_at = Some(at);
                 again |= !playing;
             }
@@ -954,6 +954,11 @@ impl Live {
     }
 }
 
+/// How far a place may move, in metres, and still count as where it was:
+/// re-posing one character moves the others' bones by rounding dust, and
+/// reading that dust as a change would settle them again every frame.
+const STILL: f32 = 1e-4;
+
 /// What BetterPenetration aims a shaft with in a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AimJob {
@@ -963,6 +968,23 @@ struct AimJob {
     vaginal: bool,
     /// Her body, when the shaft's end follows it rather than her waist.
     body: Option<BodyAim>,
+}
+
+impl AimJob {
+    /// Whether two aims are the same but for rounding dust.
+    fn near(a: Option<&AimJob>, b: Option<&AimJob>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.settings == b.settings
+                    && a.vaginal == b.vaginal
+                    && a.entry.distance(b.entry) <= STILL
+                    && a.end.distance(b.end) <= STILL
+                    && a.body.is_some() == b.body.is_some()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What of her body the main game's constraint reads: her front and back

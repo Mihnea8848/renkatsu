@@ -205,6 +205,23 @@ impl Default for Collider {
 /// Colliders lent to dynamic bones by their place in `Physics::bones`.
 pub type Guests = Vec<(usize, Vec<Shape>)>;
 
+/// Whether two sets of guests are the same but for places and sizes off by
+/// at most `tolerance` metres.
+pub fn guests_near(a: &[(usize, Vec<Shape>)], b: &[(usize, Vec<Shape>)], tolerance: f32) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|((ba, sa), (bb, sb))| {
+            ba == bb
+                && sa.len() == sb.len()
+                && sa.iter().zip(sb).all(|(x, y)| {
+                    x.capsule == y.capsule
+                        && x.inside == y.inside
+                        && x.p0.distance(y.p0) <= tolerance
+                        && x.p1.distance(y.p1) <= tolerance
+                        && (x.radius - y.radius).abs() <= tolerance
+                })
+        })
+}
+
 /// Guests with one list per bone, in the bones' order, as several givers
 /// may lend to the same bone.
 pub fn merged(guests: Guests) -> Guests {
