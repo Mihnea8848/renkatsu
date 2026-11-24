@@ -726,7 +726,7 @@ impl Live {
             let Some(set) = self.actors[at].pictures_wanted.pop() else {
                 continue;
             };
-            let env = self.environment(scene, PICTURE_BACKGROUND);
+            let mut env = self.environment(scene, PICTURE_BACKGROUND);
             let size = set.size();
             let actor = &mut self.actors[at];
             let mut made = Vec::new();
@@ -737,6 +737,7 @@ impl Live {
                         continue;
                     };
                     let lists = hand_lists(game);
+                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
                     let was: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
                     // The animation's own fingers first, as the list's 0.
                     let mut patterns: Vec<i32> = vec![0];
@@ -770,6 +771,7 @@ impl Live {
                         actor.pictures.insert(set, Vec::new());
                         continue;
                     };
+                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
                     let now = actor.layer.as_ref().and_then(|l| l.face);
                     let base = now.unwrap_or(rig.start);
                     let (eyebrows, mouths) = rig.counts();
@@ -806,6 +808,37 @@ impl Live {
             }
             actor.pictures.insert(set, made);
         }
+    }
+}
+
+/// How bright a pattern picture should at least be, as the mean of its
+/// pixels' lightness from 0 to 1.
+const PICTURE_LIGHTNESS: f32 = 0.42;
+
+/// Lights the pictures as the scene does, unless that leaves them too dark
+/// to tell the patterns apart: then the light and the ambient go up until
+/// a picture of the character as she is reaches `PICTURE_LIGHTNESS`, four
+/// times at most.
+fn lift_light(
+    renderer: &mut Renderer,
+    chara: &rk_chara::Character,
+    camera: &Camera,
+    env: &mut Environment,
+    size: [u32; 2],
+) {
+    let draws = chara.scene.pose();
+    let Ok(rgba) = renderer.render(&draws, camera, env, size[0], size[1], PICTURE_BACKGROUND) else {
+        return;
+    };
+    let lightness = rgba
+        .chunks_exact(4)
+        .map(|p| (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 255.0)
+        .sum::<f32>()
+        / (rgba.len() / 4).max(1) as f32;
+    if lightness < PICTURE_LIGHTNESS {
+        let more = (PICTURE_LIGHTNESS / lightness.max(0.05)).min(4.0);
+        env.light_intensity *= more;
+        env.ambient *= more;
     }
 }
 
