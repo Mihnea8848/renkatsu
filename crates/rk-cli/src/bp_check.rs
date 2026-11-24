@@ -186,6 +186,40 @@ pub fn check(dir: &Path, only: &[String], bones_listed: bool) -> Result<()> {
             continue;
         };
         let settings = him.better_penetration;
+        // Renkatsu's body-following end, against Studio's at her waist.
+        if mode != Mode::Oral {
+            use rk_chara::body_collision as bc;
+            let him_world_now = him.scene.world().0;
+            let start = him_world_now[shaft.points[0]].w_axis.truncate();
+            let options = bc::BodyOptions::default();
+            let points = bc::CollisionPoints::find(&her_world, |n| names.get(n).copied(), &options);
+            let up = names
+                .get(mode.entry_bone())
+                .map(|&b| her_world[b].y_axis.truncate().normalize_or_zero());
+            let inner = names.get(bc::INNER_TARGET).map(|&b| her_world[b].w_axis.truncate());
+            if let (Some(points), Some(up), Some(inner)) = (points, up, inner) {
+                let dan = bc::Dan {
+                    start,
+                    base_length: shaft.base_length,
+                    penetration: true,
+                    bp_points: true,
+                    last_end: Vec3::ZERO,
+                    last_end_vector: Vec3::ZERO,
+                };
+                let partner = bc::Partner {
+                    reference_position: entry,
+                    reference_up: up,
+                    inner_position: inner,
+                    points: &points,
+                };
+                let t = bc::adjust_dan_to_target(mode, &dan, &partner, &settings, &options, 1.0 / 60.0);
+                let turned = (end - entry).angle_between(t.end - entry).to_degrees();
+                println!(
+                    "  body-following end: {:.1} mm from Studio's, its direction {turned:.1} deg apart",
+                    t.end.distance(end) * 1000.0
+                );
+            }
+        }
         shaft.aim(&mut him.scene, entry, end, &settings, mode == Mode::Vaginal);
         let (him_world, _) = him.scene.world();
         let mut worst = (0.0f32, String::new());

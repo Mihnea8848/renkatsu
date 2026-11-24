@@ -1749,6 +1749,13 @@ fn penetration_section(
             *value = value.clamp(low, high);
         });
     }
+    // Renkatsu's own: the shaft follows her body inside, as the plugin does
+    // in the main game, rather than ending at her waist as in Studio.
+    if matches!(aimed, Some(Mode::Vaginal | Mode::Anal)) {
+        row(ui, k, "Body", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("body"), &mut s.body_collision, "Follow");
+        });
+    }
     // The plugin keeps this on the card without a control in Studio: the
     // shaft's deeper points push her belly's dynamic bone.
     let belly = match penetration_target {

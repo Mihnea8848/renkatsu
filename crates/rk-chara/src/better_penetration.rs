@@ -783,6 +783,12 @@ pub struct Settings {
     /// (`crate::dan_look`), or else to the nearest place in reach.
     #[serde(default = "yes")]
     pub auto_link: bool,
+    /// Renkatsu's own: for her vagina or anus, the shaft goes straight in
+    /// and bends only where it would leave her body, as the plugin does in
+    /// the main game (`crate::body_collision`), rather than ending at her
+    /// waist as in Studio.
+    #[serde(default = "yes")]
+    pub body_collision: bool,
 }
 
 fn yes() -> bool {
@@ -807,6 +813,7 @@ impl Default for Settings {
             belly_bulge: false,
             belly_bulge_scale: 1.0,
             auto_link: true,
+            body_collision: true,
         }
     }
 }

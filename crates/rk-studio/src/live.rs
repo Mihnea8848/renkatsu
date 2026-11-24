@@ -488,7 +488,14 @@ impl Actor {
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
-            shaft.aim(&mut self.chara.scene, job.entry, job.end, &job.settings, job.vaginal);
+            let end = match (&job.body, shaft.points.first()) {
+                (Some(body), Some(&root)) => {
+                    let start = self.chara.scene.world().0[root].w_axis.truncate();
+                    body.end(&job, start, shaft.base_length)
+                }
+                _ => job.end,
+            };
+            shaft.aim(&mut self.chara.scene, job.entry, end, &job.settings, job.vaginal);
         }
         // A partner's shaft holds the mouth where it last pulled it.
         if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
@@ -869,6 +876,75 @@ struct AimJob {
     end: Vec3,
     settings: rk_chara::better_penetration::Settings,
     vaginal: bool,
+    /// Her body, when the shaft's end follows it rather than her waist.
+    body: Option<BodyAim>,
+}
+
+/// What of her body the main game's constraint reads: her front and back
+/// rows of collision points, the place's up, and her inner target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BodyAim {
+    front: [rk_chara::body_collision::CollisionPoint; 3],
+    back: [rk_chara::body_collision::CollisionPoint; 3],
+    up: Vec3,
+    inner: Vec3,
+}
+
+impl BodyAim {
+    fn of(
+        mode: rk_chara::better_penetration::Mode,
+        world: &[Mat4],
+        names: &std::collections::HashMap<String, usize>,
+    ) -> Option<BodyAim> {
+        use rk_chara::body_collision as bc;
+        let points = bc::CollisionPoints::find(world, |n| names.get(n).copied(), &bc::BodyOptions::default())?;
+        Some(BodyAim {
+            front: points.front.try_into().ok()?,
+            back: points.back.try_into().ok()?,
+            up: world[*names.get(mode.entry_bone())?]
+                .y_axis
+                .truncate()
+                .normalize_or_zero(),
+            inner: world[*names.get(bc::INNER_TARGET)?].w_axis.truncate(),
+        })
+    }
+
+    /// The shaft's end as the main game constrains it to her body, its
+    /// root where it is posed now.
+    fn end(&self, job: &AimJob, start: Vec3, base_length: f32) -> Vec3 {
+        use rk_chara::better_penetration::Mode;
+        use rk_chara::body_collision as bc;
+        let points = bc::CollisionPoints {
+            front: self.front.to_vec(),
+            back: self.back.to_vec(),
+        };
+        let dan = bc::Dan {
+            start,
+            base_length,
+            // A link is made only while the shaft is in her.
+            penetration: true,
+            bp_points: true,
+            last_end: Vec3::ZERO,
+            last_end_vector: Vec3::ZERO,
+        };
+        let partner = bc::Partner {
+            reference_position: job.entry,
+            reference_up: self.up,
+            inner_position: self.inner,
+            points: &points,
+        };
+        let mode = if job.vaginal { Mode::Vaginal } else { Mode::Anal };
+        let options = bc::BodyOptions::default();
+        bc::adjust_dan_to_target(
+            mode,
+            &dan,
+            &partner,
+            &job.settings,
+            &options,
+            rk_chara::better_penetration::PULL_STEP,
+        )
+        .end
+    }
 }
 
 /// Where a character's shaft is aimed this frame: the partner, the place
@@ -965,6 +1041,9 @@ impl Live {
                 end,
                 settings,
                 vaginal: mode == bp::Mode::Vaginal,
+                body: (settings.body_collision && mode != bp::Mode::Oral)
+                    .then(|| BodyAim::of(mode, &world, &names))
+                    .flatten(),
             },
         ))
     }
