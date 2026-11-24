@@ -2189,6 +2189,7 @@ mod tests {
             eye: Vec3::new(0.0, 1.0, -5.0),
             target: Vec3::new(0.0, 1.0, 0.0),
             fov_y_deg: 23.0,
+            up: glam::Vec3::Y,
         };
         View::of(&camera, Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)))
     }

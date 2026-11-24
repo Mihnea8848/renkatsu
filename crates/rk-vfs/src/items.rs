@@ -174,6 +174,18 @@ impl ItemDb {
         self.vanilla.get(&(category, id))
     }
 
+    /// The game's own items of a category, by number.
+    pub fn vanilla_ids(&self, category: i32) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .vanilla
+            .keys()
+            .filter(|(c, _)| *c == category)
+            .map(|(_, id)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn modded(&self, guid: &str, category: i32, id: i32) -> Option<&Item> {
         self.modded.get(&(*self.guids.get(guid)?, category, id))
     }

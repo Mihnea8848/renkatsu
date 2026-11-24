@@ -150,6 +150,16 @@ enum Cmd {
         /// by the animation.
         #[arg(long, default_value = "day")]
         map_time: String,
+        /// The face as Studio's face panel sets it:
+        /// `EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN]]]`.
+        #[arg(long)]
+        face: Option<String>,
+        /// KK_SkinEffects' levels: a digit for each effect in the plugin's
+        /// order (virgin blood, pussy juice, pussy and anal bukkake, wet
+        /// body and face, blush body and face, butt blush, tears, drool,
+        /// saliva, cum in nose).
+        #[arg(long)]
+        skin_effects: Option<String>,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -622,6 +632,8 @@ fn main() -> Result<()> {
             alpha_to_coverage,
             map,
             map_time,
+            face,
+            skin_effects,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -653,6 +665,8 @@ fn main() -> Result<()> {
             alpha_to_coverage,
             map: map.as_deref(),
             map_time: &map_time,
+            face: face.as_deref(),
+            skin_effects: skin_effects.as_deref(),
         }),
         Cmd::Bones { card } => pose::bones(&card),
         Cmd::Ik {

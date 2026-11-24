@@ -1048,6 +1048,7 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
         rows += IK_ROWS;
     }
+
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
@@ -1067,7 +1068,13 @@ fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
 }
 
 /// Changes the selected character's pose layer as one step of the history.
-fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+pub fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+    edit_layer_held(st, false, change);
+}
+
+/// Edits the layer, as one step of the history for all of a drag while
+/// `held`.
+fn edit_layer_held(st: &mut State, held: bool, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
     let Some(mut object) = st.doc.selection().cloned() else {
         return;
     };
@@ -1079,7 +1086,7 @@ fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)
     if layer.is_empty() {
         *pose_layer = None;
     }
-    st.doc.edit(object, false);
+    st.doc.edit(object, held);
 }
 
 /// The active mode's tools in named sections, under a header that pins or
@@ -1133,7 +1140,21 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         crate::map_menu::panel(ui, k, st, body);
         return;
     }
-    let mut y = head.bottom();
+    // Rows that do not fit scroll under the header with the wheel; the
+    // ones out of sight take no clicks.
+    let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
+    let overflow = (palette_height(k, st) - rect.height()).max(0.0);
+    let scroll_id = ui.id().with(("palette scroll", st.mode));
+    let mut scroll: f32 = ui.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    if ui.rect_contains_pointer(body) {
+        scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    }
+    scroll = scroll.clamp(0.0, overflow);
+    ui.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body));
+    inner.set_clip_rect(body.intersect(ui.clip_rect()));
+    let ui = &mut inner;
+    let mut y = head.bottom() - scroll;
     let mut index = 0;
     for (section, tools) in mode.sections {
         ui.painter().text(
@@ -1198,6 +1219,23 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                             y += IK_ROWS as f32 * palette_row(k);
                         }
                     }
+                    continue;
+                }
+                if *name == "Expression" || *name == "Hands" {
+                    // The values are the character's: they live in the
+                    // Animation tab of Properties, which this opens.
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() {
+                        st.property_tab = 1;
+                        let section = if *name == "Hands" {
+                            crate::properties::HANDS_SECTION
+                        } else {
+                            crate::properties::FACE_SECTION
+                        };
+                        st.sections[section] = true;
+                    }
+                    y += palette_row(k);
+                    index += 1;
                     continue;
                 }
                 if *name == "Mirror pose" || *name == "Copy to other side" {
@@ -1414,8 +1452,21 @@ pub fn mirror(st: &mut State, copy: bool) {
             }
         }
     }
-    if !edits.is_empty() {
-        crate::keying::write_many(st, id, edits, |_| {});
+    // A mirrored pose swaps the hands' patterns too.
+    let hands = fk_layer(st).map_or([0, 0], |l| l.hands);
+    let swap = !copy && hands[0] != hands[1];
+    if !edits.is_empty() || swap {
+        crate::keying::write_many(st, id, edits, |content| {
+            if let crate::scene::Content::Character {
+                pose_layer: Some(layer),
+                ..
+            } = content
+            {
+                if swap {
+                    layer.hands = [hands[1], hands[0]];
+                }
+            }
+        });
     }
 }
 
@@ -1549,13 +1600,11 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 17] = [
+const LATER_TOOLS: [&str; 15] = [
     "Replace",
     "Reload",
     "Accessories",
-    "Expression",
     "Gaze",
-    "Hands",
     "Look at camera",
     "Depth of field",
     "Auto key",

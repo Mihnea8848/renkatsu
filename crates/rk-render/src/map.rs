@@ -1363,6 +1363,7 @@ impl MapPlacement {
             eye: back.transform_point3(camera.eye),
             target: back.transform_point3(camera.target),
             fov_y_deg: camera.fov_y_deg,
+            up: glam::Vec3::Y,
         }
     }
 }

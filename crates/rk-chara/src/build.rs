@@ -147,6 +147,15 @@ pub struct Character {
     pub ik: Option<crate::fbbik::Settings>,
     /// Its solver, set up in the pose the character was built in.
     pub ik_rig: Option<crate::ik::Rig>,
+    /// The hand patterns loaded for the layer, left then right; one is
+    /// played while the layer asks for its pattern.
+    pub hands: [Option<crate::hand_pattern::HandClip>; 2],
+    /// The face's controllers, to show another face.
+    pub face: Option<crate::face::Rig>,
+    /// The body's and the face's skin textures before the skin effects,
+    /// with the renderers wearing them, and the levels shown.
+    skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
+    skin_shown: crate::skin_effects::Levels,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -172,8 +181,11 @@ struct Builder<'g> {
     physics_sources: Vec<PhysicsSource>,
     /// The outfit is unlocked by the Clothing Unlocker plugin.
     unlocked: bool,
-    /// `ChaFileStatus.eyesOpenMax` as set when the character is added.
-    eyes_open_max: f32,
+    /// The face controllers, once the head is loaded.
+    face: Option<crate::face::Rig>,
+    /// The body's and the face's finished skin textures and the renderers
+    /// that wear them, for the skin effects to be laid over.
+    skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
     /// Renderers that a `ChaCopyBodyMaterial` component gives the body's
     /// material, with the queue it asks for (-1 keeps the body's).
     body_copies: Vec<(Vec<usize>, i32)>,
@@ -504,9 +516,16 @@ impl<'g> Builder<'g> {
         renderers: &[&str],
         draw: Option<crate::scene::MaterialInst>,
         image: Image,
-    ) {
+    ) -> (Vec<usize>, Arc<Image>) {
+        let image = Arc::new(image);
+        let worn: Vec<usize> = inst
+            .renderers
+            .iter()
+            .copied()
+            .filter(|&r| renderers.contains(&self.scene.renderers[r].name.as_str()))
+            .collect();
         let slot = TexSlot {
-            image: Arc::new(image),
+            image: image.clone(),
             scale: [1.0, 1.0],
             offset: [0.0, 0.0],
         };
@@ -523,6 +542,7 @@ impl<'g> Builder<'g> {
             }
             r.materials[0].textures.insert("_MainTex".into(), slot.clone());
         }
+        (worn, image)
     }
 
     /// Sets the values the game writes onto a skin material from the card:
@@ -989,13 +1009,19 @@ impl<'g> Builder<'g> {
         }
     }
 
-    /// Sets the face to the game's resting expression: pattern 0 with eyes
-    /// and eyebrows open and the mouth closed.
-    fn rest_expression(&mut self, inst: &Instance) {
+    /// The head's face controllers bound to its meshes, showing `start`;
+    /// `start_rate` is the eyes' open rate it starts with.
+    fn face_rig(&mut self, inst: &Instance, start: crate::face::Face, start_rate: f32) -> crate::face::Rig {
+        let mut rig = crate::face::Rig {
+            start,
+            start_rate,
+            up_correct: crate::eye_control::EYE_LOOK_UP_CORRECT,
+            ..Default::default()
+        };
         for (_, script) in &inst.scripts {
             let Ok(obj) = script.read() else { continue };
-            for (field, open) in expression::REST {
-                let Some(mut ctrl) = obj
+            for field in [expression::EYEBROWS, expression::EYES, expression::MOUTH] {
+                let Some(controller) = obj
                     .get(field)
                     .and_then(rk_unityfs::UValue::as_object)
                     .and_then(expression::Controller::read)
@@ -1003,40 +1029,79 @@ impl<'g> Builder<'g> {
                     continue;
                 };
                 if field == expression::EYES {
-                    // The game replaces the prefab's limit when the head
-                    // is loaded and again every frame.
-                    let up_correct = obj
-                        .get("EyeLookUpCorrect")
-                        .and_then(rk_unityfs::UValue::as_f32)
-                        .unwrap_or(crate::eye_control::EYE_LOOK_UP_CORRECT);
-                    ctrl.open_max = crate::eye_control::open_limit(self.eyes_open_max, up_correct);
-                }
-                for target in &ctrl.targets {
-                    let Some(node) = self
-                        .game
-                        .assets
-                        .deref(&script.file, target.object)
-                        .and_then(|o| inst.object_nodes.get(&o.key()).copied())
-                    else {
-                        continue;
-                    };
-                    for &r in &inst.renderers {
-                        let rend = &mut self.scene.renderers[r];
-                        if rend.node != node {
-                            continue;
-                        }
-                        // A mesh can be moved by more than one controller.
-                        let count = rend.mesh.blend_shapes.len();
-                        rend.shape_weights.resize(count, 0.0);
-                        for (shape, w) in ctrl.weights(target, 0, open) {
-                            if let Some(slot) = rend.shape_weights.get_mut(shape) {
-                                *slot = w;
-                            }
-                        }
+                    if let Some(up) = obj.get("EyeLookUpCorrect").and_then(rk_unityfs::UValue::as_f32) {
+                        rig.up_correct = up;
                     }
+                }
+                let renderers = controller
+                    .targets
+                    .iter()
+                    .map(|target| {
+                        let node = self
+                            .game
+                            .assets
+                            .deref(&script.file, target.object)
+                            .and_then(|o| inst.object_nodes.get(&o.key()).copied());
+                        inst.renderers
+                            .iter()
+                            .copied()
+                            .filter(|&r| Some(self.scene.renderers[r].node) == node)
+                            .collect()
+                    })
+                    .collect();
+                let part = Some(crate::face::Part { controller, renderers });
+                match field {
+                    expression::EYEBROWS => rig.eyebrows = part,
+                    expression::EYES => rig.eyes = part,
+                    _ => rig.mouth = part,
                 }
             }
         }
+        // Studio's eye patterns are the `cha_eyeset` items. Studio's
+        // characters are high poly, so the pictures have no `_low`.
+        for id in self.game.items.vanilla_ids(cat::CHA_EYESET) {
+            let Some(item) = self.game.items.vanilla(cat::CHA_EYESET, id) else {
+                continue;
+            };
+            let Some(pattern) = item.int("EyesPtn") else { continue };
+            let expression = match (item.get("EpsTexAB"), item.get("EpsTex")) {
+                (Some(bundle), Some(name)) if bundle != "0" && name != "0" => {
+                    self.loader.image_by_name(bundle, name, None)
+                }
+                _ => None,
+            };
+            rig.eyesets.insert(
+                id,
+                crate::face::EyeRow {
+                    pattern,
+                    base: item.int("EyeBase") == Some(1),
+                    pupils: item.int("EyeHitomi").unwrap_or(0) != 0,
+                    gag: item.int("EyeObjNo").unwrap_or(0),
+                    expression,
+                },
+            );
+        }
+        rig.tears = ["cf_O_namida_S", "cf_O_namida_M", "cf_O_namida_L"].map(|n| self.scene.find(inst.root, n));
+        rig.face = inst
+            .renderers
+            .iter()
+            .copied()
+            .find(|&r| self.scene.renderers[r].name == "cf_O_face");
+        rig.eye_base = self.scene.find(inst.root, "n_eyebase");
+        rig.pupils = self.scene.find(inst.root, "n_hitomi");
+        rig.irises = inst
+            .renderers
+            .iter()
+            .copied()
+            .filter(|&r| {
+                matches!(
+                    self.scene.renderers[r].name.as_str(),
+                    "cf_Ohitomi_L02" | "cf_Ohitomi_R02"
+                )
+            })
+            .collect();
+        rig.show(&mut self.scene, None);
+        rig
     }
 
     /// The FullBodyBipedIK component of a prefab, its bones as scene nodes.
@@ -1910,7 +1975,7 @@ impl<'g> Builder<'g> {
             .collect();
         let mut skinned = vec!["o_body_a"];
         skinned.extend(censored);
-        self.set_skin(inst, &skinned, draw, image);
+        self.skin_base[0] = Some(self.set_skin(inst, &skinned, draw, image));
         // Body detail: painted lines, the detail normal map and their
         // strength, and the shine sliders.
         let detail = self.skin_detail(
@@ -2067,7 +2132,7 @@ impl<'g> Builder<'g> {
             m.floats.insert("_nip".into(), 0.0);
         }
         let image = self.over(kind::FACE_OVER, image);
-        self.set_skin(inst, &["cf_O_face"], draw, image);
+        self.skin_base[1] = Some(self.set_skin(inst, &["cf_O_face"], draw, image));
         // Face detail: painted lines, the detail normal map and their
         // strength, cheek and lip shine.
         let detail = self.skin_detail(
@@ -2102,11 +2167,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         body_copies: Vec::new(),
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
-        eyes_open_max: if opts.eye_control {
-            crate::eye_control::read(&card.ext).eye_open_max
-        } else {
-            crate::eye_control::Settings::default().eye_open_max
-        },
+        face: None,
+        skin_base: [None, None],
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -2312,7 +2374,23 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot", hips);
-            b.rest_expression(&head);
+            // Studio loads cards without their status (`LoadCharaFile`'s
+            // `noLoadStatus`), so a character starts with a new status's
+            // face; then Eye Control's: it sets the eye slider and, to stop
+            // blinking, turns blinking off after it, which forces the open
+            // rate to 1.
+            let mut start = crate::face::Face::default();
+            let mut start_rate = crate::face::Rig::eyes_rate(&start);
+            if opts.eye_control && card.ext.contains_key(crate::eye_control::KEY) {
+                let eye = crate::eye_control::read(&card.ext);
+                start.eyes_open = eye.eye_open_max.clamp(0.0, 1.0);
+                start_rate = crate::face::Rig::eyes_rate(&start);
+                if eye.disable_blinking {
+                    start.blink = false;
+                    start_rate = 1.0;
+                }
+            }
+            b.face = Some(b.face_rig(&head, start, start_rate));
             b.face_layer_order(&head, card.face.foreground_eyes, card.face.foreground_eyebrow);
             let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
             let makeup = match card.coordinates.get(outfit) {
@@ -2747,12 +2825,26 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             )),
         }
     }
-    // ChaControl.UpdateVisible: tongue state 0, where Studio starts since it
-    // loads cards without their status, shows the face's tongue (S_TongueF)
-    // and hides the body's (S_TongueB, shown only in state 1).
-    for r in b.scene.renderers.iter_mut() {
-        if r.name == "o_tang" && r.part == Part::Body {
-            r.enabled = false;
+    // ChaControl.UpdateVisible: tongue state 0 shows the face's tongue
+    // (S_TongueF) and hides the body's (S_TongueB); mouth pattern 21 sets
+    // state 1, the other way round.
+    let tongue = |part: Part| -> Vec<usize> {
+        b.scene
+            .renderers
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.name == "o_tang" && r.part == part)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let tongues = [tongue(Part::Head), tongue(Part::Body)];
+    if let Some(face) = &mut b.face {
+        face.tongues = tongues;
+        face.keep_iris_places(&b.scene);
+        face.show(&mut b.scene, None);
+    } else {
+        for &r in &tongues[1] {
+            b.scene.renderers[r].enabled = false;
         }
     }
     // MaterialEditor overrides come last, so they win over everything the
@@ -2857,6 +2949,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root, top));
     Ok(Character {
         ik_rig,
+        hands: [None, None],
+        face: b.face.take(),
+        skin_base: std::mem::take(&mut b.skin_base),
+        skin_shown: Default::default(),
         scene: b.scene,
         top,
         animator: anim.root,
@@ -2961,6 +3057,33 @@ impl Character {
     /// bones it names, the edits made by hand go on top of that
     /// (`crate::pose`), IK moves the body to the layer's targets while it
     /// is on (`crate::ik`), and the heels go on again.
+    /// Lays the skin effects at `levels` over the body and the face, as
+    /// KK_SkinEffects does; a part whose effects did not change keeps its
+    /// texture.
+    pub fn show_skin_effects(&mut self, levels: &crate::skin_effects::Levels) {
+        use crate::skin_effects::{paint, EFFECTS};
+        for (part, face) in [(0, false), (1, true)] {
+            let changed = EFFECTS
+                .iter()
+                .zip(levels.iter().zip(&self.skin_shown))
+                .any(|(e, (a, b))| e.face == face && a != b);
+            let Some((worn, base)) = self.skin_base[part].as_ref().filter(|_| changed) else {
+                continue;
+            };
+            let image = paint(base, levels, face).map_or_else(|| base.clone(), Arc::new);
+            for &r in worn {
+                if let Some(slot) = self.scene.renderers[r]
+                    .materials
+                    .first_mut()
+                    .and_then(|m| m.textures.get_mut("_MainTex"))
+                {
+                    slot.image = image.clone();
+                }
+            }
+        }
+        self.skin_shown = *levels;
+    }
+
     pub fn pose_frame(
         &mut self,
         motion: Option<(&crate::motion::Bound, f32)>,
@@ -2977,6 +3100,16 @@ impl Character {
         }
         if let Some((motion, phase)) = motion {
             motion.apply(&mut self.scene, phase);
+        }
+        // The hand patterns over the animation's fingers, held at their
+        // first frame: the clips are still to within 0.004, and the game's
+        // hand Animator is wherever it got to since the pattern was chosen.
+        if let Some(layer) = layer {
+            for (clip, pattern) in self.hands.iter().zip(layer.hands) {
+                if let Some(clip) = clip.as_ref().filter(|c| pattern != 0 && c.pattern == pattern) {
+                    clip.apply(&mut self.scene, 0.0);
+                }
+            }
         }
         crate::pose::apply(&mut self.scene, edits);
         // IK over the animation and FK, before the heels go on.
