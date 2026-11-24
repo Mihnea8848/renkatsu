@@ -598,6 +598,69 @@ pub fn nearest<T: Copy>(tip: Vec3, base_length: f32, candidates: impl IntoIterat
     best
 }
 
+/// The bone of the partner's mouth the shaft pulls (`BoneNames.MouthPullBone`).
+pub const MOUTH_BONE: &str = "cf_J_MouthMove";
+
+/// The time step the pull is measured with. The plugin multiplies each
+/// frame's change by Unity's frame time, so the pull grows with the frame
+/// rate; Renkatsu measures it as Studio does at 60 frames a second,
+/// whatever the screen's rate.
+pub const PULL_STEP: f32 = 1.0 / 60.0;
+
+/// The partner's mouth following the shaft in and out, the only bone the
+/// plugin moves straight in Studio (`DanAgent.AdjustPullBones` and
+/// `CollisionAgent.PullOralBone`). Studio builds its options with the
+/// vaginal and anal pulls off and every update passes `twoDans`, so the
+/// pull never returns: it holds where the last stroke left it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouthPull {
+    /// How far the mouth is pushed in (positive) or pulled out (negative).
+    pub amount: f32,
+    /// The shaft's root's distance to the entry at the last pulling frame.
+    last_distance: f32,
+}
+
+impl MouthPull {
+    /// A pull at rest (`CollisionAgent.Initialize`, `DanAgent.InitializeDan`).
+    pub fn new(base_length: f32) -> Self {
+        Self {
+            amount: 0.0,
+            last_distance: base_length,
+        }
+    }
+
+    /// One frame of the shaft, its root at `start`, aimed at `entry`.
+    /// Returns where the mouth bone goes, in the world's directions, when
+    /// this frame moves it.
+    pub fn step(&mut self, start: Vec3, entry: Vec3, base_length: f32, oral: bool, s: &Settings) -> Option<Vec3> {
+        let direction = unity::normalize(entry - start);
+        let distance = unity::distance(start, entry);
+        // Past the shaft's length, the mouth is not in reach.
+        if !oral || distance >= base_length {
+            self.last_distance = base_length;
+            return None;
+        }
+        let pulled = self.last_distance - distance;
+        self.amount += pulled * s.pull_rate * PULL_STEP;
+        if self.amount > s.max_push {
+            self.amount = s.max_push;
+        }
+        if self.amount < -s.max_pull {
+            self.amount = -s.max_pull;
+        }
+        self.last_distance = distance;
+        Some(self.amount * direction)
+    }
+}
+
+/// The mouth bone's local position for a pull in the world's directions:
+/// the direction turned into the bone's own (`InverseTransformDirection`,
+/// rotation only).
+pub fn mouth_local(bone_world: &Mat4, pull: Vec3) -> Vec3 {
+    let (_, rotation, _) = bone_world.to_scale_rotation_translation();
+    unity::rotate(unity::inverse(rotation), pull)
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -896,6 +959,49 @@ mod tests {
             .fold(0.0, f32::max);
         eprintln!("the shaft moves her vagina bones by up to {moved} m");
         assert!(moved > 1e-4, "the shaft pushes her vagina bones");
+    }
+
+    #[test]
+    fn strokes_pull_the_mouth_as_studio_does() {
+        let s = Settings::default();
+        let base = 0.19;
+        let mut pull = MouthPull::new(base);
+        let start = Vec3::ZERO;
+        let at = |d: f32| Vec3::new(0.0, 0.0, d);
+        // In: from the base length to 0.15 pushes (0.19 - 0.15) * 1.8 / 60.
+        let moved = pull.step(start, at(0.15), base, true, &s).unwrap();
+        assert!((pull.amount - 0.0012).abs() < 1e-6, "{}", pull.amount);
+        assert!((moved - Vec3::new(0.0, 0.0, 0.0012)).length() < 1e-6);
+        // Deeper, the push stops at its most.
+        pull.step(start, at(0.05), base, true, &s);
+        assert_eq!(pull.amount, s.max_push);
+        // Out: the mouth follows the shaft, at most its pull.
+        pull.step(start, at(0.15), base, true, &s);
+        assert!(
+            (pull.amount - (0.002 - 0.1 * 1.8 / 60.0)).abs() < 1e-6,
+            "{}",
+            pull.amount
+        );
+        for _ in 0..40 {
+            pull.step(start, at(0.05), base, true, &s);
+            pull.step(start, at(0.18), base, true, &s);
+        }
+        assert!(pull.amount >= -s.max_pull - 1e-7 && pull.amount <= s.max_push + 1e-7);
+        // Out of reach, or not in the mouth, nothing moves and the pull holds.
+        let held = pull.amount;
+        assert_eq!(pull.step(start, at(0.2), base, true, &s), None);
+        assert_eq!(pull.step(start, at(0.1), base, false, &s), None);
+        assert_eq!(pull.amount, held);
+        // Coming back in starts from the base length again.
+        pull.step(start, at(0.18), base, true, &s);
+        assert!((pull.amount - (held + 0.01 * 1.8 / 60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_mouth_takes_the_pull_in_its_own_directions() {
+        let bone = Mat4::from_rotation_translation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::ONE);
+        let local = mouth_local(&bone, Vec3::new(0.0, 0.0, 0.002));
+        assert!((local - Vec3::new(-0.002, 0.0, 0.0)).length() < 1e-6, "{local:?}");
     }
 
     #[test]

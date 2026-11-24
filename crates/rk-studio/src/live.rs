@@ -77,6 +77,13 @@ struct Actor {
     guests_next: Option<rk_chara::physics::Guests>,
     /// The ones a partner's shaft gave last frame.
     received: rk_chara::physics::Guests,
+    /// The pull this character's shaft has on a partner's mouth, with the
+    /// partner it is for.
+    mouth_pull: Option<(ObjectId, rk_chara::better_penetration::MouthPull)>,
+    /// Where a partner's shaft has pulled this character's mouth bone, in
+    /// the bone's parent's space; and a new place from the last frame.
+    mouth_at: Option<Vec3>,
+    mouth_next: Option<Vec3>,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -474,6 +481,19 @@ impl Actor {
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
             shaft.aim(&mut self.chara.scene, job.entry, job.end, &job.settings, job.vaginal);
         }
+        // A partner's shaft holds the mouth where it last pulled it.
+        if let Some(at) = self.mouth_at {
+            if let Some(node) = self.mouth_node() {
+                self.chara.scene.nodes[node].local.pos = at;
+            }
+        }
+    }
+
+    /// The bone of the mouth a shaft pulls.
+    fn mouth_node(&self) -> Option<usize> {
+        self.chara
+            .scene
+            .find(self.chara.top, rk_chara::better_penetration::MOUTH_BONE)
     }
 
     /// Puts the bones back as they were loaded.
@@ -519,6 +539,12 @@ impl Actor {
         };
         // What has to be posed again from the start.
         let mut again = clock.was != Playback::Stopped && clock.now == Playback::Stopped;
+        // A stop lets the mouth go back too.
+        if again {
+            self.mouth_pull = None;
+            self.mouth_at = None;
+            self.mouth_next = None;
+        }
         // A new aim, or none where there was one, poses the shaft again.
         if self.aim_job != self.aim_posed {
             self.aim_posed = self.aim_job;
@@ -529,6 +555,13 @@ impl Actor {
         if let Some(guests) = self.guests_next.take() {
             if guests.as_slice() != self.chara.physics.guests() {
                 self.chara.physics.set_guests(guests);
+                again = true;
+            }
+        }
+        // A partner's shaft that moved the mouth poses the face again.
+        if let Some(at) = self.mouth_next.take() {
+            if self.mouth_at != Some(at) {
+                self.mouth_at = Some(at);
                 again = true;
             }
         }
@@ -1918,6 +1951,61 @@ impl Live {
             );
             given.push((aim.partner, guests));
         }
+        // Each shaft in a mouth pulls it with its strokes, measured from the
+        // shaft's root as it is aimed now.
+        let mut strokes = Vec::new();
+        for &(him, aim) in &self.aims {
+            let Some(he) = self.actors.iter().find(|a| a.id == him) else {
+                continue;
+            };
+            let (Some(shaft), Some(job)) = (he.chara.shaft.as_ref(), he.aim_job) else {
+                continue;
+            };
+            let Some(&root) = shaft.points.first() else {
+                continue;
+            };
+            let start = he.chara.scene.world().0[root].w_axis.truncate();
+            let oral = aim.mode == rk_chara::better_penetration::Mode::Oral;
+            strokes.push((
+                him,
+                aim.partner,
+                start,
+                aim.entry,
+                shaft.base_length,
+                oral,
+                job.settings,
+            ));
+        }
+        let mut pulled: Vec<(ObjectId, Vec3)> = Vec::new();
+        for actor in &mut self.actors {
+            let Some(&(_, partner, start, entry, base_length, oral, settings)) =
+                strokes.iter().find(|s| s.0 == actor.id)
+            else {
+                actor.mouth_pull = None;
+                continue;
+            };
+            let pull = match &mut actor.mouth_pull {
+                Some((p, pull)) if *p == partner => pull,
+                slot => {
+                    &mut slot
+                        .insert((partner, rk_chara::better_penetration::MouthPull::new(base_length)))
+                        .1
+                }
+            };
+            if let Some(world) = pull.step(start, entry, base_length, oral, &settings) {
+                pulled.push((partner, world));
+            }
+        }
+        for (partner, world) in pulled {
+            let Some(her) = self.actors.iter_mut().find(|a| a.id == partner) else {
+                continue;
+            };
+            let Some(node) = her.mouth_node() else {
+                continue;
+            };
+            let bone = her.chara.scene.world().0[node];
+            her.mouth_next = Some(rk_chara::better_penetration::mouth_local(&bone, world));
+        }
         for actor in &mut self.actors {
             actor.received = given
                 .iter()
@@ -2618,6 +2706,9 @@ impl Live {
             aim_posed: None,
             guests_next: None,
             received: Vec::new(),
+            mouth_pull: None,
+            mouth_at: None,
+            mouth_next: None,
             phase: None,
             fk,
             warm: false,
