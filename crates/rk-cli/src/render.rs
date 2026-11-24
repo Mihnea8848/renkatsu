@@ -311,15 +311,19 @@ pub fn render(a: Args) -> Result<()> {
     drop(draws);
     // The animation plays on, the physics moving with it frame by frame
     // as it does in the studio.
-    if let Some((motion, bound, mut time)) = playing.filter(|_| a.play > 0) {
+    // Without an animation the physics moves on with the body still.
+    if a.play > 0 {
         let dt = rk_chara::physics::FRAME_TIME;
+        let mut playing = playing;
         for frame in 1..=a.play {
-            time += dt / motion.duration().max(1e-6);
-            let phase = motion.phase(time, false);
             if !a.no_physics {
                 chara.physics.begin_frame(&mut chara.scene);
             }
-            chara.animate(&bound, phase, &states);
+            if let Some((motion, bound, time)) = &mut playing {
+                *time += dt / motion.duration().max(1e-6);
+                let phase = motion.phase(*time, false);
+                chara.animate(bound, phase, &states);
+            }
             if !a.no_physics {
                 chara.physics.end_frame(&mut chara.scene, dt);
             }

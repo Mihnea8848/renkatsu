@@ -169,7 +169,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         time: f32,
         /// Play the animation on for this many frames of 1/60 s from
-        /// there, the physics moving with it, before the picture.
+        /// there, the physics moving with it, before the picture. Without
+        /// an animation only the physics moves on.
         #[arg(long, default_value_t = 0)]
         play: u32,
         /// While playing, also save a picture every this many frames,
