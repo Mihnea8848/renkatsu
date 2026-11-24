@@ -195,7 +195,7 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
             Pos2::new(left, bar.bottom()),
             Vec2::new(
                 palette_width(st.mode, 184.0),
-                palette_height(k, st).min(rail_rect.height()),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - bar.bottom()),
             ),
         );
         drawer(ui, k, pal);
@@ -323,7 +323,10 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(rail_rect.right() + 4.0, rail_rect.top()),
-            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st)),
+            Vec2::new(
+                palette_width(st.mode, 188.0),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - rail_rect.top()),
+            ),
         );
         block(ui, k, pal);
         palette(ui, k, st, pal);
@@ -350,7 +353,7 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
             Pos2::new(left, top),
             Vec2::new(
                 palette_width(st.mode, 196.0),
-                palette_height(k, st).min(full.bottom() - top),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - top),
             ),
         );
         drawer(ui, k, pal);
@@ -1804,6 +1807,12 @@ fn enclose(all: &[Focus], fov_y_deg: f32) -> Option<Focus> {
 /// The camera's corner of the viewport, at the bottom left: what the
 /// camera is focused on, and, once the view has left its starting framing,
 /// the button that goes back to it. `corner` is the bottom left point.
+/// The height the camera's corner takes at the viewport's bottom, which
+/// the palette stays above; it scrolls when its rows do not fit.
+fn chip_room(k: &Look) -> f32 {
+    k.d.row + 6.0 + 16.0
+}
+
 fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     let Some(live) = st.live.as_ref() else { return };
     let m = 8.0;
