@@ -1485,6 +1485,7 @@ impl State {
     /// built get another try.
     pub fn content_changed(&mut self) {
         self.games.reset();
+        self.map_pictures.forget_game();
         self.content_failed = None;
         self.animations.refresh(&self.project);
         if let Some(importer) = &mut self.importer {
