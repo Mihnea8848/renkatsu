@@ -10,8 +10,11 @@
 //! `OnReload`): extended data `BetterPenetrationController`, version 1.
 //! A value the data does not hold keeps the controller's default.
 
-use glam::{Mat4, Vec3};
+use crate::scene::{Scene, Trs};
+use glam::{Mat4, Quat, Vec3};
 use rk_card::{ExtData, Value};
+use rk_ik::hierarchy::{Hierarchy, Transform};
+use rk_ik::unity;
 use serde::{Deserialize, Serialize};
 
 /// The extended data's key, the controller's name with KKAPI.
@@ -131,6 +134,8 @@ pub struct Shaft {
     /// The length from the first point, measured in the pose it was found
     /// in: the first two points' distance times the segments.
     pub base_length: f32,
+    /// Each point's local scale as found (`DanPoint.defaultLocalScale`).
+    pub scales: Vec<Vec3>,
 }
 
 /// The shaft bones' names in order (`BoneNames.DanBones`).
@@ -157,7 +162,7 @@ pub const VIRTUAL_BONES: [&str; 4] = [
 impl Shaft {
     /// The shaft of a character, when it has at least two points and the
     /// balls' top; the base length from `world`.
-    pub fn find(world: &[Mat4], find: impl Fn(&str) -> Option<usize>) -> Option<Shaft> {
+    pub fn find(scene: &Scene, world: &[Mat4], find: impl Fn(&str) -> Option<usize>) -> Option<Shaft> {
         let points: Vec<usize> = SHAFT_BONES.iter().filter_map(|n| find(n)).collect();
         let virtual_points = VIRTUAL_BONES.iter().filter_map(|n| find(n)).collect();
         let balls_top = find("cm_J_dan_f_top")?;
@@ -166,12 +171,14 @@ impl Shaft {
         }
         let at = |i: usize| world[points[i]].w_axis.truncate();
         let base_length = at(0).distance(at(1)) * (points.len() - 1) as f32;
+        let scales = points.iter().map(|&p| scene.nodes[p].local.scale).collect();
         Some(Shaft {
             points,
             virtual_points,
             balls_top,
             end: find("cm_J_dan119_00"),
             base_length,
+            scales,
         })
     }
 
@@ -184,6 +191,211 @@ impl Shaft {
     /// Where its tip is (`DanPoints.GetDanEndPosition`).
     pub fn tip(&self, world: &[Mat4]) -> Vec3 {
         world[*self.points.last().unwrap_or(&self.balls_top)].w_axis.truncate()
+    }
+}
+
+/// The shaft's new places for a pair of targets (`DanAgent.SetDanTarget`),
+/// before they are set on its bones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Solve {
+    /// Where each point goes, the first staying where it is.
+    pub points: Vec<Vec3>,
+    /// Where each virtual point goes, vaginal only, else none.
+    pub virtual_points: Vec<Vec3>,
+    /// How much thicker it grows (`GetSquishedDanGirth`).
+    pub girth: f32,
+}
+
+/// The length the shaft takes against a target `distance` away, and its
+/// girth: a target closer than the length less the threshold's share of it
+/// takes the difference off the length by `length_squish` and adds it to
+/// the girth by `girth_squish` (`GetSquishedDanLength`,
+/// `GetSquishedDanGirth`).
+pub fn squish(base_length: f32, distance: f32, s: &Settings) -> (f32, f32) {
+    let over = base_length - base_length * s.squish_threshold - distance;
+    if over > 0.0 {
+        (
+            base_length - over * s.length_squish,
+            1.0 + over / base_length * s.girth_squish,
+        )
+    } else {
+        (base_length, 1.0)
+    }
+}
+
+/// The places of the points for targets `entry` and `end`, from where they
+/// are (`AdjustDanPointsToTargets`). The shaft goes straight at the entry
+/// and turns there towards the end, each segment keeping its length: the
+/// segment that reaches past the entry is the side of a triangle with the
+/// line past it (law of sines). A shaft of only two points, a length that
+/// does not reach the entry or a straight line through both targets goes
+/// straight. The length is no more than reaches the end
+/// (`GetMaxDanLength`).
+pub fn solve(
+    starts: &[Vec3],
+    virtual_starts: &[Vec3],
+    entry: Vec3,
+    end: Vec3,
+    base_length: f32,
+    s: &Settings,
+    vaginal: bool,
+) -> Solve {
+    let mut points = starts.to_vec();
+    let Some(&start) = starts.first() else {
+        return Solve {
+            points,
+            virtual_points: Vec::new(),
+            girth: 1.0,
+        };
+    };
+    let distance = unity::distance(start, entry);
+    let (length, girth) = squish(base_length, distance, s);
+    let length = length.min(distance + unity::distance(entry, end));
+    let mut v1 = unity::normalize(entry - start);
+    let mut v2 = unity::normalize(end - entry);
+    let mut straight = false;
+    if starts.len() <= 2 {
+        v1 = unity::normalize(end - start);
+        v2 = v1;
+        straight = true;
+    } else if vectors_equal(v1, v2, 0.001) || length <= distance {
+        v2 = v1;
+        straight = true;
+    }
+    let turn = f64::from(unity::angle(v1, -v2)).to_radians();
+    let segment = length / (starts.len() - 1) as f32;
+    for i in 1..points.len() {
+        let left = distance - segment * (i - 1) as f32;
+        points[i] = if straight || f64::from(left) < 0.001 {
+            points[i - 1] + v2 * segment
+        } else if f64::from(left) < f64::from(segment) - 0.001 {
+            entry + v2 * past_entry(segment, left, turn)
+        } else {
+            points[i - 1] + v1 * segment
+        };
+    }
+    // The virtual points reach on at the unsquished length, one segment
+    // and then two at a time.
+    let mut virtual_points = Vec::new();
+    if vaginal && !virtual_starts.is_empty() {
+        virtual_points = virtual_starts.to_vec();
+        let full = base_length / (starts.len() - 1) as f32;
+        for j in 0..virtual_points.len() {
+            let (step, left, from) = if j == 0 {
+                (full, distance - full, points[0])
+            } else {
+                (2.0 * full, distance - full * (2 * j - 1) as f32, virtual_points[j - 1])
+            };
+            virtual_points[j] = if straight || f64::from(left) < 0.001 {
+                from + v2 * step
+            } else if f64::from(left) < f64::from(step) - 0.001 {
+                entry + v2 * past_entry(step, left, turn)
+            } else {
+                from + v1 * step
+            };
+        }
+    }
+    Solve {
+        points,
+        virtual_points,
+        girth,
+    }
+}
+
+/// How far past the entry a segment of `side` ends that starts `left`
+/// before it, the shaft turning by `turn` there (`SolveSSATriangle`, in
+/// double precision).
+fn past_entry(side: f32, left: f32, turn: f64) -> f32 {
+    let (a, b) = (f64::from(side), f64::from(left));
+    let zero = |v: f64| v.abs() < 1e-6;
+    if zero(a) || zero(b) || zero(turn) {
+        return 0.0;
+    }
+    let angle_b = (turn.sin() * b / a).asin();
+    let angle_c = std::f64::consts::PI - turn - angle_b;
+    (a * angle_c.sin() / turn.sin()) as f32
+}
+
+/// `MathHelpers.VectorsEqual`: every component within `threshold`.
+fn vectors_equal(a: Vec3, b: Vec3, threshold: f32) -> bool {
+    (a.x - b.x).abs() <= threshold && (a.y - b.y).abs() <= threshold && (a.z - b.z).abs() <= threshold
+}
+
+impl Shaft {
+    /// Aims the shaft at `entry` and `end` in the character's scene, as
+    /// `SetDanTarget` does: its girth, then each point placed and turned
+    /// to the next (`LookRotation` with the balls' top's right side for
+    /// its roll), the last as the one before, the end bone on the tip, and
+    /// the balls' top turned as the first point.
+    pub fn aim(&self, scene: &mut Scene, entry: Vec3, end: Vec3, s: &Settings, vaginal: bool) {
+        let mut h = Hierarchy::new(
+            scene
+                .nodes
+                .iter()
+                .map(|n| Transform {
+                    parent: n.parent,
+                    local_position: n.local.pos,
+                    local_rotation: n.local.rot,
+                    local_scale: n.local.scale,
+                })
+                .collect(),
+        );
+        let starts: Vec<Vec3> = self.points.iter().map(|&p| h.position(p)).collect();
+        let distance = starts.first().map_or(0.0, |&p| unity::distance(p, entry));
+        // `SquishDanGirth`: the second point thicker, the ones after it
+        // each a little less, so that the scales carried down taper back.
+        let (_, girth) = squish(self.base_length, distance, s);
+        let n = self.points.len() as f32 - 2.0;
+        if n > 0.0 {
+            let rest = (girth - (girth - 1.0) / n) / girth;
+            for (i, (&p, default)) in self.points.iter().zip(&self.scales).enumerate().skip(1) {
+                let g = if i == 1 { girth } else { rest };
+                let t = &mut h.transforms[p];
+                t.local_scale = Vec3::new(default.x * g, default.y * g, t.local_scale.z);
+            }
+        }
+        let starts: Vec<Vec3> = self.points.iter().map(|&p| h.position(p)).collect();
+        let virtual_starts: Vec<Vec3> = self.virtual_points.iter().map(|&p| h.position(p)).collect();
+        let solved = solve(&starts, &virtual_starts, entry, end, self.base_length, s, vaginal);
+        let right = unity::rotate(h.rotation(self.balls_top), Vec3::X);
+        let aim = |h: &mut Hierarchy, nodes: &[usize], places: &[Vec3]| {
+            let mut turn = Quat::IDENTITY;
+            for i in 0..nodes.len() {
+                if i + 1 < nodes.len() {
+                    let d = unity::normalize(places[i + 1] - places[i]);
+                    turn = unity::look_rotation(d, unity::cross(d, right));
+                }
+                h.set_position(nodes[i], places[i]);
+                h.set_rotation(nodes[i], turn);
+            }
+            turn
+        };
+        let last = aim(&mut h, &self.points, &solved.points);
+        if let (Some(end_bone), Some(&tip)) = (self.end, solved.points.last()) {
+            h.set_position(end_bone, tip);
+            h.set_rotation(end_bone, last);
+        }
+        if let Some(&first) = self.points.first() {
+            let turn = h.rotation(first);
+            h.set_rotation(self.balls_top, turn);
+        }
+        if solved.virtual_points.len() == self.virtual_points.len() {
+            aim(&mut h, &self.virtual_points, &solved.virtual_points);
+        }
+        let moved = self
+            .points
+            .iter()
+            .chain(&self.virtual_points)
+            .chain(self.end.iter())
+            .chain(std::iter::once(&self.balls_top));
+        for &i in moved {
+            let t = &h.transforms[i];
+            scene.nodes[i].local = Trs {
+                pos: t.local_position,
+                rot: t.local_rotation,
+                scale: t.local_scale,
+            };
+        }
     }
 }
 
@@ -353,6 +565,94 @@ mod tests {
         ];
         assert_eq!(nearest(tip, 0.19, picks), Some(2));
         assert_eq!(nearest(tip, 0.1, picks), None, "all are further than twice 0.1");
+    }
+
+    fn shaft(n: usize, length: f32) -> Vec<Vec3> {
+        (0..n)
+            .map(|i| Vec3::new(0.0, 0.0, length * i as f32 / (n - 1) as f32))
+            .collect()
+    }
+
+    #[test]
+    fn a_close_target_squishes_the_shaft_shorter_and_thicker() {
+        let s = Settings::default();
+        assert_eq!(squish(0.19, 0.5, &s), (0.19, 1.0), "far: as it is");
+        // 0.19 - 0.038 - 0.1 = 0.052 over: 0.6 of it off the length, 0.2 of
+        // its share of the length onto the girth.
+        let (length, girth) = squish(0.19, 0.1, &s);
+        assert!((length - (0.19 - 0.052 * 0.6)).abs() < 1e-6);
+        assert!((girth - (1.0 + 0.052 / 0.19 * 0.2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_shaft_goes_straight_at_the_entry_and_turns_there() {
+        let s = Settings {
+            length_squish: 0.0,
+            girth_squish: 0.0,
+            ..Settings::default()
+        };
+        let starts = shaft(9, 0.19);
+        // The entry 0.1 ahead and a little up, the end straight up from it.
+        let entry = Vec3::new(0.0, 0.02, 0.1);
+        let end = entry + Vec3::new(0.0, 0.2, 0.0);
+        let solved = solve(&starts, &[], entry, end, 0.19, &s, false);
+        let p = &solved.points;
+        assert_eq!(p[0], starts[0], "the first point stays");
+        let segment = 0.19 / 8.0;
+        for w in p.windows(2) {
+            assert!(
+                (w[0].distance(w[1]) - segment).abs() < 1e-4,
+                "each segment keeps its length"
+            );
+        }
+        let v1 = entry.normalize();
+        let (before, after): (Vec<Vec3>, Vec<Vec3>) = p.iter().partition(|q| q.length() <= entry.length() + 1e-5);
+        for q in before {
+            assert!(
+                q.normalize_or_zero().dot(v1) > 0.9999 || q.length() < 1e-6,
+                "{q:?} on the way in"
+            );
+        }
+        for q in after {
+            let off = q - entry;
+            assert!(
+                off.x.abs() < 1e-4 && off.z.abs() < 1e-4 && off.y > 0.0,
+                "{q:?} past the entry, towards the end"
+            );
+        }
+    }
+
+    #[test]
+    fn a_far_target_or_two_points_go_straight() {
+        let s = Settings::default();
+        let entry = Vec3::new(0.0, 0.1, 0.5);
+        let solved = solve(&shaft(9, 0.19), &[], entry, entry + Vec3::Y, 0.19, &s, false);
+        let tip = *solved.points.last().unwrap();
+        assert!(
+            (tip - entry.normalize() * 0.19).length() < 1e-4,
+            "straight at the entry, at its length"
+        );
+        let two = solve(&shaft(2, 0.19), &[], entry, entry + Vec3::Y, 0.19, &s, false);
+        let towards_end = (entry + Vec3::Y).normalize();
+        assert!(
+            (two.points[1] - towards_end * 0.19).length() < 1e-4,
+            "two points aim at the end"
+        );
+    }
+
+    #[test]
+    fn the_length_stops_at_the_end() {
+        let s = Settings {
+            length_squish: 0.0,
+            ..Settings::default()
+        };
+        let entry = Vec3::new(0.0, 0.0, 0.05);
+        let end = Vec3::new(0.0, 0.0, 0.08);
+        let solved = solve(&shaft(9, 0.19), &[], entry, end, 0.19, &s, false);
+        assert!(
+            (solved.points.last().unwrap().z - 0.08).abs() < 1e-4,
+            "no further than the end"
+        );
     }
 
     #[test]

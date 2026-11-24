@@ -67,6 +67,8 @@ struct Actor {
     /// When the eyes' highlights began to shake, which they do on the real
     /// clock whether the scene plays or not, as in Studio.
     shake_since: std::time::Instant,
+    /// The shaft was aimed by BetterPenetration last frame.
+    aimed: bool,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -794,6 +796,7 @@ impl Live {
         if !self.actors.iter().any(|a| a.chara.shaft.is_some()) {
             return;
         }
+        let mut settings_of = Vec::new();
         let posed: Vec<(ObjectId, Vec<Mat4>, std::collections::HashMap<String, usize>)> = self
             .actors
             .iter()
@@ -819,6 +822,7 @@ impl Live {
             if !settings.enabled {
                 continue;
             }
+            settings_of.push((actor.id, settings));
             let (partner, mode) = match penetration_target {
                 Some(t) => (Some(t.partner), t.mode),
                 None => match bp::Mode::of_auto(settings.auto_target) {
@@ -854,10 +858,41 @@ impl Live {
                 ));
             }
         }
+        // The shafts aimed, and the ones no longer aimed back as they were
+        // loaded.
+        for actor in &mut self.actors {
+            let Some(shaft) = actor.chara.shaft.clone() else {
+                continue;
+            };
+            let aim = self.aims.iter().find(|(id, _)| *id == actor.id).map(|(_, a)| *a);
+            let settings = settings_of.iter().find(|(id, _)| *id == actor.id).map(|(_, s)| *s);
+            match (aim, settings) {
+                (Some(aim), Some(settings)) => {
+                    let vaginal = aim.mode == bp::Mode::Vaginal;
+                    shaft.aim(&mut actor.chara.scene, aim.entry, aim.end, &settings, vaginal);
+                    actor.aimed = true;
+                }
+                _ if actor.aimed => {
+                    let nodes = shaft
+                        .points
+                        .iter()
+                        .chain(&shaft.virtual_points)
+                        .chain(shaft.end.iter())
+                        .chain(std::iter::once(&shaft.balls_top));
+                    for &i in nodes {
+                        if let (Some(node), Some(rest)) = (actor.chara.scene.nodes.get_mut(i), actor.rest.get(i)) {
+                            node.local = *rest;
+                        }
+                    }
+                    actor.aimed = false;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Where a character's shaft is aimed this frame, if anywhere.
-    // Read by the shaft's solve, which comes next.
+    // Read by the Properties' BetterPenetration rows, which come later.
     #[allow(dead_code)]
     pub fn aim(&self, id: ObjectId) -> Option<Aim> {
         self.aims.iter().find(|(who, _)| *who == id).map(|(_, aim)| *aim)
@@ -2516,6 +2551,7 @@ impl Live {
             pictures: Default::default(),
             pictures_wanted: Vec::new(),
             shake_since: std::time::Instant::now(),
+            aimed: false,
             phase: None,
             fk,
             warm: false,
