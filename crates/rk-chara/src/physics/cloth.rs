@@ -40,6 +40,9 @@ const SURFACE_ROUNDS: usize = 3;
 /// How much further than a skirt reaches its nearby triangles are
 /// gathered, so that they serve while it moves a little.
 const GATHER_MARGIN: f32 = 0.3;
+/// How much thicker than the bare foot the cloth net takes the feet to be:
+/// shoes, soles and heels, which the fit to the body does not see.
+const SHOES: f32 = 0.05;
 
 /// A triangle of `Obstacles` in the world, with the box around it.
 #[derive(Debug, Clone, Copy)]
@@ -362,22 +365,33 @@ impl Cloth {
             return;
         }
         // The thickness the vertices are pushed out of, but not the hands:
-        // a hand on the lap would hold a whole panel up.
-        let capsules: Vec<WorldCapsule> = self
-            .capsules
-            .iter()
-            .filter(|c| c.net)
-            .map(|c| {
-                let m = world(scene, c.node);
-                let s = m.x_axis.truncate().length();
+        // a hand on the lap would hold a whole panel up. With each, how
+        // deep the net may go into it.
+        let mut capsules: Vec<(WorldCapsule, f32)> = Vec::new();
+        let feet = super::net::tune("feet", SHOES);
+        for c in self.capsules.iter().filter(|c| c.net) {
+            let m = world(scene, c.node);
+            let s = m.x_axis.truncate().length();
+            let foot = scene.nodes[c.node].name.starts_with("cf_j_leg03");
+            let more = if foot { feet } else { 0.0 };
+            // The buttocks and thighs let a standing skirt's net in as
+            // deep as its target.
+            let name = &scene.nodes[c.node].name;
+            let give = if name.starts_with("cf_j_siri") || name.starts_with("cf_j_thigh00") {
+                super::net::DEEPEST
+            } else {
+                0.0
+            };
+            capsules.push((
                 WorldCapsule {
                     a: m.transform_point3(c.a),
                     b: m.transform_point3(c.b),
-                    ra: c.fa * s,
-                    rb: c.fb * s,
-                }
-            })
-            .collect();
+                    ra: c.fa * s + more,
+                    rb: c.fb * s + more,
+                },
+                give,
+            ));
+        }
         let mapped = obstacles.is_some_and(|o| !o.pieces.is_empty());
         let floor = self.floor.filter(|_| !mapped).map(|n| {
             let m = world(scene, n);
