@@ -37,7 +37,13 @@ pub struct Rig {
     /// Where each target starts when IK is switched on: the bone it is
     /// copied from (`IKInfo.CopyBone`).
     sources: [usize; IK_TARGETS],
+    /// Those bones' turns in the character's own space as she loads, which
+    /// a mirrored hand or foot turns from.
+    rest_turns: [Quat; IK_TARGETS],
 }
+
+/// Each target's twin on the other side; the body's is itself.
+pub const IK_TWINS: [usize; IK_TARGETS] = [0, 4, 5, 6, 1, 2, 3, 10, 11, 12, 7, 8, 9];
 
 fn smoothing(s: fbbik::Smoothing) -> Smoothing {
     match s {
@@ -59,7 +65,7 @@ fn transform(t: &Trs, parent: Option<usize>) -> Transform {
 impl Rig {
     /// The rig of a character from the game's settings, initiated with her
     /// bones at `rest`, as loaded. `None` when the settings lack a bone.
-    pub fn new(s: &Settings, scene: &Scene, rest: &[Trs], root: usize) -> Option<Rig> {
+    pub fn new(s: &Settings, scene: &Scene, rest: &[Trs], root: usize, top: usize) -> Option<Rig> {
         let h = Hierarchy::new(
             scene
                 .nodes
@@ -198,7 +204,10 @@ impl Rig {
             offset: Vec3::ZERO,
         };
         solver.initiate(&h).ok()?;
+        let own_turn = h.rotation(top);
+        let rest_turns = sources.map(|bone| (own_turn.inverse() * h.rotation(bone)).normalize());
         Some(Rig {
+            rest_turns,
             solver,
             h,
             root,
@@ -240,6 +249,33 @@ impl Rig {
                         Quat::IDENTITY
                     },
                 }
+            })
+            .collect()
+    }
+
+    /// The targets `which` mirrored onto their twins across the character's
+    /// middle, from `targets`: each place reflected, and a hand's or a
+    /// foot's turn from its rest reflected and laid on the twin's rest, as
+    /// a bone's mirror is. By the twin's place.
+    pub fn mirrored(&self, targets: &[IkTarget], which: &[usize]) -> Vec<(usize, IkTarget)> {
+        which
+            .iter()
+            .filter_map(|&i| {
+                let t = targets.get(i)?;
+                let twin = IK_TWINS[i];
+                let rot = if ik_target_turns(i) {
+                    let from_rest = t.rot * self.rest_turns[i].inverse();
+                    (crate::pose::reflect(from_rest) * self.rest_turns[twin]).normalize()
+                } else {
+                    Quat::IDENTITY
+                };
+                Some((
+                    twin,
+                    IkTarget {
+                        pos: Vec3::new(-t.pos.x, t.pos.y, t.pos.z),
+                        rot,
+                    },
+                ))
             })
             .collect()
     }
@@ -367,5 +403,28 @@ mod tests {
         layer.ik[3].pos += Vec3::new(0.0, 0.5, 0.0);
         chara.pose_frame(None, &[], Some(&layer), &Default::default());
         assert!(world(&chara, hand).y > moved.y + 0.1);
+    }
+
+    #[test]
+    fn her_load_pose_mirrors_onto_itself() {
+        let Some(chara) = simple() else {
+            eprintln!("skipped: no game with Simple.png");
+            return;
+        };
+        let rig = chara.ik_rig.clone().expect("the body has FullBodyBipedIK");
+        let targets = rig.targets_on_bones(&chara.scene, chara.top);
+        let all: Vec<usize> = (0..IK_TARGETS).collect();
+        for (twin, t) in rig.mirrored(&targets, &all) {
+            assert!(
+                t.pos.distance(targets[twin].pos) < 0.002,
+                "{twin}: {:?} {:?}",
+                t.pos,
+                targets[twin].pos
+            );
+            if ik_target_turns(twin) {
+                let angle = t.rot.angle_between(targets[twin].rot).to_degrees();
+                assert!(angle < 0.5, "{twin} turns {angle} degrees off");
+            }
+        }
     }
 }

@@ -329,6 +329,7 @@ pub struct State {
     pub save_pose_pending: bool,
     /// `--ik-move`: targets to move once the character is built.
     pub ik_pending: Vec<(usize, glam::Vec3)>,
+    pub ik_wanted: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
@@ -864,6 +865,7 @@ impl State {
             bake_pending: false,
             save_pose_pending: false,
             ik_pending: Vec::new(),
+            ik_wanted: false,
             pose_bone: None,
             fk_open: false,
             ik_open: false,
@@ -1810,18 +1812,41 @@ impl State {
                 return;
             }
         };
-        let Some(mut object) = self.doc.selection().cloned() else {
-            return;
-        };
-        let Content::Character {
-            animation, pose_layer, ..
-        } = &mut object.content
+        let Some(id) = self
+            .doc
+            .selection()
+            .filter(|o| matches!(o.content, Content::Character { .. }))
+            .map(|o| o.id)
         else {
             return;
         };
-        *animation = pose.base.map(Box::new);
-        *pose_layer = Some(Box::new(pose.layer)).filter(|l| !l.is_empty());
-        self.doc.edit(object, false);
+        // A bone or target with keys keys the pose's value at the playhead,
+        // so that the pose shows there.
+        let keyed: Vec<(String, rk_chara::pose::BoneEdit)> = self
+            .doc
+            .scene()
+            .sequence
+            .track(id)
+            .map(|t| t.keys.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| {
+                let edit = match rk_chara::pose::ik_key_target(&name) {
+                    Some(target) => pose.layer.ik.get(target).map(|t| t.as_edit()).unwrap_or_default(),
+                    None => pose.layer.fk.get(&name).copied().unwrap_or_default(),
+                };
+                (name, edit)
+            })
+            .collect();
+        crate::keying::write_many(self, id, keyed, |content| {
+            if let Content::Character {
+                animation, pose_layer, ..
+            } = content
+            {
+                *animation = pose.base.map(Box::new);
+                *pose_layer = Some(Box::new(pose.layer)).filter(|l| !l.is_empty());
+            }
+        });
     }
 
     /// Saves the selected character's pose in the Poses folder, named

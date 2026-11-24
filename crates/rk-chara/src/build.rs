@@ -2854,7 +2854,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let loaded: Vec<crate::scene::Trs> = b.scene.nodes.iter().map(|n| n.local).collect();
     let ik_rig = ik
         .as_ref()
-        .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root));
+        .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root, top));
     Ok(Character {
         ik_rig,
         scene: b.scene,

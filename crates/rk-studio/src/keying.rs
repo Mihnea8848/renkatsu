@@ -81,6 +81,61 @@ pub fn write(st: &mut State, id: ObjectId, bone: &str, edit: BoneEdit, held: boo
     st.doc.edit(object, held);
 }
 
+/// Gives many bones and IK targets their edits as one step of the
+/// history, as `write` gives one: keyed ones at the playhead, the others
+/// in the pose layer. `change` edits the character first, for what goes
+/// with them (an animation taken off, FK switched on).
+pub fn write_many(st: &mut State, id: ObjectId, edits: Vec<(String, BoneEdit)>, change: impl FnOnce(&mut Content)) {
+    let Some(mut object) = st.doc.scene().get(id).cloned() else {
+        return;
+    };
+    change(&mut object.content);
+    let Content::Character { pose_layer, .. } = &mut object.content else {
+        return;
+    };
+    let at = now(st);
+    let mut sequence = st.doc.scene().sequence.clone();
+    let near = sequence.near();
+    let mut keyed_any = false;
+    let layer = pose_layer.get_or_insert_with(Default::default);
+    for (bone, edit) in edits {
+        if keyed(st, id, &bone) {
+            keys::set(&mut sequence.track_mut(id, &object.name).keys, &bone, at, edit, near);
+            keyed_any = true;
+        } else if let Some(target) = rk_chara::pose::ik_key_target(&bone) {
+            if let Some(t) = layer.ik.get_mut(target) {
+                *t = rk_chara::pose::IkTarget::of_edit(edit);
+            }
+        } else if edit.is_identity() {
+            layer.fk.remove(&bone);
+        } else {
+            layer.fk.insert(bone, edit);
+        }
+    }
+    if layer.is_empty() {
+        *pose_layer = None;
+    }
+    // The character's change and the keys' make one step.
+    st.doc.edit(object, true);
+    if keyed_any {
+        st.doc.edit_sequence(sequence, true);
+    }
+    st.doc.end_gesture();
+}
+
+/// The bones a character has keys for, not her IK targets.
+pub fn keyed_bones(st: &State, id: ObjectId) -> Vec<String> {
+    track(st, id)
+        .map(|t| {
+            t.keys
+                .keys()
+                .filter(|b| rk_chara::pose::ik_key_target(b).is_none())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Keys `bones` at the playhead, each with the edit it shows, as one step.
 pub fn set_keys(st: &mut State, id: ObjectId, bones: &[String]) {
     let at = now(st);
@@ -344,5 +399,37 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(layer.ik[3].pos, glam::Vec3::ZERO);
+    }
+
+    #[test]
+    fn many_edits_go_to_keys_or_the_pose_in_one_step() {
+        let mut st = State::new(Project::none(), Scene::new());
+        let her = st.doc.add_character("Her", "Characters/her.png".into());
+        let neck = "cf_j_neck".to_owned();
+        st.clock = 1.0;
+        set_keys(&mut st, her, std::slice::from_ref(&neck));
+        st.clock = 2.0;
+        let steps = |st: &State| st.doc.scene().sequence.track(her).map_or(0, |t| t.keys[&neck].len());
+        write_many(
+            &mut st,
+            her,
+            vec![(neck.clone(), turned(30.0)), ("cf_j_head".to_owned(), turned(10.0))],
+            |content| {
+                if let Content::Character { pose_layer, .. } = content {
+                    pose_layer.get_or_insert_with(Default::default).fk_on = true;
+                }
+            },
+        );
+        assert_eq!(steps(&st), 2, "the keyed neck has a key at the playhead");
+        let layer = |st: &State| match &st.doc.scene().get(her).unwrap().content {
+            Content::Character { pose_layer, .. } => pose_layer.clone(),
+            _ => unreachable!(),
+        };
+        let now = layer(&st).unwrap();
+        assert!(now.fk_on && now.fk["cf_j_head"] == turned(10.0) && !now.fk.contains_key(&neck));
+        // One undo takes both back.
+        st.doc.undo();
+        assert_eq!(steps(&st), 1);
+        assert!(layer(&st).is_none_or(|l| !l.fk.contains_key("cf_j_head")));
     }
 }

@@ -1241,7 +1241,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                         if bake {
                             bake_animation(st);
                         } else {
-                            edit_fk_layer(st, |l| l.fk.clear());
+                            reset_bones(st, None);
                         }
                     }
                     y += palette_row(k);
@@ -1391,23 +1391,32 @@ fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::
 /// of the history.
 pub fn mirror(st: &mut State, copy: bool) {
     let Some(id) = st.doc.selected else { return };
-    let bone = st.pose_bone.clone().filter(|_| copy);
-    let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) else {
-        return;
+    let mut edits: Vec<(String, rk_chara::pose::BoneEdit)> = Vec::new();
+    // A chosen IK target copies onto its twin; the whole pose mirrors its
+    // targets with its bones.
+    let targets: Vec<usize> = match (copy, st.pose_ik) {
+        (true, Some(target)) => vec![target],
+        (true, None) => Vec::new(),
+        (false, _) => (0..rk_chara::pose::IK_TARGETS).collect(),
     };
-    edit_fk_layer(st, |l| {
-        for (name, rot) in found {
-            let edit = rk_chara::pose::BoneEdit {
-                rot,
-                ..l.fk.get(&name).copied().unwrap_or_default()
-            };
-            if edit.is_identity() {
-                l.fk.remove(&name);
-            } else {
-                l.fk.insert(name, edit);
+    if let Some(found) = st.live.as_ref().and_then(|l| l.ik_mirror(id, &targets)) {
+        edits.extend(found.into_iter().map(|(i, t)| (rk_chara::pose::ik_key(i), t.as_edit())));
+    }
+    if !(copy && st.pose_ik.is_some()) {
+        let bone = st.pose_bone.clone().filter(|_| copy);
+        if let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) {
+            for (name, rot) in found {
+                let edit = rk_chara::pose::BoneEdit {
+                    rot,
+                    ..crate::keying::shown(st, id, &name)
+                };
+                edits.push((name, edit));
             }
         }
-    });
+    }
+    if !edits.is_empty() {
+        crate::keying::write_many(st, id, edits, |_| {});
+    }
 }
 
 /// The project's poses, to give the selected character one.
@@ -1443,31 +1452,41 @@ pub fn bake_animation(st: &mut State) {
     let Some((found, parts)) = st.live.as_mut().and_then(|l| l.baked_edits(id)) else {
         return;
     };
-    let Some(mut object) = st.doc.selection().cloned() else {
-        return;
-    };
-    let crate::scene::Content::Character {
-        animation, pose_layer, ..
-    } = &mut object.content
-    else {
-        return;
-    };
-    *animation = None;
-    let layer = pose_layer.get_or_insert_with(Default::default);
-    layer.fk_on = true;
-    for part in parts {
-        if !layer.fk_parts.contains(&part) {
-            layer.fk_parts.push(part);
+    // The animation goes and FK comes on with the parts the pose turns; the
+    // edits go where each bone's go, its keys or the pose layer.
+    crate::keying::write_many(st, id, found, |content| {
+        if let crate::scene::Content::Character {
+            animation, pose_layer, ..
+        } = content
+        {
+            *animation = None;
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            layer.fk_on = true;
+            for part in parts {
+                if !layer.fk_parts.contains(&part) {
+                    layer.fk_parts.push(part);
+                }
+            }
         }
-    }
-    for (name, edit) in found {
-        if edit.is_identity() {
-            layer.fk.remove(&name);
-        } else {
-            layer.fk.insert(name, edit);
-        }
-    }
-    st.doc.edit(object, false);
+    });
+}
+
+/// Puts the selected character's bones back as one step: those of
+/// `bones`, or all of them. A keyed bone takes a key of no turn at the
+/// playhead; the others lose their edit.
+fn reset_bones(st: &mut State, bones: Option<&[String]>) {
+    let Some(id) = st.doc.selected else { return };
+    let fits = |name: &String| bones.is_none_or(|b| b.contains(name));
+    let mut names: Vec<String> = fk_layer(st).map(|l| l.fk.keys().cloned().collect()).unwrap_or_default();
+    names.extend(crate::keying::keyed_bones(st, id));
+    names.retain(fits);
+    names.sort();
+    names.dedup();
+    let edits = names
+        .into_iter()
+        .map(|n| (n, rk_chara::pose::BoneEdit::default()))
+        .collect();
+    crate::keying::write_many(st, id, edits, |_| {});
 }
 
 /// The FK parts as boxes to tick, one to a row, under the category's
@@ -1524,7 +1543,7 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
             color,
         );
         if resp.clicked() {
-            edit_fk_layer(st, |l| l.fk.retain(|name, _| !bones.contains(name)));
+            reset_bones(st, Some(&bones));
         }
     }
 }

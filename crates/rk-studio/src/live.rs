@@ -977,6 +977,17 @@ impl Live {
         )
     }
 
+    /// A built character's IK targets `which` mirrored onto their twins, as
+    /// her pose shows them now, by the twin's place.
+    pub fn ik_mirror(&self, id: ObjectId, which: &[usize]) -> Option<Vec<(usize, rk_chara::pose::IkTarget)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor
+            .layer
+            .as_ref()
+            .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
+        Some(actor.chara.ik_rig.as_ref()?.mirrored(&layer.ik, which))
+    }
+
     /// A built character's IK targets on her bones as they stand, as
     /// Studio's copy puts them.
     pub fn ik_targets_on_bones(&self, id: ObjectId) -> Option<Vec<rk_chara::pose::IkTarget>> {

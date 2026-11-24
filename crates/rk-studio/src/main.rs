@@ -754,6 +754,7 @@ impl Studio {
                     .with_context(|| format!("no IK target {name}"))?,
             );
         }
+        state.ik_wanted = !cli.ik_move.is_empty();
         for spec in &cli.ik_move {
             let (name, by) = spec.split_once(':').context("--ik-move is Target:x,y,z")?;
             let target = rk_chara::pose::IK_TARGET_NAMES
@@ -1162,12 +1163,17 @@ impl eframe::App for Studio {
         // A mirror asked for at the start, once the character is built.
         if self.state.mirror_pending {
             let id = self.state.doc.selected;
-            let ready = id.is_some_and(|id| {
-                self.state
-                    .live
-                    .as_ref()
-                    .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
-            });
+            // After any IK asked for has reached the live character.
+            let ik_ready = self.state.ik_pending.is_empty()
+                && (!self.state.ik_wanted
+                    || id.is_some_and(|id| self.state.live.as_ref().is_some_and(|l| l.ik_handles(id).is_some())));
+            let ready = ik_ready
+                && id.is_some_and(|id| {
+                    self.state
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
+                });
             if ready {
                 viewport::mirror(&mut self.state, false);
                 self.state.mirror_pending = false;
