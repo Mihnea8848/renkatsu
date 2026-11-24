@@ -88,6 +88,8 @@ struct Actor {
     playing: Option<Playing>,
     /// Why it could not be read.
     animation_problem: Option<String>,
+    /// Hand patterns, by hand and number, that could not be read.
+    hand_problems: Vec<(usize, i32)>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
     /// The edits made by hand the bones were last posed with, and their
@@ -453,13 +455,13 @@ impl Actor {
 
     /// Brings the character in line with its object for one frame: the
     /// clothes states, the pose or animation, the place, and the physics.
-    /// `game` reads an animation that is not loaded yet. Returns whether
-    /// the character moved as a whole.
+    /// `game` reads an animation or a hand pattern that is not loaded
+    /// yet. Returns whether the character moved as a whole.
     fn update(
         &mut self,
         object: &crate::scene::Object,
         world: Mat4,
-        game: &mut dyn FnMut() -> Result<Motion>,
+        game: &mut dyn FnMut(Load) -> Result<Motion>,
         clock: &Clock,
         keys: Option<&rk_chara::keys::Keys>,
         log: &mut Log,
@@ -518,7 +520,7 @@ impl Actor {
             self.playing = None;
             self.animation_problem = None;
             if let Some(pose) = pose {
-                match game() {
+                match game(Load::Animation) {
                     Ok(motion) => {
                         let bound = motion.bind(&motion::Skeleton::of(&self.chara.scene, self.chara.animator));
                         self.playing = Some(Playing { motion, bound });
@@ -575,6 +577,31 @@ impl Actor {
             self.back_to_rest();
             again = true;
         }
+        // A hand pattern not loaded yet is read once.
+        let hands = self.layer.as_ref().map_or([0, 0], |l| l.hands);
+        for (side, pattern) in hands.into_iter().enumerate() {
+            let loaded = self.chara.hands[side].as_ref().map(|c| c.pattern);
+            if pattern == 0 || loaded == Some(pattern) || self.hand_problems.contains(&(side, pattern)) {
+                continue;
+            }
+            let chara = &self.chara;
+            let clip = game(Load::Hand(side, pattern)).and_then(|motion| {
+                rk_chara::hand_pattern::HandClip::bind(pattern, &motion, &chara.scene, chara.top, side)
+            });
+            match clip {
+                Ok(clip) => {
+                    self.chara.hands[side] = Some(clip);
+                    again = true;
+                }
+                Err(e) => {
+                    log.error(format!(
+                        "{}: the hand pattern {pattern} could not be read: {e:#}",
+                        object.name
+                    ));
+                    self.hand_problems.push((side, pattern));
+                }
+            }
+        }
 
         let phase = match (&self.playing, pose) {
             (Some(playing), Some(pose)) => Some(playing.phase(pose, clock.time)),
@@ -618,7 +645,8 @@ impl Actor {
         from[top] = self.chara.scene.nodes[top].local;
         self.chara.refresh_heels(&states);
         let motion = self.playing.is_some() && phase.is_some();
-        if motion || !self.edits.is_empty() {
+        let hands = self.layer.as_ref().is_some_and(|l| l.hands != [0, 0]);
+        if motion || hands || !self.edits.is_empty() {
             // Hair and skirts settle from where they were, as CharaStudio
             // never puts them back on their rest shape for a new pose.
             self.pose_frame(phase, &states);
@@ -642,6 +670,27 @@ impl Actor {
 }
 
 /// CharaStudio's table of FK bones, read from the game once.
+/// What an actor asks to have read from the game.
+#[derive(Debug, Clone, Copy)]
+pub enum Load {
+    /// Its animation.
+    Animation,
+    /// A hand's pattern, by hand (0 left, 1 right) and number.
+    Hand(usize, i32),
+}
+
+/// CharaStudio's hand patterns of the game and its mods, read once.
+pub fn hand_lists(game: &rk_vfs::Game) -> &'static rk_chara::hand_pattern::Lists {
+    HAND_LISTS.get_or_init(|| rk_chara::hand_pattern::read(game))
+}
+
+/// The hand patterns, once something has read them.
+pub fn hand_lists_read() -> Option<&'static rk_chara::hand_pattern::Lists> {
+    HAND_LISTS.get()
+}
+
+static HAND_LISTS: std::sync::OnceLock<rk_chara::hand_pattern::Lists> = std::sync::OnceLock::new();
+
 fn fk_table(game: &rk_vfs::Game) -> &'static std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo> {
     static TABLE: std::sync::OnceLock<std::collections::BTreeMap<i32, rk_chara::bone_info::BoneInfo>> =
         std::sync::OnceLock::new();
@@ -1305,7 +1354,21 @@ impl Live {
                 _ => None,
             };
             let parameters = actor.chara.parameters.with_options(options);
-            let mut read = || -> Result<Motion> {
+            let mut read = |what: Load| -> Result<Motion> {
+                if let Load::Hand(side, pattern) = what {
+                    let game = games.get(&mods)?;
+                    let anime = hand_lists(game)[side]
+                        .get(&pattern)
+                        .with_context(|| format!("the game has no hand pattern {pattern}"))?;
+                    return motion::load(
+                        game,
+                        &anime.bundle,
+                        &anime.controller,
+                        &anime.clip,
+                        None,
+                        &Default::default(),
+                    );
+                }
                 let Content::Character {
                     animation: Some(animation),
                     ..
@@ -2003,6 +2066,7 @@ impl Live {
         let chara = rk_chara::build(game, &card, &options)?;
         let fk =
             rk_chara::bone_info::on_character(fk_table(game), &chara.scene, chara.animator, chara.top, card.sex() == 1);
+        hand_lists(game);
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
@@ -2024,6 +2088,7 @@ impl Live {
             edits: Vec::new(),
             playing: None,
             animation_problem: None,
+            hand_problems: Vec::new(),
             phase: None,
             fk,
             warm: false,

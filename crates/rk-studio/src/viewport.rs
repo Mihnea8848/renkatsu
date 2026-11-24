@@ -1048,6 +1048,9 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
         rows += IK_ROWS;
     }
+    if MODES[mode].name == "Pose" && st.hands_open && fk_layer(st).is_some() {
+        rows += 2;
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
@@ -1067,7 +1070,7 @@ fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
 }
 
 /// Changes the selected character's pose layer as one step of the history.
-fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+pub fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
     let Some(mut object) = st.doc.selection().cloned() else {
         return;
     };
@@ -1196,6 +1199,24 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                                 &layer,
                             );
                             y += IK_ROWS as f32 * palette_row(k);
+                        }
+                    }
+                    continue;
+                }
+                if *name == "Hands" {
+                    hands_category(ui, k, st, row, id, g, name);
+                    y += palette_row(k);
+                    index += 1;
+                    if st.hands_open {
+                        if let Some(layer) = fk_layer(st) {
+                            hand_rows(
+                                ui,
+                                k,
+                                st,
+                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
+                                &layer,
+                            );
+                            y += 2.0 * palette_row(k);
                         }
                     }
                     continue;
@@ -1386,6 +1407,65 @@ fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::
     }
 }
 
+/// The Hands category's row: it opens on the hands' patterns, and is bright
+/// while a hand has one.
+fn hands_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
+    let on = fk_layer(st).is_some_and(|l| l.hands != [0, 0]);
+    let resp = ui.interact(row, id, Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(row, 2.0, k.t.control);
+    }
+    let y = row.center().y;
+    let arrow = if st.hands_open {
+        icon::CARET_DOWN
+    } else {
+        icon::CARET_RIGHT
+    };
+    glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
+    let tint = if on { k.t.text_bright } else { k.t.text };
+    glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
+    widgets::label(p, k, Pos2::new(row.left() + 38.0, y), name, tint);
+    if resp.clicked() {
+        st.hands_open = !st.hands_open;
+    }
+}
+
+/// Each hand's pattern as CharaStudio lists them, the first choice
+/// leaving the fingers to the animation.
+fn hand_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
+    let lists = crate::live::hand_lists_read();
+    for (side, hand) in ["Left", "Right"].into_iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(area.left() + 38.0, area.top() + side as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
+        );
+        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), hand, k.t.text);
+        let patterns: Vec<(i32, String)> = std::iter::once((0, "Animation".to_owned()))
+            .chain(
+                lists
+                    .into_iter()
+                    .flat_map(|l| l[side].values().map(|a| (a.no, a.label()))),
+            )
+            .collect();
+        let names: Vec<&str> = patterns.iter().map(|(_, n)| n.as_str()).collect();
+        let was = patterns
+            .iter()
+            .position(|(no, _)| *no == layer.hands[side])
+            .unwrap_or(0);
+        let mut chosen = was;
+        let field = Rect::from_min_max(
+            Pos2::new(row.left() + 46.0, row.top() + 2.0),
+            Pos2::new(row.right(), row.bottom() - 2.0),
+        );
+        widgets::combo(ui, k, field, ui.id().with(("hand pattern", side)), &mut chosen, &names);
+        if chosen != was {
+            let pattern = patterns[chosen].0;
+            edit_fk_layer(st, |l| l.hands[side] = pattern);
+        }
+    }
+}
+
 /// Mirrors the selected character's pose by hand, or with `copy` copies
 /// the chosen bone and the bones below it to the other side, as one step
 /// of the history.
@@ -1414,8 +1494,21 @@ pub fn mirror(st: &mut State, copy: bool) {
             }
         }
     }
-    if !edits.is_empty() {
-        crate::keying::write_many(st, id, edits, |_| {});
+    // A mirrored pose swaps the hands' patterns too.
+    let hands = fk_layer(st).map_or([0, 0], |l| l.hands);
+    let swap = !copy && hands[0] != hands[1];
+    if !edits.is_empty() || swap {
+        crate::keying::write_many(st, id, edits, |content| {
+            if let crate::scene::Content::Character {
+                pose_layer: Some(layer),
+                ..
+            } = content
+            {
+                if swap {
+                    layer.hands = [hands[1], hands[0]];
+                }
+            }
+        });
     }
 }
 
@@ -1549,13 +1642,12 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 17] = [
+const LATER_TOOLS: [&str; 16] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
-    "Hands",
     "Look at camera",
     "Depth of field",
     "Auto key",

@@ -48,6 +48,15 @@ pub struct Layer {
     /// stiffness and the body's vertical pull are 0.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub optimize_ik: bool,
+    /// CharaStudio's hand pattern of each hand, left then right: a clip of
+    /// its `HandAnime` lists over the fingers, or 0 to leave them to the
+    /// animation.
+    #[serde(default, skip_serializing_if = "no_hands")]
+    pub hands: [i32; 2],
+}
+
+fn no_hands(hands: &[i32; 2]) -> bool {
+    *hands == [0, 0]
 }
 
 impl Default for Layer {
@@ -60,6 +69,7 @@ impl Default for Layer {
             ik_groups: all_ik_groups(),
             ik: Vec::new(),
             optimize_ik: true,
+            hands: [0, 0],
         }
     }
 }
@@ -252,6 +262,7 @@ impl Layer {
             && self.ik.is_empty()
             && is_all_ik_groups(&self.ik_groups)
             && self.optimize_ik
+            && no_hands(&self.hands)
     }
 
     /// Whether an IK target's group is on.
@@ -461,6 +472,18 @@ pub fn mirrored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_patterns_are_kept_and_left_out_while_both_follow_the_animation() {
+        assert!(!toml::to_string(&Layer::default()).unwrap().contains("hands"));
+        let layer = Layer {
+            hands: [1, 17],
+            ..Layer::default()
+        };
+        assert!(!layer.is_empty());
+        let back: Layer = toml::from_str(&toml::to_string(&layer).unwrap()).unwrap();
+        assert_eq!(back.hands, [1, 17]);
+    }
 
     #[test]
     fn an_edit_turns_the_bone_in_its_own_space_after_its_pose() {

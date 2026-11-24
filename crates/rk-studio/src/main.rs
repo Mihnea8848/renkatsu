@@ -180,6 +180,10 @@ struct Cli {
     /// her own space, as `LeftHand:0,0.15,0.1`, to picture IK.
     #[arg(long, hide = true)]
     ik_move: Vec<String>,
+    /// Give the selected character these hand patterns, as `LEFT,RIGHT`
+    /// numbers of CharaStudio's lists, to picture them.
+    #[arg(long, hide = true)]
+    hand_patterns: Option<String>,
     /// Start with this IK target (a name of CharaStudio's IKTargetEN)
     /// chosen for the gizmo, to picture it.
     #[arg(long, hide = true)]
@@ -764,6 +768,11 @@ impl Studio {
             let p: Vec<f32> = by.split(',').map(str::parse).collect::<Result<_, _>>()?;
             anyhow::ensure!(p.len() == 3, "--ik-move is Target:x,y,z");
             state.ik_pending.push((target, glam::Vec3::new(p[0], p[1], p[2])));
+        }
+        if let Some(spec) = &cli.hand_patterns {
+            let p: Vec<i32> = spec.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            anyhow::ensure!(p.len() == 2, "--hand-patterns is LEFT,RIGHT");
+            viewport::edit_fk_layer(&mut state, |l| l.hands = [p[0], p[1]]);
         }
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {

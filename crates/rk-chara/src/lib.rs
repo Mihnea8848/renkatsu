@@ -26,6 +26,7 @@ pub mod eyelook;
 pub mod fbbik;
 pub mod foreground;
 pub mod hair_accessories;
+pub mod hand_pattern;
 pub mod hand_size;
 pub mod ik;
 pub mod invisible_body;

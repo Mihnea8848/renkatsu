@@ -147,6 +147,9 @@ pub struct Character {
     pub ik: Option<crate::fbbik::Settings>,
     /// Its solver, set up in the pose the character was built in.
     pub ik_rig: Option<crate::ik::Rig>,
+    /// The hand patterns loaded for the layer, left then right; one is
+    /// played while the layer asks for its pattern.
+    pub hands: [Option<crate::hand_pattern::HandClip>; 2],
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -2857,6 +2860,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root, top));
     Ok(Character {
         ik_rig,
+        hands: [None, None],
         scene: b.scene,
         top,
         animator: anim.root,
@@ -2977,6 +2981,16 @@ impl Character {
         }
         if let Some((motion, phase)) = motion {
             motion.apply(&mut self.scene, phase);
+        }
+        // The hand patterns over the animation's fingers, held at their
+        // first frame: the clips are still to within 0.004, and the game's
+        // hand Animator is wherever it got to since the pattern was chosen.
+        if let Some(layer) = layer {
+            for (clip, pattern) in self.hands.iter().zip(layer.hands) {
+                if let Some(clip) = clip.as_ref().filter(|c| pattern != 0 && c.pattern == pattern) {
+                    clip.apply(&mut self.scene, 0.0);
+                }
+            }
         }
         crate::pose::apply(&mut self.scene, edits);
         // IK over the animation and FK, before the heels go on.
