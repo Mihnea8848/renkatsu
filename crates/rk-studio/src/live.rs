@@ -3146,6 +3146,9 @@ impl Live {
         let options = rk_chara::BuildOptions {
             outfit: recipe.outfit.min(card.coordinates.len().saturating_sub(1)),
             outdoor_shoes: recipe.outdoor_shoes,
+            // The cloth solver on the GPU moves the skirts: the CPU's
+            // nets shake and throw points about while a scene plays.
+            skirts_on_gpu: true,
             ..Default::default()
         };
         let chara = rk_chara::build(game, &card, &options)?;
