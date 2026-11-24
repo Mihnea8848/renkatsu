@@ -5,14 +5,17 @@
 //! and the news under it. The news come from `rk_packages::news`.
 
 use crate::brand::{self, Art};
+use crate::news_pictures::{Pictures, State};
 use crate::selector::Act;
 use crate::state::Look;
 use crate::widgets::{glyph, hair_h};
 use egui::{Align2, Pos2, Rect, Sense, Ui, Vec2};
 use egui_phosphor::regular as icon;
-use rk_packages::news::{Kind, Language, Post};
+use rk_packages::news::{Kind, Language, Picture, Post};
 
 const BANNER: f32 = 280.0;
+/// The key of a scroll a screenshot asks for, taken once a post is open.
+pub const SCROLL_START: &str = "news scroll start";
 const PAD: f32 = 32.0;
 /// The widest a post's text runs, for lines that read well.
 const MEASURE: f32 = 760.0;
@@ -47,11 +50,48 @@ enum Click {
 const BODY: f32 = 14.0;
 /// How much of a post's text the list shows before it fades out.
 const PREVIEW: f32 = 92.0;
+/// The space between paragraphs, and around a picture.
+const GAP: f32 = 10.0;
+const PICTURE_GAP: f32 = 22.0;
+/// The tallest a picture shows, so that a tall one leaves room for the
+/// text around it; less where the page shows less, so that a picture is
+/// always seen whole with its caption.
+const TALLEST: f32 = 540.0;
+const TALLEST_OF_VIEW: f32 = 0.85;
+
+/// A paragraph of a post as the page lays it out.
+enum Block {
+    Text(std::sync::Arc<egui::Galley>),
+    Picture(Picture, Option<std::sync::Arc<egui::Galley>>),
+}
+
+/// The size a picture shows at in a column `width` wide: its own size,
+/// smaller to fit the column and `TALLEST`, never larger; a frame of the
+/// column's width while it loads; nothing when it could not be had.
+fn picture_size(state: &State, width: f32, tallest: f32, points_per_pixel: f32) -> Option<Vec2> {
+    match state {
+        State::Loading => Some(Vec2::new(width, (width * 9.0 / 16.0).min(tallest).round())),
+        State::Failed => None,
+        State::Ready(shown) => {
+            let natural = Vec2::new(shown.size[0] as f32, shown.size[1] as f32) * points_per_pixel;
+            let scale = (width / natural.x).min(tallest / natural.y).min(1.0);
+            Some((natural * scale).round())
+        }
+    }
+}
 
 /// A piece of news as a post: its date, its title and its text. In the
 /// list the text is cut and fades, and a click anywhere opens the post;
 /// shown whole, its title opens its page when it has one.
-fn post_ui(ui: &mut Ui, k: &Look, post: &Post, today: &str, n: usize, whole: bool) -> Option<Click> {
+fn post_ui(
+    ui: &mut Ui,
+    k: &Look,
+    post: &Post,
+    today: &str,
+    n: usize,
+    whole: bool,
+    pictures: &mut Pictures,
+) -> Option<Click> {
     let t = &k.t;
     let language = Language::default();
     let width = ui.available_width().min(MEASURE);
@@ -77,28 +117,90 @@ fn post_ui(ui: &mut Ui, k: &Look, post: &Post, today: &str, n: usize, whole: boo
         .layout(post.title_in(language).to_owned(), k.bold(24.0), t.text_bright, width);
     let (title_rect, _) = ui.allocate_exact_size(Vec2::new(width, title.size().y), Sense::hover());
     ui.add_space(12.0);
-    // The text, a paragraph at a time; in the list only its start.
+    // The text, a paragraph at a time; in the list only its start, and no
+    // pictures: they show once the post is opened.
     let font = egui::FontId::proportional(BODY);
-    let galleys: Vec<_> = post
+    let blocks: Vec<Block> = post
         .body_in(language)
         .split("\n\n")
-        .map(|paragraph| match paragraph.strip_prefix(rk_packages::news::HEADING) {
-            Some(heading) => ui
-                .painter()
-                .layout(heading.to_owned(), k.bold(BODY + 3.0), t.text_bright, width),
-            None => ui.painter().layout(paragraph.to_owned(), font.clone(), t.text, width),
+        .filter_map(|paragraph| {
+            if let Some(picture) = rk_packages::news::picture(paragraph) {
+                let caption = (!picture.caption.is_empty()).then(|| {
+                    ui.painter()
+                        .layout(picture.caption.clone(), k.small(), t.text_dim, width)
+                });
+                return whole.then_some(Block::Picture(picture, caption));
+            }
+            Some(Block::Text(match paragraph.strip_prefix(rk_packages::news::HEADING) {
+                Some(heading) => ui
+                    .painter()
+                    .layout(heading.to_owned(), k.bold(BODY + 3.0), t.text_bright, width),
+                None => ui.painter().layout(paragraph.to_owned(), font.clone(), t.text, width),
+            }))
         })
         .collect();
-    let full: f32 = galleys.iter().map(|g| g.size().y).sum::<f32>() + 10.0 * galleys.len().saturating_sub(1) as f32;
+    // Where each block goes, from the top of the text: a picture has more
+    // room around it than a paragraph, and its caption under it.
+    let per_pixel = 1.0 / ui.ctx().pixels_per_point();
+    let tallest = TALLEST
+        .min((ui.clip_rect().height() * TALLEST_OF_VIEW).max(160.0))
+        .round();
+    let mut sizes: Vec<Option<Vec2>> = Vec::with_capacity(blocks.len());
+    let mut full: f32 = 0.0;
+    let mut after: f32 = 0.0;
+    for block in &blocks {
+        let (size, gap) = match block {
+            Block::Text(g) => (Some(g.size()), GAP),
+            Block::Picture(picture, caption) => {
+                let state = pictures.get(ui.ctx(), &picture.url);
+                let size = picture_size(&state, width, tallest, per_pixel);
+                let tall = size.map(|s| s.y + caption.as_ref().map_or(0.0, |c| 8.0 + c.size().y));
+                (tall.map(|h| Vec2::new(width, h)), PICTURE_GAP)
+            }
+        };
+        if let Some(size) = size {
+            if full > 0.0 {
+                full += after.max(gap);
+            }
+            full += size.y;
+            after = gap;
+        }
+        sizes.push(size);
+    }
     let cut = !whole && full > PREVIEW;
     let height = if cut { PREVIEW } else { full };
     let (text, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let p = ui.painter().with_clip_rect(text.intersect(ui.clip_rect()));
     let mut y = text.top();
-    for galley in galleys {
-        let h = galley.size().y;
-        p.galley(Pos2::new(text.left(), y), galley, t.text);
-        y += h + 10.0;
+    let mut after = 0.0;
+    let mut first = true;
+    for (block, size) in blocks.into_iter().zip(sizes) {
+        let Some(size) = size else { continue };
+        let gap = if matches!(block, Block::Text(_)) {
+            GAP
+        } else {
+            PICTURE_GAP
+        };
+        if !first {
+            y += f32::max(after, gap);
+        }
+        first = false;
+        after = gap;
+        match block {
+            Block::Text(galley) => p.galley(Pos2::new(text.left(), y), galley, t.text),
+            Block::Picture(picture, caption) => {
+                let state = pictures.get(ui.ctx(), &picture.url);
+                let shown = picture_size(&state, width, tallest, per_pixel).unwrap_or(size);
+                // A picture narrower than the column sits in its middle.
+                let at = Rect::from_min_size(Pos2::new((text.left() + (width - shown.x) / 2.0).round(), y), shown);
+                picture_ui(ui, &p, k, &state, at);
+                if let Some(caption) = caption {
+                    let x = (text.left() + (width - caption.size().x) / 2.0).round();
+                    p.galley(Pos2::new(x, at.bottom() + 8.0), caption, t.text_dim);
+                }
+            }
+        }
+        y += size.y;
         if y > text.bottom() {
             break;
         }
@@ -137,6 +239,31 @@ fn post_ui(ui: &mut Ui, k: &Look, post: &Post, today: &str, n: usize, whole: boo
         (true, false) => Some(Click::Open),
         (true, true) => Some(Click::Page),
     }
+}
+
+/// A picture in its place: rounded like the panels, with a hairline round
+/// it; a quiet frame while it loads. A moving one asks for its next frame.
+fn picture_ui(ui: &Ui, p: &egui::Painter, k: &Look, state: &State, at: Rect) {
+    let t = &k.t;
+    let round = k.radius() + 2.0;
+    match state {
+        State::Loading => {
+            p.rect_filled(at, round, t.input);
+            glyph(p, k, at.center(), icon::IMAGE, 28.0, t.text_dim.gamma_multiply(0.5));
+        }
+        State::Ready(shown) => {
+            let (texture, next) = shown.frame(ui.input(|i| i.time));
+            p.add(egui::Shape::Rect(
+                egui::epaint::RectShape::filled(at, round, egui::Color32::WHITE)
+                    .with_texture(texture.id(), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))),
+            ));
+            if let Some(next) = next {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(next));
+            }
+        }
+        State::Failed => return,
+    }
+    p.rect_stroke(at, round, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
 }
 
 /// A band that goes from clear at its top to `color` at its bottom.
@@ -191,7 +318,7 @@ fn back(ui: &mut Ui, k: &Look) -> bool {
 /// posts, newest first, each cut short; a click shows one whole under the
 /// banner, with a way back. Projects have pages of their own. Without
 /// news only the banner shows.
-pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str) -> Option<Act> {
+pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str, pictures: &mut Pictures) -> Option<Act> {
     let mut act = None;
     let top = Rect::from_min_size(main.min, Vec2::new(main.width(), BANNER));
     banner(ui, k, top);
@@ -203,7 +330,12 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str) -> O
     let mut open = ui.data(|d| d.get_temp::<usize>(open_id)).filter(|&n| n < posts.len());
     let area = Rect::from_min_max(Pos2::new(main.left(), top.bottom()), main.max);
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(area));
-    let scroll = egui::ScrollArea::vertical().auto_shrink(false).id_salt(("news", open));
+    let mut scroll = egui::ScrollArea::vertical().auto_shrink(false).id_salt(("news", open));
+    if open.is_some() {
+        if let Some(y) = ui.data_mut(|d| d.remove_temp::<f32>(egui::Id::new(SCROLL_START))) {
+            scroll = scroll.vertical_scroll_offset(y);
+        }
+    }
     scroll.show(&mut column, |ui| {
         ui.add_space(if open.is_some() { 16.0 } else { 28.0 });
         ui.horizontal(|ui| {
@@ -215,7 +347,7 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str) -> O
                         open = None;
                     }
                     ui.add_space(14.0);
-                    if let Some(Click::Page) = post_ui(ui, k, &posts[n], today, n, true) {
+                    if let Some(Click::Page) = post_ui(ui, k, &posts[n], today, n, true, pictures) {
                         act = posts[n].url.clone().map(Act::OpenUrl);
                     }
                 } else {
@@ -227,7 +359,7 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str) -> O
                             hair_h(ui.painter(), line.left(), line.right(), line.center().y, k.t.line);
                             ui.add_space(22.0);
                         }
-                        if post_ui(ui, k, post, today, n, false).is_some() {
+                        if post_ui(ui, k, post, today, n, false, pictures).is_some() {
                             open = Some(n);
                         }
                     }

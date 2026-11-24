@@ -33,6 +33,93 @@ const SUMMARY_CHARS: usize = 200;
 const BODY_CHARS: usize = 16000;
 /// What starts a paragraph of a post's body that is a heading.
 pub const HEADING: &str = "## ";
+/// Where the news file's pictures are: a post names one by its path
+/// below the news folder, `images/posing.png`.
+pub const PICTURES: &str = "https://raw.githubusercontent.com/Mihnea8848/renkatsu/main/news/";
+/// GitHub's store of what is pasted into a release's notes, the other
+/// place a picture may come from.
+const ATTACHMENTS: &str = "https://github.com/user-attachments/assets/";
+/// A picture larger than this is not shown.
+pub const PICTURE_BYTES: u64 = 8 << 20;
+
+/// A picture of a post: a paragraph of its own, `![caption](address)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub url: String,
+    pub caption: String,
+}
+
+/// The picture a paragraph is, when it is one and nothing else.
+pub fn picture(paragraph: &str) -> Option<Picture> {
+    let rest = paragraph.trim().strip_prefix("![")?;
+    let (caption, rest) = rest.split_once("](")?;
+    let url = rest.strip_suffix(')')?;
+    if url.is_empty() || url.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(Picture {
+        url: url.to_owned(),
+        caption: caption.trim().to_owned(),
+    })
+}
+
+/// The full address of a picture the page may show: one of the news
+/// folder, by its path there or in full, or one pasted into a release.
+fn picture_url(src: &str) -> Option<String> {
+    let src = src.trim();
+    let clean = |path: &str| {
+        !path.is_empty()
+            && !path.contains(char::is_whitespace)
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+    };
+    if let Some(path) = src.strip_prefix(PICTURES) {
+        return clean(path).then(|| src.to_owned());
+    }
+    if let Some(id) = src.strip_prefix(ATTACHMENTS) {
+        return clean(id).then(|| src.to_owned());
+    }
+    (!src.contains(':') && clean(src)).then(|| format!("{PICTURES}{src}"))
+}
+
+/// A body with its pictures at their full addresses, and the ones the
+/// page may not show left out.
+fn with_pictures(body: &str) -> String {
+    body.split("\n\n")
+        .filter_map(|paragraph| match picture(paragraph) {
+            Some(p) => picture_url(&p.url).map(|url| format!("![{}]({url})", p.caption)),
+            None => Some(paragraph.to_owned()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The picture a line of release notes is: markdown's `![alt](address)`
+/// or the `<img>` GitHub writes for a pasted one; as a paragraph of the
+/// body.
+fn release_picture(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(p) = picture(line) {
+        return Some(format!("![{}]({})", p.caption, p.url));
+    }
+    if !line.starts_with("<img") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        let at = line.find(&format!("{name}=\""))? + name.len() + 2;
+        let end = line[at..].find('"')?;
+        Some(line[at..at + end].to_owned())
+    };
+    let src = attribute("src")?;
+    let alt = attribute("alt").unwrap_or_default();
+    let alt = if alt.eq_ignore_ascii_case("image") {
+        String::new()
+    } else {
+        alt
+    };
+    Some(format!("![{}]({src})", plain(&alt, TITLE_CHARS)))
+}
 
 /// Where a piece of news comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,9 +311,11 @@ pub fn parse_posts(text: &str, running: &str, today: &str) -> Result<Vec<Post>> 
             url: link(text("url")),
             title_ja: short("title_ja", TITLE_CHARS),
             summary_ja: short("summary_ja", SUMMARY_CHARS),
-            body: text("body").map(|t| paragraphs(t, BODY_CHARS)).unwrap_or_default(),
+            body: text("body")
+                .map(|t| with_pictures(&paragraphs(t, BODY_CHARS)))
+                .unwrap_or_default(),
             body_ja: text("body_ja")
-                .map(|t| paragraphs(t, BODY_CHARS))
+                .map(|t| with_pictures(&paragraphs(t, BODY_CHARS)))
                 .filter(|t| !t.is_empty()),
         });
     }
@@ -270,6 +359,13 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
         let mut lines: Vec<String> = Vec::new();
         let mut summary = "";
         for line in notes.lines() {
+            // A picture is a paragraph of its own, never the summary.
+            if let Some(shown) = release_picture(line) {
+                if !downloads {
+                    lines.push(shown);
+                }
+                continue;
+            }
             let heading = line.starts_with('#');
             let text = line.trim_start_matches(['#', '*', '-', ' ']).trim();
             if heading {
@@ -288,7 +384,7 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
                 text.to_owned()
             });
         }
-        let body = paragraphs(&lines.join("\n\n"), BODY_CHARS);
+        let body = with_pictures(&paragraphs(&lines.join("\n\n"), BODY_CHARS));
         posts.push(Post {
             kind: Kind::Release,
             date: day,
@@ -451,6 +547,50 @@ impl Cache {
         }
         asked
     }
+}
+
+/// The file of a picture of the news, fetched once and kept in the cache
+/// folder beside the news. Only the news folder's pictures and those of
+/// releases are fetched, at most `PICTURE_BYTES`, and only PNG and JPEG.
+pub fn picture_file(url: &str) -> Result<PathBuf> {
+    if picture_url(url).as_deref() != Some(url) {
+        bail!("{url} is not a picture of the news");
+    }
+    // FNV-1a of the address names the file.
+    let name = url.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
+    let dir = Cache::file().with_file_name("news-pictures");
+    let file = dir.join(format!("{name:016x}"));
+    if file.is_file() {
+        return Ok(file);
+    }
+    let mut answer = crate::download::agent()
+        .get(url)
+        .call()
+        .with_context(|| format!("asking for {url}"))?;
+    if !answer.status().is_success() {
+        bail!("{url} answered {}", answer.status());
+    }
+    let mut bytes = Vec::new();
+    answer
+        .body_mut()
+        .with_config()
+        .limit(PICTURE_BYTES + 1)
+        .reader()
+        .take(PICTURE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PICTURE_BYTES {
+        bail!("{url} is larger than {} MB", PICTURE_BYTES >> 20);
+    }
+    if !(bytes.starts_with(b"\x89PNG") || bytes.starts_with(&[0xff, 0xd8, 0xff])) {
+        bail!("{url} is not a PNG or JPEG picture");
+    }
+    std::fs::create_dir_all(&dir)?;
+    let part = file.with_extension("part");
+    std::fs::write(&part, &bytes)?;
+    std::fs::rename(&part, &file)?;
+    Ok(file)
 }
 
 pub(crate) enum Answer {
@@ -686,5 +826,65 @@ mod tests {
         assert_eq!(post("2025-12-31").day("2026-01-02"), "31 Dec 2025");
         assert_eq!(today(0), "1970-01-01");
         assert_eq!(today(951_782_400), "2000-02-29");
+    }
+
+    #[test]
+    fn pictures_of_a_post_get_their_full_address_and_others_are_left_out() {
+        let file = r#"
+            [[post]]
+            date = 2026-11-24
+            title = "Mirror pose"
+            body = """
+            Mirror flips a pose.
+
+            ![Before and after](images/mirror.png)
+
+            ![Elsewhere](https://example.org/x.png)
+
+            ![Up a folder](../secret.png)
+
+            ![Full address](https://raw.githubusercontent.com/Mihnea8848/renkatsu/main/news/images/a.png)
+            """
+        "#;
+        let posts = parse_posts(file, "1.0.0", "2026-11-24").unwrap();
+        let shown: Vec<Picture> = posts[0].body.split("\n\n").filter_map(picture).collect();
+        assert_eq!(
+            shown,
+            [
+                Picture {
+                    url: format!("{PICTURES}images/mirror.png"),
+                    caption: "Before and after".into()
+                },
+                Picture {
+                    url: format!("{PICTURES}images/a.png"),
+                    caption: "Full address".into()
+                },
+            ]
+        );
+        assert!(posts[0].body.starts_with("Mirror flips a pose."));
+        assert_eq!(picture("A line with ![a](b.png) in it"), None);
+    }
+
+    #[test]
+    fn a_picture_pasted_into_release_notes_is_shown_but_is_never_the_summary() {
+        let json = r#"[{"tag_name": "v0.3.0", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.3.0",
+            "published_at": "2026-11-30T10:00:00Z",
+            "body": "<img width=\"1600\" alt=\"Posing\" src=\"https://github.com/user-attachments/assets/1f2e\" />\n\nPosing by hand is here.\n\n![x](https://example.org/y.png)"}]"#;
+        let (posts, _) = parse_releases(json).unwrap();
+        assert_eq!(posts[0].summary, "Posing by hand is here.");
+        let shown: Vec<Picture> = posts[0].body.split("\n\n").filter_map(picture).collect();
+        assert_eq!(
+            shown,
+            [Picture {
+                url: "https://github.com/user-attachments/assets/1f2e".into(),
+                caption: "Posing".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn only_pictures_of_the_news_are_fetched() {
+        assert!(picture_file("https://example.org/a.png").is_err());
+        assert!(picture_file(&format!("{PICTURES}../x.png")).is_err());
     }
 }

@@ -39,6 +39,7 @@ mod maps;
 mod modes;
 mod mods;
 mod mugshot;
+mod news_pictures;
 mod packages;
 mod panels;
 mod poses;
@@ -285,6 +286,10 @@ struct Cli {
     /// Start with the Maps library open, to picture it.
     #[arg(long, hide = true)]
     map_library: bool,
+    /// Start with a news post, once opened, scrolled down by this many
+    /// points, to picture its pictures.
+    #[arg(long, hide = true)]
+    news_scroll: Option<f32>,
     /// Start with the Maps library scrolled down by this many points.
     #[arg(long, hide = true)]
     map_scroll: Option<f32>,
@@ -592,6 +597,10 @@ impl Studio {
         state.scripted = cli.screenshot.is_some();
         state.jobs.wake = Some(cc.egui_ctx.clone());
         state.fetch_feed();
+        if let Some(y) = cli.news_scroll {
+            cc.egui_ctx
+                .data_mut(|d| d.insert_temp(egui::Id::new(crate::landing::SCROLL_START), y));
+        }
         if let Some(files) = &cli.pretend_news {
             let (posts, releases) = files.split_once(',').unwrap_or((files, ""));
             let read = |file: &str| std::fs::read_to_string(file).with_context(|| format!("reading {file}"));

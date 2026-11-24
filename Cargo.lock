@@ -3073,6 +3073,7 @@ dependencies = [
  "egui-phosphor",
  "egui_dock",
  "glam",
+ "image",
  "png 0.17.16",
  "rfd",
  "rk-asset",

@@ -231,6 +231,8 @@ pub struct Selector {
     pub offer: crate::packages::Offer,
     /// The news of the home page, as of this frame.
     pub news: Vec<rk_packages::news::Post>,
+    /// The news' pictures, fetched as posts are opened.
+    pub pictures: crate::news_pictures::Pictures,
 }
 
 impl Selector {
@@ -255,6 +257,7 @@ impl Selector {
             starter: None,
             offer: Default::default(),
             news: Vec::new(),
+            pictures: Default::default(),
         };
         selector.refresh(settings);
         selector
@@ -973,7 +976,7 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
         // The home page takes the whole part, over its head and foot.
         part.painter().rect_filled(whole, 0.0, t.panel);
         let today = rk_packages::news::today(now);
-        let more = crate::landing::home(&mut part, k, whole, &sel.news, &today);
+        let more = crate::landing::home(&mut part, k, whole, &sel.news, &today, &mut sel.pictures);
         return act.or(more);
     }
     part.painter().text(
