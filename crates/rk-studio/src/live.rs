@@ -91,6 +91,10 @@ struct Actor {
     hole_at: Option<rk_chara::better_penetration::HolePull>,
     /// The body has the pull bones or the inner bones a stroke moves.
     hole_bones: bool,
+    /// A partner's shaft is in this character's mouth, which then holds
+    /// it; as of this frame and the last one.
+    mouth_held: bool,
+    mouth_held_next: bool,
     /// The finger bones whose colliders push vaginas, and this character's
     /// vagina dynamic bones they push.
     fingers: Vec<usize>,
@@ -526,6 +530,20 @@ impl Actor {
         }
     }
 
+    /// The face to show: the layer's, or with none the character's own, its
+    /// mouth holding a partner's shaft while one is in it. None leaves the
+    /// face as it was loaded.
+    fn face_shown(&self) -> Option<rk_chara::face::Face> {
+        let own = self.layer.as_ref().and_then(|l| l.face);
+        if !self.mouth_held {
+            return own;
+        }
+        let mut face = own.or_else(|| self.chara.face.as_ref().map(|r| r.start))?;
+        face.mouth = rk_chara::face::HOLDING_MOUTH;
+        face.mouth_open = 1.0;
+        Some(face)
+    }
+
     /// The bone of the mouth a shaft pulls.
     fn mouth_node(&self) -> Option<usize> {
         self.chara
@@ -755,15 +773,26 @@ impl Actor {
             });
             self.back_to_rest();
             // The face is blend shapes, set once for the layer.
+            let shown = self.face_shown();
             if let Some(face) = &self.chara.face {
-                face.show(&mut self.chara.scene, self.layer.as_ref().and_then(|l| l.face.as_ref()));
+                face.show(&mut self.chara.scene, shown.as_ref());
             }
             let skin = self.layer.as_ref().map(|l| l.skin).unwrap_or_default();
             self.chara.show_skin_effects(&skin);
             again = true;
         }
+        // A shaft come into the mouth or gone from it shows the face again.
+        let held = std::mem::take(&mut self.mouth_held_next);
+        if held != self.mouth_held {
+            self.mouth_held = held;
+            let shown = self.face_shown();
+            if let Some(face) = &self.chara.face {
+                face.show(&mut self.chara.scene, shown.as_ref());
+            }
+            again |= clock.now != Playback::Playing;
+        }
         // Shaking highlights take a new size every step of the real clock.
-        if let (Some(rig), Some(face)) = (&self.chara.face, self.layer.as_ref().and_then(|l| l.face)) {
+        if let (Some(rig), Some(face)) = (&self.chara.face, self.face_shown()) {
             if face.shaking {
                 rig.show_at(
                     &mut self.chara.scene,
@@ -2217,6 +2246,7 @@ impl Live {
         }
         let playing = clock.now == Playback::Playing;
         let mut pulled: Vec<(ObjectId, Vec3, f32)> = Vec::new();
+        let mut holding: Vec<ObjectId> = Vec::new();
         for actor in &mut self.actors {
             let Some(&(_, partner, start, entry, base_length, oral, settings)) =
                 strokes.iter().find(|s| s.0 == actor.id)
@@ -2235,6 +2265,9 @@ impl Live {
             // A stroke pulls whenever the shaft moves; a return takes time,
             // so it runs while the scene plays.
             let stroking = oral && start.distance(entry) < base_length;
+            if stroking && settings.oral_mouth {
+                holding.push(partner);
+            }
             if !stroking && !playing {
                 pull.last_distance = base_length;
                 continue;
@@ -2242,6 +2275,9 @@ impl Live {
             if let Some(world) = pull.step(start, entry, base_length, oral, &settings) {
                 pulled.push((partner, world, settings.return_rate));
             }
+        }
+        for actor in &mut self.actors {
+            actor.mouth_held_next = holding.contains(&actor.id);
         }
         // The vaginal and anal pulls, by the same rule as the mouth's; with
         // them off, a vaginal stroke still turns her inner bone back each
@@ -3007,6 +3043,8 @@ impl Live {
                 .any(|n| chara.scene.find(chara.top, n).is_some());
         let vagina = rk_chara::better_penetration::vagina_bones(&chara.physics, &chara.scene);
         Ok(Actor {
+            mouth_held: false,
+            mouth_held_next: false,
             hole_bones,
             fingers,
             vagina,

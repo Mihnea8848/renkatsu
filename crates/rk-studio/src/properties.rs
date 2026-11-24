@@ -1752,6 +1752,12 @@ fn penetration_section(
             ("Return rate", &mut s.return_rate, 0.0, 1.0),
         ]);
     }
+    // Renkatsu's own: her mouth holds the shaft while it is in it.
+    if aimed == Some(Mode::Oral) {
+        row(ui, k, "Mouth", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("oral mouth"), &mut s.oral_mouth, "Hold");
+        });
+    }
     for (name, value, low, high) in sliders {
         row(ui, k, name, off, |ui, rect| {
             widgets::number_to(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE, 3);

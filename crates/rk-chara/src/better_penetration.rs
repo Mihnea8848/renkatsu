@@ -971,6 +971,11 @@ pub struct Settings {
     /// bones. They take the same push, pull and rates as the mouth.
     #[serde(default)]
     pub pull_holes: bool,
+    /// Renkatsu's own: while the shaft is in her mouth, her mouth holds it
+    /// as the main game's H faces do (`crate::face::HOLDING_MOUTH`, fully
+    /// open); Studio leaves the mouth as it was set.
+    #[serde(default = "yes")]
+    pub oral_mouth: bool,
 }
 
 fn yes() -> bool {
@@ -997,6 +1002,7 @@ impl Default for Settings {
             auto_link: true,
             body_collision: true,
             pull_holes: false,
+            oral_mouth: true,
         }
     }
 }

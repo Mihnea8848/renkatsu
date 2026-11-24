@@ -74,6 +74,11 @@ const IRIS_TEXTURES: [&str; 3] = ["_MainTex", "_overtex1", "_overtex2"];
 /// The mouth pattern that puts the tongue out.
 pub const TONGUE_OUT: i32 = 21;
 
+/// The mouth the game's H scenes give a face with a shaft in its mouth,
+/// "Holding in the mouth" (咥え): the `HFaceList` faces of oral actions use
+/// it, or 21 for licking, with the mouth's least opening at 1.
+pub const HOLDING_MOUTH: i32 = 22;
+
 /// A `cha_eyeset` item.
 #[derive(Debug, Clone, Default)]
 pub struct EyeRow {
