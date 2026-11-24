@@ -774,6 +774,96 @@ impl Live {
     }
 }
 
+/// Where a character's shaft is aimed this frame: the partner, the place
+/// on her, and BetterPenetration's two targets in the world.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aim {
+    pub partner: ObjectId,
+    pub mode: rk_chara::better_penetration::Mode,
+    pub entry: Vec3,
+    pub end: Vec3,
+}
+
+impl Live {
+    /// Each shaft's aim, once every character is posed: the partner and
+    /// place chosen in the scene, or the nearest the settings' auto-target
+    /// finds, then the two targets on her bones.
+    fn aim_shafts(&mut self, scene: &Scene) {
+        use rk_chara::better_penetration as bp;
+        self.aims.clear();
+        if !self.actors.iter().any(|a| a.chara.shaft.is_some()) {
+            return;
+        }
+        let posed: Vec<(ObjectId, Vec<Mat4>, std::collections::HashMap<String, usize>)> = self
+            .actors
+            .iter()
+            .map(|a| {
+                let (world, _) = a.chara.scene.world();
+                (a.id, world, bp::bones_by_name(&a.chara.scene, a.chara.top))
+            })
+            .collect();
+        for (at, actor) in self.actors.iter().enumerate() {
+            let Some(shaft) = &actor.chara.shaft else { continue };
+            let Some(Content::Character {
+                better_penetration,
+                penetration_target,
+                ..
+            }) = scene.get(actor.id).map(|o| &o.content)
+            else {
+                continue;
+            };
+            let settings = better_penetration
+                .as_deref()
+                .copied()
+                .unwrap_or(actor.chara.better_penetration);
+            if !settings.enabled {
+                continue;
+            }
+            let (partner, mode) = match penetration_target {
+                Some(t) => (Some(t.partner), t.mode),
+                None => match bp::Mode::of_auto(settings.auto_target) {
+                    Some(mode) => (None, mode),
+                    None => continue,
+                },
+            };
+            let tip = shaft.tip(&posed[at].1);
+            let partner = partner.or_else(|| {
+                let candidates =
+                    posed
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != at)
+                        .filter_map(|(_, (id, world, names))| {
+                            Some((*id, world[*names.get(mode.entry_bone())?].w_axis.truncate()))
+                        });
+                bp::nearest(tip, shaft.base_length, candidates)
+            });
+            let Some(partner) = partner else { continue };
+            let Some((_, world, names)) = posed.iter().find(|(id, ..)| *id == partner) else {
+                continue;
+            };
+            if let Some((entry, end)) = bp::targets(mode, world, |n| names.get(n).copied()) {
+                self.aims.push((
+                    actor.id,
+                    Aim {
+                        partner,
+                        mode,
+                        entry,
+                        end,
+                    },
+                ));
+            }
+        }
+    }
+
+    /// Where a character's shaft is aimed this frame, if anywhere.
+    // Read by the shaft's solve, which comes next.
+    #[allow(dead_code)]
+    pub fn aim(&self, id: ObjectId) -> Option<Aim> {
+        self.aims.iter().find(|(who, _)| *who == id).map(|(_, aim)| *aim)
+    }
+}
+
 /// A set of pattern pictures of a character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pictures {
@@ -1053,6 +1143,8 @@ pub struct Live {
     renderer: Renderer,
     render_state: egui_wgpu::RenderState,
     actors: Vec<Actor>,
+    /// Each shaft's aim this frame, by character.
+    aims: Vec<(ObjectId, Aim)>,
     /// The map as the characters' skirts rest on it, and what it was made
     /// from, so that it is made again only when the map moves.
     obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
@@ -1136,6 +1228,7 @@ impl Live {
         // Until a character arrives, the view of a standing person.
         let empty = Camera::frame(Vec3::new(-0.4, 0.0, -0.2), Vec3::new(0.4, 1.5, 0.2), 16.0 / 9.0, 0.0);
         Ok(Live {
+            aims: Vec::new(),
             smooth_edges: true,
             renderer,
             render_state: render_state.clone(),
@@ -1733,6 +1826,7 @@ impl Live {
                 }
             }
         }
+        self.aim_shafts(scene);
         self.make_pictures(scene, games, &mods);
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);

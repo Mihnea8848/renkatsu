@@ -158,6 +158,8 @@ pub struct Character {
     pub face: Option<crate::face::Rig>,
     /// BetterPenetration's settings as the card holds them.
     pub better_penetration: crate::better_penetration::Settings,
+    /// The shaft BetterPenetration moves, when the body has one.
+    pub shaft: Option<crate::better_penetration::Shaft>,
     /// The body's and the face's skin textures before the skin effects,
     /// with the renderers wearing them, and the levels shown.
     skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
@@ -2987,11 +2989,18 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let ik_rig = ik
         .as_ref()
         .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root, top));
+    // BetterPenetration measures the shaft in the pose it is found in.
+    let shaft = {
+        let (world, _) = b.scene.world();
+        let named = crate::better_penetration::bones_by_name(&b.scene, top);
+        crate::better_penetration::Shaft::find(&world, |n| named.get(n).copied())
+    };
     Ok(Character {
         ik_rig,
         hands: [None, None],
         face: b.face.take(),
         better_penetration: crate::better_penetration::read(&card.ext),
+        shaft,
         skin_base: std::mem::take(&mut b.skin_base),
         skin_shown: Default::default(),
         scene: b.scene,
