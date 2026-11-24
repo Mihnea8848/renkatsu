@@ -18,7 +18,8 @@
 //!   and checked against the engine's own answers, which the capture
 //!   plugin's `unitymath` key writes (`tests/unity_math.rs`): all of them
 //!   agree within 1e-6, and the half turn for opposite vectors was read
-//!   from those answers.
+//!   from those answers. `Vector3.Slerp` is native too and not yet in
+//!   that capture.
 //!
 //! Vectors and rotations are glam's types; their own operators are not
 //! used where Unity computes differently.
@@ -149,6 +150,16 @@ pub fn angle(from: Vec3, to: Vec3) -> f32 {
     acos(clamp(dot(normalize(from), normalize(to)), -1.0, 1.0)) * RAD2DEG
 }
 
+/// `Vector3 == Vector3`: closer than about 1e-5.
+pub fn vec_eq(a: Vec3, b: Vec3) -> bool {
+    sqr_magnitude(Vec3::new(a.x - b.x, a.y - b.y, a.z - b.z)) < 1e-10
+}
+
+/// `Mathf.Sin`.
+pub fn sin(f: f32) -> f32 {
+    f64::from(f).sin() as f32
+}
+
 // ---- Quaternion (managed) ----
 
 /// `Quaternion * Quaternion`.
@@ -177,6 +188,11 @@ pub fn rotate(q: Quat, p: Vec3) -> Vec3 {
 /// `Quaternion.Dot`.
 pub fn quat_dot(a: Quat, b: Quat) -> f32 {
     a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+}
+
+/// `Quaternion == Quaternion`: a dot product above 0.999999.
+pub fn quat_eq(a: Quat, b: Quat) -> bool {
+    quat_dot(a, b) > 0.999_999
 }
 
 // ---- Native ----
@@ -379,6 +395,55 @@ pub fn ortho_normalize(a: &mut Vec3, b: &mut Vec3) {
     } else {
         *b / mag
     };
+}
+
+/// The rotation matrix of a turn of `angle` radians about unit `axis`
+/// (`Matrix3x3f::SetAxisAngle`).
+fn axis_angle_matrix(axis: Vec3, angle: f32) -> Mat3 {
+    let (s, c) = (angle.sin(), angle.cos());
+    let (xx, yy, zz) = (axis.x * axis.x, axis.y * axis.y, axis.z * axis.z);
+    let (xy, yz, zx) = (axis.x * axis.y, axis.y * axis.z, axis.z * axis.x);
+    let (xs, ys, zs) = (axis.x * s, axis.y * s, axis.z * s);
+    let one_c = 1.0 - c;
+    [
+        [one_c * xx + c, one_c * xy - zs, one_c * zx + ys],
+        [one_c * xy + zs, one_c * yy + c, one_c * yz - xs],
+        [one_c * zx - ys, one_c * yz + xs, one_c * zz + c],
+    ]
+}
+
+fn mat_mul_vec(m: &Mat3, v: Vec3) -> Vec3 {
+    Vec3::new(
+        m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+        m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+        m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
+    )
+}
+
+/// `Vector3.Slerp`, `t` held to 0 to 1: the direction turned along the
+/// arc, the length blended. Written as the engine's maths library is known
+/// to work; not yet checked against Unity's own answers (the `unitymath`
+/// capture has no rows for it).
+pub fn vec_slerp(lhs: Vec3, rhs: Vec3, t: f32) -> Vec3 {
+    let t = clamp01(t);
+    let straight = |t: f32| lhs + (rhs - lhs) * t;
+    let (lhs_mag, rhs_mag) = (lhs.length(), rhs.length());
+    if lhs_mag < EPSILON || rhs_mag < EPSILON {
+        return straight(t);
+    }
+    let lerped_magnitude = lhs_mag + (rhs_mag - lhs_mag) * t;
+    let d = dot(lhs, rhs) / (lhs_mag * rhs_mag);
+    if d > 1.0 - EPSILON {
+        return straight(t);
+    }
+    let lhs_norm = lhs / lhs_mag;
+    let m = if d < -1.0 + EPSILON {
+        axis_angle_matrix(ortho_normal_vector(lhs_norm), std::f32::consts::PI * t)
+    } else {
+        let axis = cross(lhs, rhs);
+        axis_angle_matrix(axis / axis.length(), d.acos() * t)
+    };
+    mat_mul_vec(&m, lhs_norm) * lerped_magnitude
 }
 
 /// A unit vector square to unit `n` (`OrthoNormalVectorFast`).
