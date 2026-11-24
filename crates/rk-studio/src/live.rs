@@ -1331,7 +1331,7 @@ impl Pictures {
     /// The picture's size in pixels.
     pub fn size(self) -> [u32; 2] {
         let _ = self;
-        [96, 48]
+        [192, 96]
     }
 }
 
@@ -1351,21 +1351,40 @@ impl Live {
 
     /// Makes the pictures asked for: the character with each pattern in
     /// turn, seen up close, then as she was.
-    fn make_pictures(&mut self, scene: &Scene) {
+    fn make_pictures(&mut self) {
         for at in 0..self.actors.len() {
             let Some(set) = self.actors[at].pictures_wanted.pop() else {
                 continue;
             };
-            let mut env = self.environment(scene, PICTURE_BACKGROUND);
             let size = set.size();
             let actor = &mut self.actors[at];
             let mut made = Vec::new();
             let face_set = set;
+            // The pictures show the face as loaded, whatever the scene's
+            // pose: the bones go back to their loaded places for them.
+            let posed: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
+            for (node, rest) in actor.chara.scene.nodes.iter_mut().zip(&actor.rest) {
+                node.local = *rest;
+            }
             let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set)) else {
+                for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&posed) {
+                    node.local = *local;
+                }
                 actor.pictures.insert(set, Vec::new());
                 continue;
             };
-            lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
+            let env = picture_light(&actor.chara, &camera);
+            // Without hair and accessories, which hide the brows and eyes
+            // in many cards; the face alone, as on a mannequin.
+            let shown: Vec<bool> = actor.chara.scene.renderers.iter().map(|r| r.enabled).collect();
+            for r in &mut actor.chara.scene.renderers {
+                if matches!(
+                    r.part,
+                    rk_chara::scene::Part::Hair(_) | rk_chara::scene::Part::Accessory(_)
+                ) {
+                    r.enabled = false;
+                }
+            }
             let now = actor.layer.as_ref().and_then(|l| l.face);
             let base = now.unwrap_or(rig.start);
             let (eyebrows, mouths) = rig.counts();
@@ -1398,40 +1417,31 @@ impl Live {
                 }
             }
             rig.show(&mut actor.chara.scene, now.as_ref());
+            for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&posed) {
+                node.local = *local;
+            }
+            for (r, on) in actor.chara.scene.renderers.iter_mut().zip(shown) {
+                r.enabled = on;
+            }
             actor.pictures.insert(set, made);
         }
     }
 }
 
-/// How bright a pattern picture should at least be, as the mean of its
-/// pixels' lightness from 0 to 1.
-const PICTURE_LIGHTNESS: f32 = 0.42;
-
-/// Lights the pictures as the scene does, unless that leaves them too dark
-/// to tell the patterns apart: then the light and the ambient go up until
-/// a picture of the character as she is reaches `PICTURE_LIGHTNESS`, four
-/// times at most.
-fn lift_light(
-    renderer: &mut Renderer,
-    chara: &rk_chara::Character,
-    camera: &Camera,
-    env: &mut Environment,
-    size: [u32; 2],
-) {
-    let draws = chara.scene.pose();
-    let Ok(rgba) = renderer.render(&draws, camera, env, size[0], size[1], PICTURE_BACKGROUND) else {
-        return;
+/// The light the pattern pictures are taken in, the same for every scene:
+/// the character's own shading, one light from in front of the face and a
+/// little above, no shadows and none of the scene's effects.
+fn picture_light(chara: &rk_chara::Character, camera: &Camera) -> Environment {
+    let toward = (camera.eye - camera.target).normalize_or_zero();
+    let light = (toward + camera.up.normalize_or_zero() * 0.4).normalize_or_zero();
+    let mut env = Environment {
+        ramp: chara.ramp.clone(),
+        light_dir: Some(light.to_array()),
+        effects: None,
+        ..Environment::default()
     };
-    let lightness = rgba
-        .chunks_exact(4)
-        .map(|p| (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 255.0)
-        .sum::<f32>()
-        / (rgba.len() / 4).max(1) as f32;
-    if lightness < PICTURE_LIGHTNESS {
-        let more = (PICTURE_LIGHTNESS / lightness.max(0.05)).min(4.0);
-        env.light_intensity *= more;
-        env.ambient *= more;
-    }
+    env.shadows.enabled = false;
+    env
 }
 
 /// RGBA bytes as an image for the interface.
@@ -1452,25 +1462,24 @@ fn face_camera(chara: &rk_chara::Character, set: Pictures) -> Option<Camera> {
     let forward = face.z_axis.truncate().normalize_or_zero();
     let up = face.y_axis.truncate().normalize_or_zero();
     let target = match set {
-        Pictures::Eyebrows => eyes + up * 0.018,
+        Pictures::Eyebrows => eyes + up * 0.03,
         Pictures::Mouth => eye("cf_J_MouthMove")?,
         _ => eyes,
     };
-    // Both eyes across the picture; the mouth closer.
-    let fov_y_deg = if set == Pictures::Mouth { 9.0 } else { 15.0 };
-    // Seen in the face's own space, so that no pose or turn of the
-    // character tips the picture over, with the same slight tilt in all.
-    let tilted = Quat::from_axis_angle(forward, PICTURE_TILT.to_radians()) * up;
+    // Both eyes, or both eyebrows, filling the width; the mouth with a
+    // little of the cheeks and chin around it.
+    let fov_y_deg = match set {
+        Pictures::Mouth => 7.0,
+        _ => 12.5,
+    };
+    // Straight at the face, in its own space.
     Some(Camera {
         eye: target + forward * 0.3,
         target,
         fov_y_deg,
-        up: tilted,
+        up,
     })
 }
-
-/// How far the face pictures lean, in degrees.
-const PICTURE_TILT: f32 = 8.0;
 
 /// What an actor asks to have read from the game.
 #[derive(Debug, Clone, Copy)]
@@ -2479,7 +2488,7 @@ impl Live {
                 .chain(actor.vagina.iter().map(|&b| (b, fingers.clone())))
                 .collect();
         }
-        self.make_pictures(scene);
+        self.make_pictures();
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
         self.send_doors(scene, &clock);

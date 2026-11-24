@@ -1999,8 +1999,10 @@ fn pattern_row(
         .and_then(|l| l.pictures(id, set))
         .map(<[_]>::to_vec)
         .unwrap_or_default();
+    // Drawn at twice the size they show in the row, sharper on any screen
+    // and larger in the grid.
     let [w, h] = set.size();
-    let (w, h) = (w as f32 * 0.5, h as f32 * 0.5);
+    let (w, h) = (w as f32 * 0.25, h as f32 * 0.25);
     sized_row(ui, k, name, off, (h + 4.0 - k.d.row).max(0.0), |ui, rect| {
         let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
         clicked = click;
@@ -2046,7 +2048,7 @@ fn pattern_row(
                     .spacing(Vec2::splat(4.0))
                     .show(ui, |ui| {
                         for (i, (n, image)) in pictures.iter().enumerate() {
-                            let (cell, cell_resp) = ui.allocate_exact_size(Vec2::new(w * 1.5, h * 1.5), Sense::click());
+                            let (cell, cell_resp) = ui.allocate_exact_size(Vec2::new(w * 2.0, h * 2.0), Sense::click());
                             let texture = picture_texture(ui, image);
                             ui.painter().image(
                                 texture.id(),
