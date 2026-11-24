@@ -30,9 +30,136 @@ pub const FRESH: u64 = 15 * 60;
 const LINKS: &str = "https://github.com/Mihnea8848/";
 const TITLE_CHARS: usize = 80;
 const SUMMARY_CHARS: usize = 200;
+const AUTHOR_CHARS: usize = 40;
 const BODY_CHARS: usize = 16000;
 /// What starts a paragraph of a post's body that is a heading.
 pub const HEADING: &str = "## ";
+/// Where the news file's pictures are: a post names one by its path
+/// below the news folder, `images/posing.png`.
+pub const PICTURES: &str = "https://raw.githubusercontent.com/Mihnea8848/renkatsu/main/news/";
+/// GitHub's store of what is pasted into a release's notes, the other
+/// place a picture may come from.
+const ATTACHMENTS: &str = "https://github.com/user-attachments/assets/";
+/// A picture larger than this is not shown.
+pub const PICTURE_BYTES: u64 = 8 << 20;
+
+/// A picture of a post: a paragraph of its own, `![caption](address)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub url: String,
+    pub caption: String,
+}
+
+/// The picture a paragraph is, when it is one and nothing else.
+pub fn picture(paragraph: &str) -> Option<Picture> {
+    let rest = paragraph.trim().strip_prefix("![")?;
+    let (caption, rest) = rest.split_once("](")?;
+    let url = rest.strip_suffix(')')?;
+    if url.is_empty() || url.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(Picture {
+        url: url.to_owned(),
+        caption: caption.trim().to_owned(),
+    })
+}
+
+/// The full address of a picture the page may show: one of the news
+/// folder, by its path there or in full, or one pasted into a release.
+fn picture_url(src: &str) -> Option<String> {
+    let src = src.trim();
+    let clean = |path: &str| {
+        !path.is_empty()
+            && !path.contains(char::is_whitespace)
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+    };
+    if let Some(path) = src.strip_prefix(PICTURES) {
+        return clean(path).then(|| src.to_owned());
+    }
+    if let Some(id) = src.strip_prefix(ATTACHMENTS) {
+        return clean(id).then(|| src.to_owned());
+    }
+    (!src.contains(':') && clean(src)).then(|| format!("{PICTURES}{src}"))
+}
+
+/// A body with its pictures at their full addresses, and the ones the
+/// page may not show left out.
+fn with_pictures(body: &str) -> String {
+    body.split("\n\n")
+        .filter_map(|paragraph| match picture(paragraph) {
+            Some(p) => picture_url(&p.url).map(|url| format!("![{}]({url})", p.caption)),
+            None => Some(paragraph.to_owned()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A body with the pictures of a post's `pictures` key put in: each
+/// `{ file, caption, after }` goes after paragraph number `after` of the
+/// body (0 before it, none or past its end after it). Versions of
+/// Renkatsu before pictures ignore the key and show the body alone.
+fn place_pictures(body: &str, list: Option<&toml::Value>) -> String {
+    let listed: Vec<(usize, String)> = list
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let file = p.get("file")?.as_str()?;
+            let caption = p.get("caption").and_then(toml::Value::as_str).unwrap_or_default();
+            let after = p
+                .get("after")
+                .and_then(toml::Value::as_integer)
+                .map_or(usize::MAX, |n| n.max(0) as usize);
+            Some((after, format!("![{}]({})", plain(caption, TITLE_CHARS), file.trim())))
+        })
+        .collect();
+    if listed.is_empty() {
+        return body.to_owned();
+    }
+    let paragraphs: Vec<&str> = body.split("\n\n").filter(|p| !p.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for at in 0..=paragraphs.len() {
+        let last = at == paragraphs.len();
+        out.extend(
+            listed
+                .iter()
+                .filter(|(after, _)| *after == at || (last && *after > at))
+                .map(|(_, shown)| shown.clone()),
+        );
+        if let Some(p) = paragraphs.get(at) {
+            out.push((*p).to_owned());
+        }
+    }
+    out.join("\n\n")
+}
+
+/// The picture a line of release notes is: markdown's `![alt](address)`
+/// or the `<img>` GitHub writes for a pasted one; as a paragraph of the
+/// body.
+fn release_picture(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(p) = picture(line) {
+        return Some(format!("![{}]({})", p.caption, p.url));
+    }
+    if !line.starts_with("<img") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        let at = line.find(&format!("{name}=\""))? + name.len() + 2;
+        let end = line[at..].find('"')?;
+        Some(line[at..at + end].to_owned())
+    };
+    let src = attribute("src")?;
+    let alt = attribute("alt").unwrap_or_default();
+    let alt = if alt.eq_ignore_ascii_case("image") {
+        String::new()
+    } else {
+        alt
+    };
+    Some(format!("![{}]({src})", plain(&alt, TITLE_CHARS)))
+}
 
 /// Where a piece of news comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +201,10 @@ pub struct Post {
     pub body: String,
     #[serde(default)]
     pub body_ja: Option<String>,
+    /// Who wrote it: a post's `author`, the account that published a
+    /// release.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 impl Post {
@@ -224,10 +355,15 @@ pub fn parse_posts(text: &str, running: &str, today: &str) -> Result<Vec<Post>> 
             url: link(text("url")),
             title_ja: short("title_ja", TITLE_CHARS),
             summary_ja: short("summary_ja", SUMMARY_CHARS),
-            body: text("body").map(|t| paragraphs(t, BODY_CHARS)).unwrap_or_default(),
+            // A post with pictures and no body shows its summary above them.
+            body: text("body")
+                .or(entry.get("pictures").and(text("summary")))
+                .map(|t| with_pictures(&place_pictures(&paragraphs(t, BODY_CHARS), entry.get("pictures"))))
+                .unwrap_or_default(),
             body_ja: text("body_ja")
-                .map(|t| paragraphs(t, BODY_CHARS))
+                .map(|t| with_pictures(&place_pictures(&paragraphs(t, BODY_CHARS), entry.get("pictures"))))
                 .filter(|t| !t.is_empty()),
+            author: short("author", AUTHOR_CHARS),
         });
     }
     Ok(posts)
@@ -270,6 +406,13 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
         let mut lines: Vec<String> = Vec::new();
         let mut summary = "";
         for line in notes.lines() {
+            // A picture is a paragraph of its own, never the summary.
+            if let Some(shown) = release_picture(line) {
+                if !downloads {
+                    lines.push(shown);
+                }
+                continue;
+            }
             let heading = line.starts_with('#');
             let text = line.trim_start_matches(['#', '*', '-', ' ']).trim();
             if heading {
@@ -288,7 +431,7 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
                 text.to_owned()
             });
         }
-        let body = paragraphs(&lines.join("\n\n"), BODY_CHARS);
+        let body = with_pictures(&paragraphs(&lines.join("\n\n"), BODY_CHARS));
         posts.push(Post {
             kind: Kind::Release,
             date: day,
@@ -299,6 +442,10 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
             summary_ja: None,
             body,
             body_ja: None,
+            author: release["author"]["login"]
+                .as_str()
+                .map(|a| plain(a, AUTHOR_CHARS))
+                .filter(|a| !a.is_empty()),
         });
     }
     Ok((posts, latest))
@@ -451,6 +598,50 @@ impl Cache {
         }
         asked
     }
+}
+
+/// The file of a picture of the news, fetched once and kept in the cache
+/// folder beside the news. Only the news folder's pictures and those of
+/// releases are fetched, at most `PICTURE_BYTES`, and only PNG and JPEG.
+pub fn picture_file(url: &str) -> Result<PathBuf> {
+    if picture_url(url).as_deref() != Some(url) {
+        bail!("{url} is not a picture of the news");
+    }
+    // FNV-1a of the address names the file.
+    let name = url.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
+    let dir = Cache::file().with_file_name("news-pictures");
+    let file = dir.join(format!("{name:016x}"));
+    if file.is_file() {
+        return Ok(file);
+    }
+    let mut answer = crate::download::agent()
+        .get(url)
+        .call()
+        .with_context(|| format!("asking for {url}"))?;
+    if !answer.status().is_success() {
+        bail!("{url} answered {}", answer.status());
+    }
+    let mut bytes = Vec::new();
+    answer
+        .body_mut()
+        .with_config()
+        .limit(PICTURE_BYTES + 1)
+        .reader()
+        .take(PICTURE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PICTURE_BYTES {
+        bail!("{url} is larger than {} MB", PICTURE_BYTES >> 20);
+    }
+    if !(bytes.starts_with(b"\x89PNG") || bytes.starts_with(&[0xff, 0xd8, 0xff])) {
+        bail!("{url} is not a PNG or JPEG picture");
+    }
+    std::fs::create_dir_all(&dir)?;
+    let part = file.with_extension("part");
+    std::fs::write(&part, &bytes)?;
+    std::fs::rename(&part, &file)?;
+    Ok(file)
 }
 
 pub(crate) enum Answer {
@@ -681,10 +872,124 @@ mod tests {
             summary_ja: None,
             body: String::new(),
             body_ja: None,
+            author: None,
         };
         assert_eq!(post("2026-11-06").day("2026-11-19"), "6 Nov");
         assert_eq!(post("2025-12-31").day("2026-01-02"), "31 Dec 2025");
         assert_eq!(today(0), "1970-01-01");
         assert_eq!(today(951_782_400), "2000-02-29");
+    }
+
+    #[test]
+    fn pictures_of_a_post_get_their_full_address_and_others_are_left_out() {
+        let file = r#"
+            [[post]]
+            date = 2026-11-24
+            title = "Mirror pose"
+            body = """
+            Mirror flips a pose.
+
+            ![Before and after](images/mirror.png)
+
+            ![Elsewhere](https://example.org/x.png)
+
+            ![Up a folder](../secret.png)
+
+            ![Full address](https://raw.githubusercontent.com/Mihnea8848/renkatsu/main/news/images/a.png)
+            """
+        "#;
+        let posts = parse_posts(file, "1.0.0", "2026-11-24").unwrap();
+        let shown: Vec<Picture> = posts[0].body.split("\n\n").filter_map(picture).collect();
+        assert_eq!(
+            shown,
+            [
+                Picture {
+                    url: format!("{PICTURES}images/mirror.png"),
+                    caption: "Before and after".into()
+                },
+                Picture {
+                    url: format!("{PICTURES}images/a.png"),
+                    caption: "Full address".into()
+                },
+            ]
+        );
+        assert!(posts[0].body.starts_with("Mirror flips a pose."));
+        assert_eq!(picture("A line with ![a](b.png) in it"), None);
+    }
+
+    #[test]
+    fn a_picture_pasted_into_release_notes_is_shown_but_is_never_the_summary() {
+        let json = r#"[{"tag_name": "v0.3.0", "html_url": "https://github.com/Mihnea8848/renkatsu/releases/tag/v0.3.0",
+            "published_at": "2026-11-30T10:00:00Z",
+            "body": "<img width=\"1600\" alt=\"Posing\" src=\"https://github.com/user-attachments/assets/1f2e\" />\n\nPosing by hand is here.\n\n![x](https://example.org/y.png)"}]"#;
+        let (posts, _) = parse_releases(json).unwrap();
+        assert_eq!(posts[0].summary, "Posing by hand is here.");
+        let shown: Vec<Picture> = posts[0].body.split("\n\n").filter_map(picture).collect();
+        assert_eq!(
+            shown,
+            [Picture {
+                url: "https://github.com/user-attachments/assets/1f2e".into(),
+                caption: "Posing".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn only_pictures_of_the_news_are_fetched() {
+        assert!(picture_file("https://example.org/a.png").is_err());
+        assert!(picture_file(&format!("{PICTURES}../x.png")).is_err());
+    }
+
+    #[test]
+    fn listed_pictures_go_after_the_paragraph_they_name() {
+        let file = r#"
+            [[post]]
+            date = 2026-11-18
+            title = "Starter Content"
+            body = """
+            One.
+
+            Two.
+            """
+            pictures = [
+                { file = "images/end.png" },
+                { file = "images/first.png", caption = "Before all", after = 0 },
+                { file = "images/two.png", caption = "After one", after = 1 },
+            ]
+
+            [[post]]
+            date = 2026-11-17
+            title = "Summary only"
+            summary = "Short."
+            pictures = [{ file = "images/s.png" }]
+        "#;
+        let posts = parse_posts(file, "1.0.0", "2026-11-18").unwrap();
+        let order: Vec<String> = posts[0]
+            .body
+            .split("\n\n")
+            .map(|p| picture(p).map_or(p.to_owned(), |p| p.url.trim_start_matches(PICTURES).to_owned()))
+            .collect();
+        assert_eq!(
+            order,
+            ["images/first.png", "One.", "images/two.png", "Two.", "images/end.png"]
+        );
+        assert_eq!(
+            picture(posts[0].body.split("\n\n").nth(2).unwrap()).unwrap().caption,
+            "After one"
+        );
+        assert_eq!(posts[1].body, format!("Short.\n\n![]({PICTURES}images/s.png)"));
+    }
+
+    #[test]
+    fn a_post_says_who_wrote_it() {
+        let posts = parse_posts(
+            "[[post]]\ndate = 2026-11-24\ntitle = \"T\"\nauthor = \"Mihnea8848\"\n",
+            "1.0.0",
+            "2026-11-24",
+        )
+        .unwrap();
+        assert_eq!(posts[0].author.as_deref(), Some("Mihnea8848"));
+        let json = r#"[{"tag_name": "v0.3.0", "published_at": "2026-11-30T10:00:00Z", "author": {"login": "Mihnea8848"}, "body": "x"}]"#;
+        assert_eq!(parse_releases(json).unwrap().0[0].author.as_deref(), Some("Mihnea8848"));
     }
 }

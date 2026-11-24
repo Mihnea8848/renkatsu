@@ -921,6 +921,10 @@ pub struct Scene {
     pub light_groups: Vec<String>,
     #[serde(skip)]
     poses: Poses,
+    /// What changes over time: kept in a file of its own beside the
+    /// scene's (`crate::sequence`), and in the history with the scene.
+    #[serde(skip)]
+    pub sequence: crate::sequence::Sequence,
 }
 
 impl Scene {
@@ -931,6 +935,7 @@ impl Scene {
             objects: Vec::new(),
             light_groups: Vec::new(),
             poses: Poses::default(),
+            sequence: Default::default(),
         }
     }
 
@@ -2311,6 +2316,20 @@ impl Document {
         // The tree is not edited this way.
         let (parent, bone) = (self.scene.objects[at].parent, self.scene.objects[at].bone.clone());
         self.scene.objects[at] = Object { parent, bone, ..edited };
+        true
+    }
+
+    /// Replaces the scene's sequence, as `edit` does an object: a step of
+    /// the history, or with `held` part of the drag's step.
+    pub fn edit_sequence(&mut self, sequence: crate::sequence::Sequence, held: bool) -> bool {
+        if self.scene.sequence == sequence {
+            return false;
+        }
+        if !self.gesture {
+            self.checkpoint();
+        }
+        self.gesture = held;
+        self.scene.sequence = sequence;
         true
     }
 

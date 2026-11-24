@@ -129,14 +129,20 @@ const MOST_STEPS: usize = 100_000;
 
 impl Layer {
     /// Where the layer is `seconds` after it started in `from` (its
-    /// default state when the map loads). A transition fires when its
-    /// state has played to the exit time; the first to come fires. The
-    /// machine's exit leads back to the default state.
+    /// default state when the map loads, or one played as `Animator.Play`
+    /// does). A transition fires when its state has played to the exit
+    /// time; the first to come fires. The machine's exit leads back to the
+    /// default state.
+    ///
+    /// A state that plays backwards, at a negative speed, starts at its
+    /// end and plays down to its start, and its exit time is reached
+    /// coming down: a door's `close` plays its opening clip backwards and
+    /// leaves for `close_Idle` once it is shut.
     fn now(&self, from: usize, seconds: f32) -> Option<Now> {
         let mut state = from;
-        self.states.get(state)?;
+        let first = self.states.get(state)?;
         // When the state was entered, and at which normalized time.
-        let (mut entered, mut start) = (0.0f32, 0.0f32);
+        let (mut entered, mut start) = (0.0f32, if first.rate() < 0.0 { 1.0f32 } else { 0.0 });
         for _ in 0..MOST_STEPS {
             let s = &self.states[state];
             let rate = s.rate();
@@ -147,12 +153,18 @@ impl Layer {
             };
             let mut first: Option<(f32, &Transition)> = None;
             for t in &s.exits {
-                let wait = if start >= t.exit_time {
+                let wait = if rate < 0.0 {
+                    if start <= t.exit_time {
+                        0.0
+                    } else {
+                        (start - t.exit_time) / -rate
+                    }
+                } else if start >= t.exit_time {
                     0.0
                 } else if rate > 0.0 {
                     (t.exit_time - start) / rate
                 } else {
-                    // A state that stands or plays backwards never gets there.
+                    // A state that stands never gets there.
                     continue;
                 };
                 if first.is_none_or(|(w, _)| wait < w) {
@@ -1127,14 +1139,19 @@ mod tests {
     }
 
     #[test]
-    fn a_state_played_backwards_never_reaches_its_exit() {
-        let mut back = turn(90.0, 1.0, false);
-        back.speed = -1.0;
-        back.exits = vec![exit(1, 1.0, 0.0)];
-        let l = layer(vec![back, hold(45.0)]);
-        assert_eq!(l.now(l.default, 50.0).map(|n| n.state), Some(0));
+    fn a_door_closes_by_playing_its_opening_backwards() {
+        // The game's door: `close` plays the 0 to 90 degree turn at speed
+        // -1 and leaves for `close_Idle`, held at 0, at exit time 0.
+        let mut close = turn(90.0, 1.0, false);
+        close.speed = -1.0;
+        close.exits = vec![exit(1, 1.2548346e-9, 0.0)];
+        let l = layer(vec![close, hold(0.0)]);
         let rest = [Trs::default()];
-        assert!(yaw(&l.pose(l.default, 50.0, false, &rest)).abs() < 1e-3);
+        assert!((yaw(&l.pose(0, 0.0, false, &rest)) - 90.0).abs() < 1e-3, "starts open");
+        assert!((yaw(&l.pose(0, 0.5, false, &rest)) - 45.0).abs() < 1e-2, "half shut");
+        assert_eq!(l.now(0, 0.5).map(|n| n.state), Some(0));
+        assert_eq!(l.now(0, 1.5).map(|n| n.state), Some(1), "held shut once it got there");
+        assert!(yaw(&l.pose(0, 1.5, false, &rest)).abs() < 1e-3);
     }
 
     #[test]

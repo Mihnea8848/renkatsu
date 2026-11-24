@@ -161,6 +161,11 @@ enum Cmd {
     /// The bones CharaStudio poses by hand (FK), as found on a card's
     /// character, by part.
     Bones { card: PathBuf },
+    /// The body's inverse kinematics (FinalIK's FullBodyBipedIK).
+    Ik {
+        #[command(subcommand)]
+        cmd: IkCmd,
+    },
     /// Print which states a card's clothes have, and what a row of state
     /// changes such as `top=1 bottom=3 all=0` shows.
     Clothes {
@@ -487,6 +492,19 @@ enum BundleCmd {
 }
 
 #[derive(Subcommand)]
+enum IkCmd {
+    /// Print the FullBodyBipedIK settings the game's body stores, with a
+    /// card's character for the bones.
+    Settings {
+        card: PathBuf,
+        /// A `.ik.json` of the capture plugin: say where CharaStudio's
+        /// solver had other settings.
+        #[arg(long)]
+        capture: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CardCmd {
     /// Print a card's contents as JSON.
     Dump {
@@ -637,6 +655,9 @@ fn main() -> Result<()> {
             map_time: &map_time,
         }),
         Cmd::Bones { card } => pose::bones(&card),
+        Cmd::Ik {
+            cmd: IkCmd::Settings { card, capture },
+        } => pose::ik_settings(&card, capture.as_deref()),
         Cmd::Animation {
             cmd: AnimationCmd::List { all },
         } => pose::list(all),

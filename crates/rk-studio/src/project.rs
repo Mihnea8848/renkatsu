@@ -569,6 +569,11 @@ impl Project {
         if file.format < 3 {
             file.scene.reset_chara_lights();
         }
+        // Its sequence, beside it, when it has one.
+        let sequence = path.with_extension(crate::sequence::EXTENSION);
+        if sequence.is_file() {
+            file.scene.sequence = crate::sequence::Sequence::read(&sequence)?;
+        }
         Ok(file.scene)
     }
 
@@ -625,6 +630,15 @@ impl Project {
             scene: scene.clone(),
         })?;
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        // The sequence beside it; a scene with no keys left keeps none.
+        let sequence = path.with_extension(crate::sequence::EXTENSION);
+        let mut kept = scene.sequence.clone();
+        kept.tidy();
+        if !kept.tracks.is_empty() {
+            kept.write(&sequence)?;
+        } else if sequence.is_file() {
+            std::fs::remove_file(&sequence).with_context(|| format!("removing {}", sequence.display()))?;
+        }
         if let Some(old) = old {
             std::fs::remove_file(&old).with_context(|| format!("removing {}", old.display()))?;
         }
@@ -793,6 +807,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_scene_keeps_its_keys_in_a_sequence_beside_it() {
+        let home = scratch("sequence");
+        let root = home.join("P");
+        let mut project = Project::create(&root, "P").unwrap();
+        let mut scene = Scene::new();
+        let edit = rk_chara::pose::BoneEdit {
+            rot: glam::Quat::from_rotation_z(0.3),
+            ..Default::default()
+        };
+        let near = scene.sequence.near();
+        let track = scene.sequence.track_mut(crate::scene::ObjectId(3), "Her");
+        rk_chara::keys::set(&mut track.keys, "cf_j_neck", 0.5, edit, near);
+        project.save_scene(&scene).unwrap();
+        let file = root
+            .join(&project.file.scene)
+            .with_extension(crate::sequence::EXTENSION);
+        assert!(file.is_file(), "the keys are in a file of their own");
+        let back = project.read_scene_at(&project.file.scene.clone()).unwrap();
+        assert_eq!(back.sequence, scene.sequence);
+        // With no keys left the file goes.
+        scene.sequence.tracks.clear();
+        project.save_scene(&scene).unwrap();
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

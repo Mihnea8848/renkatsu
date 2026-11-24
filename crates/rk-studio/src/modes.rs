@@ -112,6 +112,7 @@ pub const MODES: [Mode; 7] = [
                     (icon::FILM_STRIP, "Bake animation"),
                 ],
             ),
+            ("Keys", &[(icon::DIAMOND, "Set key"), (icon::TRASH, "Delete key")]),
             (
                 "Library",
                 &[
@@ -165,7 +166,7 @@ pub const MODES: [Mode; 7] = [
             (
                 "Keys",
                 &[
-                    (icon::KEY, "Set key"),
+                    (icon::DIAMOND, "Set key"),
                     (icon::RECORD, "Auto key"),
                     (icon::TRASH, "Delete key"),
                 ],

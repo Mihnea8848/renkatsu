@@ -366,6 +366,9 @@ pub struct Clock {
     pub now: Playback,
     pub dt: f32,
     pub time: f32,
+    /// A character whose keys play on a time of their own, as the
+    /// Animator's solo play does, while the scene stands.
+    pub solo: Option<(ObjectId, f32)>,
 }
 
 impl Clock {
@@ -376,6 +379,7 @@ impl Clock {
             now: Playback::Stopped,
             dt: 0.0,
             time: 0.0,
+            solo: None,
         }
     }
 }
@@ -436,7 +440,7 @@ impl Actor {
             }
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
-        self.chara.pose_frame(motion, &self.edits, states);
+        self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
     }
 
     /// Puts the bones back as they were loaded.
@@ -457,6 +461,7 @@ impl Actor {
         world: Mat4,
         game: &mut dyn FnMut() -> Result<Motion>,
         clock: &Clock,
+        keys: Option<&rk_chara::keys::Keys>,
         log: &mut Log,
     ) -> bool {
         let Content::Character {
@@ -542,7 +547,22 @@ impl Actor {
 
         // Edits made by hand: a change poses the character again from
         // the bones as loaded, so a bone no longer edited goes back.
-        let layer = pose_layer.as_deref().filter(|l| !l.is_empty());
+        // The keys of the scene's sequence at the clock's time, over the
+        // pose by hand and the IK targets, while FK or IK is on.
+        let keyed = pose_layer
+            .as_deref()
+            .filter(|l| l.fk_on || l.ik_on)
+            .zip(keys.filter(|k| !k.is_empty()))
+            .map(|(l, k)| {
+                let mut l = l.clone();
+                let time = match clock.solo {
+                    Some((solo, time)) if solo == self.id => time,
+                    _ => clock.time,
+                };
+                l.with_keys(rk_chara::keys::pose_at(k, time));
+                l
+            });
+        let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());
         if layer != self.layer.as_ref() {
             self.layer = layer.cloned();
             // A bone of CharaStudio's FK table takes its edit while one of
@@ -929,6 +949,53 @@ impl Live {
         self.actors.iter().find(|a| a.id == id)?.phase
     }
 
+    /// A built character's own space, which her IK targets are in: the
+    /// world of her top node.
+    pub fn ik_space(&self, id: ObjectId) -> Option<Mat4> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        Some(actor.chara.scene.world().0[actor.chara.top])
+    }
+
+    /// A built character's IK targets in the world while IK is on: those of
+    /// the groups that are on, each with its place and turn.
+    pub fn ik_handles(&self, id: ObjectId) -> Option<Vec<(usize, Vec3, Quat)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor
+            .layer
+            .as_ref()
+            .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
+        let own = actor.chara.scene.world().0[actor.chara.top];
+        let (_, turn, _) = own.to_scale_rotation_translation();
+        Some(
+            layer
+                .ik
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| layer.ik_group_on(*i))
+                .map(|(i, t)| (i, own.transform_point3(t.pos), (turn * t.rot).normalize()))
+                .collect(),
+        )
+    }
+
+    /// A built character's IK targets `which` mirrored onto their twins, as
+    /// her pose shows them now, by the twin's place.
+    pub fn ik_mirror(&self, id: ObjectId, which: &[usize]) -> Option<Vec<(usize, rk_chara::pose::IkTarget)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor
+            .layer
+            .as_ref()
+            .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
+        Some(actor.chara.ik_rig.as_ref()?.mirrored(&layer.ik, which))
+    }
+
+    /// A built character's IK targets on her bones as they stand, as
+    /// Studio's copy puts them.
+    pub fn ik_targets_on_bones(&self, id: ObjectId) -> Option<Vec<rk_chara::pose::IkTarget>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let rig = actor.chara.ik_rig.as_ref()?;
+        Some(rig.targets_on_bones(&actor.chara.scene, actor.chara.top))
+    }
+
     /// The names of a built character's FK bones in `part`.
     pub fn part_bones(&self, id: ObjectId, part: Part) -> Vec<String> {
         self.actors
@@ -1267,7 +1334,8 @@ impl Live {
                 )
             };
             let world = scene.world_by(actor.id, &self.poses);
-            if actor.update(object, world, &mut read, &clock, log) {
+            let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
+            if actor.update(object, world, &mut read, &clock, keys, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
             }
             // The bones that objects follow, now that they are posed.

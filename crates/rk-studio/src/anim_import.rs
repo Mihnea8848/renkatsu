@@ -833,6 +833,7 @@ impl Importer {
                 now: Playback::Playing,
                 dt,
                 time: preview.seconds,
+                solo: None,
             },
             &mut preview.log,
         );
