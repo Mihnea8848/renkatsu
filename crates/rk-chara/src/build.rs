@@ -1066,6 +1066,12 @@ impl<'g> Builder<'g> {
                 },
             );
         }
+        rig.tears = ["cf_O_namida_S", "cf_O_namida_M", "cf_O_namida_L"].map(|n| self.scene.find(inst.root, n));
+        rig.face = inst
+            .renderers
+            .iter()
+            .copied()
+            .find(|&r| self.scene.renderers[r].name == "cf_O_face");
         rig.eye_base = self.scene.find(inst.root, "n_eyebase");
         rig.pupils = self.scene.find(inst.root, "n_hitomi");
         rig.irises = inst
@@ -2352,10 +2358,12 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot", hips);
-            // The card's face, as Studio adds the character, then Eye
-            // Control's: it sets the eye slider and, to stop blinking,
-            // turns blinking off after it, which forces the open rate to 1.
-            let mut start = crate::face::Face::of_status(&card.status);
+            // Studio loads cards without their status (`LoadCharaFile`'s
+            // `noLoadStatus`), so a character starts with a new status's
+            // face; then Eye Control's: it sets the eye slider and, to stop
+            // blinking, turns blinking off after it, which forces the open
+            // rate to 1.
+            let mut start = crate::face::Face::default();
             let mut start_rate = crate::face::Rig::eyes_rate(&start);
             if opts.eye_control && card.ext.contains_key(crate::eye_control::KEY) {
                 let eye = crate::eye_control::read(&card.ext);

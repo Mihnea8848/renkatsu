@@ -23,7 +23,6 @@
 
 use crate::expression::Controller;
 use crate::scene::{Image, Scene, TexSlot};
-use rk_card::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -108,6 +107,13 @@ pub struct Face {
     pub blink: bool,
     /// Studio's mouth slider (`ChangeMouthOpen`, the mouth's fixed rate).
     pub mouth_open: f32,
+    /// The tears, 0 to 3 (`ChaFileStatus.tearsLv`): none, small, middle,
+    /// large.
+    #[serde(default)]
+    pub tears: u8,
+    /// The blush, 0 to 1 (`ChaFileStatus.hohoAkaRate`).
+    #[serde(default)]
+    pub blush: f32,
 }
 
 impl Default for Face {
@@ -120,25 +126,8 @@ impl Default for Face {
             eyes_open: 1.0,
             blink: true,
             mouth_open: 0.0,
-        }
-    }
-}
-
-impl Face {
-    /// The face a card's status gives a character added to Studio
-    /// (`AddObjectAssist`): its patterns, blink and eye slider; Studio's
-    /// own mouth opening, which starts closed.
-    pub fn of_status(status: &Value) -> Face {
-        let int = |key: &str, default: i32| field(status, key).and_then(Value::as_i64).map_or(default, |v| v as i32);
-        let float = |key: &str, default: f32| field(status, key).and_then(Value::as_f64).map_or(default, |v| v as f32);
-        let start = Face::default();
-        Face {
-            eyebrows: int("eyebrowPtn", 0),
-            eyes: int("eyesPtn", 0),
-            mouth: int("mouthPtn", 0),
-            eyes_open: float("eyesOpenMax", 1.0).clamp(0.0, 1.0),
-            blink: field(status, "eyesBlink").and_then(Value::as_bool).unwrap_or(true),
-            ..start
+            tears: 0,
+            blush: 0.0,
         }
     }
 }
@@ -151,8 +140,8 @@ impl std::str::FromStr for Face {
     fn from_str(spec: &str) -> anyhow::Result<Face> {
         let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
         anyhow::ensure!(
-            (3..=6).contains(&parts.len()),
-            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN]]]"
+            (3..=8).contains(&parts.len()),
+            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN[,TEARS[,BLUSH]]]]]"
         );
         let mut face = Face {
             eyebrows: parts[0].parse()?,
@@ -169,16 +158,14 @@ impl std::str::FromStr for Face {
         if let Some(v) = parts.get(5) {
             face.mouth_open = v.parse()?;
         }
+        if let Some(v) = parts.get(6) {
+            face.tears = v.parse()?;
+        }
+        if let Some(v) = parts.get(7) {
+            face.blush = v.parse()?;
+        }
         Ok(face)
     }
-}
-
-/// A map's value by its key.
-fn field<'a>(map: &'a Value, key: &str) -> Option<&'a Value> {
-    map.as_map()?
-        .iter()
-        .find(|(k, _)| k.as_str() == Some(key))
-        .map(|(_, v)| v)
 }
 
 /// One controller bound to the character's meshes.
@@ -246,6 +233,10 @@ pub struct Rig {
     pub irises: Vec<usize>,
     /// The face's tongue and the body's, by renderer.
     pub tongues: [Vec<usize>; 2],
+    /// The small, middle and large tears' nodes (`cf_O_namida_S/M/L`).
+    pub tears: [Option<usize>; 3],
+    /// The face's renderer, whose material carries the blush.
+    pub face: Option<usize>,
     /// The face the character was built with.
     pub start: Face,
     /// The eyes' open rate it was built with: EyeControl turns blinking
@@ -279,6 +270,19 @@ impl Rig {
         if let Some(part) = &self.mouth {
             // Studio fixes the mouth at its slider (`FixedRate`).
             part.show(scene, face.mouth, face.mouth_open.clamp(0.0, 1.0));
+        }
+        // `UpdateVisible`: tear level n shows the n-th tears.
+        for (i, node) in self.tears.iter().enumerate() {
+            if let Some(n) = node {
+                scene.nodes[*n].active = usize::from(face.tears) == i + 1;
+            }
+        }
+        // `ChangeHohoAkaRate`: the face's second overlay colour takes
+        // 0.2 of alpha at the most.
+        if let Some(m) = self.face.and_then(|r| scene.renderers[r].materials.first_mut()) {
+            let mut color = m.colors.get("_overcolor2").copied().unwrap_or([1.0; 4]);
+            color[3] = 0.2 * face.blush.clamp(0.0, 1.0);
+            m.set_color("_overcolor2", color);
         }
         let out = face.mouth == TONGUE_OUT;
         for (tongue, shown) in self.tongues.iter().zip([!out, out]) {
@@ -367,24 +371,6 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_status_gives_its_face_and_studio_closes_the_mouth() {
-        let status = Value::Map(vec![
-            (Value::from("eyebrowPtn"), Value::from(3)),
-            (Value::from("eyesPtn"), Value::from(4)),
-            (Value::from("mouthPtn"), Value::from(1)),
-            (Value::from("eyesOpenMax"), Value::from(0.625)),
-            (Value::from("eyesBlink"), Value::from(false)),
-            (Value::from("mouthOpenMax"), Value::from(1.0)),
-        ]);
-        let face = Face::of_status(&status);
-        assert_eq!((face.eyebrows, face.eyes, face.mouth), (3, 4, 1));
-        assert_eq!(face.eyes_open, 0.625);
-        assert!(!face.blink);
-        assert_eq!(face.mouth_open, 0.0);
-        assert_eq!(Face::of_status(&Value::Nil), Face::default());
-    }
 
     #[test]
     fn a_face_reads_from_its_numbers() {
