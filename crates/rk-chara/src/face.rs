@@ -74,6 +74,114 @@ const IRIS_TEXTURES: [&str; 3] = ["_MainTex", "_overtex1", "_overtex2"];
 /// The mouth pattern that puts the tongue out.
 pub const TONGUE_OUT: i32 = 21;
 
+/// The eyes' blinking (`FBSBlinkControl`): open for a while, then closing,
+/// shut for a few frames and opening again. The game's random numbers are
+/// Unity's; here each face has its own seeded ones, so that faces do not
+/// blink together and a run repeats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Blink {
+    /// `BlinkFrequency`: the open time is 0.2 s times a whole number below it.
+    pub frequency: u8,
+    /// `BaseSpeed`: how long closing or opening takes, plus up to 0.05 s.
+    pub base_speed: f32,
+    mode: i8,
+    blink_time: f32,
+    calc_speed: f32,
+    /// Frames left shut, which the game counts in frames.
+    count: i32,
+    last_frame: f32,
+    seed: u32,
+}
+
+/// The game counts the shut frames at its frame rate; Renkatsu at this one.
+const BLINK_FRAME: f32 = 1.0 / 60.0;
+
+impl Blink {
+    /// A face that starts open and first blinks after a random wait.
+    pub fn new(seed: u32) -> Blink {
+        let mut b = Blink {
+            frequency: 30,
+            base_speed: 0.15,
+            mode: -1,
+            blink_time: 0.0,
+            calc_speed: 0.15,
+            count: 0,
+            last_frame: 0.0,
+            // Scrambled, as xorshift's first numbers from small seeds are alike.
+            seed: seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x7F4A_7C15) | 1,
+        };
+        b.blink_time = b.wait(0.0);
+        b.mode = 0;
+        b
+    }
+
+    /// A random number in `0.0..1.0` (xorshift).
+    fn random(&mut self) -> f32 {
+        let mut x = self.seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.seed = x;
+        (x >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// When an open eye next closes: 0.2 s times a whole number below the
+    /// frequency (`Random.Range(0, BlinkFrequency)`).
+    fn wait(&mut self, now: f32) -> f32 {
+        let n = (self.random() * f32::from(self.frequency)).floor();
+        now + 0.2 * n
+    }
+
+    /// Whether a blink is under way: closing, shut or opening.
+    pub fn busy(&self) -> bool {
+        self.mode != 0
+    }
+
+    /// Seconds from `now` until the open eye next starts to close.
+    pub fn until_next(&self, now: f32) -> f32 {
+        (self.blink_time - now).max(0.0)
+    }
+
+    /// The open rate at `now` seconds of the real clock (`CalcBlink`).
+    pub fn rate(&mut self, now: f32) -> f32 {
+        let left = (self.blink_time - now).max(0.0);
+        let rate = match self.mode {
+            0 => 1.0,
+            1 => (left / self.calc_speed).clamp(0.0, 1.0),
+            _ => (1.0 - left / self.calc_speed).clamp(0.0, 1.0),
+        };
+        if now > self.blink_time {
+            match self.mode {
+                0 => {
+                    // `SetForceClose`.
+                    self.calc_speed = self.base_speed + self.random() * 0.05;
+                    self.blink_time = now + self.calc_speed;
+                    self.count = (self.random() * 3.0).floor() as i32 + 1;
+                    self.mode = 1;
+                    self.last_frame = now;
+                }
+                1 => {
+                    // Shut for `count` frames, then `SetForceOpen`.
+                    while self.count > 0 && now - self.last_frame >= BLINK_FRAME {
+                        self.count -= 1;
+                        self.last_frame += BLINK_FRAME;
+                    }
+                    if self.count <= 0 {
+                        self.calc_speed = self.base_speed + self.random() * 0.05;
+                        self.blink_time = now + self.calc_speed;
+                        self.mode = -1;
+                    }
+                }
+                _ => {
+                    self.blink_time = self.wait(now);
+                    self.mode = 0;
+                }
+            }
+        }
+        rate
+    }
+}
+
 /// The mouth the game's H scenes give a face with a shaft in its mouth,
 /// "Holding in the mouth" (咥え): the `HFaceList` faces of oral actions use
 /// it, or 21 for licking, with the mouth's least opening at 1.
@@ -409,15 +517,23 @@ impl Rig {
     /// As `show`, with shaking highlights where they are `seconds` after
     /// they began.
     pub fn show_at(&self, scene: &mut Scene, face: Option<&Face>, seconds: f32) {
+        self.show_blinking(scene, face, seconds, 1.0);
+    }
+
+    /// As `show_at`, with the eyes and eyebrows where a blink has them:
+    /// `blink` is its open rate, 1 between blinks; it counts only while
+    /// the face blinks.
+    pub fn show_blinking(&self, scene: &mut Scene, face: Option<&Face>, seconds: f32, blink: f32) {
         let (face, eyes_rate) = match face {
-            Some(f) => (f, Rig::eyes_rate(f)),
+            Some(f) => (f, if f.blink { blink } else { Rig::eyes_rate(f) }),
+            None if self.start.blink => (&self.start, blink.min(self.start_rate)),
             None => (&self.start, self.start_rate),
         };
-        // Eyebrows follow the blink (`SyncBlink`), between blinks and
-        // with blinking off both at 1.
+        // Eyebrows follow the blink (`SyncBlink`); with blinking off at 1.
+        let brows_rate = if face.blink { blink } else { 1.0 };
         if let Some(part) = &self.eyebrows {
             let c = &part.controller;
-            part.show(scene, face.eyebrows, lerp(c.open_min, c.open_max, 1.0));
+            part.show(scene, face.eyebrows, lerp(c.open_min, c.open_max, brows_rate));
         }
         if let Some(part) = &self.eyes {
             let c = &part.controller;
@@ -682,6 +798,37 @@ mod tests {
         assert!((still[2] - (0.1 * 0.8 - 0.2)).abs() < 1e-6);
         assert!((still[3] - (-0.04 * 0.5 - 0.2 + 0.1)).abs() < 1e-6);
         assert!(shaken(place, iris, [2.0, 1.5])[0] > 1.7);
+    }
+
+    #[test]
+    fn a_blink_closes_and_opens_within_the_games_times() {
+        let mut b = Blink::new(7);
+        let mut t = 0.0;
+        // Open until the first blink, at most 0.2 s times 29.
+        while b.rate(t) >= 1.0 {
+            t += BLINK_FRAME;
+            assert!(t < 6.0, "a blink comes within 5.8 s");
+        }
+        let started = t;
+        let mut shut = false;
+        while t < started + 1.0 {
+            let r = b.rate(t);
+            shut |= r <= 0.0;
+            if shut && r >= 1.0 {
+                break;
+            }
+            t += BLINK_FRAME;
+        }
+        assert!(shut, "the eyes shut");
+        // Closing and opening each 0.15 to 0.2 s, shut 1 to 3 frames.
+        let took = t - started;
+        assert!((0.3..0.5).contains(&took), "{took}");
+        // Faces with other seeds blink at other times.
+        let first = |seed| {
+            let mut b = Blink::new(seed);
+            (0..600).position(|i| b.rate(i as f32 * BLINK_FRAME) < 1.0)
+        };
+        assert_ne!(first(1), first(2));
     }
 
     #[test]

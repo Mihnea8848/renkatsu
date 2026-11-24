@@ -1319,6 +1319,9 @@ impl eframe::App for Studio {
         }
         if self.state.settings.frame_rate.continuous() || self.state.live.as_ref().is_some_and(live::Live::settling) {
             ctx.request_repaint();
+        } else if let Some(wait) = self.state.live.as_ref().and_then(live::Live::next_blink) {
+            // Woken for the next blink.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(wait.max(0.001)));
         }
         let dt = ctx.input(|i| i.unstable_dt);
         let ft = &mut self.state.frame_time;

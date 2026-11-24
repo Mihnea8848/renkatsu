@@ -67,6 +67,12 @@ struct Actor {
     /// When the eyes' highlights began to shake, which they do on the real
     /// clock whether the scene plays or not, as in Studio.
     shake_since: std::time::Instant,
+    /// The eyes' blinking, on the real clock from when the character was
+    /// built, whether the scene plays or not, as in Studio; and the open
+    /// rate the face was last shown with.
+    blink: rk_chara::face::Blink,
+    blink_rate: f32,
+    awake: std::time::Instant,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -798,14 +804,26 @@ impl Actor {
             }
             again |= clock.now != Playback::Playing;
         }
-        // Shaking highlights take a new size every step of the real clock.
-        if let (Some(rig), Some(face)) = (&self.chara.face, self.face_shown()) {
-            if face.shaking {
-                rig.show_at(
-                    &mut self.chara.scene,
-                    Some(&face),
-                    self.shake_since.elapsed().as_secs_f32(),
-                );
+        // The eyes blink and shaking highlights take a new size on the real
+        // clock, whether the scene plays or not.
+        let shown = self.face_shown();
+        if let Some(start_blinks) = self.chara.face.as_ref().map(|r| r.start.blink) {
+            let rate = if shown.map_or(start_blinks, |f| f.blink) {
+                self.blink.rate(self.awake.elapsed().as_secs_f32())
+            } else {
+                1.0
+            };
+            let shaking = shown.is_some_and(|f| f.shaking);
+            if shaking || rate != self.blink_rate {
+                self.blink_rate = rate;
+                if let Some(rig) = &self.chara.face {
+                    rig.show_blinking(
+                        &mut self.chara.scene,
+                        shown.as_ref(),
+                        self.shake_since.elapsed().as_secs_f32(),
+                        rate,
+                    );
+                }
             }
         }
         // A hand pattern not loaded yet is read once.
@@ -3122,9 +3140,19 @@ impl Live {
     /// Whether a character's cloth still settles while the scene stands,
     /// or her eyes' highlights shake, so that frames keep being drawn.
     pub fn settling(&self) -> bool {
+        self.actors.iter().any(|a| {
+            a.cloth_owed > 0 || a.blink.busy() || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking)
+        })
+    }
+
+    /// Seconds until the next blink starts, for the view to wake then
+    /// when nothing else draws it.
+    pub fn next_blink(&self) -> Option<f32> {
         self.actors
             .iter()
-            .any(|a| a.cloth_owed > 0 || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking))
+            .filter(|a| a.chara.face.is_some())
+            .map(|a| a.blink.until_next(a.awake.elapsed().as_secs_f32()))
+            .min_by(f32::total_cmp)
     }
 
     /// Whether a map is shown that things can be dropped on, so that the
@@ -3209,6 +3237,9 @@ impl Live {
             pictures: Default::default(),
             pictures_wanted: Vec::new(),
             shake_since: std::time::Instant::now(),
+            blink: rk_chara::face::Blink::new(id.0 as u32),
+            blink_rate: 1.0,
+            awake: std::time::Instant::now(),
             aim_job: None,
             aim_posed: None,
             guests_next: None,
