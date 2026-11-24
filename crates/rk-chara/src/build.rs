@@ -40,6 +40,9 @@ pub struct BuildOptions {
     /// whether `n_dankon` is drawn at all; the clothes states then say
     /// when. `None` keeps what the card's status says.
     pub visible_son: Option<bool>,
+    /// The uncensor body to wear, by its GUID, in place of the one the
+    /// card names or the plugin picks.
+    pub uncensor_body: Option<String>,
     /// Let hair, skirts, ribbons and the bust settle as the game's
     /// DynamicBone physics does.
     pub physics: bool,
@@ -106,6 +109,7 @@ impl Default for BuildOptions {
             outdoor_shoes: false,
             censor: false,
             visible_son: None,
+            uncensor_body: None,
             physics: true,
             settle_frames: crate::physics::SETTLE_FRAMES,
             frame_time: crate::physics::FRAME_TIME,
@@ -2216,7 +2220,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         use crate::uncensor_selector as us;
         use rk_vfs::uncensor::defaults as ud;
         let uncensors = game.assets.uncensors();
-        let guid = us::stored_body(&card.ext, uncensors);
+        let guid = opts
+            .uncensor_body
+            .clone()
+            .or_else(|| us::stored_body(&card.ext, uncensors));
         let chosen = us::stored_parts(&card.ext, uncensors, u8::from(female));
         let voice_rate = rk_card::map_get(&card.parameter, "voiceRate")
             .and_then(rk_card::Value::as_f64)
