@@ -1975,6 +1975,16 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         crate::state::Playback::Paused => {}
         crate::state::Playback::Stopped => st.clock = 0.0,
     }
+    // A sequence with keys plays to its end, then starts over or holds.
+    let sequence = &st.doc.scene().sequence;
+    if st.playback == crate::state::Playback::Playing && !sequence.tracks.is_empty() && st.clock > sequence.length {
+        if st.loop_sequence {
+            st.clock = st.clock.rem_euclid(sequence.length.max(0.01));
+        } else {
+            st.clock = sequence.length;
+            st.playback = crate::state::Playback::Paused;
+        }
+    }
     live.follow(
         st.doc.scene(),
         &st.project,

@@ -210,7 +210,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Properties => properties::show(ui, k, st),
             Panel::Content => crate::content_panel::show(ui, k, st),
             Panel::Console => console(ui, k, st),
-            Panel::Timeline => timeline(ui, k),
+            Panel::Timeline => crate::timeline::show(ui, k, st),
             Panel::Animator => crate::animator::show(ui, k, st),
         }
     }
@@ -1100,102 +1100,6 @@ fn console(ui: &mut Ui, k: &Look, st: &mut State) {
                 p.text(Pos2::new(x + 12.0, y), Align2::LEFT_CENTER, text, k.mono(), color);
             }
         });
-    ui.allocate_rect(body, Sense::hover());
-}
-
-/// A sketch of the timeline: tracks, a ruler and a playhead. Animation is
-/// a later phase, so nothing here is live.
-fn timeline(ui: &mut Ui, k: &Look) {
-    let t = &k.t;
-    let bar = toolbar(ui, k, |ui| {
-        for g in [icon::SKIP_BACK, icon::PLAY, icon::SKIP_FORWARD] {
-            ui.add_enabled_ui(false, |ui| icon_button(ui, k, g, false));
-        }
-        bar_divider(ui, k);
-        ui.add_space(2.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, k.field()), Sense::hover());
-        let x = label(ui.painter(), k, rect.left_center(), "Frame 24", t.text_bright);
-        label(
-            ui.painter(),
-            k,
-            Pos2::new(x + 6.0, rect.center().y),
-            "of 120",
-            t.text_dim,
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let text = "Not available yet";
-            let w = widgets::text_width(ui, text, k.font()).ceil();
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, k.field()), Sense::hover());
-            label(ui.painter(), k, rect.left_center(), text, t.text_dim);
-        });
-    });
-    let body = ui.available_rect_before_wrap();
-    let p = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
-    hair_h(&p, bar.left(), bar.right(), body.top(), t.line);
-    let names_w = 168.0;
-    let ruler = Rect::from_min_max(
-        Pos2::new(body.left() + names_w, body.top() + 1.0),
-        Pos2::new(body.right(), body.top() + 23.0),
-    );
-    p.rect_filled(ruler, 0.0, t.header);
-    hair_v(&p, ruler.left() - 1.0, body.top(), body.bottom(), t.line);
-    let per_frame = (ruler.width() - 24.0) / 120.0;
-    let frame_x = |f: f32| (ruler.left() + 12.0 + f * per_frame).round();
-    for f in (0..=120).step_by(5) {
-        let x = frame_x(f as f32);
-        let major = f % 10 == 0;
-        hair_v(
-            &p,
-            x,
-            ruler.bottom() - if major { 8.0 } else { 4.0 },
-            ruler.bottom(),
-            t.hover,
-        );
-        if major {
-            p.text(
-                Pos2::new(x + 3.0, ruler.top() + 8.0),
-                Align2::LEFT_CENTER,
-                f.to_string(),
-                k.small(),
-                t.text_dim,
-            );
-        }
-    }
-    let tracks: [(usize, Kind, &str, &[f32]); 4] = [
-        (0, Kind::Character, "Simple", &[]),
-        (1, Kind::Animation, "Animation", &[0.0, 24.0, 60.0]),
-        (1, Kind::Character, "Expression", &[12.0, 48.0]),
-        (0, Kind::Camera, "Camera 1", &[0.0, 90.0]),
-    ];
-    for (i, (depth, kind, name, keys)) in tracks.iter().enumerate() {
-        let top = ruler.bottom() + i as f32 * k.d.row;
-        let y = top + k.d.row / 2.0;
-        let x = body.left() + 12.0 + *depth as f32 * 14.0;
-        glyph(&p, k, Pos2::new(x + 8.0, y), kind.glyph(), 15.0, kind.color());
-        label(&p, k, Pos2::new(x + 22.0, y), name, t.text);
-        hair_h(&p, body.left(), body.right(), top + k.d.row - 1.0, t.line);
-        for key in *keys {
-            let c = Pos2::new(frame_x(*key) + 0.5, y);
-            let d = 4.5;
-            p.add(egui::Shape::convex_polygon(
-                vec![
-                    c + Vec2::new(0.0, -d),
-                    c + Vec2::new(d, 0.0),
-                    c + Vec2::new(0.0, d),
-                    c + Vec2::new(-d, 0.0),
-                ],
-                t.text,
-                Stroke::NONE,
-            ));
-        }
-    }
-    let x = frame_x(24.0);
-    p.rect_filled(
-        Rect::from_min_max(Pos2::new(x - 4.0, ruler.top()), Pos2::new(x + 5.0, ruler.top() + 9.0)),
-        1.0,
-        t.select,
-    );
-    hair_v(&p, x, ruler.top(), body.bottom(), t.select);
     ui.allocate_rect(body, Sense::hover());
 }
 

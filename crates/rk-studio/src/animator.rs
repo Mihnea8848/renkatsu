@@ -16,6 +16,19 @@ use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h, hair_v};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2};
 use egui_phosphor::regular as icon;
+use rk_chara::keys::Ease;
+use rk_chara::pose::BoneEdit;
+
+/// What a menu of the Animator asks for.
+enum KeyAct {
+    Copy(BoneEdit),
+    Move(String, f32),
+    Ease(String, f32, Ease),
+    Delete(String, f32),
+    Set(String),
+    Paste(String),
+    DeleteBone(String),
+}
 
 /// Draws the panel.
 pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
@@ -140,6 +153,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 
     let mut chosen: Option<String> = None;
+    let mut acts: Vec<KeyAct> = Vec::new();
     let listed = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         for (i, (depth, name, shown)) in rows.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row), Sense::click());
@@ -186,21 +200,35 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 } else {
                     t.text
                 };
-                let diamond = vec![
-                    centre + Vec2::new(0.0, -r),
-                    centre + Vec2::new(r, 0.0),
-                    centre + Vec2::new(0.0, r),
-                    centre + Vec2::new(-r, 0.0),
-                ];
-                ui.painter().add(egui::Shape::convex_polygon(
-                    diamond,
-                    fill,
-                    egui::Stroke::new(1.0, Color32::from_black_alpha(140)),
-                ));
+                crate::timeline::diamond(ui.painter(), centre, r, fill);
                 if resp.clicked() {
                     chosen = Some((*name).clone());
                     go_to = Some(key.time);
                 }
+                let (bone, time) = ((*name).clone(), key.time);
+                resp.context_menu(|ui| {
+                    if widgets::menu_item(ui, k, icon::COPY, "Copy key", "", true) {
+                        acts.push(KeyAct::Copy(key.edit));
+                        ui.close();
+                    }
+                    if widgets::menu_item(ui, k, icon::ARROWS_HORIZONTAL, "Move to playhead", "", true) {
+                        acts.push(KeyAct::Move(bone.clone(), time));
+                        ui.close();
+                    }
+                    widgets::menu_sub(ui, k, icon::WAVE_SINE, "Ease", |ui| {
+                        for (ease, text) in [(Ease::Smooth, "Smooth"), (Ease::Linear, "Linear"), (Ease::Step, "Hold")] {
+                            if widgets::check_item(ui, k, key.ease == ease, text, "").clicked() {
+                                acts.push(KeyAct::Ease(bone.clone(), time, ease));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if widgets::menu_item(ui, k, icon::TRASH, "Delete key", "", true) {
+                        acts.push(KeyAct::Delete(bone.clone(), time));
+                        ui.close();
+                    }
+                });
             }
             let resp = if shown != *name {
                 resp.on_hover_text(name.as_str())
@@ -210,6 +238,24 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             if resp.clicked() {
                 chosen = Some((*name).clone());
             }
+            let keyed = keys.contains_key(name.as_str());
+            let can_paste = st.key_clipboard.is_some();
+            resp.context_menu(|ui| {
+                let bone = (*name).clone();
+                if widgets::menu_item(ui, k, icon::KEY, "Set key", "", true) {
+                    acts.push(KeyAct::Set(bone.clone()));
+                    ui.close();
+                }
+                if widgets::menu_item(ui, k, icon::CLIPBOARD, "Paste key", "", can_paste) {
+                    acts.push(KeyAct::Paste(bone.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if widgets::menu_item(ui, k, icon::TRASH, "Delete keys of this bone", "", keyed) {
+                    acts.push(KeyAct::DeleteBone(bone));
+                    ui.close();
+                }
+            });
         }
     });
     // The playhead, over the ruler and the rows.
@@ -226,7 +272,26 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     }
     // Moving the playhead holds the scene there.
     if let Some(time) = go_to {
-        st.clock = st.doc.scene().sequence.snap(time);
-        st.playback = crate::state::Playback::Paused;
+        crate::timeline::go_to(st, time);
+    }
+    // What the menus asked for, the keys at the playhead where they act
+    // at a time.
+    for act in acts {
+        match act {
+            KeyAct::Copy(edit) => st.key_clipboard = Some(edit),
+            KeyAct::Move(bone, from) => {
+                let to = st.clock;
+                crate::keying::move_key(st, id, &bone, from, to);
+            }
+            KeyAct::Ease(bone, time, ease) => crate::keying::set_ease(st, id, &bone, time, ease),
+            KeyAct::Delete(bone, time) => crate::keying::delete_key_at(st, id, &bone, time),
+            KeyAct::Set(bone) => crate::keying::set_keys(st, id, &[bone]),
+            KeyAct::Paste(bone) => {
+                if let Some(edit) = st.key_clipboard {
+                    crate::keying::paste_key(st, id, &bone, edit);
+                }
+            }
+            KeyAct::DeleteBone(bone) => crate::keying::delete_bone_keys(st, id, &bone),
+        }
     }
 }

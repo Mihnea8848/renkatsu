@@ -379,6 +379,10 @@ pub struct State {
     pub updating: Option<crate::self_update::Updating>,
     /// The updated program to start once Renkatsu has quit.
     pub restart_into: Option<PathBuf>,
+    /// A key copied, to paste on a bone.
+    pub key_clipboard: Option<rk_chara::pose::BoneEdit>,
+    /// Playing a sequence with keys starts over at its end.
+    pub loop_sequence: bool,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -872,6 +876,8 @@ impl State {
             update: None,
             updating: None,
             restart_into: None,
+            key_clipboard: None,
+            loop_sequence: true,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,

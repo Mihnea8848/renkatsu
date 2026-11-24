@@ -58,6 +58,7 @@ mod sources;
 mod state;
 mod surface;
 mod theme;
+mod timeline;
 mod viewport;
 mod widgets;
 
