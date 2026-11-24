@@ -26,6 +26,7 @@ pub enum Channel {
     Highlights,
     EyeRoll,
     SmallIrises,
+    Shaking,
     /// A hand's pattern, 0 left and 1 right.
     Hand(usize),
     /// A skin effect, by its place in `crate::skin_effects::EFFECTS`.
@@ -33,7 +34,7 @@ pub enum Channel {
 }
 
 /// The face's values in their order.
-pub const FACE: [Channel; 11] = [
+pub const FACE: [Channel; 12] = [
     Channel::Eyebrows,
     Channel::Eyes,
     Channel::Mouth,
@@ -45,6 +46,7 @@ pub const FACE: [Channel; 11] = [
     Channel::Highlights,
     Channel::EyeRoll,
     Channel::SmallIrises,
+    Channel::Shaking,
 ];
 
 impl Channel {
@@ -71,6 +73,7 @@ impl Channel {
             Channel::Highlights => "highlights",
             Channel::EyeRoll => "eye_roll",
             Channel::SmallIrises => "small_irises",
+            Channel::Shaking => "shaking",
             Channel::Hand(_) | Channel::Skin(_) => "",
         }
     }
@@ -114,6 +117,7 @@ impl Channel {
             Channel::Highlights => "Highlights".into(),
             Channel::EyeRoll => "Eye roll".into(),
             Channel::SmallIrises => "Small irises".into(),
+            Channel::Shaking => "Shaking".into(),
             Channel::Hand(0) => "Left hand".into(),
             Channel::Hand(_) => "Right hand".into(),
             Channel::Skin(i) => crate::skin_effects::EFFECTS.get(i).map_or("Skin", |e| e.name).into(),
@@ -137,6 +141,7 @@ impl Channel {
             Channel::Highlights => flag(!face.hide_highlight),
             Channel::EyeRoll => face.eye_y,
             Channel::SmallIrises => face.eye_small,
+            Channel::Shaking => flag(face.shaking),
             Channel::Hand(side) => layer.hands.get(side).copied().unwrap_or(0) as f32,
             Channel::Skin(i) => layer.skin.get(i).copied().map_or(0.0, f32::from),
         }
@@ -170,6 +175,7 @@ impl Channel {
             Channel::Highlights => face.hide_highlight = whole == 0,
             Channel::EyeRoll => face.eye_y = value,
             Channel::SmallIrises => face.eye_small = value,
+            Channel::Shaking => face.shaking = whole != 0,
             Channel::Hand(_) | Channel::Skin(_) => {}
         }
     }

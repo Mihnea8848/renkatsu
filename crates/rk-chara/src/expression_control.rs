@@ -98,6 +98,8 @@ pub fn read_xml(text: &str) -> Result<Vec<Preset>> {
                 hide_highlight: flag("hideHighlight", false),
                 eye_y: float("eyeY", 0.0),
                 eye_small: float("eyeSmall", 0.0),
+                // The plugin's presets do not shake the eyes.
+                shaking: false,
             },
         });
     }

@@ -1409,6 +1409,20 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             Channel::SmallIrises,
             &mut toggled,
         );
+        row(ui, k, "Shaking", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("shaking key"), keyed.mark(Channel::Shaking));
+            widgets::checkbox(
+                ui,
+                k,
+                rect,
+                ui_id.with("shaking"),
+                &mut face.shaking,
+                "Highlights shake",
+            );
+            if click {
+                toggled.push(Channel::Shaking);
+            }
+        });
         face.blush = face.blush.clamp(0.0, 1.0);
         face.eye_y = face.eye_y.clamp(0.0, 0.5);
         face.eye_small = face.eye_small.clamp(0.0, 1.0);
@@ -1624,10 +1638,17 @@ fn preset_row(
         st.expressions = Some((own, plugin));
     }
     let (own, plugin) = st.expressions.clone().unwrap_or_default();
+    // Presets do not shake the eyes: a pick keeps the shaking as it is.
+    let same = |a: &rk_chara::face::Face, b: &rk_chara::face::Face| {
+        rk_chara::face::Face {
+            shaking: b.shaking,
+            ..*a
+        } == *b
+    };
     let shown = own
         .iter()
         .chain(&plugin)
-        .find(|p| p.face == *face)
+        .find(|p| same(&p.face, face))
         .map_or("Custom", |p| p.name.as_str())
         .to_owned();
     let mut save = false;
@@ -1643,8 +1664,11 @@ fn preset_row(
             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                 for (i, preset) in own.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
-                            *face = preset.face;
+                        if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
+                            *face = rk_chara::face::Face {
+                                shaking: face.shaking,
+                                ..preset.face
+                            };
                             ui.close();
                         }
                         if icon_button(ui, k, icon::TRASH, false).on_hover_text("Delete").clicked() {
@@ -1659,8 +1683,11 @@ fn preset_row(
                             .size(k.d.text - 1.0),
                     );
                     for preset in &plugin {
-                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
-                            *face = preset.face;
+                        if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
+                            *face = rk_chara::face::Face {
+                                shaking: face.shaking,
+                                ..preset.face
+                            };
                             ui.close();
                         }
                     }

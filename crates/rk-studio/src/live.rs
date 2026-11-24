@@ -64,6 +64,9 @@ struct Actor {
     /// for; and the sets asked for and not made yet.
     pictures: std::collections::HashMap<Pictures, Vec<(i32, Arc<egui::ColorImage>)>>,
     pictures_wanted: Vec<Pictures>,
+    /// When the eyes' highlights began to shake, which they do on the real
+    /// clock whether the scene plays or not, as in Studio.
+    shake_since: std::time::Instant,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -614,6 +617,16 @@ impl Actor {
             let skin = self.layer.as_ref().map(|l| l.skin).unwrap_or_default();
             self.chara.show_skin_effects(&skin);
             again = true;
+        }
+        // Shaking highlights take a new size every step of the real clock.
+        if let (Some(rig), Some(face)) = (&self.chara.face, self.layer.as_ref().and_then(|l| l.face)) {
+            if face.shaking {
+                rig.show_at(
+                    &mut self.chara.scene,
+                    Some(&face),
+                    self.shake_since.elapsed().as_secs_f32(),
+                );
+            }
         }
         // A hand pattern not loaded yet is read once.
         let hands = self.layer.as_ref().map_or([0, 0], |l| l.hands);
@@ -2341,9 +2354,11 @@ impl Live {
     }
 
     /// Whether a character's cloth still settles while the scene stands,
-    /// so that frames are drawn until it has.
+    /// or her eyes' highlights shake, so that frames keep being drawn.
     pub fn settling(&self) -> bool {
-        self.actors.iter().any(|a| a.cloth_owed > 0)
+        self.actors
+            .iter()
+            .any(|a| a.cloth_owed > 0 || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking))
     }
 
     /// Whether a map is shown that things can be dropped on, so that the
@@ -2406,6 +2421,7 @@ impl Live {
             hand_problems: Vec::new(),
             pictures: Default::default(),
             pictures_wanted: Vec::new(),
+            shake_since: std::time::Instant::now(),
             phase: None,
             fk,
             warm: false,
