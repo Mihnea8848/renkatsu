@@ -50,6 +50,7 @@ mod properties;
 mod scene;
 mod selector;
 mod self_update;
+mod sequence;
 mod settings;
 mod shortcuts;
 mod sources;

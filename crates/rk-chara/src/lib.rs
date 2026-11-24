@@ -28,6 +28,7 @@ pub mod foreground;
 pub mod hair_accessories;
 pub mod hand_size;
 pub mod invisible_body;
+pub mod keys;
 pub mod loader;
 pub mod material_editor;
 pub mod more_accessories;

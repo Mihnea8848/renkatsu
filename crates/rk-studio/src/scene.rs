@@ -921,6 +921,10 @@ pub struct Scene {
     pub light_groups: Vec<String>,
     #[serde(skip)]
     poses: Poses,
+    /// What changes over time: kept in a file of its own beside the
+    /// scene's (`crate::sequence`), and in the history with the scene.
+    #[serde(skip)]
+    pub sequence: crate::sequence::Sequence,
 }
 
 impl Scene {
@@ -931,6 +935,7 @@ impl Scene {
             objects: Vec::new(),
             light_groups: Vec::new(),
             poses: Poses::default(),
+            sequence: Default::default(),
         }
     }
 
