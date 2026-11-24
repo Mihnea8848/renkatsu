@@ -67,8 +67,10 @@ struct Actor {
     /// When the eyes' highlights began to shake, which they do on the real
     /// clock whether the scene plays or not, as in Studio.
     shake_since: std::time::Instant,
-    /// The shaft was aimed by BetterPenetration last frame.
-    aimed: bool,
+    /// BetterPenetration's aim of the shaft for this frame, and the one the
+    /// character was last posed with.
+    aim_job: Option<AimJob>,
+    aim_posed: Option<AimJob>,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -461,6 +463,11 @@ impl Actor {
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
         self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
+        // BetterPenetration aims the shaft over the animation, FK and IK,
+        // before the dynamic bones move.
+        if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
+            shaft.aim(&mut self.chara.scene, job.entry, job.end, &job.settings, job.vaginal);
+        }
     }
 
     /// Puts the bones back as they were loaded.
@@ -506,6 +513,11 @@ impl Actor {
         };
         // What has to be posed again from the start.
         let mut again = clock.was != Playback::Stopped && clock.now == Playback::Stopped;
+        // A new aim, or none where there was one, poses the shaft again.
+        if self.aim_job != self.aim_posed {
+            self.aim_posed = self.aim_job;
+            again = true;
+        }
 
         // The states the scene asks for, as far as the outfit has them.
         let states = cs::fitted(clothes, &self.chara.clothes.worn);
@@ -776,6 +788,15 @@ impl Live {
     }
 }
 
+/// What BetterPenetration aims a shaft with in a frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AimJob {
+    entry: Vec3,
+    end: Vec3,
+    settings: rk_chara::better_penetration::Settings,
+    vaginal: bool,
+}
+
 /// Where a character's shaft is aimed this frame: the partner, the place
 /// on her, and BetterPenetration's two targets in the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -787,108 +808,68 @@ pub struct Aim {
 }
 
 impl Live {
-    /// Each shaft's aim, once every character is posed: the partner and
-    /// place chosen in the scene, or the nearest the settings' auto-target
-    /// finds, then the two targets on her bones.
-    fn aim_shafts(&mut self, scene: &Scene) {
+    /// The aim of the shaft of the actor at `at`, from the others as they
+    /// are posed now: the partner and place chosen in the scene, or the
+    /// nearest the settings' auto-target finds, then the two targets on her
+    /// bones. The actors with a shaft are updated after the others, so a
+    /// partner is posed for this frame.
+    fn aim_of(&self, at: usize, scene: &Scene) -> Option<(Aim, AimJob)> {
         use rk_chara::better_penetration as bp;
-        self.aims.clear();
-        if !self.actors.iter().any(|a| a.chara.shaft.is_some()) {
-            return;
+        let actor = &self.actors[at];
+        let shaft = actor.chara.shaft.as_ref()?;
+        let Some(Content::Character {
+            better_penetration,
+            penetration_target,
+            ..
+        }) = scene.get(actor.id).map(|o| &o.content)
+        else {
+            return None;
+        };
+        let settings = better_penetration
+            .as_deref()
+            .copied()
+            .unwrap_or(actor.chara.better_penetration);
+        if !settings.enabled {
+            return None;
         }
-        let mut settings_of = Vec::new();
-        let posed: Vec<(ObjectId, Vec<Mat4>, std::collections::HashMap<String, usize>)> = self
-            .actors
-            .iter()
-            .map(|a| {
-                let (world, _) = a.chara.scene.world();
-                (a.id, world, bp::bones_by_name(&a.chara.scene, a.chara.top))
-            })
-            .collect();
-        for (at, actor) in self.actors.iter().enumerate() {
-            let Some(shaft) = &actor.chara.shaft else { continue };
-            let Some(Content::Character {
-                better_penetration,
-                penetration_target,
-                ..
-            }) = scene.get(actor.id).map(|o| &o.content)
-            else {
-                continue;
-            };
-            let settings = better_penetration
-                .as_deref()
-                .copied()
-                .unwrap_or(actor.chara.better_penetration);
-            if !settings.enabled {
-                continue;
+        let (partner, mode) = match penetration_target {
+            Some(t) => (Some(t.partner), t.mode),
+            None => (None, bp::Mode::of_auto(settings.auto_target)?),
+        };
+        let posed = |a: &Actor| (a.chara.scene.world().0, bp::bones_by_name(&a.chara.scene, a.chara.top));
+        let partner = match partner {
+            Some(p) => p,
+            None => {
+                let tip = shaft.tip(&actor.chara.scene.world().0);
+                let candidates = self
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != at)
+                    .filter_map(|(_, a)| {
+                        let (world, names) = posed(a);
+                        Some((a.id, world[*names.get(mode.entry_bone())?].w_axis.truncate()))
+                    });
+                bp::nearest(tip, shaft.base_length, candidates)?
             }
-            settings_of.push((actor.id, settings));
-            let (partner, mode) = match penetration_target {
-                Some(t) => (Some(t.partner), t.mode),
-                None => match bp::Mode::of_auto(settings.auto_target) {
-                    Some(mode) => (None, mode),
-                    None => continue,
-                },
-            };
-            let tip = shaft.tip(&posed[at].1);
-            let partner = partner.or_else(|| {
-                let candidates =
-                    posed
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != at)
-                        .filter_map(|(_, (id, world, names))| {
-                            Some((*id, world[*names.get(mode.entry_bone())?].w_axis.truncate()))
-                        });
-                bp::nearest(tip, shaft.base_length, candidates)
-            });
-            let Some(partner) = partner else { continue };
-            let Some((_, world, names)) = posed.iter().find(|(id, ..)| *id == partner) else {
-                continue;
-            };
-            if let Some((entry, end)) = bp::targets(mode, world, |n| names.get(n).copied()) {
-                self.aims.push((
-                    actor.id,
-                    Aim {
-                        partner,
-                        mode,
-                        entry,
-                        end,
-                    },
-                ));
-            }
-        }
-        // The shafts aimed, and the ones no longer aimed back as they were
-        // loaded.
-        for actor in &mut self.actors {
-            let Some(shaft) = actor.chara.shaft.clone() else {
-                continue;
-            };
-            let aim = self.aims.iter().find(|(id, _)| *id == actor.id).map(|(_, a)| *a);
-            let settings = settings_of.iter().find(|(id, _)| *id == actor.id).map(|(_, s)| *s);
-            match (aim, settings) {
-                (Some(aim), Some(settings)) => {
-                    let vaginal = aim.mode == bp::Mode::Vaginal;
-                    shaft.aim(&mut actor.chara.scene, aim.entry, aim.end, &settings, vaginal);
-                    actor.aimed = true;
-                }
-                _ if actor.aimed => {
-                    let nodes = shaft
-                        .points
-                        .iter()
-                        .chain(&shaft.virtual_points)
-                        .chain(shaft.end.iter())
-                        .chain(std::iter::once(&shaft.balls_top));
-                    for &i in nodes {
-                        if let (Some(node), Some(rest)) = (actor.chara.scene.nodes.get_mut(i), actor.rest.get(i)) {
-                            node.local = *rest;
-                        }
-                    }
-                    actor.aimed = false;
-                }
-                _ => {}
-            }
-        }
+        };
+        let her = self.actors.iter().find(|a| a.id == partner && a.id != actor.id)?;
+        let (world, names) = posed(her);
+        let (entry, end) = bp::targets(mode, &world, |n| names.get(n).copied())?;
+        Some((
+            Aim {
+                partner,
+                mode,
+                entry,
+                end,
+            },
+            AimJob {
+                entry,
+                end,
+                settings,
+                vaginal: mode == bp::Mode::Vaginal,
+            },
+        ))
     }
 
     /// Where a character's shaft is aimed this frame, if anywhere.
@@ -1787,11 +1768,19 @@ impl Live {
         // A character comes after what it is attached to, so that one on
         // a bone is put where the bone is in this frame.
         let mut order: Vec<usize> = (0..self.actors.len()).collect();
-        order.sort_by_key(|i| scene.depth(self.actors[*i].id));
+        // A character with a shaft after the others at its depth, so that
+        // a partner is posed when it is aimed at her.
+        order.sort_by_key(|i| (scene.depth(self.actors[*i].id), self.actors[*i].chara.shaft.is_some()));
         self.poses.clear();
+        self.aims.clear();
         let obstacles = self.obstacles();
         for at in order {
+            let aim = self.aim_of(at, scene);
+            if let Some((aim, _)) = aim {
+                self.aims.push((self.actors[at].id, aim));
+            }
             let actor = &mut self.actors[at];
+            actor.aim_job = aim.map(|(_, job)| job);
             // A map that came or changed has the skirts settle on it.
             actor.among_changed |= actor.chara.physics.set_obstacles(obstacles.clone());
             let Some(object) = scene.get(actor.id) else { continue };
@@ -1861,7 +1850,6 @@ impl Live {
                 }
             }
         }
-        self.aim_shafts(scene);
         self.make_pictures(scene, games, &mods);
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
@@ -2551,7 +2539,8 @@ impl Live {
             pictures: Default::default(),
             pictures_wanted: Vec::new(),
             shake_since: std::time::Instant::now(),
-            aimed: false,
+            aim_job: None,
+            aim_posed: None,
             phase: None,
             fk,
             warm: false,
