@@ -7,10 +7,13 @@
 //! Renkatsu's own, not the game's.
 //!
 //! - The net is built at load from the skirt's chains as they rest: the
-//!   chains go round the waist, with `BETWEEN` columns between each two
-//!   that follow the skirt's round shape, and `ROWS` rows down them.
-//! - (Fifth pass: the net now remembers the shape it settles to under
-//!   gravity at load, see `settle`; what follows on targets is older.)
+//!   chains go round the waist, with columns between each two that
+//!   follow the skirt's round shape and rows down them, `SPACING` apart,
+//!   and on past the chains' ends as far as the cloth hangs.
+//! - It remembers the shape it settles to under gravity at load
+//!   (`settle`), bends by angle (`Bend`) and moves among a body that is
+//!   taken from one frame's pose to the next within the step (`Body`).
+//!   What follows on targets is older.
 //! - Each frame its target is where the chains put the skirt after the
 //!   game's step and the Advanced pass: every point rides the chain bones
 //!   on either side of it, as the mesh is skinned to them.
@@ -2313,9 +2316,9 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_pushes_the_cloth_in_and_never_over_itself() {
+    fn an_arm_in_the_wall_of_the_skirt_pushes_the_cloth_in() {
         // A forearm lies level in the front wall of the skirt, its line
-        // a little inside the cloth: the cloth leaves it inwards.
+        // a little outside the cloth: the cloth leaves it inwards.
         let (scene, mut net) = cone(16, 8, 0.12, 0.2, 0.4);
         let radius_at = |y: f32| 0.12 + 0.08 * (1.0 - y) / 0.4;
         let arm = limb(
@@ -2331,6 +2334,103 @@ mod tests {
                 assert!(p.x < radius_at(0.8) - 0.01, "point {i} at {p} went over the arm");
             }
         }
+    }
+
+    #[test]
+    fn a_grid_puts_its_points_the_spacing_apart() {
+        // 47 cm long, chains 17 cm apart at the hem, points 4.3 cm apart.
+        assert_eq!(grid(0.47, 0.17, 0.043), (3, 12));
+        // Half the spacing: twice the cells.
+        assert_eq!(grid(0.47, 0.17, 0.0215), (7, 23));
+        // Never fewer than the least, never more than the most.
+        assert_eq!(grid(0.05, 0.01, 0.043), (0, ROWS.0));
+        assert_eq!(grid(5.0, 5.0, 0.01), (BETWEEN, ROWS.1));
+    }
+
+    #[test]
+    fn cloth_past_a_chains_end_is_measured_along_the_chain() {
+        let (end, on) = (Vec3::new(0.0, 0.5, 0.2), Vec3::new(0.0, -0.8, 0.6));
+        assert!((past_one(end + on * 0.1 + Vec3::X * 0.3, end, on) - 0.1).abs() < 1e-6);
+        assert_eq!(past_one(end - on * 0.1, end, on), 0.0);
+    }
+
+    #[test]
+    fn a_moving_body_is_part_of_the_way_there_within_a_step() {
+        let (from, to) = ([Mat4::IDENTITY], [Mat4::from_translation(Vec3::X)]);
+        let body = Body::Moving {
+            shells: &[],
+            from: &from,
+            to: &to,
+        };
+        let places = body.places(0.25).expect("it moves");
+        assert!((places[0].w_axis.x - 0.25).abs() < 1e-6);
+        assert!(Body::Still(&[]).places(0.25).is_none());
+    }
+
+    #[test]
+    fn cloth_on_a_limb_goes_along_with_it() {
+        // A thigh sticks out level through the front of the skirt and
+        // the cloth has come to rest on it. It then slides along its own
+        // length by 2 cm over one frame: the cloth pressed on it goes
+        // most of that way with it, where friction in the world's space
+        // would have held it back.
+        let (scene, mut net) = cone(16, 8, 0.12, 0.2, 0.4);
+        let thigh = limb(Vec3::new(0.0, 0.8, 0.0), Vec3::new(0.5, 0.8, 0.0), 0.07, false);
+        run(&scene, &mut net, std::slice::from_ref(&thigh), None, 120);
+        let (i, at) = net
+            .pos
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(i, _)| net.pressed[i] > 0.5)
+            .max_by(|a, b| a.1.y.total_cmp(&b.1.y))
+            .expect("cloth lies on the thigh");
+        let shell = Shell {
+            node: 0,
+            a: Vec3::new(0.0, 0.8, 0.0),
+            b: Vec3::new(0.5, 0.8, 0.0),
+            e1: Vec3::Y,
+            e2: Vec3::Z,
+            stations: 2,
+            radii: vec![0.07; 2 * crate::physics::shell::ANGLES].into(),
+            caps: [true, true],
+            outside: false,
+        };
+        let (from, to) = ([Mat4::IDENTITY], [Mat4::from_translation(Vec3::X * 0.02)]);
+        let body = Body::Moving {
+            shells: std::slice::from_ref(&shell),
+            from: &from,
+            to: &to,
+        };
+        net.advance(&body, &Mat4::IDENTITY, None, None, 1.0 / 60.0);
+        let went = net.pos[i].x - at.x;
+        assert!(went > 0.01, "the cloth went {went} of 0.02 with the thigh");
+    }
+
+    #[test]
+    fn a_ring_cut_open_has_no_bend_across_the_cut() {
+        // No cloth from column 1 to column 2, in every row.
+        let (cols, rows) = (6, 4);
+        let mut open = vec![0u8; cols * rows];
+        for r in 0..rows {
+            open[r * cols + 1] = OPEN_ROUND;
+        }
+        let b = bends(cols, rows, &open);
+        // Columns 1 and 2 have a neighbour on one side only.
+        assert!(!b
+            .iter()
+            .any(|b| b.round && (b.at as usize % cols == 1 || b.at as usize % cols == 2)));
+        // Their bends down the skirt are measured round that one side.
+        let down = b
+            .iter()
+            .find(|b| !b.round && b.at as usize == cols + 1)
+            .expect("a bend");
+        assert_eq!(down.axis, [cols as u32, cols as u32 + 1]);
+        let down = b
+            .iter()
+            .find(|b| !b.round && b.at as usize == cols + 2)
+            .expect("a bend");
+        assert_eq!(down.axis, [cols as u32 + 2, cols as u32 + 3]);
     }
 
     #[test]
