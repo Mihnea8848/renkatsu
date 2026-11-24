@@ -1316,7 +1316,8 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
     if section(ui, k, st, FACE_SECTION, "Expression") {
         let mut face = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
         preset_row(ui, k, st, waiting, ui_id.with("preset"), &mut face);
-        let number = |n: i32| n.to_string();
+        let eyebrow_name = |n: i32| rk_chara::face::eyebrow_label(n).map_or_else(|| n.to_string(), str::to_owned);
+        let mouth_name = |n: i32| rk_chara::face::mouth_label(n).map_or_else(|| n.to_string(), str::to_owned);
         let eye_name = |n: i32| rk_chara::face::eye_label(n).map_or_else(|| n.to_string(), str::to_owned);
         pattern_row(
             ui,
@@ -1327,7 +1328,7 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             "Eyebrows",
             waiting,
             ui_id.with("eyebrows"),
-            &number,
+            &eyebrow_name,
             &mut face.eyebrows,
         );
         pattern_row(
@@ -1351,7 +1352,7 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             "Mouth",
             waiting,
             ui_id.with("mouth"),
-            &number,
+            &mouth_name,
             &mut face.mouth,
         );
         row(ui, k, "Eyes open", waiting, |ui, rect| {

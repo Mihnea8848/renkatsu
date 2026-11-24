@@ -22,6 +22,54 @@ pub struct Preset {
     pub face: Face,
 }
 
+/// The plugin's own preset names in English: the leading word, then
+/// whatever number or share follows it (`笑顔2`, `涙Lv1`, `頬50%`).
+const NAMES: &[(&str, &str)] = &[
+    ("デフォルト", "Default"),
+    ("笑顔", "Smile"),
+    ("切ない", "Aching"),
+    ("照れ", "Shy"),
+    ("怒り", "Angry"),
+    ("真剣", "Serious"),
+    ("つまらない", "Bored"),
+    ("苦しい", "Pained"),
+    ("嫌悪", "Disgusted"),
+    ("思案", "Thinking"),
+    ("悲しい", "Sad"),
+    ("泣き", "Crying"),
+    ("焦り", "Flustered"),
+    ("落胆", "Dejected"),
+    ("困る", "Troubled"),
+    ("ドヤ", "Smug"),
+    ("緊張", "Nervous"),
+    ("痛い", "Hurt"),
+    ("感じ", "Aroused"),
+    ("涙Lv", "Tears"),
+    ("頬", "Blush"),
+    ("瞳Y", "Eye roll"),
+    ("瞳小", "Small irises"),
+];
+
+/// A preset's name in English when it is one of the plugin's own; any
+/// other name stays as it is.
+pub fn english(name: &str) -> String {
+    let found = NAMES
+        .iter()
+        .filter(|(jp, _)| name.starts_with(jp))
+        .max_by_key(|(jp, _)| jp.len());
+    match found {
+        Some((jp, en)) => {
+            let rest = name[jp.len()..].trim();
+            if rest.is_empty() {
+                (*en).to_owned()
+            } else {
+                format!("{en} {rest}")
+            }
+        }
+        None => name.to_owned(),
+    }
+}
+
 /// The presets of an `ExpressionControl.xml`, in its order. Values it does
 /// not store keep a new status's.
 pub fn read_xml(text: &str) -> Result<Vec<Preset>> {
@@ -37,7 +85,7 @@ pub fn read_xml(text: &str) -> Result<Vec<Preset>> {
         let flag = |key: &str, default: bool| text(key).map_or(default, |v| v.trim().eq_ignore_ascii_case("true"));
         let start = Face::default();
         out.push(Preset {
-            name: text("name").unwrap_or_default().to_owned(),
+            name: english(text("name").unwrap_or_default()),
             face: Face {
                 eyebrows: int("eyebrowPtn", start.eyebrows),
                 eyes: int("eyesPtn", start.eyes),
@@ -132,6 +180,17 @@ mod tests {
         let presets = of_game(&dir);
         assert!(!presets.is_empty());
         assert!(presets.iter().all(|p| !p.name.is_empty()));
+    }
+
+    #[test]
+    fn the_plugins_names_read_in_english() {
+        assert_eq!(english("デフォルト"), "Default");
+        assert_eq!(english("笑顔2"), "Smile 2");
+        assert_eq!(english("涙Lv3"), "Tears 3");
+        assert_eq!(english("頬50%"), "Blush 50%");
+        assert_eq!(english("瞳小25%"), "Small irises 25%");
+        assert_eq!(english("瞳Y10%"), "Eye roll 10%");
+        assert_eq!(english("My face"), "My face");
     }
 
     #[test]

@@ -47,6 +47,79 @@ pub struct EyeRow {
     pub expression: Option<Arc<Image>>,
 }
 
+/// The game's eyebrow patterns by the names given here, from their
+/// Japanese ones.
+pub fn eyebrow_label(pattern: i32) -> Option<&'static str> {
+    const NAMES: [&str; 17] = [
+        "Default",
+        "Angry",
+        "Troubled",
+        "Bored",
+        "Doubtful left",
+        "Doubtful right",
+        "Thinking left",
+        "Thinking right",
+        "Cross left",
+        "Cross right",
+        "Serious",
+        "Uneasy",
+        "Surprised",
+        "Dejected",
+        "Smug",
+        "Wink left",
+        "Wink right",
+    ];
+    usize::try_from(pattern).ok().and_then(|i| NAMES.get(i)).copied()
+}
+
+/// The game's mouth patterns by the names given here, from their Japanese
+/// ones; the vowels are the mouth shapes of speech.
+pub fn mouth_label(pattern: i32) -> Option<&'static str> {
+    const NAMES: [&str; 40] = [
+        "Default",
+        "Smile",
+        "Happy",
+        "Happy, small",
+        "Happy, smaller",
+        "Excited",
+        "Excited, small",
+        "Excited, smaller",
+        "Angry",
+        "Angry 2",
+        "Serious",
+        "Serious 2",
+        "Disgusted",
+        "Lonely",
+        "Flustered",
+        "Displeased",
+        "Fed up",
+        "Surprised",
+        "Surprised, small",
+        "Smug",
+        "Tongue out",
+        "Licking",
+        "Holding in the mouth",
+        "Kiss",
+        "Open, tongue out",
+        "A, small",
+        "A, large",
+        "I, small",
+        "I, large",
+        "U, small",
+        "U, large",
+        "E, small",
+        "E, large",
+        "O, small",
+        "O, large",
+        "N, small",
+        "N, large",
+        "Cat mouth",
+        "Triangle",
+        "Cartoon grin",
+    ];
+    usize::try_from(pattern).ok().and_then(|i| NAMES.get(i)).copied()
+}
+
 /// The game's eye patterns by the names given here, from their Japanese
 /// ones.
 pub fn eye_label(id: i32) -> Option<&'static str> {
