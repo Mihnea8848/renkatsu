@@ -326,7 +326,7 @@ mod tests {
         st.doc.edit(object, false);
         let hand = rk_chara::pose::ik_key(3);
         st.pose_ik = Some(3);
-        assert_eq!(bones_to_key(&st, her), [hand.clone()]);
+        assert_eq!(bones_to_key(&st, her), std::slice::from_ref(&hand));
         st.clock = 1.0;
         set_keys(&mut st, her, std::slice::from_ref(&hand));
         st.clock = 2.0;
