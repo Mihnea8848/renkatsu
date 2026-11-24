@@ -476,7 +476,8 @@ impl Rig {
     /// The highlights, and KK_ExpressionControl's eye roll and size, which
     /// it lays every frame over the eye look's placement
     /// (`ProcEyeY`, `ProcEyeSmall`): the scale grows by the size, the
-    /// offset moves back by half of it, and up by the roll.
+    /// offset moves back by half of it, and up by the roll. The picture in
+    /// the irises rolls along, as KK_Ahegao rolls it.
     fn show_irises(&self, scene: &mut Scene, face: &Face, seconds: f32) {
         let small = face.eye_small.clamp(0.0, 1.0);
         let roll = face.eye_y.clamp(0.0, 0.5);
@@ -495,6 +496,13 @@ impl Rig {
                 }
                 slot.scale = [place[0] + small, place[1] + small];
                 slot.offset = [place[2] - small / 2.0, place[3] - small / 2.0 - roll];
+            }
+            // The picture in the irises rolls with them, as KK_Ahegao moves
+            // it (`_expression` to the material's offset, up by twice the
+            // roll); KK_ExpressionControl leaves it behind.
+            let st = m.tex_st.get("_expression").copied().unwrap_or([1.0, 1.0, 0.0, 0.0]);
+            if let Some(slot) = m.textures.get_mut("_expression") {
+                slot.offset = [st[2], st[3] - roll * 2.0];
             }
         }
     }

@@ -1832,7 +1832,15 @@ fn preset_row(
             .unwrap_or_default();
         let plugin = rk_core::Config::load()
             .ok()
-            .map(|c| ec::of_game(&c.game_dir))
+            .map(|c| {
+                [
+                    ("ExpressionControl", ec::of_game(&c.game_dir)),
+                    ("Ahegao", rk_chara::ahegao::of_game(&c.game_dir)),
+                ]
+                .into_iter()
+                .filter(|(_, presets)| !presets.is_empty())
+                .collect()
+            })
             .unwrap_or_default();
         st.expressions = Some((own, plugin));
     }
@@ -1846,7 +1854,7 @@ fn preset_row(
     };
     let shown = own
         .iter()
-        .chain(&plugin)
+        .chain(plugin.iter().flat_map(|(_, presets)| presets))
         .find(|p| same(&p.face, face))
         .map_or("Custom", |p| p.name.as_str())
         .to_owned();
@@ -1875,13 +1883,9 @@ fn preset_row(
                         }
                     });
                 }
-                if !plugin.is_empty() {
-                    ui.label(
-                        egui::RichText::new("ExpressionControl")
-                            .color(k.t.text_dim)
-                            .size(k.d.text - 1.0),
-                    );
-                    for preset in &plugin {
+                for (heading, presets) in &plugin {
+                    ui.label(egui::RichText::new(*heading).color(k.t.text_dim).size(k.d.text - 1.0));
+                    for preset in presets {
                         if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
                             *face = rk_chara::face::Face {
                                 shaking: face.shaking,

@@ -7,6 +7,7 @@
 pub mod abmx;
 pub mod accessory_clothes;
 pub mod accessory_states;
+pub mod ahegao;
 pub mod animation_file;
 pub mod animations;
 pub mod better_penetration;
