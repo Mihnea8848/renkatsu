@@ -472,6 +472,8 @@ pub enum Begin {
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub dt: f32,
+    /// None only moves the cloth as `begin` says, for a character put
+    /// somewhere else while nothing runs.
     pub substeps: u32,
     /// Where each slot is in the world at each boundary between
     /// substeps: `(substeps + 1) * slots`, the frame's start first.
@@ -680,6 +682,9 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 state.vel[i] = m.transform_vector3(state.vel[i]);
             }
         }
+    }
+    if frame.substeps == 0 {
+        return;
     }
     // The map's planes, from where the points are as the frame begins.
     let reach = FASTEST * frame.dt + material.thickness;
@@ -1149,7 +1154,6 @@ pub struct Drape {
     /// How far the cloth reaches from its waists.
     reach: f32,
     ready: bool,
-    carried: Option<Mat4>,
     nearby: Nearby,
     map: Option<(usize, Arc<Vec<[Vec3; 3]>>)>,
     /// The fastest a shell's middle went in a frame so far, in metres.
@@ -1205,7 +1209,6 @@ impl Clone for Drape {
             middles: Vec::new(),
             reach: self.reach,
             ready: false,
-            carried: None,
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
@@ -1447,7 +1450,6 @@ impl Drape {
             rest,
             reach,
             ready: false,
-            carried: None,
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
@@ -1475,9 +1477,16 @@ impl Drape {
         for m in &mut self.was {
             *m = moved * *m;
         }
-        self.carried = Some(match self.carried {
-            Some(before) => moved * before,
-            None => moved,
+        // At once, not with the next frame: the character may be drawn
+        // in its new place before anything runs again.
+        self.live.push(Frame {
+            dt: 0.0,
+            substeps: 0,
+            poses: poses(&self.was, &self.was, 0),
+            begin: Begin::Carry(moved),
+            arms: false,
+            floor: None,
+            map: None,
         });
     }
 
@@ -1546,7 +1555,6 @@ impl Drape {
                 from = to;
             }
             self.was.clone_from(&now);
-            self.carried = None;
             self.ready = true;
         }
         if dt > 0.0 {
@@ -1567,7 +1575,7 @@ impl Drape {
                 dt,
                 substeps: subs,
                 poses: poses(&self.was, &now, subs),
-                begin: self.carried.take().map_or(Begin::Keep, Begin::Carry),
+                begin: Begin::Keep,
                 arms: true,
                 floor,
                 map,

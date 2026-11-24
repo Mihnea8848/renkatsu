@@ -314,8 +314,10 @@ impl Gpu {
         setup: &Setup,
         frame: &Frame,
     ) {
+        // A frame of no substeps only moves the cloth with its character.
+        let only_begin = frame.substeps == 0;
         let subs = frame.substeps.clamp(1, MOST_SUBSTEPS);
-        let h = frame.dt / subs as f32;
+        let h = if only_begin { 0.0 } else { frame.dt / subs as f32 };
         // The map's triangles, when they are others than last time.
         let mut flags = 0;
         let mut triangles = 0;
@@ -385,9 +387,11 @@ impl Gpu {
         }
         queue.write_buffer(&self.subs, 0, &bytes);
         // The pass that dresses reads the body as the frame leaves it.
-        sub.boundary = subs;
+        sub.boundary = if only_begin { 0 } else { subs };
         queue.write_buffer(&self.subs, DRESS_SLOT * SUB_STRIDE, bytemuck::bytes_of(&sub));
-        self.last = Some(frame.clone());
+        if !only_begin {
+            self.last = Some(frame.clone());
+        }
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -403,10 +407,12 @@ impl Gpu {
             if flags & (RESET | CARRY) != 0 {
                 go(&pipelines.begin, &self.begin, 0);
             }
-            go(&pipelines.find, &self.find, 0);
-            for s in 0..subs {
-                go(&pipelines.predict, &self.predict, s);
-                go(&pipelines.solve, &self.solve, s);
+            if !only_begin {
+                go(&pipelines.find, &self.find, 0);
+                for s in 0..subs {
+                    go(&pipelines.predict, &self.predict, s);
+                    go(&pipelines.solve, &self.solve, s);
+                }
             }
             go(&pipelines.frames, &self.frames, 0);
         }
