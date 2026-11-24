@@ -287,6 +287,35 @@ impl<'g> Builder<'g> {
         });
     }
 
+    /// The physics an uncensor's prefab brings: in the game UncensorSelector
+    /// destroys the prefab once its meshes are taken, and only what Mod
+    /// Bone Implantor moved into the skeleton lives on
+    /// (`TransferBonesOverride`), with the dynamic bones and colliders on
+    /// it. Those take their own colliders, as their prefab set them.
+    fn implanted_physics(&mut self, donor: &Instance, implants: Option<&crate::uncensor_selector::Implants>) {
+        let Some(implants) = implants else { return };
+        let scripts: Vec<(usize, rk_vfs::ObjRef)> = donor
+            .scripts
+            .iter()
+            .filter(|(node, _)| implants.bones.contains(node))
+            .cloned()
+            .collect();
+        if scripts.is_empty() {
+            return;
+        }
+        self.physics_sources.push(PhysicsSource {
+            scripts,
+            transforms: donor.transform_nodes.clone(),
+            part: false,
+            copy: false,
+            shake: true,
+            slot: None,
+            root: donor.root,
+            belongs: crate::physics::Belongs::Body,
+            object: None,
+        });
+    }
+
     /// Instantiates an item's main prefab; `None` for empty slots.
     fn part(&mut self, label: &str, item: &Item, parent: Option<usize>, part: Part) -> Option<Instance> {
         let (ab, data) = (item.get("MainAB")?, item.get("MainData")?);
@@ -2249,6 +2278,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         // have moved into the skeleton.
                         let pairs = b.implant_pairs(&donor);
                         let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        b.implanted_physics(&donor, implants.as_ref());
                         us::swap_meshes(&mut b.scene, &mut body, &donor, data, uncensors, implants.as_ref());
                         from = (vpath.clone(), data.asset.clone());
                     }
@@ -2300,6 +2330,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     Ok(donor) => {
                         let pairs = b.implant_pairs(&donor);
                         let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        b.implanted_physics(&donor, implants.as_ref());
                         us::swap_parts(&mut b.scene, &body, &donor, names, implants.as_ref());
                     }
                     Err(e) => b.loader.warn(format!("uncensor {what} {}: {e:#}", data.guid)),
