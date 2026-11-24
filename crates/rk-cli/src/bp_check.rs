@@ -193,7 +193,7 @@ pub fn check(dir: &Path, only: &[String], bones_listed: bool) -> Result<()> {
                 .join("UserData/chara/male")
                 .join(field(&line, "partner").unwrap_or_default()),
         )
-        .map(|c| c.ext.get(bp::KEY).is_some())
+        .map(|c| c.ext.contains_key(bp::KEY))
         .unwrap_or(false);
         let settings = if card_has {
             him.better_penetration
