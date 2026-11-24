@@ -160,6 +160,10 @@ fn between(from: &Mat4, to: &Mat4, f: f32) -> Mat4 {
 }
 
 /// The kinds of link, which give its compliance and its length.
+/// Bits per point of `Net::open`: no cloth to the next point round the
+/// skirt, and none at the point at all.
+const OPEN_ROUND: u8 = 1;
+const OPEN_POINT: u8 = 2;
 const DOWN: u8 = 0;
 const ACROSS: u8 = 1;
 const DIAGONAL: u8 = 2;
@@ -234,6 +238,10 @@ pub struct Net {
     outward: f32,
     /// Rows from the waist down that are fixed to the body.
     fixed: usize,
+    /// Per point: where the garment has no cloth (`OPEN_ROUND`,
+    /// `OPEN_POINT`), as with the two flaps of a slit dress, whose net
+    /// is a ring all the same. Empty when it has cloth all round.
+    open: Vec<u8>,
     /// Per point: whether it is pressed on something, 0 to 1, which
     /// fades over a few steps.
     pressed: Vec<f32>,
@@ -437,6 +445,7 @@ impl Net {
             gap: vec![THICKNESS; rest.len()],
             outward: outward(&rest, cols, rows),
             fixed,
+            open: Vec::new(),
             hold: vec![0.0; rest.len()],
             pressed: vec![0.0; rest.len()],
             shell_rest: Vec::new(),
@@ -779,6 +788,11 @@ impl Net {
             (tune("restore_top", RESTORE.0), tune("restore_hem", RESTORE.1))
         };
         let fixed = self.fixed * cols;
+        // Points the garment has no cloth at stay on the target, out of
+        // everything's way.
+        let none: Vec<bool> = (0..cols * rows)
+            .map(|i| self.open.get(i).is_some_and(|o| o & OPEN_POINT != 0))
+            .collect();
         let mut hold = std::mem::take(&mut self.hold);
         hold.resize(cols * rows, 0.0);
         for (i, k) in hold.iter_mut().enumerate() {
@@ -794,7 +808,7 @@ impl Net {
         let heavy = tune("heavy", HEAVY);
         let light: Vec<f32> = (0..cols * rows)
             .map(|i| {
-                if i < fixed {
+                if i < fixed || none[i] {
                     0.0
                 } else {
                     1.0 / (1.0 + heavy * self.pressed[i])
@@ -826,7 +840,11 @@ impl Net {
                 .collect();
             let old = self.pos.clone();
             self.pos[..fixed].copy_from_slice(&aim[..fixed]);
-            for (p, v) in self.pos.iter_mut().zip(&mut self.vel).skip(fixed) {
+            for (i, (p, v)) in self.pos.iter_mut().zip(&mut self.vel).enumerate().skip(fixed) {
+                if none[i] {
+                    *p = aim[i];
+                    continue;
+                }
                 *v = (*v + gravity * h) * damping;
                 *p += *v * h;
             }
@@ -834,6 +852,9 @@ impl Net {
             loose.copy_from_slice(&light);
             caught.fill(false);
             for i in fixed..cols * rows {
+                if none[i] {
+                    continue;
+                }
                 // No further from the top of its column than the cloth
                 // is long.
                 let top = self.pos[i % cols];
@@ -970,6 +991,9 @@ impl Net {
                     rest_on(&mut column, &self.nearby.triangles);
                     for (r, p) in column.iter().enumerate() {
                         let i = r * cols + c;
+                        if none[i] {
+                            continue;
+                        }
                         let pushed = *p - self.pos[i];
                         let far = pushed.length();
                         if far > 1e-6 {
@@ -987,8 +1011,8 @@ impl Net {
             if again {
                 lengths_pass(&self.links, &lengths, &kinds, &loose, &mut self.pos, h, true);
             }
-            for ((v, p), o) in self.vel.iter_mut().zip(&self.pos).zip(&old).skip(fixed) {
-                *v = (*p - *o) / h;
+            for (i, ((v, p), o)) in self.vel.iter_mut().zip(&self.pos).zip(&old).enumerate().skip(fixed) {
+                *v = if none[i] { Vec3::ZERO } else { (*p - *o) / h };
             }
         }
     }
@@ -998,10 +1022,102 @@ impl Net {
     fn shape(&self) -> NetShape {
         NetShape {
             active: self.active && self.ready,
-            pos: frames(&self.pos, self.cols, self.rows),
-            target: frames(&self.target, self.cols, self.rows),
+            pos: frames(&self.pos, self.cols, self.rows, &self.open),
+            target: frames(&self.target, self.cols, self.rows, &self.open),
             inner: self.gap.iter().map(|g| (THICKNESS - g) * self.outward).collect(),
             pressed: self.pressed.clone(),
+        }
+    }
+}
+
+impl Net {
+    /// Tells the net which of its cells the garment has cloth in
+    /// (`cols` per row, `rows - 1` rows): links through the others go,
+    /// and points with no cloth round them stay out of the way. A slit
+    /// dress is two flaps then, not a tube.
+    fn cover(&mut self, cells: &[bool]) {
+        let (cols, rows) = (self.cols, self.rows);
+        if cells.iter().all(|&c| c) {
+            return;
+        }
+        let cell = |c: usize, r: isize| r >= 0 && (r as usize) < rows - 1 && cells[r as usize * cols + c % cols];
+        let mut open = vec![0u8; cols * rows];
+        for r in 0..rows {
+            for c in 0..cols {
+                let i = r * cols + c;
+                let last = (c + cols - 1) % cols;
+                let r = r as isize;
+                if !cell(c, r - 1) && !cell(c, r) {
+                    open[i] |= OPEN_ROUND;
+                }
+                if !cell(c, r - 1) && !cell(c, r) && !cell(last, r - 1) && !cell(last, r) {
+                    open[i] |= OPEN_POINT;
+                }
+            }
+        }
+        // The fixed rows stay whole: they sit on the body.
+        for o in &mut open[..self.fixed * cols] {
+            *o = 0;
+        }
+        let round = |i: u32| open[i as usize] & OPEN_ROUND == 0;
+        let point = |i: u32| open[i as usize] & OPEN_POINT == 0;
+        let before = |i: u32| {
+            let i = i as usize;
+            (i / cols * cols + (i % cols + cols - 1) % cols) as u32
+        };
+        self.links.retain(|&(a, b, kind)| match kind {
+            ACROSS => round(a),
+            // From `a` to the one after the next: both steps.
+            BEND_ROUND => round(a) && round(before(b)),
+            DOWN | BEND_DOWN => point(a) && point(b),
+            // A diagonal lies in one cell: `a` is in its upper row, at
+            // its first column or the one after.
+            _ => {
+                let (ca, ra) = (a as usize % cols, a as usize / cols);
+                let first = if (b as usize % cols) == (ca + 1) % cols {
+                    ca
+                } else {
+                    (ca + cols - 1) % cols
+                };
+                cells[ra * cols + first]
+            }
+        });
+        if std::env::var("RK_NET_DEBUG").is_ok() {
+            let none = open.iter().filter(|&&o| o & OPEN_POINT != 0).count();
+            eprintln!(
+                "net cover: {} of {} cells have cloth, {none} points have none",
+                cells.iter().filter(|&&c| c).count(),
+                cells.len()
+            );
+        }
+        self.open = open;
+    }
+}
+
+/// The cells of a net (`cols` per row, `rows - 1` rows) that a triangle
+/// of a mesh bound to it lies in, added to `cells`. `on_net` gives each
+/// bound vertex's place on the net as a column and a row with fractions.
+fn covered(cells: &mut [bool], cols: usize, indices: &[u32], on_net: &std::collections::HashMap<u32, [f32; 2]>) {
+    let rows = cells.len() / cols;
+    for t in indices.chunks_exact(3) {
+        let (Some(a), Some(b), Some(c)) = (on_net.get(&t[0]), on_net.get(&t[1]), on_net.get(&t[2])) else {
+            continue;
+        };
+        // Columns go round: the other two are taken the short way from
+        // the first.
+        let near = |u: f32| a[0] + (u - a[0] + cols as f32 * 0.5).rem_euclid(cols as f32) - cols as f32 * 0.5;
+        let us = [a[0], near(b[0]), near(c[0])];
+        let vs = [a[1], b[1], c[1]];
+        // The triangle's box on the net, a little smaller so that one
+        // that only touches a cell's side does not count for it.
+        let lo = |x: [f32; 3]| x.iter().copied().fold(f32::MAX, f32::min) + 0.05;
+        let hi = |x: [f32; 3]| x.iter().copied().fold(f32::MIN, f32::max) - 0.05;
+        let (u0, u1) = (lo(us).floor() as i64, hi(us).max(lo(us)).floor() as i64);
+        let (v0, v1) = (lo(vs).floor() as i64, hi(vs).max(lo(vs)).floor() as i64);
+        for v in v0.max(0)..=v1.min(rows as i64 - 1) {
+            for u in u0..=u1 {
+                cells[v as usize * cols + u.rem_euclid(cols as i64) as usize] = true;
+            }
         }
     }
 }
@@ -1080,12 +1196,22 @@ fn outward(points: &[Vec3], cols: usize, rows: usize) -> f32 {
 
 /// Each point of a grid with the directions round the waist and down
 /// the skirt there.
-fn frames(points: &[Vec3], cols: usize, rows: usize) -> Vec<[Vec3; 3]> {
+fn frames(points: &[Vec3], cols: usize, rows: usize, open: &[u8]) -> Vec<[Vec3; 3]> {
+    // Whether there is cloth from a point to the next round the skirt,
+    // and to the next down it.
+    let joined = |i: usize, way: u8| open.get(i).is_none_or(|o| o & way == 0);
     (0..cols * rows)
         .map(|i| {
             let (c, r) = (i % cols, i / cols);
             let at = |c: usize, r: usize| points[r * cols + c];
-            let round = at((c + 1) % cols, r) - at((c + cols - 1) % cols, r);
+            let (next, last) = ((c + 1) % cols, (c + cols - 1) % cols);
+            // Round the skirt by the neighbours there is cloth to: at
+            // the edge of a slit only the one on its own side.
+            let round = match (joined(i, OPEN_ROUND), joined(r * cols + last, OPEN_ROUND)) {
+                (true, false) => (at(next, r) - at(c, r)) * 2.0,
+                (false, true) => (at(c, r) - at(last, r)) * 2.0,
+                _ => at(next, r) - at(last, r),
+            };
             // The hem's row takes two rows up: one cell tucked under
             // at the hem does not turn the surface over.
             let down = if r + 1 == rows && rows > 2 {
@@ -1190,7 +1316,13 @@ pub(super) fn bind(scene: &Scene, nets: &mut [Net]) -> Vec<Binding> {
     // Per net point: how far out of the net the innermost layer bound
     // there is.
     let mut inner: Vec<Vec<f32>> = nets.iter().map(|n| vec![f32::MAX; n.rest.len()]).collect();
-    let mut out = Vec::new();
+    let mut out: Vec<Binding> = Vec::new();
+    // Per binding and vertex: its place, normal and tangent at rest,
+    // which are put in the net's frame once the nets know where they
+    // have cloth.
+    let mut resting: Vec<Vec<[Vec3; 3]>> = Vec::new();
+    // Per net: the cells some bound triangle lies in.
+    let mut cells: Vec<Vec<bool>> = nets.iter().map(|n| vec![false; n.cols * (n.rows - 1)]).collect();
     for (ri, r) in scene.renderers.iter().enumerate() {
         if !r.skinned || r.mesh.skin.is_empty() || r.mesh.positions.is_empty() {
             continue;
@@ -1202,8 +1334,8 @@ pub(super) fn bind(scene: &Scene, nets: &mut [Net]) -> Vec<Binding> {
         let draw = scene.draw_mesh(r, &world);
         let positions = draw.positions();
         let posed = draw.posed();
-        let rest_frames: Vec<Vec<[Vec3; 3]>> = nets.iter().map(|n| frames(&n.rest, n.cols, n.rows)).collect();
         let mut vertices = Vec::new();
+        let mut places = Vec::new();
         for (vi, (sv, p)) in r.mesh.skin.iter().zip(&positions).enumerate() {
             // The net the vertex is most weighted to, and by how much.
             let mut share = [0.0f32; 4];
@@ -1242,31 +1374,16 @@ pub(super) fn bind(scene: &Scene, nets: &mut [Net]) -> Vec<Binding> {
             if weight <= 1e-3 {
                 continue;
             }
-            let mut bound = Bound {
+            let t = posed.tangents[vi];
+            places.push([p, Vec3::from(posed.normals[vi]), Vec3::new(t[0], t[1], t[2])]);
+            vertices.push(Bound {
                 vertex: vi as u32,
                 net: k as u32,
                 corners: nearest.1,
                 bary: nearest.2,
                 weight,
                 local: [Vec3::ZERO; 3],
-            };
-            let (at, turn) = surface(&rest_frames[k], &bound);
-            let back = turn.transpose();
-            let t = posed.tangents[vi];
-            bound.local = [
-                back * (p - at),
-                back * Vec3::from(posed.normals[vi]),
-                back * Vec3::new(t[0], t[1], t[2]),
-            ];
-            if weight > 0.5 {
-                let out_of = bound.local[0].z * net.outward;
-                for (&c, &w) in bound.corners.iter().zip(&bound.bary) {
-                    if w > 0.2 {
-                        inner[k][c as usize] = inner[k][c as usize].min(out_of);
-                    }
-                }
-            }
-            vertices.push(bound);
+            });
         }
         if std::env::var("RK_NET_DEBUG").is_ok() && !vertices.is_empty() {
             let mut bound = vec![false; positions.len()];
@@ -1304,12 +1421,61 @@ pub(super) fn bind(scene: &Scene, nets: &mut [Net]) -> Vec<Binding> {
                 q(1.0)
             );
         }
+        for (k, net) in nets.iter().enumerate() {
+            // Where on the net each vertex bound to it is.
+            let cols = net.cols as i32;
+            let on_net: std::collections::HashMap<u32, [f32; 2]> = vertices
+                .iter()
+                .filter(|b| b.net == k as u32)
+                .map(|b| {
+                    let first = (b.corners[0] as usize % net.cols) as i32;
+                    let (mut u, mut v) = (0.0, 0.0);
+                    for (&c, &w) in b.corners.iter().zip(&b.bary) {
+                        let col = (c as usize % net.cols) as i32;
+                        let col = first + (col - first + cols / 2).rem_euclid(cols) - cols / 2;
+                        u += col as f32 * w;
+                        v += (c as usize / net.cols) as f32 * w;
+                    }
+                    (b.vertex, [u, v])
+                })
+                .collect();
+            covered(&mut cells[k], net.cols, &r.mesh.indices, &on_net);
+        }
         if !vertices.is_empty() {
             out.push(Binding {
                 renderer: ri,
                 mesh: Arc::as_ptr(&r.mesh) as *const u8 as usize,
                 vertices,
             });
+            resting.push(places);
+        }
+    }
+    // A net with no cloth in some of its cells is cut there, unless
+    // nothing is bound to it at all.
+    if tune("slits", 1.0) != 0.0 {
+        for (net, cells) in nets.iter_mut().zip(&cells) {
+            if cells.iter().any(|&c| c) {
+                net.cover(cells);
+            }
+        }
+    }
+    // Each vertex in the frame of the rest net's surface where it is
+    // bound.
+    let rest_frames: Vec<Vec<[Vec3; 3]>> = nets.iter().map(|n| frames(&n.rest, n.cols, n.rows, &n.open)).collect();
+    for (binding, places) in out.iter_mut().zip(&resting) {
+        for (bound, &[p, normal, tangent]) in binding.vertices.iter_mut().zip(places) {
+            let k = bound.net as usize;
+            let (at, turn) = surface(&rest_frames[k], bound);
+            let back = turn.transpose();
+            bound.local = [back * (p - at), back * normal, back * tangent];
+            if bound.weight > 0.5 {
+                let out_of = bound.local[0].z * nets[k].outward;
+                for (&c, &w) in bound.corners.iter().zip(&bound.bary) {
+                    if w > 0.2 {
+                        inner[k][c as usize] = inner[k][c as usize].min(out_of);
+                    }
+                }
+            }
         }
     }
     // The net is kept as far off the skin as puts its innermost layer
@@ -1588,6 +1754,7 @@ mod tests {
             gap: vec![THICKNESS; rest.len()],
             outward: outward(&rest, cols, rows),
             fixed: 1,
+            open: Vec::new(),
             hold: vec![0.0; rest.len()],
             pressed: vec![0.0; rest.len()],
             shell_rest: Vec::new(),
@@ -1686,6 +1853,67 @@ mod tests {
     }
 
     #[test]
+    fn a_triangle_covers_the_cells_it_lies_in_and_goes_round_the_ring() {
+        let cols = 8;
+        let mut cells = vec![false; cols * 3];
+        let on_net: std::collections::HashMap<u32, [f32; 2]> = [
+            (0, [1.2, 0.2]),
+            (1, [1.8, 0.3]),
+            (2, [1.5, 0.9]),
+            // Over the seam of the ring, in its last column and row.
+            (3, [7.2, 2.2]),
+            (4, [0.0, 2.5]),
+            (5, [7.5, 2.9]),
+        ]
+        .into_iter()
+        .collect();
+        covered(&mut cells, cols, &[0, 1, 2, 3, 4, 5, 0, 1, 9], &on_net);
+        let want: Vec<usize> = vec![1, 2 * cols + 7];
+        let got: Vec<usize> = (0..cells.len()).filter(|&i| cells[i]).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_net_with_no_cloth_on_one_side_is_two_edges_and_nothing_between() {
+        let (scene, mut net) = cone(16, 8, 0.12, 0.2, 0.4);
+        let (cols, rows) = (net.cols, net.rows);
+        // No cloth in columns 4 to 9 below the first row of cells.
+        let mut cells = vec![true; cols * (rows - 1)];
+        for r in 1..rows - 1 {
+            for c in 4..10 {
+                cells[r * cols + c] = false;
+            }
+        }
+        let whole = net.links.len();
+        net.cover(&cells);
+        assert!(net.links.len() < whole);
+        // Points 5 to 9 of the lower rows have none round them, and no
+        // link is left to them; the edges at 4 and 10 are still cloth.
+        let none = |i: usize| net.open[i] & OPEN_POINT != 0;
+        for r in 2..rows {
+            for c in 0..cols {
+                assert_eq!(none(r * cols + c), (5..10).contains(&c), "column {c} row {r}");
+            }
+        }
+        for &(a, b, _) in &net.links {
+            assert!(!none(a as usize) && !none(b as usize) || (a as usize) < 2 * cols || (b as usize) < 2 * cols);
+        }
+        // The surface at an edge is told by its own side only.
+        let f = frames(&net.rest, cols, rows, &net.open);
+        let i = 4 * cols + 4;
+        assert!((f[i][1] - (net.rest[i] - net.rest[i - 1]) * 2.0).length() < 1e-6);
+        // A limb where there is no cloth moves nothing.
+        run(&scene, &mut net, &[], None, 60);
+        let free = net.pos.clone();
+        let through = limb(Vec3::new(0.0, 0.7, 0.0), Vec3::new(-0.55, 0.7, 0.23), 0.03, false);
+        net.reset();
+        run(&scene, &mut net, &[through], None, 60);
+        for (p, q) in net.pos.iter().zip(&free) {
+            assert!((*p - *q).length() < 1e-3, "{q} moved to {p}");
+        }
+    }
+
+    #[test]
     fn a_net_is_kept_off_the_floor_and_keeps_its_lengths() {
         // The floor is 15 cm above the hem.
         let (scene, mut net) = cone(16, 8, 0.12, 0.2, 0.4);
@@ -1775,8 +2003,8 @@ mod tests {
         ];
         let shape = NetShape {
             active: true,
-            pos: frames(&points, 3, 2),
-            target: frames(&points, 3, 2),
+            pos: frames(&points, 3, 2, &[]),
+            target: frames(&points, 3, 2, &[]),
             inner: vec![0.0; 6],
             pressed: vec![0.0; 6],
         };
@@ -1817,7 +2045,7 @@ mod tests {
             .iter()
             .map(|f| turn * f[0] + Vec3::new(0.0, 0.0, 1.0))
             .collect();
-        shape.pos = frames(&moved, 3, 2);
+        shape.pos = frames(&moved, 3, 2, &[]);
         let (rest, rest_turn) = surface(&shape.target, &bound);
         let rest = rest + rest_turn.z_axis * 0.02;
         let skinned = [Vec3::new(0.8, -0.4, 0.3), Vec3::Z, Vec3::X];
@@ -1831,7 +2059,7 @@ mod tests {
     fn a_layer_on_a_net_pressed_on_something_lies_nearly_flat_on_it() {
         let (mut shape, bound) = patch();
         let moved: Vec<Vec3> = shape.target.iter().map(|f| f[0] + Vec3::new(0.0, 0.0, 1.0)).collect();
-        shape.pos = frames(&moved, 3, 2);
+        shape.pos = frames(&moved, 3, 2, &[]);
         shape.pressed = vec![1.0; 6];
         let (rest, rest_turn) = surface(&shape.target, &bound);
         // The vertex rests 2 cm off the net; pressed, a fifth of that.
@@ -1850,7 +2078,7 @@ mod tests {
                 points.push(Vec3::new(x, y, 0.0));
             }
         }
-        let f = frames(&points, 3, 3);
+        let f = frames(&points, 3, 3, &[]);
         assert!(f[7][2].y < 0.0, "the hem's way down is {}", f[7][2]);
     }
 
