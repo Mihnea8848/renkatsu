@@ -182,6 +182,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             let waiting = built.is_none().then_some("The character is not built");
             skin_effects_section(ui, k, st, object.id, waiting, pose_layer);
+            if let Some(card) = built.as_ref().and_then(|b| b.better_penetration) {
+                penetration_section(ui, k, st, &mut object, card);
+            }
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
@@ -1275,6 +1278,7 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
 pub const HANDS_SECTION: usize = 19;
 pub const FACE_SECTION: usize = 20;
 pub const SKIN_SECTION: usize = 21;
+pub const PENETRATION_SECTION: usize = 22;
 
 /// The hands' patterns and the face, as Studio's hand and face panels set
 /// them: each pattern a picture that opens a grid of the others.
@@ -1607,6 +1611,102 @@ fn skin_effects_section(
     }
     section_end(ui, k);
     keyed.commit(st, id, pose_layer, &next, &toggled, false);
+}
+
+/// BetterPenetration for a character with a shaft: the plugin's settings,
+/// with its sliders' ranges, and the partner it aims at, which in Studio
+/// NodesConstraints holds. Settings left as the card has them stay the
+/// card's.
+fn penetration_section(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    object: &mut crate::scene::Object,
+    card: rk_chara::better_penetration::Settings,
+) {
+    use rk_chara::better_penetration::{AutoTarget, Mode};
+    let others: Vec<(crate::scene::ObjectId, String)> = st
+        .doc
+        .scene()
+        .objects()
+        .iter()
+        .filter(|o| o.kind() == Kind::Character && o.id != object.id)
+        .map(|o| (o.id, o.name.clone()))
+        .collect();
+    if !section(ui, k, st, PENETRATION_SECTION, "Penetration") {
+        return;
+    }
+    let Content::Character {
+        better_penetration,
+        penetration_target,
+        ..
+    } = &mut object.content
+    else {
+        return;
+    };
+    let ui_id = ui.id().with("penetration");
+    let mut s = better_penetration.as_deref().copied().unwrap_or(card);
+    row(ui, k, "Enabled", None, |ui, rect| {
+        widgets::checkbox(ui, k, rect, ui_id.with("enabled"), &mut s.enabled, "On");
+    });
+    let off = (!s.enabled).then_some("BetterPenetration is off");
+    row(ui, k, "Partner", off, |ui, rect| {
+        let name = penetration_target
+            .and_then(|t| others.iter().find(|(id, _)| *id == t.partner))
+            .map_or("None", |(_, name)| name.as_str());
+        let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(rect.width());
+            if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
+                *penetration_target = None;
+                ui.close();
+            }
+            for (id, name) in &others {
+                let on = penetration_target.is_some_and(|t| t.partner == *id);
+                if widgets::check_item(ui, k, on, name, "").clicked() {
+                    let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
+                    *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+                    ui.close();
+                }
+            }
+        });
+    });
+    if let Some(target) = penetration_target.as_mut() {
+        row(ui, k, "Target", off, |ui, rect| {
+            let options: Vec<(&str, bool)> = Mode::ALL.iter().map(|m| (m.label(), true)).collect();
+            let chosen = Mode::ALL.iter().position(|m| *m == target.mode);
+            if let Some(i) = choices(ui, k, rect, ui_id.with("target"), chosen, &options) {
+                target.mode = Mode::ALL[i];
+            }
+        });
+    } else {
+        row(ui, k, "Auto-target", off, |ui, rect| {
+            let options: Vec<(&str, bool)> = AutoTarget::ALL.iter().map(|a| (a.label(), true)).collect();
+            let chosen = AutoTarget::ALL.iter().position(|a| *a == s.auto_target);
+            if let Some(i) = choices(ui, k, rect, ui_id.with("auto"), chosen, &options) {
+                s.auto_target = AutoTarget::ALL[i];
+            }
+        });
+    }
+    // The plugin's sliders, by their ranges in Studio.
+    let sliders: [(&str, &mut f32, f32, f32); 8] = [
+        ("Length squish", &mut s.length_squish, 0.0, 1.0),
+        ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
+        ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
+        ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
+        ("Hit length", &mut s.collider_length_scale, 0.5, 1.5),
+        ("Max push", &mut s.max_push, 0.0, 0.3),
+        ("Max pull", &mut s.max_pull, 0.0, 0.3),
+        ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
+    ];
+    for (name, value, low, high) in sliders {
+        row(ui, k, name, off, |ui, rect| {
+            widgets::number_to(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE, 3);
+            *value = value.clamp(low, high);
+        });
+    }
+    section_end(ui, k);
+    *better_penetration = (s != card).then(|| Box::new(s));
 }
 
 /// The file of Renkatsu's own expression presets, beside the settings.

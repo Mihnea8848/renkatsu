@@ -467,7 +467,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 22],
+    pub sections: [bool; 23],
     /// Expression presets: Renkatsu's own, then ExpressionControl's from
     /// the game folder; read when first shown.
     pub expressions: Option<(
@@ -941,7 +941,7 @@ impl State {
             expression_name: String::new(),
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true, false,
+                true, true, true, true, false, true,
             ],
             property_tab: 0,
             profiles: Default::default(),

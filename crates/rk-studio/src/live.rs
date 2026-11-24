@@ -1214,6 +1214,9 @@ pub struct Built {
     /// The body carries the mask liquid levels are read against. The
     /// game's male body does not, so nothing of them shows on it.
     pub liquid_mask: bool,
+    /// BetterPenetration's settings from the card, when the body has a
+    /// shaft.
+    pub better_penetration: Option<rk_chara::better_penetration::Settings>,
 }
 
 pub struct Live {
@@ -1639,6 +1642,7 @@ impl Live {
             animation_problem: a.animation_problem.clone(),
             parameters: a.chara.parameters,
             liquid_mask: a.chara.liquid_mask(),
+            better_penetration: a.chara.shaft.as_ref().map(|_| a.chara.better_penetration),
         })
     }
 
