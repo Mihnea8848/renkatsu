@@ -307,12 +307,16 @@ impl Rig {
             for m in &mut scene.renderers[r].materials {
                 match &row.expression {
                     Some(image) => {
+                        // `SetTexture` keeps the placement the material
+                        // stores: on the game's irises a third of the size,
+                        // over the pupil.
+                        let st = m.tex_st.get("_expression").copied().unwrap_or([1.0, 1.0, 0.0, 0.0]);
                         m.set_texture(
                             "_expression",
                             TexSlot {
                                 image: image.clone(),
-                                scale: [1.0, 1.0],
-                                offset: [0.0, 0.0],
+                                scale: [st[0], st[1]],
+                                offset: [st[2], st[3]],
                             },
                         );
                         m.set_float("_exppower", 1.0);
@@ -443,7 +447,12 @@ mod tests {
         assert!(chara.scene.nodes[base].active);
         assert!(chara.scene.renderers[rig.tongues[0][0]].enabled);
         let iris = &chara.scene.renderers[rig.irises[0]].materials[0];
-        assert!(iris.textures.contains_key("_expression"));
+        let picture = &iris.textures["_expression"];
+        assert_eq!(
+            (picture.scale, picture.offset),
+            ([3.0, 3.0], [-1.0, -0.8]),
+            "the material's placement"
+        );
         assert_eq!(iris.floats.get("_exppower"), Some(&1.0));
     }
 
