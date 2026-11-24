@@ -1688,21 +1688,46 @@ fn penetration_section(
             }
         });
     }
-    // The plugin's sliders, by their ranges in Studio.
-    let sliders: [(&str, &mut f32, f32, f32); 8] = [
-        ("Length squish", &mut s.length_squish, 0.0, 1.0),
-        ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
-        ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
+    // Where the shaft goes, if anywhere: the partner's place, or the one
+    // auto-target looks for.
+    let aimed = match penetration_target {
+        Some(t) => Some(t.mode),
+        None => Mode::of_auto(s.auto_target),
+    };
+    // The plugin's sliders, by their ranges in Studio, each where it does
+    // something: the squish while the shaft is aimed; the colliders'
+    // size always, since his own balls meet two of them; the pull only on
+    // a mouth, the one bone the plugin pulls in Studio.
+    let mut sliders: Vec<(&str, &mut f32, f32, f32)> = Vec::new();
+    if aimed.is_some() {
+        sliders.extend([
+            ("Length squish", &mut s.length_squish, 0.0, 1.0),
+            ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
+            ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
+        ]);
+    }
+    sliders.extend([
         ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
         ("Hit length", &mut s.collider_length_scale, 0.5, 1.5),
-        ("Max push", &mut s.max_push, 0.0, 0.3),
-        ("Max pull", &mut s.max_pull, 0.0, 0.3),
-        ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
-    ];
+    ]);
+    if aimed == Some(Mode::Oral) {
+        sliders.extend([
+            ("Max push", &mut s.max_push, 0.0, 0.3),
+            ("Max pull", &mut s.max_pull, 0.0, 0.3),
+            ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
+        ]);
+    }
     for (name, value, low, high) in sliders {
         row(ui, k, name, off, |ui, rect| {
             widgets::number_to(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE, 3);
             *value = value.clamp(low, high);
+        });
+    }
+    // The plugin keeps this on the card without a control in Studio: the
+    // shaft's deeper points push her belly's dynamic bone.
+    if aimed == Some(Mode::Vaginal) {
+        row(ui, k, "Belly", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("belly"), &mut s.belly_bulge, "Bulge");
         });
     }
     section_end(ui, k);
