@@ -340,6 +340,8 @@ pub struct State {
     /// The Pose palette's Hands category is open, showing each hand's
     /// pattern.
     pub hands_open: bool,
+    /// The Pose palette's Expression category is open.
+    pub face_open: bool,
     /// The IK target chosen for the gizmo, by its place in the layer.
     pub pose_ik: Option<usize>,
     /// What the Animator panel's skeleton is searched by.
@@ -872,6 +874,7 @@ impl State {
             pose_bone: None,
             fk_open: false,
             hands_open: false,
+            face_open: false,
             ik_open: false,
             pose_ik: None,
             animator_search: String::new(),

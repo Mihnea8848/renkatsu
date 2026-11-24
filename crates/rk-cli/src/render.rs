@@ -54,6 +54,8 @@ pub struct Args<'a> {
     pub map: Option<&'a str>,
     /// The map's time of day.
     pub map_time: &'a str,
+    /// A face as `rk_chara::face::Face` reads it.
+    pub face: Option<&'a str>,
 }
 
 /// The colour behind the character when none is asked for.
@@ -139,6 +141,10 @@ pub fn render(a: Args) -> Result<()> {
         ..Default::default()
     };
     let mut chara = rk_chara::build(&game, &card, &opts)?;
+    if let (Some(spec), Some(rig)) = (a.face, &chara.face) {
+        let face: rk_chara::face::Face = spec.parse()?;
+        rig.show(&mut chara.scene, Some(&face));
+    }
     let t_build = t.elapsed();
     // Where she stands, with her hair and skirts carried along.
     if a.at.is_some() || a.turn != 0.0 {

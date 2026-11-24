@@ -184,6 +184,10 @@ struct Cli {
     /// numbers of CharaStudio's lists, to picture them.
     #[arg(long, hide = true)]
     hand_patterns: Option<String>,
+    /// Give the selected character this face, as
+    /// `EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN]]]`, to picture it.
+    #[arg(long, hide = true)]
+    face: Option<String>,
     /// Start with this IK target (a name of CharaStudio's IKTargetEN)
     /// chosen for the gizmo, to picture it.
     #[arg(long, hide = true)]
@@ -773,6 +777,10 @@ impl Studio {
             let p: Vec<i32> = spec.split(',').map(str::parse).collect::<Result<_, _>>()?;
             anyhow::ensure!(p.len() == 2, "--hand-patterns is LEFT,RIGHT");
             viewport::edit_fk_layer(&mut state, |l| l.hands = [p[0], p[1]]);
+        }
+        if let Some(spec) = &cli.face {
+            let face: rk_chara::face::Face = spec.parse()?;
+            viewport::edit_fk_layer(&mut state, |l| l.face = Some(face));
         }
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {

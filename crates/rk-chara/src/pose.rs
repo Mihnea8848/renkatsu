@@ -53,6 +53,9 @@ pub struct Layer {
     /// animation.
     #[serde(default, skip_serializing_if = "no_hands")]
     pub hands: [i32; 2],
+    /// The face set in the pose, over the card's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<crate::face::Face>,
 }
 
 fn no_hands(hands: &[i32; 2]) -> bool {
@@ -70,6 +73,7 @@ impl Default for Layer {
             ik: Vec::new(),
             optimize_ik: true,
             hands: [0, 0],
+            face: None,
         }
     }
 }
@@ -263,6 +267,7 @@ impl Layer {
             && is_all_ik_groups(&self.ik_groups)
             && self.optimize_ik
             && no_hands(&self.hands)
+            && self.face.is_none()
     }
 
     /// Whether an IK target's group is on.

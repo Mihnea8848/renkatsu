@@ -1051,6 +1051,9 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.hands_open && fk_layer(st).is_some() {
         rows += 2;
     }
+    if MODES[mode].name == "Pose" && st.face_open && face_now(st).is_some() {
+        rows += FACE_ROWS;
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
@@ -1071,6 +1074,12 @@ fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
 
 /// Changes the selected character's pose layer as one step of the history.
 pub fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+    edit_layer_held(st, false, change);
+}
+
+/// Edits the layer, as one step of the history for all of a drag while
+/// `held`.
+fn edit_layer_held(st: &mut State, held: bool, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
     let Some(mut object) = st.doc.selection().cloned() else {
         return;
     };
@@ -1082,7 +1091,7 @@ pub fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::La
     if layer.is_empty() {
         *pose_layer = None;
     }
-    st.doc.edit(object, false);
+    st.doc.edit(object, held);
 }
 
 /// The active mode's tools in named sections, under a header that pins or
@@ -1136,7 +1145,21 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         crate::map_menu::panel(ui, k, st, body);
         return;
     }
-    let mut y = head.bottom();
+    // Rows that do not fit scroll under the header with the wheel; the
+    // ones out of sight take no clicks.
+    let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
+    let overflow = (palette_height(k, st) - rect.height()).max(0.0);
+    let scroll_id = ui.id().with(("palette scroll", st.mode));
+    let mut scroll: f32 = ui.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    if ui.rect_contains_pointer(body) {
+        scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    }
+    scroll = scroll.clamp(0.0, overflow);
+    ui.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body));
+    inner.set_clip_rect(body.intersect(ui.clip_rect()));
+    let ui = &mut inner;
+    let mut y = head.bottom() - scroll;
     let mut index = 0;
     for (section, tools) in mode.sections {
         ui.painter().text(
@@ -1203,8 +1226,24 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     }
                     continue;
                 }
+                if *name == "Expression" {
+                    let on = fk_layer(st).is_some_and(|l| l.face.is_some());
+                    let mut open = st.face_open;
+                    open_category(ui, k, row, id, g, name, on, &mut open);
+                    st.face_open = open;
+                    y += palette_row(k);
+                    index += 1;
+                    if st.face_open && face_now(st).is_some() {
+                        face_rows(ui, k, st, Rect::from_min_max(Pos2::new(rect.left(), y), rect.max));
+                        y += FACE_ROWS as f32 * palette_row(k);
+                    }
+                    continue;
+                }
                 if *name == "Hands" {
-                    hands_category(ui, k, st, row, id, g, name);
+                    let on = fk_layer(st).is_some_and(|l| l.hands != [0, 0]);
+                    let mut open = st.hands_open;
+                    open_category(ui, k, row, id, g, name, on, &mut open);
+                    st.hands_open = open;
                     y += palette_row(k);
                     index += 1;
                     if st.hands_open {
@@ -1407,27 +1446,93 @@ fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::
     }
 }
 
-/// The Hands category's row: it opens on the hands' patterns, and is bright
-/// while a hand has one.
-fn hands_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
-    let on = fk_layer(st).is_some_and(|l| l.hands != [0, 0]);
+/// A category's row that opens on its settings, bright while they are
+/// set.
+#[allow(clippy::too_many_arguments)]
+fn open_category(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, name: &str, on: bool, open: &mut bool) {
     let resp = ui.interact(row, id, Sense::click());
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(row, 2.0, k.t.control);
     }
     let y = row.center().y;
-    let arrow = if st.hands_open {
-        icon::CARET_DOWN
-    } else {
-        icon::CARET_RIGHT
-    };
+    let arrow = if *open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
     glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
     let tint = if on { k.t.text_bright } else { k.t.text };
     glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
     widgets::label(p, k, Pos2::new(row.left() + 38.0, y), name, tint);
     if resp.clicked() {
-        st.hands_open = !st.hands_open;
+        *open = !*open;
+    }
+}
+
+/// The rows of the Expression category.
+const FACE_ROWS: usize = 6;
+
+/// The selected character's face as shown, its eye patterns and how many
+/// eyebrow and mouth patterns it has.
+fn face_now(st: &State) -> Option<(rk_chara::face::Face, Vec<i32>, (usize, usize))> {
+    let id = st.doc.selected?;
+    let rig = st.live.as_ref()?.face_rig(id)?;
+    let face = fk_layer(st).and_then(|l| l.face).unwrap_or(rig.start);
+    Some((face, rig.eyesets.keys().copied().collect(), rig.counts()))
+}
+
+/// Studio's face panel: the eyebrow, eye and mouth patterns, how open the
+/// eyes and mouth are, and blinking.
+fn face_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
+    let Some((face, eyesets, (eyebrows, mouths))) = face_now(st) else {
+        return;
+    };
+    let mut next = face;
+    let cell = |i: usize| {
+        Rect::from_min_size(
+            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
+        )
+    };
+    let field = |row: Rect| {
+        Rect::from_min_max(
+            Pos2::new(row.left() + 86.0, row.top() + 2.0),
+            Pos2::new(row.right(), row.bottom() - 2.0),
+        )
+    };
+    let pick = |ui: &mut Ui, i: usize, label: &str, numbers: &[i32], value: &mut i32| {
+        let row = cell(i);
+        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);
+        let names: Vec<String> = numbers.iter().map(i32::to_string).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut chosen = numbers.iter().position(|n| n == value).unwrap_or(0);
+        widgets::combo(ui, k, field(row), ui.id().with(("face", label)), &mut chosen, &names);
+        if let Some(&n) = numbers.get(chosen) {
+            *value = n;
+        }
+    };
+    let count = |n: usize| (0..n as i32).collect::<Vec<_>>();
+    pick(ui, 0, "Eyebrows", &count(eyebrows), &mut next.eyebrows);
+    pick(ui, 1, "Eyes", &eyesets, &mut next.eyes);
+    pick(ui, 2, "Mouth", &count(mouths), &mut next.mouth);
+    let amount = |ui: &mut Ui, i: usize, label: &str, value: &mut f32| {
+        let row = cell(i);
+        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);
+        widgets::number(
+            ui,
+            k,
+            field(row),
+            ui.id().with(("face", label)),
+            value,
+            widgets::Marker::None,
+            true,
+            0.01,
+        );
+        *value = value.clamp(0.0, 1.0);
+    };
+    amount(ui, 3, "Eyes open", &mut next.eyes_open);
+    widgets::checkbox(ui, k, cell(4), ui.id().with("face blink"), &mut next.blink, "Blink");
+    amount(ui, 5, "Mouth open", &mut next.mouth_open);
+    if next != face {
+        let held = ui.input(|i| i.pointer.any_down());
+        edit_layer_held(st, held, |l| l.face = Some(next));
     }
 }
 
@@ -1642,11 +1747,10 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 16] = [
+const LATER_TOOLS: [&str; 15] = [
     "Replace",
     "Reload",
     "Accessories",
-    "Expression",
     "Gaze",
     "Look at camera",
     "Depth of field",

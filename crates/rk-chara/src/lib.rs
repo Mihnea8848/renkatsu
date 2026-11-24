@@ -23,6 +23,7 @@ pub mod edit_fangs;
 pub mod expression;
 pub mod eye_control;
 pub mod eyelook;
+pub mod face;
 pub mod fbbik;
 pub mod foreground;
 pub mod hair_accessories;

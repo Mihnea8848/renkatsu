@@ -575,6 +575,10 @@ impl Actor {
                 l.resolve_parts(&self.chara.scene, self.chara.top, parts_of)
             });
             self.back_to_rest();
+            // The face is blend shapes, set once for the layer.
+            if let Some(face) = &self.chara.face {
+                face.show(&mut self.chara.scene, self.layer.as_ref().and_then(|l| l.face.as_ref()));
+            }
             again = true;
         }
         // A hand pattern not loaded yet is read once.
@@ -670,6 +674,13 @@ impl Actor {
 }
 
 /// CharaStudio's table of FK bones, read from the game once.
+impl Live {
+    /// A character's face controllers.
+    pub fn face_rig(&self, id: ObjectId) -> Option<&rk_chara::face::Rig> {
+        self.actors.iter().find(|a| a.id == id)?.chara.face.as_ref()
+    }
+}
+
 /// What an actor asks to have read from the game.
 #[derive(Debug, Clone, Copy)]
 pub enum Load {

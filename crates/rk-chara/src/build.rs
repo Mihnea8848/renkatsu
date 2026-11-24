@@ -150,6 +150,8 @@ pub struct Character {
     /// The hand patterns loaded for the layer, left then right; one is
     /// played while the layer asks for its pattern.
     pub hands: [Option<crate::hand_pattern::HandClip>; 2],
+    /// The face's controllers, to show another face.
+    pub face: Option<crate::face::Rig>,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -175,8 +177,8 @@ struct Builder<'g> {
     physics_sources: Vec<PhysicsSource>,
     /// The outfit is unlocked by the Clothing Unlocker plugin.
     unlocked: bool,
-    /// `ChaFileStatus.eyesOpenMax` as set when the character is added.
-    eyes_open_max: f32,
+    /// The face controllers, once the head is loaded.
+    face: Option<crate::face::Rig>,
     /// Renderers that a `ChaCopyBodyMaterial` component gives the body's
     /// material, with the queue it asks for (-1 keeps the body's).
     body_copies: Vec<(Vec<usize>, i32)>,
@@ -992,13 +994,19 @@ impl<'g> Builder<'g> {
         }
     }
 
-    /// Sets the face to the game's resting expression: pattern 0 with eyes
-    /// and eyebrows open and the mouth closed.
-    fn rest_expression(&mut self, inst: &Instance) {
+    /// The head's face controllers bound to its meshes, showing `start`;
+    /// `start_rate` is the eyes' open rate it starts with.
+    fn face_rig(&mut self, inst: &Instance, start: crate::face::Face, start_rate: f32) -> crate::face::Rig {
+        let mut rig = crate::face::Rig {
+            start,
+            start_rate,
+            up_correct: crate::eye_control::EYE_LOOK_UP_CORRECT,
+            ..Default::default()
+        };
         for (_, script) in &inst.scripts {
             let Ok(obj) = script.read() else { continue };
-            for (field, open) in expression::REST {
-                let Some(mut ctrl) = obj
+            for field in [expression::EYEBROWS, expression::EYES, expression::MOUTH] {
+                let Some(controller) = obj
                     .get(field)
                     .and_then(rk_unityfs::UValue::as_object)
                     .and_then(expression::Controller::read)
@@ -1006,40 +1014,47 @@ impl<'g> Builder<'g> {
                     continue;
                 };
                 if field == expression::EYES {
-                    // The game replaces the prefab's limit when the head
-                    // is loaded and again every frame.
-                    let up_correct = obj
-                        .get("EyeLookUpCorrect")
-                        .and_then(rk_unityfs::UValue::as_f32)
-                        .unwrap_or(crate::eye_control::EYE_LOOK_UP_CORRECT);
-                    ctrl.open_max = crate::eye_control::open_limit(self.eyes_open_max, up_correct);
-                }
-                for target in &ctrl.targets {
-                    let Some(node) = self
-                        .game
-                        .assets
-                        .deref(&script.file, target.object)
-                        .and_then(|o| inst.object_nodes.get(&o.key()).copied())
-                    else {
-                        continue;
-                    };
-                    for &r in &inst.renderers {
-                        let rend = &mut self.scene.renderers[r];
-                        if rend.node != node {
-                            continue;
-                        }
-                        // A mesh can be moved by more than one controller.
-                        let count = rend.mesh.blend_shapes.len();
-                        rend.shape_weights.resize(count, 0.0);
-                        for (shape, w) in ctrl.weights(target, 0, open) {
-                            if let Some(slot) = rend.shape_weights.get_mut(shape) {
-                                *slot = w;
-                            }
-                        }
+                    if let Some(up) = obj.get("EyeLookUpCorrect").and_then(rk_unityfs::UValue::as_f32) {
+                        rig.up_correct = up;
                     }
+                }
+                let renderers = controller
+                    .targets
+                    .iter()
+                    .map(|target| {
+                        let node = self
+                            .game
+                            .assets
+                            .deref(&script.file, target.object)
+                            .and_then(|o| inst.object_nodes.get(&o.key()).copied());
+                        inst.renderers
+                            .iter()
+                            .copied()
+                            .filter(|&r| Some(self.scene.renderers[r].node) == node)
+                            .collect()
+                    })
+                    .collect();
+                let part = Some(crate::face::Part { controller, renderers });
+                match field {
+                    expression::EYEBROWS => rig.eyebrows = part,
+                    expression::EYES => rig.eyes = part,
+                    _ => rig.mouth = part,
                 }
             }
         }
+        // Studio's eye patterns are the `cha_eyeset` items.
+        for id in self.game.items.vanilla_ids(cat::CHA_EYESET) {
+            if let Some(ptn) = self
+                .game
+                .items
+                .vanilla(cat::CHA_EYESET, id)
+                .and_then(|i| i.int("EyesPtn"))
+            {
+                rig.eyesets.insert(id, ptn);
+            }
+        }
+        rig.show(&mut self.scene, None);
+        rig
     }
 
     /// The FullBodyBipedIK component of a prefab, its bones as scene nodes.
@@ -2105,11 +2120,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         body_copies: Vec::new(),
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
-        eyes_open_max: if opts.eye_control {
-            crate::eye_control::read(&card.ext).eye_open_max
-        } else {
-            crate::eye_control::Settings::default().eye_open_max
-        },
+        face: None,
     };
     let female = card.sex() != 0;
     let top = b.scene.add_node("BodyTop", None, Default::default());
@@ -2315,7 +2326,21 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             }
             b.scene.set_parent(head.root, Some(head_bone.root));
             assign_weights(&mut b.scene, &head, &head_bones, "cf_J_N_FaceRoot", hips);
-            b.rest_expression(&head);
+            // The card's face, as Studio adds the character, then Eye
+            // Control's: it sets the eye slider and, to stop blinking,
+            // turns blinking off after it, which forces the open rate to 1.
+            let mut start = crate::face::Face::of_status(&card.status);
+            let mut start_rate = crate::face::Rig::eyes_rate(&start);
+            if opts.eye_control && card.ext.contains_key(crate::eye_control::KEY) {
+                let eye = crate::eye_control::read(&card.ext);
+                start.eyes_open = eye.eye_open_max.clamp(0.0, 1.0);
+                start_rate = crate::face::Rig::eyes_rate(&start);
+                if eye.disable_blinking {
+                    start.blink = false;
+                    start_rate = 1.0;
+                }
+            }
+            b.face = Some(b.face_rig(&head, start, start_rate));
             b.face_layer_order(&head, card.face.foreground_eyes, card.face.foreground_eyebrow);
             let outfit = opts.outfit.min(card.coordinates.len().saturating_sub(1));
             let makeup = match card.coordinates.get(outfit) {
@@ -2861,6 +2886,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     Ok(Character {
         ik_rig,
         hands: [None, None],
+        face: b.face.take(),
         scene: b.scene,
         top,
         animator: anim.root,
