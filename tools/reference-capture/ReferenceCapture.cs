@@ -282,27 +282,48 @@ namespace Renkatsu
                     }
                 }
 
-                // Her body before anything else, so that BetterPenetration
-                // finds its dynamic bones when it links. The next case
-                // loads her again with the card's own.
+                // Her body before anything else. UncensorSelector swaps only
+                // the mesh at once; Mod Bone Implantor adds a body's bones
+                // when a card is loaded with it. So a copy of the card is
+                // saved with the body and loaded in her place. The next
+                // case loads her card again.
                 if (chara != null && e.Body != null)
                 {
-                    bool asked = false;
+                    string withBody = null;
                     try
                     {
-                        asked = SetBody(chara.charInfo, e.Body);
+                        withBody = CardWithBody(chara.charInfo, e.Body, e.Path, Path.Combine(root, "cards"));
                     }
                     catch (Exception ex)
                     {
-                        Logger.LogError("Reference capture: could not set the body of " + name + ": " + ex);
+                        Logger.LogError("Reference capture: could not give " + name + " the body: " + ex);
                     }
                     reload = true;
-                    if (!asked)
+                    if (withBody == null)
                     {
                         index.Append(name).Append("\tno body ").Append(e.Body).Append("\n");
                         continue;
                     }
-                    for (int i = 0; i < 60; i++)
+                    studio.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
+                    chara = null;
+                    for (int i = 0; i < 5; i++)
+                    {
+                        yield return null;
+                    }
+                    try
+                    {
+                        chara = AddObjectFemale.Add(withBody);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not load " + withBody + ": " + ex);
+                    }
+                    if (chara == null)
+                    {
+                        index.Append(name).Append("\tcould not load the card with the body\n");
+                        continue;
+                    }
+                    for (int i = 0; i < 30; i++)
                     {
                         yield return null;
                     }
@@ -1359,25 +1380,32 @@ namespace Renkatsu
 
         private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
-        // Gives a character an UncensorSelector body, when the plugin has
-        // one by that GUID.
-        private static bool SetBody(ChaControl cha, string guid)
+        // Saves a copy of a character's card with an UncensorSelector body,
+        // when the plugin has one by that GUID, and returns its path.
+        private static string CardWithBody(ChaControl cha, string guid, string card, string dir)
         {
             MonoBehaviour part = PluginPart(cha, "UncensorSelectorController");
             if (part == null)
             {
-                return false;
+                return null;
             }
             Type type = part.GetType();
             FieldInfo list = type.DeclaringType != null ? type.DeclaringType.GetField("BodyDictionary", Any) : null;
             System.Collections.IDictionary bodies = list != null ? list.GetValue(null) as System.Collections.IDictionary : null;
             if (bodies == null || !bodies.Contains(guid))
             {
-                return false;
+                return null;
             }
             type.GetProperty("BodyGUID", Any).SetValue(part, guid, null);
-            type.GetMethod("UpdateUncensor", Any).Invoke(part, null);
-            return true;
+            MethodInfo save = type.GetMethod("OnCardBeingSaved", Any);
+            save.Invoke(part, new[] { Enum.ToObject(save.GetParameters()[0].ParameterType, 0) });
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, Path.GetFileNameWithoutExtension(card) + "." + guid + ".png");
+            using (FileStream st = new FileStream(path, FileMode.Create, FileAccess.Write))
+            {
+                cha.chaFile.SaveCharaFile(st, true);
+            }
+            return path;
         }
 
         // Sets BetterPenetration's auto-target on a male; false until the
