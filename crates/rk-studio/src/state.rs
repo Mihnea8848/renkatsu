@@ -336,6 +336,8 @@ pub struct State {
     pub fk_open: bool,
     /// The Pose palette's Inverse kinematics category is open.
     pub ik_open: bool,
+    /// The IK target chosen for the gizmo, by its place in the layer.
+    pub pose_ik: Option<usize>,
     /// What the Animator panel's skeleton is searched by.
     pub animator_search: String,
     /// The project that is open; `Project::none()` while the project
@@ -865,6 +867,7 @@ impl State {
             pose_bone: None,
             fk_open: false,
             ik_open: false,
+            pose_ik: None,
             animator_search: String::new(),
             library: Library::new(&project),
             project,

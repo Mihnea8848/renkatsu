@@ -180,6 +180,10 @@ struct Cli {
     /// her own space, as `LeftHand:0,0.15,0.1`, to picture IK.
     #[arg(long, hide = true)]
     ik_move: Vec<String>,
+    /// Start with this IK target (a name of CharaStudio's IKTargetEN)
+    /// chosen for the gizmo, to picture it.
+    #[arg(long, hide = true)]
+    pose_ik: Option<String>,
     /// Save the selected character's pose once she is built (after a
     /// bake or a mirror asked for), to picture it.
     #[arg(long, hide = true)]
@@ -742,6 +746,14 @@ impl Studio {
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
         state.bake_pending = cli.bake_pose;
+        if let Some(name) = &cli.pose_ik {
+            state.pose_ik = Some(
+                rk_chara::pose::IK_TARGET_NAMES
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+                    .with_context(|| format!("no IK target {name}"))?,
+            );
+        }
         for spec in &cli.ik_move {
             let (name, by) = spec.split_once(':').context("--ik-move is Target:x,y,z")?;
             let target = rk_chara::pose::IK_TARGET_NAMES

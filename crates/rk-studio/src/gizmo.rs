@@ -249,6 +249,8 @@ enum Grip {
     Object(ObjectId),
     /// A bone of a character, by name, turned with the Pose tool.
     Bone(ObjectId, String),
+    /// An IK target of a character, by its place in her layer.
+    Ik(ObjectId, usize),
 }
 
 /// What a drag did in the world, before it is told to what it holds: where
@@ -266,6 +268,9 @@ struct Moved {
 struct Start {
     grip: Grip,
     bone: Option<(Quat, rk_chara::pose::BoneEdit)>,
+    /// For an IK target, its turn in the world and the character's own
+    /// space.
+    target: Option<(Quat, Mat4)>,
     object: Object,
     /// What carries the object's own transform into the scene.
     parent: Mat4,
@@ -360,7 +365,9 @@ impl Drag {
     /// Takes hold of a handle where the pointer pressed.
     fn begin(tool: usize, handle: Handle, frame: Frame, pivot: Pivot, view: &View, press: Pos2, st: &State) -> Drag {
         let scene = st.doc.scene();
-        let starts = if st.tool == crate::viewport::POSE_TOOL {
+        let starts = if ik_gizmo(st, tool).is_some() {
+            ik_start(st, tool).into_iter().collect()
+        } else if st.tool == crate::viewport::POSE_TOOL {
             bone_start(st).into_iter().collect()
         } else {
             st.doc
@@ -372,6 +379,7 @@ impl Drag {
                     Some(Start {
                         grip: Grip::Object(id),
                         bone: None,
+                        target: None,
                         parent,
                         parent_turn: parent.to_scale_rotation_translation().1,
                         place: parent.transform_point3(object.transform.position.into()),
@@ -573,6 +581,28 @@ impl Drag {
         layer
             .fk
             .insert(name.to_owned(), rk_chara::pose::BoneEdit { rot, ..edit });
+        Some(object)
+    }
+
+    /// The character of the IK target `start` holds, with the target moved
+    /// or turned as far as the drag has gone, in her own space.
+    fn moved_target(&self, start: &Start, id: ObjectId, target: usize, st: &State) -> Option<Object> {
+        let (turn, own) = start.target?;
+        let m = self.world(start);
+        let mut object = st.doc.scene().get(id)?.clone();
+        let crate::scene::Content::Character {
+            pose_layer: Some(layer),
+            ..
+        } = &mut object.content
+        else {
+            return None;
+        };
+        let t = layer.ik.get_mut(target)?;
+        t.pos = own.inverse().transform_point3(m.place);
+        if rk_chara::pose::ik_target_turns(target) {
+            let (_, own_turn, _) = own.to_scale_rotation_translation();
+            t.rot = (own_turn.inverse() * m.turn * turn).normalize();
+        }
         Some(object)
     }
 
@@ -968,9 +998,8 @@ fn build(tool: usize, frame: &Frame, view: &View, hot: Option<Handle>, drag: Opt
 pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> bool {
     let Some(live) = st.live.as_ref() else { return false };
     let view = View::of(&live.cam.orbit.camera(), full);
-    // The Pose tool turns its bone with the Rotate tool's rings.
     let pose = st.tool == crate::viewport::POSE_TOOL;
-    let tool = if pose { ROTATE } else { st.tool };
+    let tool = gizmo_tool(st);
     let (pos, press, primary, secondary, alt, ctrl, escape) = ui.input(|i| {
         (
             i.pointer.latest_pos(),
@@ -1011,6 +1040,11 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
                         object.transform = drag.moved(start);
                         st.doc.edit(object, true);
                     }
+                    Grip::Ik(id, target) => {
+                        if let Some(object) = drag.moved_target(start, *id, *target, st) {
+                            st.doc.edit(object, true);
+                        }
+                    }
                     Grip::Bone(id, name) => {
                         let turned = drag.turned_bone(start, name);
                         let edit = turned.and_then(|o| match o.content {
@@ -1037,20 +1071,23 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
     // it on the Pose page; elsewhere it selects as the Select tool does.
     if pose && scene.clicked_by(PointerButton::Primary) && !alt {
         if let Some(ball) = pos.and_then(|pos| ball_at(st, pos)).cloned() {
-            st.pose_bone = Some(ball.bone);
-            st.property_tab = 1;
+            match ball.ik {
+                Some(target) => {
+                    st.pose_ik = Some(target);
+                    st.pose_bone = None;
+                }
+                None => {
+                    st.pose_bone = Some(ball.bone);
+                    st.pose_ik = None;
+                    st.property_tab = 1;
+                }
+            }
             st.doc.selected = Some(ball.character);
             return true;
         }
     }
     let selecting = (1..=SCALE).contains(&tool);
-    let at = if pose {
-        bone_frame(st, &view)
-    } else if (MOVE..=SCALE).contains(&tool) {
-        frame(st, &view, tool)
-    } else {
-        None
-    };
+    let at = gizmo_frame(st, &view, tool);
     let over = |pos: Option<Pos2>| at.as_ref().zip(pos).and_then(|(f, pos)| hit(tool, f, &view, pos));
     st.gizmo.hover = if scene.hovered() && st.gizmo.band.is_none() {
         over(pos)
@@ -1224,6 +1261,8 @@ fn icon_at(p: &egui::Painter, k: &Look, at: Pos2, look: &IconLook, selected: boo
 struct Ball {
     character: ObjectId,
     bone: String,
+    /// An IK target's handle, by its place in the layer.
+    ik: Option<usize>,
     at: Pos2,
     radius: f32,
     /// Where the bone above it that shows is, for the line between them.
@@ -1235,6 +1274,8 @@ struct Ball {
 
 /// A ball's radius in the world, and the least and most it shows at.
 const BALL_SIZE: f32 = 0.03;
+/// An IK target's ball, in the world.
+const IK_BALL_SIZE: f32 = 0.06;
 const BALL_SMALLEST: f32 = 3.5;
 const BALL_LARGEST: f32 = 9.0;
 
@@ -1248,6 +1289,95 @@ fn chosen_bone(st: &State) -> Option<(ObjectId, String)> {
         Some(crate::scene::Content::Character { pose_layer: Some(l), .. }) if l.fk_on
     );
     on.then_some((id, name))
+}
+
+/// The tool whose handles the gizmo has: the Pose tool turns its bone
+/// with the Rotate tool's rings and moves its IK target with the Move
+/// tool's arrows.
+fn gizmo_tool(st: &State) -> usize {
+    match (st.tool == crate::viewport::POSE_TOOL, chosen_ik(st).is_some()) {
+        (true, true) => MOVE,
+        (true, false) => ROTATE,
+        (false, _) => st.tool,
+    }
+}
+
+/// Where the gizmo stands for `tool`: on the chosen IK target, on the
+/// chosen bone with the Pose tool, or on the selection.
+fn gizmo_frame(st: &State, view: &View, tool: usize) -> Option<Frame> {
+    if ik_gizmo(st, tool).is_some() {
+        ik_frame(st, view, tool)
+    } else if st.tool == crate::viewport::POSE_TOOL {
+        bone_frame(st, view)
+    } else if (MOVE..=SCALE).contains(&tool) {
+        frame(st, view, tool)
+    } else {
+        None
+    }
+}
+
+/// The selected character and her IK target chosen, while her IK is on.
+fn chosen_ik(st: &State) -> Option<(ObjectId, usize)> {
+    let id = st.doc.selected?;
+    let target = st.pose_ik?;
+    let on = matches!(
+        st.doc.scene().get(id).map(|o| &o.content),
+        Some(crate::scene::Content::Character { pose_layer: Some(l), .. })
+            if l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS && l.ik_group_on(target)
+    );
+    on.then_some((id, target))
+}
+
+/// The IK target the gizmo works on with `tool`: the chosen one with the
+/// Pose tool, and in Pose mode with the Move tool, or the Rotate tool for
+/// a target that turns (a hand or a foot).
+fn ik_gizmo(st: &State, tool: usize) -> Option<(ObjectId, usize)> {
+    let (id, target) = chosen_ik(st)?;
+    let pose_mode = crate::modes::MODES.get(st.mode).is_some_and(|m| m.name == "Pose");
+    let fits = st.tool == crate::viewport::POSE_TOOL
+        || (pose_mode && (tool == MOVE || (tool == ROTATE && rk_chara::pose::ik_target_turns(target))));
+    fits.then_some((id, target))
+}
+
+/// The gizmo on the chosen IK target, along its own axes or the world's.
+fn ik_frame(st: &State, view: &View, tool: usize) -> Option<Frame> {
+    let (id, target) = ik_gizmo(st, tool)?;
+    let (_, origin, turn) = st
+        .live
+        .as_ref()?
+        .ik_handles(id)?
+        .into_iter()
+        .find(|(i, _, _)| *i == target)?;
+    if (origin - view.eye).dot(view.forward) < 0.02 {
+        return None;
+    }
+    let turn = if st.gizmo.space == Space::Local {
+        turn
+    } else {
+        Quat::IDENTITY
+    };
+    Some(Frame {
+        origin,
+        axes: [turn * Vec3::X, turn * Vec3::Y, turn * Vec3::Z],
+        unit: view.unit_at(origin),
+    })
+}
+
+/// The chosen IK target as a drag takes hold of it.
+fn ik_start(st: &State, tool: usize) -> Option<Start> {
+    let (id, target) = ik_gizmo(st, tool)?;
+    let live = st.live.as_ref()?;
+    let (_, place, turn) = live.ik_handles(id)?.into_iter().find(|(i, _, _)| *i == target)?;
+    let own = live.ik_space(id)?;
+    Some(Start {
+        grip: Grip::Ik(id, target),
+        bone: None,
+        target: Some((turn, own)),
+        object: st.doc.scene().get(id)?.clone(),
+        parent: Mat4::IDENTITY,
+        parent_turn: own.to_scale_rotation_translation().1,
+        place,
+    })
 }
 
 /// The Pose tool's gizmo: rings on the chosen bone, along its own axes or
@@ -1280,6 +1410,7 @@ fn bone_start(st: &State) -> Option<Start> {
     Some(Start {
         grip: Grip::Bone(id, name),
         bone: Some((local, edit)),
+        target: None,
         object,
         parent: Mat4::IDENTITY,
         parent_turn,
@@ -1294,6 +1425,31 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
     };
     let mut out: Vec<(f32, Ball)> = Vec::new();
     for id in st.doc.selected_all() {
+        // IK targets, bigger than the bones' balls.
+        for (target, world, _) in live.ik_handles(id).unwrap_or_default() {
+            let depth = (world - view.eye).dot(view.forward);
+            let (Some(at), Some(edge)) = (view.screen(world), view.screen(world + Vec3::Y * IK_BALL_SIZE)) else {
+                continue;
+            };
+            if depth <= 0.0 {
+                continue;
+            }
+            let radius = (edge - at).length().clamp(BALL_SMALLEST + 1.5, BALL_LARGEST + 3.0);
+            let per_point = 2.0 * depth * (view.fov * 0.5).tan() / view.rect.height().max(1.0);
+            out.push((
+                depth,
+                Ball {
+                    character: id,
+                    bone: String::new(),
+                    ik: Some(target),
+                    at,
+                    radius,
+                    parent: None,
+                    world,
+                    size: radius * per_point,
+                },
+            ));
+        }
         let Some(handles) = live.fk_handles(id) else { continue };
         for (bone, world, parent) in handles {
             let depth = (world - view.eye).dot(view.forward);
@@ -1311,6 +1467,7 @@ fn balls(st: &State, view: &View) -> Vec<Ball> {
                 Ball {
                     character: id,
                     bone,
+                    ik: None,
                     at,
                     radius,
                     parent: parent.and_then(|p| view.screen(p)),
@@ -1352,13 +1509,30 @@ fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
     const SIDES: usize = 18;
     let hot = pointer
         .and_then(|pos| ball_at(st, pos))
-        .map(|b| (b.character, b.bone.clone()));
+        .map(|b| (b.character, b.bone.clone(), b.ik));
     let chosen = st.pose_bone.as_deref();
     let mut mesh = Mesh::default();
     for b in &st.gizmo.balls {
-        let lit = hot.as_ref().is_some_and(|(c, n)| *c == b.character && *n == b.bone);
-        let on = chosen == Some(b.bone.as_str()) && st.doc.selected == Some(b.character);
-        let (grey, alpha) = if lit || on { (1.0, 0.85) } else { (0.75, 0.3) };
+        let lit = hot
+            .as_ref()
+            .is_some_and(|(c, n, ik)| *c == b.character && *n == b.bone && *ik == b.ik);
+        let on = st.doc.selected == Some(b.character)
+            && match b.ik {
+                Some(target) => st.pose_ik == Some(target),
+                None => chosen == Some(b.bone.as_str()),
+            };
+        let (grey, alpha) = match (lit || on, b.ik.is_some()) {
+            (true, _) => (1.0, 0.85),
+            (false, true) => (0.9, 0.6),
+            (false, false) => (0.75, 0.3),
+        };
+        // CharaStudio's colours: effectors' targets red, bend goals blue,
+        // the bones white.
+        let tint = match b.ik {
+            Some(2 | 5 | 8 | 11) => [0.35, 0.55, 1.0],
+            Some(_) => [1.0, 0.35, 0.35],
+            None => [1.0, 1.0, 1.0],
+        };
         // A light from the camera's side and a little above, so that each
         // ball reads as a sphere: lit in front, darker at its rim.
         let light = ((view.eye - b.world).normalize_or(Vec3::Z) + Vec3::Y * 0.7).normalize();
@@ -1369,7 +1543,18 @@ fn ball_mesh(st: &State, view: &View, pointer: Option<Pos2>) -> Mesh {
             let p = b.world + n * b.size;
             let lit = n.dot(light).max(0.0);
             let shade = grey * (0.55 + 0.45 * lit) + 0.12 * lit.powi(16);
-            [p.x, p.y, p.z, n.x, n.y, n.z, shade, shade, shade, alpha]
+            [
+                p.x,
+                p.y,
+                p.z,
+                n.x,
+                n.y,
+                n.z,
+                shade * tint[0],
+                shade * tint[1],
+                shade * tint[2],
+                alpha,
+            ]
         };
         // Only the half that faces the camera: seen through, the far half
         // would show as stripes.
@@ -1789,17 +1974,10 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     let mut balls_left = ball_mesh(st, &view, pointer);
     st.gizmo.shown = shown;
 
+    let tool = gizmo_tool(st);
     let shown = match &st.gizmo.drag {
         Some(drag) => Some(drag.shown()),
-        None if (MOVE..=SCALE).contains(&tool) => frame(st, &view, tool),
-        None if tool == crate::viewport::POSE_TOOL => bone_frame(st, &view),
-        None => None,
-    };
-    // The Pose tool's gizmo is the Rotate tool's.
-    let tool = if tool == crate::viewport::POSE_TOOL {
-        ROTATE
-    } else {
-        tool
+        None => gizmo_frame(st, &view, tool),
     };
     if let Some(at) = shown {
         let drag = st.gizmo.drag.as_ref();
@@ -2020,6 +2198,7 @@ mod tests {
         let start = Start {
             grip: Grip::Object(object.id),
             bone: None,
+            target: None,
             parent,
             parent_turn: parent.to_scale_rotation_translation().1,
             place: parent.transform_point3(object.transform.position.into()),
@@ -2061,6 +2240,7 @@ mod tests {
         let start = Start {
             grip: Grip::Bone(id, "cf_j_arm00_L".into()),
             bone: Some((local, edit)),
+            target: None,
             object: scene.get(id).unwrap().clone(),
             parent: Mat4::IDENTITY,
             parent_turn,
@@ -2103,6 +2283,85 @@ mod tests {
                 "{axis}"
             );
         }
+    }
+
+    #[test]
+    fn a_dragged_ik_target_lands_in_her_own_space() {
+        let view = view();
+        let frame = frame_at(&view, Vec3::new(0.0, 1.0, 0.0));
+        let mut st = State::new(crate::project::Project::none(), Scene::new());
+        let id = st.doc.add_character("Anna", "a.png".into());
+        // She stands turned a quarter round and two metres along x.
+        let own = Mat4::from_rotation_translation(Quat::from_rotation_y(FRAC_PI_2), Vec3::new(2.0, 0.0, 0.0));
+        let mut object = st.doc.scene().get(id).unwrap().clone();
+        if let Content::Character { pose_layer, .. } = &mut object.content {
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            layer.ik_on = true;
+            layer.ik = vec![
+                rk_chara::pose::IkTarget {
+                    pos: Vec3::ZERO,
+                    rot: Quat::IDENTITY,
+                };
+                rk_chara::pose::IK_TARGETS
+            ];
+        }
+        st.doc.edit(object, false);
+        let hand = 3;
+        let start = Start {
+            grip: Grip::Ik(id, hand),
+            bone: None,
+            target: Some((Quat::from_rotation_y(FRAC_PI_2), own)),
+            object: st.doc.scene().get(id).unwrap().clone(),
+            parent: Mat4::IDENTITY,
+            parent_turn: Quat::from_rotation_y(FRAC_PI_2),
+            place: own.transform_point3(Vec3::ZERO),
+        };
+        let drag = |amount, handle| Drag {
+            tool: MOVE,
+            handle,
+            frame,
+            on_grid: false,
+            pivot: Pivot::Origin,
+            starts: Vec::new(),
+            press: Pos2::ZERO,
+            along: 0.0,
+            held: Vec3::ZERO,
+            spoke: Vec3::X,
+            tangent: Vec2::X,
+            amount,
+            readout: String::new(),
+        };
+        let target = |object: Object| match object.content {
+            Content::Character {
+                pose_layer: Some(l), ..
+            } => l.ik[hand],
+            _ => unreachable!(),
+        };
+        // Up a metre in the world is up a metre in her space; along the
+        // world's x is along her z, since she is turned.
+        let moved = drag(Amount::Move(Vec3::new(1.0, 1.0, 0.0)), Handle::Centre)
+            .moved_target(&start, id, hand, &st)
+            .unwrap();
+        assert!(target(moved).pos.abs_diff_eq(Vec3::new(0.0, 1.0, 1.0), 1e-5));
+        // A hand turns with the drag; a shoulder, a point, keeps its turn.
+        let turned = drag(Amount::Turn(0.5), Handle::Axis(1))
+            .moved_target(&start, id, hand, &st)
+            .unwrap();
+        assert!(target(turned)
+            .rot
+            .abs_diff_eq(Quat::from_axis_angle(frame.axes[1], 0.5), 1e-5));
+        let shoulder = drag(Amount::Turn(0.5), Handle::Axis(1))
+            .moved_target(
+                &Start {
+                    grip: Grip::Ik(id, 1),
+                    ..start
+                },
+                id,
+                1,
+                &st,
+            )
+            .unwrap();
+        assert_eq!(target(shoulder).rot, Quat::IDENTITY);
     }
 
     fn light() -> Object {

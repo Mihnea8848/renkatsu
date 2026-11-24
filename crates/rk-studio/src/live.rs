@@ -949,6 +949,34 @@ impl Live {
         self.actors.iter().find(|a| a.id == id)?.phase
     }
 
+    /// A built character's own space, which her IK targets are in: the
+    /// world of her top node.
+    pub fn ik_space(&self, id: ObjectId) -> Option<Mat4> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        Some(actor.chara.scene.world().0[actor.chara.top])
+    }
+
+    /// A built character's IK targets in the world while IK is on: those of
+    /// the groups that are on, each with its place and turn.
+    pub fn ik_handles(&self, id: ObjectId) -> Option<Vec<(usize, Vec3, Quat)>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let layer = actor
+            .layer
+            .as_ref()
+            .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
+        let own = actor.chara.scene.world().0[actor.chara.top];
+        let (_, turn, _) = own.to_scale_rotation_translation();
+        Some(
+            layer
+                .ik
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| layer.ik_group_on(*i))
+                .map(|(i, t)| (i, own.transform_point3(t.pos), (turn * t.rot).normalize()))
+                .collect(),
+        )
+    }
+
     /// A built character's IK targets on her bones as they stand, as
     /// Studio's copy puts them.
     pub fn ik_targets_on_bones(&self, id: ObjectId) -> Option<Vec<rk_chara::pose::IkTarget>> {
