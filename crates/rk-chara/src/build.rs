@@ -2840,6 +2840,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let tongues = [tongue(Part::Head), tongue(Part::Body)];
     if let Some(face) = &mut b.face {
         face.tongues = tongues;
+        face.keep_iris_places(&b.scene);
         face.show(&mut b.scene, None);
     } else {
         for &r in &tongues[1] {

@@ -21,6 +21,7 @@ pub mod dbde;
 pub mod dynamic_bone_editor;
 pub mod edit_fangs;
 pub mod expression;
+pub mod expression_control;
 pub mod eye_control;
 pub mod eyelook;
 pub mod face;

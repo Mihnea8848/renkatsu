@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// The iris textures the eye look moves (`EyeLookMaterialControll.texStates`).
+const IRIS_TEXTURES: [&str; 3] = ["_MainTex", "_overtex1", "_overtex2"];
+
 /// The mouth pattern that puts the tongue out.
 pub const TONGUE_OUT: i32 = 21;
 
@@ -114,6 +117,17 @@ pub struct Face {
     /// The blush, 0 to 1 (`ChaFileStatus.hohoAkaRate`).
     #[serde(default)]
     pub blush: f32,
+    /// The eyes' highlights hidden (`ChaControl.HideEyeHighlight`).
+    #[serde(default)]
+    pub hide_highlight: bool,
+    /// KK_ExpressionControl's eye roll, 0 to 0.5: the irises move up by
+    /// this much of their texture.
+    #[serde(default)]
+    pub eye_y: f32,
+    /// KK_ExpressionControl's smaller irises, 0 to 1: their textures grow
+    /// by this much about their middle.
+    #[serde(default)]
+    pub eye_small: f32,
 }
 
 impl Default for Face {
@@ -128,6 +142,9 @@ impl Default for Face {
             mouth_open: 0.0,
             tears: 0,
             blush: 0.0,
+            hide_highlight: false,
+            eye_y: 0.0,
+            eye_small: 0.0,
         }
     }
 }
@@ -140,8 +157,8 @@ impl std::str::FromStr for Face {
     fn from_str(spec: &str) -> anyhow::Result<Face> {
         let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
         anyhow::ensure!(
-            (3..=8).contains(&parts.len()),
-            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN[,TEARS[,BLUSH]]]]]"
+            (3..=11).contains(&parts.len()),
+            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN[,TEARS[,BLUSH[,HIDE_HIGHLIGHT[,EYE_Y[,EYE_SMALL]]]]]]]]"
         );
         let mut face = Face {
             eyebrows: parts[0].parse()?,
@@ -163,6 +180,15 @@ impl std::str::FromStr for Face {
         }
         if let Some(v) = parts.get(7) {
             face.blush = v.parse()?;
+        }
+        if let Some(v) = parts.get(8) {
+            face.hide_highlight = *v != "0";
+        }
+        if let Some(v) = parts.get(9) {
+            face.eye_y = v.parse()?;
+        }
+        if let Some(v) = parts.get(10) {
+            face.eye_small = v.parse()?;
         }
         Ok(face)
     }
@@ -237,6 +263,9 @@ pub struct Rig {
     pub tears: [Option<usize>; 3],
     /// The face's renderer, whose material carries the blush.
     pub face: Option<usize>,
+    /// The irises' textures as the eye look places them, by renderer:
+    /// `_MainTex`, `_overtex1` and `_overtex2`'s scale and offset.
+    pub iris_places: Vec<(usize, [Option<[f32; 4]>; 3])>,
     /// The face the character was built with.
     pub start: Face,
     /// The eyes' open rate it was built with: EyeControl turns blinking
@@ -267,6 +296,7 @@ impl Rig {
             part.show(scene, pattern, lerp(c.open_min, limit, eyes_rate));
         }
         self.show_eye_row(scene, face.eyes);
+        self.show_irises(scene, face);
         if let Some(part) = &self.mouth {
             // Studio fixes the mouth at its slider (`FixedRate`).
             part.show(scene, face.mouth, face.mouth_open.clamp(0.0, 1.0));
@@ -296,6 +326,45 @@ impl Rig {
     /// (`ChangeEyesPtn`).
     pub fn eye_row(&self, id: i32) -> Option<&EyeRow> {
         self.eyesets.get(&id).or_else(|| self.eyesets.get(&0))
+    }
+
+    /// Keeps where the eye look put the irises' textures, for the eye
+    /// roll and size to start from.
+    pub fn keep_iris_places(&mut self, scene: &Scene) {
+        self.iris_places = self
+            .irises
+            .iter()
+            .map(|&r| {
+                let m = scene.renderers[r].materials.first();
+                let place = |name: &str| {
+                    m.and_then(|m| m.textures.get(name))
+                        .map(|t| [t.scale[0], t.scale[1], t.offset[0], t.offset[1]])
+                };
+                (r, IRIS_TEXTURES.map(place))
+            })
+            .collect();
+    }
+
+    /// The highlights, and KK_ExpressionControl's eye roll and size, which
+    /// it lays every frame over the eye look's placement
+    /// (`ProcEyeY`, `ProcEyeSmall`): the scale grows by the size, the
+    /// offset moves back by half of it, and up by the roll.
+    fn show_irises(&self, scene: &mut Scene, face: &Face) {
+        let small = face.eye_small.clamp(0.0, 1.0);
+        let roll = face.eye_y.clamp(0.0, 0.5);
+        for (r, places) in &self.iris_places {
+            let Some(m) = scene.renderers[*r].materials.first_mut() else {
+                continue;
+            };
+            m.set_float("_isHighLight", if face.hide_highlight { 0.0 } else { 1.0 });
+            for (name, place) in IRIS_TEXTURES.iter().zip(places) {
+                let (Some(place), Some(slot)) = (place, m.textures.get_mut(*name)) else {
+                    continue;
+                };
+                slot.scale = [place[0] + small, place[1] + small];
+                slot.offset = [place[2] - small / 2.0, place[3] - small / 2.0 - roll];
+            }
+        }
     }
 
     /// The eye white, the pupils and the irises' picture of an eye

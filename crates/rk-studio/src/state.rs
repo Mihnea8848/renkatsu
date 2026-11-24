@@ -468,6 +468,14 @@ pub struct State {
 
     /// Properties sections that are open.
     pub sections: [bool; 22],
+    /// Expression presets: Renkatsu's own, then ExpressionControl's from
+    /// the game folder; read when first shown.
+    pub expressions: Option<(
+        Vec<rk_chara::expression_control::Preset>,
+        Vec<rk_chara::expression_control::Preset>,
+    )>,
+    /// The name a new expression preset is saved under.
+    pub expression_name: String,
     /// The page of a character's Properties: the scene's settings, the
     /// card's profile or its likes.
     pub property_tab: usize,
@@ -929,6 +937,8 @@ impl State {
             gizmo: Default::default(),
             playback: Playback::Stopped,
             clock: 0.0,
+            expressions: None,
+            expression_name: String::new(),
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
                 true, true, true, true, false,

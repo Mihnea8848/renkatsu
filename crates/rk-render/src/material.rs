@@ -659,9 +659,14 @@ impl MaterialDesc {
                 ]
             } else if kind == Kind::Eye {
                 // The game switches highlights on unless the character hides
-                // them; the stored value is not used. Then how strongly the
-                // picture shows.
-                [1.0, float("_rotation", 0.0), float("_exppower", 0.0), 0.0]
+                // them (`HideEyeHighlight`), and the character's face sets
+                // the value. Then how strongly the picture shows.
+                [
+                    float("_isHighLight", 1.0),
+                    float("_rotation", 0.0),
+                    float("_exppower", 0.0),
+                    0.0,
+                ]
             } else if kind == Kind::Overlay {
                 let nose = mat.shader.to_lowercase().contains("nose");
                 [if nose { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]

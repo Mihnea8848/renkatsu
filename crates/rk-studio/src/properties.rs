@@ -1315,6 +1315,7 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
     }
     if section(ui, k, st, FACE_SECTION, "Expression") {
         let mut face = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
+        preset_row(ui, k, st, waiting, ui_id.with("preset"), &mut face);
         let number = |n: i32| n.to_string();
         let eye_name = |n: i32| rk_chara::face::eye_label(n).map_or_else(|| n.to_string(), str::to_owned);
         pattern_row(
@@ -1400,6 +1401,38 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             );
         });
         face.blush = face.blush.clamp(0.0, 1.0);
+        row(ui, k, "Highlights", waiting, |ui, rect| {
+            let mut shown = !face.hide_highlight;
+            widgets::checkbox(ui, k, rect, ui_id.with("highlights"), &mut shown, "Shown");
+            face.hide_highlight = !shown;
+        });
+        // KK_ExpressionControl's eye roll and smaller irises.
+        row(ui, k, "Eye roll", waiting, |ui, rect| {
+            widgets::number(
+                ui,
+                k,
+                rect,
+                ui_id.with("eye roll"),
+                &mut face.eye_y,
+                Marker::None,
+                true,
+                FINE,
+            );
+        });
+        row(ui, k, "Small irises", waiting, |ui, rect| {
+            widgets::number(
+                ui,
+                k,
+                rect,
+                ui_id.with("small irises"),
+                &mut face.eye_small,
+                Marker::None,
+                true,
+                FINE,
+            );
+        });
+        face.eye_y = face.eye_y.clamp(0.0, 0.5);
+        face.eye_small = face.eye_small.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
         let shown = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
@@ -1444,6 +1477,111 @@ fn skin_effects_section(
     section_end(ui, k);
     if next != layer {
         *pose_layer = (!next.is_empty()).then_some(next);
+    }
+}
+
+/// The file of Renkatsu's own expression presets, beside the settings.
+fn expressions_path() -> Option<std::path::PathBuf> {
+    Some(crate::settings::Settings::path()?.with_file_name("expressions.toml"))
+}
+
+/// Expression presets, as ExpressionControl keeps them: a pick sets the
+/// whole face. Renkatsu's own come first, then the plugin's from the game
+/// folder; the current face can be saved under a name, and an own preset
+/// deleted.
+fn preset_row(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    off: Option<&str>,
+    ui_id: egui::Id,
+    face: &mut rk_chara::face::Face,
+) {
+    use rk_chara::expression_control as ec;
+    if st.expressions.is_none() {
+        let own = expressions_path()
+            .and_then(|p| ec::read_saved(&p).ok())
+            .unwrap_or_default();
+        let plugin = rk_core::Config::load()
+            .ok()
+            .map(|c| ec::of_game(&c.game_dir))
+            .unwrap_or_default();
+        st.expressions = Some((own, plugin));
+    }
+    let (own, plugin) = st.expressions.clone().unwrap_or_default();
+    let shown = own
+        .iter()
+        .chain(&plugin)
+        .find(|p| p.face == *face)
+        .map_or("Custom", |p| p.name.as_str())
+        .to_owned();
+    let mut save = false;
+    let mut delete = None;
+    let mut name = st.expression_name.clone();
+    if name.is_empty() {
+        name = format!("Expression {}", own.len() + 1);
+    }
+    row(ui, k, "Preset", off, |ui, rect| {
+        let resp = widgets::dropdown_field(ui, k, rect, ui_id, &shown);
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(rect.width());
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (i, preset) in own.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
+                            *face = preset.face;
+                            ui.close();
+                        }
+                        if icon_button(ui, k, icon::TRASH, false).on_hover_text("Delete").clicked() {
+                            delete = Some(i);
+                        }
+                    });
+                }
+                if !plugin.is_empty() {
+                    ui.label(
+                        egui::RichText::new("ExpressionControl")
+                            .color(k.t.text_dim)
+                            .size(k.d.text - 1.0),
+                    );
+                    for preset in &plugin {
+                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
+                            *face = preset.face;
+                            ui.close();
+                        }
+                    }
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut name).desired_width(rect.width() - 70.0));
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+            });
+        });
+    });
+    st.expression_name = name.clone();
+    if save || delete.is_some() {
+        let mut own = own;
+        if let Some(i) = delete {
+            own.remove(i);
+        }
+        if save {
+            own.retain(|p| p.name != name);
+            own.push(ec::Preset {
+                name: name.trim().to_owned(),
+                face: *face,
+            });
+            st.expression_name.clear();
+        }
+        match expressions_path().map(|p| ec::save(&p, &own)) {
+            Some(Err(e)) => st.log.error(format!("Could not save the expressions: {e:#}")),
+            _ => {
+                if let Some((saved, _)) = st.expressions.as_mut() {
+                    *saved = own;
+                }
+            }
+        }
     }
 }
 
