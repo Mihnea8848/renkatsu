@@ -78,6 +78,19 @@ pub struct WorldShell {
 }
 
 impl Shell {
+    /// The middle thickness at each end, in its own space.
+    pub fn ends(&self) -> [f32; 2] {
+        let middle = |ring: &[f32]| {
+            let mut ring = ring.to_vec();
+            ring.sort_by(f32::total_cmp);
+            ring[ring.len() / 2]
+        };
+        [
+            middle(&self.radii[..ANGLES]),
+            middle(&self.radii[self.radii.len() - ANGLES..]),
+        ]
+    }
+
     pub fn in_world(&self, m: &Mat4) -> WorldShell {
         let (a, b) = (m.transform_point3(self.a), m.transform_point3(self.b));
         let scale = m.x_axis.truncate().length();
@@ -92,17 +105,7 @@ impl Shell {
             stations: self.stations,
             radii: self.radii.clone(),
             caps: self.caps,
-            ends: {
-                let middle = |ring: &[f32]| {
-                    let mut ring = ring.to_vec();
-                    ring.sort_by(f32::total_cmp);
-                    ring[ring.len() / 2]
-                };
-                [
-                    middle(&self.radii[..ANGLES]),
-                    middle(&self.radii[self.radii.len() - ANGLES..]),
-                ]
-            },
+            ends: self.ends(),
             outside: self.outside,
             centre: (a + b) * 0.5,
             reach: (b - a).length() * 0.5 + widest,

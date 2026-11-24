@@ -100,6 +100,18 @@ enum Cmd {
         /// Physics.
         #[arg(long)]
         game_skirts: bool,
+        /// Move the skirts' cloth with the solver that runs on the GPU,
+        /// in place of Advanced Skirt Physics' net on the CPU.
+        #[arg(long, conflicts_with = "game_skirts")]
+        gpu_skirts: bool,
+        /// A folder to write the skirts' cloth to after every frame
+        /// played, one text per frame, for the walking score.
+        #[arg(long)]
+        skirt_dump: Option<PathBuf>,
+        /// Measure what a frame of the GPU solver costs, with this many
+        /// substeps (0 for as many as it takes itself).
+        #[arg(long)]
+        skirt_time: Option<u32>,
         /// Where the character stands in the map, as `x,y,z` in metres.
         #[arg(long, allow_hyphen_values = true)]
         at: Option<String>,
@@ -625,6 +637,9 @@ fn main() -> Result<()> {
             no_physics,
             colliders,
             game_skirts,
+            gpu_skirts,
+            skirt_dump,
+            skirt_time,
             at,
             turn,
             list,
@@ -659,6 +674,9 @@ fn main() -> Result<()> {
             no_physics,
             colliders: colliders.as_deref(),
             game_skirts,
+            gpu_skirts,
+            skirt_dump: skirt_dump.as_deref(),
+            skirt_time,
             at: at.as_deref(),
             turn,
             list,

@@ -168,6 +168,7 @@ impl Curve {
 }
 
 pub mod cloth;
+pub mod drape;
 pub mod net;
 pub mod shell;
 
@@ -1980,6 +1981,34 @@ impl Physics {
             Some(cloth) if self.advanced => cloth.draw(),
             _ => None,
         };
+        scene.drape = match &self.cloth {
+            Some(cloth) if self.advanced => cloth.drape(),
+            _ => None,
+        };
+    }
+
+    /// Has the GPU solver (`drape`, run by the renderer) move the skirts'
+    /// nets in place of the CPU's net solver. Advanced Skirt Physics
+    /// must be on for either.
+    pub fn solve_skirts_on_gpu(&mut self, on: bool) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.solve_on_gpu(on);
+        }
+    }
+
+    /// The fastest a part of the body went in a frame since the GPU
+    /// solver started, as seen from the waist, in metres.
+    pub fn fastest_limb(&self) -> f32 {
+        self.cloth.as_ref().map_or(0.0, cloth::Cloth::fastest_limb)
+    }
+
+    /// One text per cloth net for the walking score (`rk render
+    /// --skirt-dump`); `gpu` is the GPU solver's state read back.
+    pub fn skirt_dump(&self, scene: &Scene, gpu: Option<drape::Readback<'_>>) -> Vec<String> {
+        match &self.cloth {
+            Some(cloth) if self.advanced => cloth.dump(scene, gpu),
+            _ => Vec::new(),
+        }
     }
 
     /// While `held`, `end_frame` moves everything but the cloth nets,
@@ -2020,6 +2049,7 @@ impl Physics {
     pub fn settle_cloth(&mut self, scene: &mut Scene, frames: u32, dt: f32) {
         let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) else {
             scene.cloth = None;
+            scene.drape = None;
             scene.push_out = None;
             return;
         };
@@ -2027,6 +2057,7 @@ impl Physics {
             cloth.step_nets(scene, &self.ran, self.obstacles.as_ref(), dt);
         }
         scene.cloth = cloth.draw();
+        scene.drape = cloth.drape();
     }
 
     /// Fits Advanced Skirt Physics to the character as it is now, which
