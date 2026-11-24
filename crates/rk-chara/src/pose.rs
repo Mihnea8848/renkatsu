@@ -250,7 +250,18 @@ impl Layer {
     /// Lays keyed edits over the layer: bones' over FK, IK targets' over
     /// the targets.
     pub fn with_keys(&mut self, keyed: BTreeMap<String, BoneEdit>) {
+        self.with_keys_from(keyed, &crate::face::Face::default());
+    }
+
+    /// As `with_keys`, the face starting from `start` where the layer sets
+    /// none: the keys of the hands, the face and the skin effects
+    /// (`crate::channels`) set those values.
+    pub fn with_keys_from(&mut self, keyed: BTreeMap<String, BoneEdit>, start: &crate::face::Face) {
         for (name, edit) in keyed {
+            if let Some(channel) = crate::channels::Channel::of_key(&name) {
+                channel.set(self, start, crate::channels::of_edit(edit));
+                continue;
+            }
             match ik_key_target(&name) {
                 Some(target) => {
                     if let Some(t) = self.ik.get_mut(target) {

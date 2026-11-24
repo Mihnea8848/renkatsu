@@ -11,6 +11,7 @@ pub mod animation_file;
 pub mod animations;
 pub mod bone_info;
 pub mod build;
+pub mod channels;
 pub mod clothes_state;
 pub mod clothing_blend_shape;
 pub mod clothing_unlocker;

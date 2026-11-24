@@ -170,7 +170,22 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         }
         _ => None,
     };
-    if !fk_on && ik_groups.is_none() {
+    // The hands', the face's and the skin effects' keyed values, whatever
+    // FK and IK are.
+    let values: Vec<(usize, String, String)> = st
+        .doc
+        .scene()
+        .sequence
+        .track(id)
+        .map(|t| {
+            rk_chara::channels::Channel::all()
+                .into_iter()
+                .filter(|c| t.keys.contains_key(&c.key()))
+                .map(|c| (0, c.key(), c.label()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !fk_on && ik_groups.is_none() && values.is_empty() {
         say(ui, "Forward kinematics is off");
         return;
     }
@@ -188,7 +203,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         .iter()
         .filter(|_| fk_on)
         .map(|(depth, name)| (*depth, name.clone(), crate::bones::pose_label(name)));
-    let rows: Vec<(usize, String, String)> = targets
+    let rows: Vec<(usize, String, String)> = values
+        .into_iter()
+        .chain(targets)
         .chain(bones)
         .filter(|(_, name, shown)| {
             needle.is_empty() || shown.to_lowercase().contains(&needle) || name.to_lowercase().contains(&needle)

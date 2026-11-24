@@ -181,7 +181,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 section_end(ui, k);
             }
             let waiting = built.is_none().then_some("The character is not built");
-            skin_effects_section(ui, k, st, waiting, pose_layer);
+            skin_effects_section(ui, k, st, object.id, waiting, pose_layer);
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
@@ -1280,14 +1280,17 @@ pub const SKIN_SECTION: usize = 21;
 /// them: each pattern a picture that opens a grid of the others.
 fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     use crate::live::Pictures;
+    use rk_chara::channels::Channel;
     let Content::Character { pose_layer, .. } = content else {
         return;
     };
     let rig = st.live.as_ref().and_then(|l| l.face_rig(id)).cloned();
     let waiting = rig.is_none().then_some("The character is not built");
+    let start = rig.as_ref().map(|r| r.start).unwrap_or_default();
     let ui_id = ui.id().with("face");
-    let layer = pose_layer.clone().unwrap_or_default();
-    let mut next = layer.clone();
+    let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
+    let mut next = keyed.shown.clone();
+    let mut toggled = Vec::new();
     if section(ui, k, st, HANDS_SECTION, "Hands") {
         for (side, name) in ["Left", "Right"].into_iter().enumerate() {
             let label_of = |n: i32| -> String {
@@ -1298,7 +1301,8 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                     .and_then(|l| l[side].get(&n))
                     .map_or_else(|| format!("Pattern {n}"), |a| a.label())
             };
-            pattern_row(
+            let mark = keyed.mark(Channel::Hand(side));
+            let picked = pattern_row(
                 ui,
                 k,
                 st,
@@ -1309,142 +1313,241 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 ui_id.with(("hand", side)),
                 &label_of,
                 &mut next.hands[side],
+                mark,
             );
+            if picked {
+                toggled.push(Channel::Hand(side));
+            }
         }
         section_end(ui, k);
     }
     if section(ui, k, st, FACE_SECTION, "Expression") {
-        let mut face = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
+        let mut face = next.face.unwrap_or(start);
         preset_row(ui, k, st, waiting, ui_id.with("preset"), &mut face);
         let eyebrow_name = |n: i32| rk_chara::face::eyebrow_label(n).map_or_else(|| n.to_string(), str::to_owned);
         let mouth_name = |n: i32| rk_chara::face::mouth_label(n).map_or_else(|| n.to_string(), str::to_owned);
         let eye_name = |n: i32| rk_chara::face::eye_label(n).map_or_else(|| n.to_string(), str::to_owned);
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Eyebrows,
-            "Eyebrows",
-            waiting,
-            ui_id.with("eyebrows"),
-            &eyebrow_name,
-            &mut face.eyebrows,
-        );
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Eyes,
-            "Eyes",
-            waiting,
-            ui_id.with("eyes"),
-            &eye_name,
-            &mut face.eyes,
-        );
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Mouth,
-            "Mouth",
-            waiting,
-            ui_id.with("mouth"),
-            &mouth_name,
-            &mut face.mouth,
-        );
-        row(ui, k, "Eyes open", waiting, |ui, rect| {
-            widgets::number(
+        for (set, name, label_of, value, channel) in [
+            (
+                Pictures::Eyebrows,
+                "Eyebrows",
+                &eyebrow_name as &dyn Fn(i32) -> String,
+                &mut face.eyebrows,
+                Channel::Eyebrows,
+            ),
+            (Pictures::Eyes, "Eyes", &eye_name, &mut face.eyes, Channel::Eyes),
+            (Pictures::Mouth, "Mouth", &mouth_name, &mut face.mouth, Channel::Mouth),
+        ] {
+            let mark = keyed.mark(channel);
+            if pattern_row(
                 ui,
                 k,
-                rect,
-                ui_id.with("eyes open"),
-                &mut face.eyes_open,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+                st,
+                id,
+                set,
+                name,
+                waiting,
+                ui_id.with(name),
+                label_of,
+                value,
+                mark,
+            ) {
+                toggled.push(channel);
+            }
+        }
+        let amount = |ui: &mut Ui, name: &str, value: &mut f32, channel: Channel, toggled: &mut Vec<Channel>| {
+            row(ui, k, name, waiting, |ui, rect| {
+                let (rect, click) = key_mark(ui, k, rect, ui_id.with((name, "key")), keyed.mark(channel));
+                widgets::number(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE);
+                if click {
+                    toggled.push(channel);
+                }
+            });
+        };
+        amount(ui, "Eyes open", &mut face.eyes_open, Channel::EyesOpen, &mut toggled);
         row(ui, k, "Blink", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("blink key"), keyed.mark(Channel::Blink));
             widgets::checkbox(ui, k, rect, ui_id.with("blink"), &mut face.blink, "Blink");
+            if click {
+                toggled.push(Channel::Blink);
+            }
         });
-        row(ui, k, "Mouth open", waiting, |ui, rect| {
-            widgets::number(
-                ui,
-                k,
-                rect,
-                ui_id.with("mouth open"),
-                &mut face.mouth_open,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+        amount(ui, "Mouth open", &mut face.mouth_open, Channel::MouthOpen, &mut toggled);
         row(ui, k, "Tears", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
             let options = [("None", true), ("Small", true), ("Middle", true), ("Large", true)];
             let chosen = usize::from(face.tears.min(3));
             if let Some(i) = choices(ui, k, rect, ui_id.with("tears"), Some(chosen), &options) {
                 face.tears = i as u8;
             }
+            if click {
+                toggled.push(Channel::Tears);
+            }
         });
-        row(ui, k, "Blush", waiting, |ui, rect| {
-            widgets::number(
+        amount(ui, "Blush", &mut face.blush, Channel::Blush, &mut toggled);
+        row(ui, k, "Highlights", waiting, |ui, rect| {
+            let (rect, click) = key_mark(
                 ui,
                 k,
                 rect,
-                ui_id.with("blush"),
-                &mut face.blush,
-                Marker::None,
-                true,
-                FINE,
+                ui_id.with("highlights key"),
+                keyed.mark(Channel::Highlights),
             );
-        });
-        face.blush = face.blush.clamp(0.0, 1.0);
-        row(ui, k, "Highlights", waiting, |ui, rect| {
             let mut shown = !face.hide_highlight;
             widgets::checkbox(ui, k, rect, ui_id.with("highlights"), &mut shown, "Shown");
             face.hide_highlight = !shown;
+            if click {
+                toggled.push(Channel::Highlights);
+            }
         });
         // KK_ExpressionControl's eye roll and smaller irises.
-        row(ui, k, "Eye roll", waiting, |ui, rect| {
-            widgets::number(
-                ui,
-                k,
-                rect,
-                ui_id.with("eye roll"),
-                &mut face.eye_y,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
-        row(ui, k, "Small irises", waiting, |ui, rect| {
-            widgets::number(
-                ui,
-                k,
-                rect,
-                ui_id.with("small irises"),
-                &mut face.eye_small,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+        amount(ui, "Eye roll", &mut face.eye_y, Channel::EyeRoll, &mut toggled);
+        amount(
+            ui,
+            "Small irises",
+            &mut face.eye_small,
+            Channel::SmallIrises,
+            &mut toggled,
+        );
+        face.blush = face.blush.clamp(0.0, 1.0);
         face.eye_y = face.eye_y.clamp(0.0, 0.5);
         face.eye_small = face.eye_small.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
-        let shown = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
-        if face != shown {
+        if face != next.face.unwrap_or(start) {
             next.face = Some(face);
         }
         section_end(ui, k);
     }
-    if next != layer {
-        *pose_layer = (!next.is_empty()).then_some(next);
+    let held = ui.input(|i| i.pointer.any_down());
+    keyed.commit(st, id, pose_layer, &next, &toggled, held);
+}
+
+/// The values that take keys (`rk_chara::channels`) of a character as
+/// the Properties show them: the pose layer with their keys at the
+/// playhead, and each value's keys.
+struct KeyedValues {
+    start: rk_chara::face::Face,
+    /// The layer as stored.
+    layer: rk_chara::pose::Layer,
+    /// The layer with the values' keys at the playhead.
+    shown: rk_chara::pose::Layer,
+    /// Each keyed value's keys: whether it has any, and one at the
+    /// playhead.
+    marks: std::collections::HashMap<String, (bool, bool)>,
+}
+
+impl KeyedValues {
+    fn of(
+        st: &State,
+        id: crate::scene::ObjectId,
+        layer: Option<&rk_chara::pose::Layer>,
+        start: &rk_chara::face::Face,
+    ) -> Self {
+        use rk_chara::channels::Channel;
+        let layer = layer.cloned().unwrap_or_default();
+        let mut shown = layer.clone();
+        let mut marks = std::collections::HashMap::new();
+        if let Some(track) = st.doc.scene().sequence.track(id) {
+            let mut at = rk_chara::keys::pose_at(&track.keys, st.clock);
+            at.retain(|name, _| Channel::of_key(name).is_some());
+            shown.with_keys_from(at, start);
+            let now = crate::keying::now(st);
+            let near = st.doc.scene().sequence.near();
+            for (name, list) in &track.keys {
+                if Channel::of_key(name).is_some() {
+                    let here = list.iter().any(|key| (key.time - now).abs() <= near);
+                    marks.insert(name.clone(), (true, here));
+                }
+            }
+        }
+        KeyedValues {
+            start: *start,
+            layer,
+            shown,
+            marks,
+        }
     }
+
+    fn mark(&self, channel: rk_chara::channels::Channel) -> (bool, bool) {
+        self.marks.get(&channel.key()).copied().unwrap_or_default()
+    }
+
+    /// Where the edits go: a keyed value's to its key at the playhead, the
+    /// others' to the pose layer. A diamond clicked sets the value's key
+    /// at the playhead, or takes it away when there is one.
+    fn commit(
+        &self,
+        st: &mut State,
+        id: crate::scene::ObjectId,
+        pose_layer: &mut Option<Box<rk_chara::pose::Layer>>,
+        next: &rk_chara::pose::Layer,
+        toggled: &[rk_chara::channels::Channel],
+        held: bool,
+    ) {
+        use rk_chara::channels::Channel;
+        let mut out = self.layer.clone();
+        for channel in Channel::all() {
+            let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
+            if was == now {
+                continue;
+            }
+            if self.mark(channel).0 {
+                crate::keying::write_value(st, id, &channel.key(), now, held);
+            } else {
+                channel.set(&mut out, &self.start, now);
+            }
+        }
+        for &channel in toggled {
+            if self.mark(channel).1 {
+                crate::keying::delete_keys(st, id, &[channel.key()]);
+            } else {
+                crate::keying::write_value(st, id, &channel.key(), channel.get(next, &self.start), false);
+            }
+        }
+        if out != self.layer {
+            *pose_layer = (!out.is_empty()).then(|| Box::new(out));
+        }
+    }
+}
+
+/// A value's key diamond at the right of its row: hollow with no keys,
+/// half with keys elsewhere, full with one at the playhead. Gives the rest
+/// of the row and whether the diamond was clicked.
+fn key_mark(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, (any, here): (bool, bool)) -> (Rect, bool) {
+    let side = 18.0;
+    let cell = Rect::from_min_max(Pos2::new(rect.right() - side, rect.top()), rect.max);
+    let resp = ui
+        .interact(cell, id, Sense::click())
+        .on_hover_text(if here { "Delete key" } else { "Set key" });
+    let c = cell.center();
+    let r = 4.5;
+    let points = vec![
+        c + Vec2::new(0.0, -r),
+        c + Vec2::new(r, 0.0),
+        c + Vec2::new(0.0, r),
+        c + Vec2::new(-r, 0.0),
+    ];
+    let line = if resp.hovered() { k.t.text_bright } else { k.t.text_dim };
+    let p = ui.painter();
+    if here {
+        p.add(egui::Shape::convex_polygon(
+            points,
+            k.t.select,
+            egui::Stroke::new(1.0, line),
+        ));
+    } else {
+        p.add(egui::Shape::closed_line(points.clone(), egui::Stroke::new(1.0, line)));
+        if any {
+            // Half filled: keys at other times.
+            p.add(egui::Shape::convex_polygon(
+                vec![points[0], points[2], points[3]],
+                line,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+    (rect.with_max_x(cell.left() - 4.0), resp.clicked())
 }
 
 /// KK_SkinEffects: a level for each of its effects, kept in the pose so
@@ -1453,17 +1556,27 @@ fn skin_effects_section(
     ui: &mut Ui,
     k: &Look,
     st: &mut State,
+    id: crate::scene::ObjectId,
     waiting: Option<&str>,
     pose_layer: &mut Option<Box<rk_chara::pose::Layer>>,
 ) {
+    use rk_chara::channels::Channel;
     if !section(ui, k, st, SKIN_SECTION, "Skin effects") {
         return;
     }
     let ui_id = ui.id().with("skin effects");
-    let layer = pose_layer.clone().unwrap_or_default();
-    let mut next = layer.clone();
+    let start = st
+        .live
+        .as_ref()
+        .and_then(|l| l.face_rig(id))
+        .map(|r| r.start)
+        .unwrap_or_default();
+    let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
+    let mut next = keyed.shown.clone();
+    let mut toggled = Vec::new();
     for (i, effect) in rk_chara::skin_effects::EFFECTS.iter().enumerate() {
         row(ui, k, effect.name, waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with((i, "key")), keyed.mark(Channel::Skin(i)));
             let names = ["None", "1", "2", "3"];
             let options: Vec<(&str, bool)> = names[..=usize::from(effect.levels)]
                 .iter()
@@ -1473,12 +1586,13 @@ fn skin_effects_section(
             if let Some(level) = choices(ui, k, rect, ui_id.with(i), Some(chosen), &options) {
                 next.skin[i] = level as u8;
             }
+            if click {
+                toggled.push(Channel::Skin(i));
+            }
         });
     }
     section_end(ui, k);
-    if next != layer {
-        *pose_layer = (!next.is_empty()).then_some(next);
-    }
+    keyed.commit(st, id, pose_layer, &next, &toggled, false);
 }
 
 /// The file of Renkatsu's own expression presets, beside the settings.
@@ -1600,7 +1714,9 @@ fn pattern_row(
     ui_id: egui::Id,
     label_of: &dyn Fn(i32) -> String,
     value: &mut i32,
-) {
+    key: (bool, bool),
+) -> bool {
+    let mut clicked = false;
     let pictures: Vec<(i32, std::sync::Arc<egui::ColorImage>)> = st
         .live
         .as_mut()
@@ -1610,6 +1726,8 @@ fn pattern_row(
     let [w, h] = set.size();
     let (w, h) = (w as f32 * 0.5, h as f32 * 0.5);
     sized_row(ui, k, name, off, (h + 4.0 - k.d.row).max(0.0), |ui, rect| {
+        let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
+        clicked = click;
         let field = Rect::from_min_size(rect.min, Vec2::new(rect.width(), h + 4.0));
         let resp = ui.interact(field, ui_id, Sense::click());
         let p = ui.painter();
@@ -1681,6 +1799,7 @@ fn pattern_row(
             });
         });
     });
+    clicked
 }
 
 /// A pattern picture's texture, kept for as long as the picture.

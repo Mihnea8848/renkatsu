@@ -570,20 +570,28 @@ impl Actor {
         // Edits made by hand: a change poses the character again from
         // the bones as loaded, so a bone no longer edited goes back.
         // The keys of the scene's sequence at the clock's time, over the
-        // pose by hand and the IK targets, while FK or IK is on.
-        let keyed = pose_layer
-            .as_deref()
-            .filter(|l| l.fk_on || l.ik_on)
-            .zip(keys.filter(|k| !k.is_empty()))
-            .map(|(l, k)| {
-                let mut l = l.clone();
-                let time = match clock.solo {
-                    Some((solo, time)) if solo == self.id => time,
-                    _ => clock.time,
-                };
-                l.with_keys(rk_chara::keys::pose_at(k, time));
-                l
+        // pose by hand: the bones' while FK is on, the IK targets' while IK
+        // is, and the hands', the face's and the skin effects' always.
+        let start = self.chara.face.as_ref().map(|f| f.start).unwrap_or_default();
+        let keyed = keys.filter(|k| !k.is_empty()).map(|k| {
+            let mut l = pose_layer.as_deref().cloned().unwrap_or_default();
+            let time = match clock.solo {
+                Some((solo, time)) if solo == self.id => time,
+                _ => clock.time,
+            };
+            let (fk, ik) = (l.fk_on, l.ik_on);
+            let mut at = rk_chara::keys::pose_at(k, time);
+            at.retain(|name, _| {
+                rk_chara::channels::Channel::of_key(name).is_some()
+                    || if rk_chara::pose::ik_key_target(name).is_some() {
+                        ik
+                    } else {
+                        fk
+                    }
             });
+            l.with_keys_from(at, &start);
+            l
+        });
         let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());
         // A new animation, other clothes or a stop put the body somewhere
         // else at once, and the cloth nets start again there. An edit by
