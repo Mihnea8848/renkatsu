@@ -20,7 +20,7 @@ download. If you have the game, Renkatsu reads your cards and mods from it
 too, and never changes it.
 
 <p align="center">
-  <img src="docs/images/studio.png" alt="Renkatsu Studio with a character in the viewport and the project's characters below" width="900">
+  <img src="docs/images/classroom.png" alt="Renkatsu-Chan sitting on a desk in a classroom at sunset" width="900">
 </p>
 
 Get the installer from the
@@ -68,6 +68,10 @@ run it, and start a project.
 - Set keys on bones and IK targets and play them on the timeline, with
   smooth, even or held easing. Play one character's animation on its
   own while you work on it, and save it to give to another character.
+
+<p align="center">
+  <img src="docs/images/studio.png" alt="Posing with IK in the studio: the Pose tools, IK handles on the character, her keys in the Animator, the Outliner and Properties" width="900">
+</p>
 
 ### Build the scene
 
