@@ -401,12 +401,7 @@ fn apply(act: Act, st: &mut State, ctx: &egui::Context) {
         }
         Act::Packages => st.packages.open = true,
         Act::OpenUrl(url) => settings::open_url(&url),
-        Act::InstallUpdate => {
-            let busy = st.updating.as_ref().is_some_and(|u| u.busy());
-            if let (false, Some(release)) = (busy, st.update.clone()) {
-                st.updating = Some(crate::self_update::Updating::start(release, ctx));
-            }
-        }
+        Act::InstallUpdate => st.update_clicked(ctx),
         Act::GetStarter => {
             // The window shows how far the download is and can stop it.
             st.packages.open = true;
@@ -447,9 +442,6 @@ pub fn page(ui: &mut Ui, k: &Look, st: &mut State) {
     let Some(mut sel) = st.selector.take() else { return };
     sel.loaded = false;
     sel.update = st.update.clone();
-    if let Some(updating) = &mut st.updating {
-        updating.poll(ui.ctx());
-    }
     sel.updating = st.updating.as_ref().map(|u| (u.text(), u.failed.clone()));
     sel.news.clone_from(&st.news);
     let dt = ui.input(|i| i.stable_dt).min(1.0 / 30.0);
@@ -570,37 +562,6 @@ fn side_row_under(
         color,
     );
     clicked
-}
-
-/// The line under "Update available": Install Update, which works by
-/// itself once clicked, then says how far it is.
-fn install_line(ui: &mut Ui, k: &Look, row: Rect, updating: Option<&(String, Option<String>)>) -> bool {
-    let t = &k.t;
-    let pos = Pos2::new(row.left() + 18.0, row.bottom() + 2.0);
-    let (text, color, can) = match updating {
-        None => ("Install Update", t.accent, true),
-        Some((text, None)) => (text.as_str(), t.text_dim, false),
-        Some((text, Some(_))) => (text.as_str(), t.stop, true),
-    };
-    let width = widgets::text_width(ui, text, k.small()).ceil();
-    let rect = Rect::from_min_size(Pos2::new(pos.x, pos.y - 8.0), Vec2::new(width, 16.0));
-    let mut resp = ui.interact(rect, ui.id().with("install update"), Sense::click());
-    let hover = can && resp.hovered();
-    line(
-        ui,
-        pos,
-        SIDE - 32.0,
-        text,
-        k.small(),
-        if hover { t.text_bright } else { color },
-    );
-    if hover {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if let Some((_, Some(why))) = updating {
-        resp = resp.on_hover_text(why.as_str());
-    }
-    can && resp.clicked()
 }
 
 /// How far a side row's smaller line reaches below the row.
@@ -947,16 +908,26 @@ fn window(ui: &mut Ui, k: &Look, sel: &mut Selector, view: ProjectView, now: u64
     if side_row_under(ui, k, game, glyph_name, text, &under, t.text_dim) {
         act = Some(Act::ChooseGame);
     }
-    if let Some(release) = &sel.update {
+    // A newer Renkatsu: the row installs it by itself, its line saying how
+    // far it is.
+    if sel.update.is_some() {
         let row = Rect::from_min_size(
             Pos2::new(side.left(), side.bottom() - 84.0),
             Vec2::new(SIDE - 1.0, 36.0),
         );
-        if side_row(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", "", false) {
-            act = Some(Act::OpenUrl(release.url.clone()));
-        }
-        if install_line(ui, k, row, sel.updating.as_ref()) {
+        let (under, color) = match &sel.updating {
+            None => ("Install Update".to_owned(), t.accent),
+            Some((text, Some(_))) => (text.clone(), t.stop),
+            Some((text, None)) if text == "Restart to update" => (text.clone(), t.accent),
+            Some((text, None)) => (text.clone(), t.text_dim),
+        };
+        if side_row_under(ui, k, row, icon::ARROW_CIRCLE_UP, "Update available", &under, color) {
             act = Some(Act::InstallUpdate);
+        }
+        if let Some((_, Some(why))) = &sel.updating {
+            let hit = Rect::from_min_max(row.min, Pos2::new(row.right(), row.bottom() + UNDER));
+            ui.interact(hit, ui.id().with("update why"), Sense::hover())
+                .on_hover_text(why.as_str());
         }
     }
     ui.painter().text(

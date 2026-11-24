@@ -136,6 +136,10 @@ struct Cli {
     /// Show a newer Renkatsu as found, to picture the notice.
     #[arg(long, hide = true)]
     pretend_update: Option<String>,
+    /// Start installing the newer Renkatsu found at the start, as a click
+    /// on it does, to try the update.
+    #[arg(long, hide = true)]
+    install_update: bool,
     /// Start with the Packages window open, to picture it.
     #[arg(long, hide = true)]
     packages: bool,
@@ -622,6 +626,9 @@ impl Studio {
                 url: "https://github.com/Mihnea8848/renkatsu/releases".to_owned(),
             });
         }
+        if cli.install_update {
+            state.update_clicked(&cc.egui_ctx);
+        }
         let selecting = state.project.is_none();
         if selecting {
             state.show_selector();
@@ -996,6 +1003,13 @@ impl eframe::App for Studio {
                 eprintln!("The layout could not be kept: {e:#}");
             }
         }
+        // Restarting into an update, on the project that was open.
+        if let Some(program) = self.state.restart_into.take() {
+            let project = (!self.state.project.is_none()).then(|| self.state.project.root.clone());
+            if let Err(e) = self_update::start(&program, project.as_deref()) {
+                eprintln!("The updated Renkatsu did not start: {e}");
+            }
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1130,6 +1144,13 @@ impl eframe::App for Studio {
             }
         }
 
+        // An update at work: with no project open it restarts into the new
+        // Renkatsu at once, with one it waits to be restarted.
+        let no_project = self.state.project.is_none();
+        if let Some(updating) = &mut self.state.updating {
+            updating.poll(ctx, no_project);
+        }
+
         // A bake asked for at the start, once the animation poses her.
         if self.state.bake_pending {
             let id = self.state.doc.selected;
@@ -1233,7 +1254,7 @@ impl Studio {
             self.dock = panels::default_layout(self.bottom);
             self.state.maximised = false;
         }
-        bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &self.state));
+        bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &mut self.state));
         chrome::window_edges(ui.ctx(), &k);
         if k.d.overlays == Overlays::Header && !self.state.overlays_hidden {
             egui::Panel::left("rail")

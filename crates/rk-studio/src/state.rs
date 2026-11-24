@@ -377,6 +377,8 @@ pub struct State {
     pub update: Option<rk_packages::update::Release>,
     /// Install Update at work, or stopped with why.
     pub updating: Option<crate::self_update::Updating>,
+    /// The updated program to start once Renkatsu has quit.
+    pub restart_into: Option<PathBuf>,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -869,6 +871,7 @@ impl State {
             scripted: false,
             update: None,
             updating: None,
+            restart_into: None,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,
@@ -1477,6 +1480,23 @@ impl State {
         let selected = self.doc.selected;
         self.adopt(copy, scene);
         self.doc.selected = selected;
+    }
+
+    /// A click on the update: installs it, again after it failed, and once
+    /// it is installed restarts into it by quitting, which asks to save.
+    pub fn update_clicked(&mut self, ctx: &egui::Context) {
+        match &self.updating {
+            Some(u) if u.busy() => {}
+            Some(u) if u.ready().is_some() => {
+                self.restart_into = u.ready().map(Path::to_owned);
+                self.ask(Command::Quit, ctx);
+            }
+            _ => {
+                if let Some(release) = self.update.clone() {
+                    self.updating = Some(crate::self_update::Updating::start(release, ctx));
+                }
+            }
+        }
     }
 
     /// What characters are built from changed: the Koikatsu folder was
