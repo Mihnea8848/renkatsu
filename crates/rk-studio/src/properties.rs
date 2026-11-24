@@ -386,6 +386,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 section_end(ui, k);
             }
+            // The hands and the face over the animation.
+            face_sections(ui, k, st, object.id, &mut object.content);
             // The pose made by hand over the animation, while she is posed
             // by hand.
             pose_sections(ui, k, st, object.id, &mut object.content);
@@ -1264,6 +1266,237 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
 /// The Animation page's sections of the pose made by hand, while the
 /// character is posed by hand: the bone chosen (on its ball or in the
 /// Animator) with its turn over the animation and a way back.
+/// Section numbers of the hands and the face.
+pub const HANDS_SECTION: usize = 19;
+pub const FACE_SECTION: usize = 20;
+
+/// The hands' patterns and the face, as Studio's hand and face panels set
+/// them: each pattern a picture that opens a grid of the others.
+fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
+    use crate::live::Pictures;
+    let Content::Character { pose_layer, .. } = content else {
+        return;
+    };
+    let rig = st.live.as_ref().and_then(|l| l.face_rig(id)).cloned();
+    let waiting = rig.is_none().then_some("The character is not built");
+    let ui_id = ui.id().with("face");
+    let layer = pose_layer.clone().unwrap_or_default();
+    let mut next = layer.clone();
+    if section(ui, k, st, HANDS_SECTION, "Hands") {
+        for (side, name) in ["Left", "Right"].into_iter().enumerate() {
+            let label_of = |n: i32| -> String {
+                if n == 0 {
+                    return "Animation".to_owned();
+                }
+                crate::live::hand_lists_read()
+                    .and_then(|l| l[side].get(&n))
+                    .map_or_else(|| format!("Pattern {n}"), |a| a.label())
+            };
+            pattern_row(
+                ui,
+                k,
+                st,
+                id,
+                Pictures::Hand(side),
+                name,
+                waiting,
+                ui_id.with(("hand", side)),
+                &label_of,
+                &mut next.hands[side],
+            );
+        }
+        section_end(ui, k);
+    }
+    if section(ui, k, st, FACE_SECTION, "Expression") {
+        let mut face = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
+        let number = |n: i32| n.to_string();
+        let eye_name = |n: i32| rk_chara::face::eye_label(n).map_or_else(|| n.to_string(), str::to_owned);
+        pattern_row(
+            ui,
+            k,
+            st,
+            id,
+            Pictures::Eyebrows,
+            "Eyebrows",
+            waiting,
+            ui_id.with("eyebrows"),
+            &number,
+            &mut face.eyebrows,
+        );
+        pattern_row(
+            ui,
+            k,
+            st,
+            id,
+            Pictures::Eyes,
+            "Eyes",
+            waiting,
+            ui_id.with("eyes"),
+            &eye_name,
+            &mut face.eyes,
+        );
+        pattern_row(
+            ui,
+            k,
+            st,
+            id,
+            Pictures::Mouth,
+            "Mouth",
+            waiting,
+            ui_id.with("mouth"),
+            &number,
+            &mut face.mouth,
+        );
+        row(ui, k, "Eyes open", waiting, |ui, rect| {
+            widgets::number(
+                ui,
+                k,
+                rect,
+                ui_id.with("eyes open"),
+                &mut face.eyes_open,
+                Marker::None,
+                true,
+                FINE,
+            );
+        });
+        row(ui, k, "Blink", waiting, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("blink"), &mut face.blink, "Blink");
+        });
+        row(ui, k, "Mouth open", waiting, |ui, rect| {
+            widgets::number(
+                ui,
+                k,
+                rect,
+                ui_id.with("mouth open"),
+                &mut face.mouth_open,
+                Marker::None,
+                true,
+                FINE,
+            );
+        });
+        face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
+        face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
+        let shown = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
+        if face != shown {
+            next.face = Some(face);
+        }
+        section_end(ui, k);
+    }
+    if next != layer {
+        *pose_layer = (!next.is_empty()).then_some(next);
+    }
+}
+
+/// A pattern as its picture, which opens a grid of all the pictures to
+/// pick from. Without pictures yet the pattern's name stands in.
+#[allow(clippy::too_many_arguments)]
+fn pattern_row(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    id: crate::scene::ObjectId,
+    set: crate::live::Pictures,
+    name: &str,
+    off: Option<&str>,
+    ui_id: egui::Id,
+    label_of: &dyn Fn(i32) -> String,
+    value: &mut i32,
+) {
+    let pictures: Vec<(i32, std::sync::Arc<egui::ColorImage>)> = st
+        .live
+        .as_mut()
+        .and_then(|l| l.pictures(id, set))
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let [w, h] = set.size();
+    let (w, h) = (w as f32 * 0.5, h as f32 * 0.5);
+    sized_row(ui, k, name, off, (h + 4.0 - k.d.row).max(0.0), |ui, rect| {
+        let field = Rect::from_min_size(rect.min, Vec2::new(rect.width(), h + 4.0));
+        let resp = ui.interact(field, ui_id, Sense::click());
+        let p = ui.painter();
+        p.rect_filled(field, k.radius(), if resp.hovered() { k.t.hover } else { k.t.control });
+        let tile = Rect::from_min_size(field.min + Vec2::splat(2.0), Vec2::new(w, h));
+        let current = pictures.iter().find(|(n, _)| n == value);
+        match current {
+            Some((_, image)) => {
+                let texture = picture_texture(ui, image);
+                p.image(
+                    texture.id(),
+                    tile,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => {
+                p.rect_filled(tile, 2.0, k.t.header);
+            }
+        }
+        label(
+            &p.with_clip_rect(field.with_max_x(field.right() - 22.0)),
+            k,
+            Pos2::new(tile.right() + 8.0, field.center().y),
+            &label_of(*value),
+            k.t.text,
+        );
+        glyph(
+            p,
+            k,
+            Pos2::new(field.right() - 12.0, field.center().y),
+            widgets::caret_of(&resp),
+            10.0,
+            k.t.text,
+        );
+        egui::Popup::menu(&resp).show(|ui| {
+            let columns = 4;
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                egui::Grid::new(ui_id.with("grid"))
+                    .spacing(Vec2::splat(4.0))
+                    .show(ui, |ui| {
+                        for (i, (n, image)) in pictures.iter().enumerate() {
+                            let (cell, cell_resp) = ui.allocate_exact_size(Vec2::new(w * 1.5, h * 1.5), Sense::click());
+                            let texture = picture_texture(ui, image);
+                            ui.painter().image(
+                                texture.id(),
+                                cell,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                            let ring = if n == value {
+                                k.t.select
+                            } else if cell_resp.hovered() {
+                                k.t.text_bright
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            ui.painter()
+                                .rect_stroke(cell, 2.0, egui::Stroke::new(1.5, ring), egui::StrokeKind::Inside);
+                            if cell_resp.on_hover_text(label_of(*n)).clicked() {
+                                *value = *n;
+                                ui.close();
+                            }
+                            if (i + 1) % columns == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
+        });
+    });
+}
+
+/// A pattern picture's texture, kept for as long as the picture.
+fn picture_texture(ui: &Ui, image: &std::sync::Arc<egui::ColorImage>) -> egui::TextureHandle {
+    let key = egui::Id::new(("pattern picture", std::sync::Arc::as_ptr(image) as usize));
+    if let Some(texture) = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(key)) {
+        return texture;
+    }
+    let texture = ui
+        .ctx()
+        .load_texture("pattern picture", (**image).clone(), egui::TextureOptions::LINEAR);
+    ui.ctx().data_mut(|d| d.insert_temp(key, texture.clone()));
+    texture
+}
+
 fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     let Content::Character { pose_layer, .. } = content else {
         return;

@@ -60,6 +60,10 @@ struct Recipe {
 /// A character of the scene, built.
 struct Actor {
     id: ObjectId,
+    /// Small pictures of the character's patterns, by set, once asked
+    /// for; and the sets asked for and not made yet.
+    pictures: std::collections::HashMap<Pictures, Vec<(i32, Arc<egui::ColorImage>)>>,
+    pictures_wanted: Vec<Pictures>,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -679,6 +683,177 @@ impl Live {
     pub fn face_rig(&self, id: ObjectId) -> Option<&rk_chara::face::Rig> {
         self.actors.iter().find(|a| a.id == id)?.chara.face.as_ref()
     }
+}
+
+/// A set of pattern pictures of a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Pictures {
+    Eyebrows,
+    Eyes,
+    Mouth,
+    /// A hand's patterns, 0 left and 1 right.
+    Hand(usize),
+}
+
+impl Pictures {
+    /// The picture's size in pixels.
+    pub fn size(self) -> [u32; 2] {
+        match self {
+            Pictures::Hand(_) => [64, 64],
+            _ => [96, 48],
+        }
+    }
+}
+
+/// The background of the pattern pictures.
+const PICTURE_BACKGROUND: [f64; 4] = [0.16, 0.16, 0.17, 1.0];
+
+impl Live {
+    /// A character's pictures of a set, made on a coming frame when they
+    /// are not yet.
+    pub fn pictures(&mut self, id: ObjectId, set: Pictures) -> Option<&[(i32, Arc<egui::ColorImage>)]> {
+        let actor = self.actors.iter_mut().find(|a| a.id == id)?;
+        if !actor.pictures.contains_key(&set) && !actor.pictures_wanted.contains(&set) {
+            actor.pictures_wanted.push(set);
+        }
+        actor.pictures.get(&set).map(Vec::as_slice)
+    }
+
+    /// Makes the pictures asked for: the character with each pattern in
+    /// turn, seen up close, then as she was.
+    fn make_pictures(&mut self, scene: &Scene, games: &mut Games, mods: &Path) {
+        for at in 0..self.actors.len() {
+            let Some(set) = self.actors[at].pictures_wanted.pop() else {
+                continue;
+            };
+            let env = self.environment(scene, PICTURE_BACKGROUND);
+            let size = set.size();
+            let actor = &mut self.actors[at];
+            let mut made = Vec::new();
+            match set {
+                Pictures::Hand(side) => {
+                    let (Ok(game), Some(camera)) = (games.get(mods), hand_camera(&actor.chara, side)) else {
+                        actor.pictures.insert(set, Vec::new());
+                        continue;
+                    };
+                    let lists = hand_lists(game);
+                    let was: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
+                    // The animation's own fingers first, as the list's 0.
+                    let mut patterns: Vec<i32> = vec![0];
+                    patterns.extend(lists[side].keys().copied());
+                    for pattern in patterns {
+                        if let Some(anime) = lists[side].get(&pattern) {
+                            let chara = &actor.chara;
+                            let clip =
+                                rk_chara::hand_pattern::HandClip::load(game, anime, &chara.scene, chara.top, side);
+                            match clip {
+                                Ok(clip) => clip.apply(&mut actor.chara.scene, 0.0),
+                                Err(_) => continue,
+                            }
+                        }
+                        let draws = actor.chara.scene.pose();
+                        if let Ok(rgba) =
+                            self.renderer
+                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
+                        {
+                            made.push((pattern, picture(size, &rgba)));
+                        }
+                        drop(draws);
+                        for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&was) {
+                            node.local = *local;
+                        }
+                    }
+                }
+                face_set => {
+                    let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set))
+                    else {
+                        actor.pictures.insert(set, Vec::new());
+                        continue;
+                    };
+                    let now = actor.layer.as_ref().and_then(|l| l.face);
+                    let base = now.unwrap_or(rig.start);
+                    let (eyebrows, mouths) = rig.counts();
+                    let patterns: Vec<i32> = match face_set {
+                        Pictures::Eyebrows => (0..eyebrows as i32).collect(),
+                        Pictures::Eyes => rig.eye_choices(),
+                        _ => (0..mouths as i32).collect(),
+                    };
+                    for pattern in patterns {
+                        let mut face = base;
+                        match face_set {
+                            Pictures::Eyebrows => face.eyebrows = pattern,
+                            Pictures::Eyes => {
+                                face.eyes = pattern;
+                                face.blink = true;
+                            }
+                            _ => {
+                                face.mouth = pattern;
+                                // Open enough for the pattern's shape to show.
+                                face.mouth_open = face.mouth_open.max(0.5);
+                            }
+                        }
+                        rig.show(&mut actor.chara.scene, Some(&face));
+                        let draws = actor.chara.scene.pose();
+                        if let Ok(rgba) =
+                            self.renderer
+                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
+                        {
+                            made.push((pattern, picture(size, &rgba)));
+                        }
+                    }
+                    rig.show(&mut actor.chara.scene, now.as_ref());
+                }
+            }
+            actor.pictures.insert(set, made);
+        }
+    }
+}
+
+/// RGBA bytes as an image for the interface.
+fn picture(size: [u32; 2], rgba: &[u8]) -> Arc<egui::ColorImage> {
+    Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+        [size[0] as usize, size[1] as usize],
+        rgba,
+    ))
+}
+
+/// A camera close in front of the face: on the eyes, a little above them
+/// for the eyebrows, below them for the mouth.
+fn face_camera(chara: &rk_chara::Character, set: Pictures) -> Option<Camera> {
+    let (world, _) = chara.scene.world();
+    let eye = |name: &str| Some(world[chara.scene.find(chara.top, name)?].w_axis.truncate());
+    let eyes = (eye("cf_J_Eye_tx_L")? + eye("cf_J_Eye_tx_R")?) * 0.5;
+    let face = world[chara.scene.find(chara.top, "cf_J_FaceBase")?];
+    let forward = face.z_axis.truncate().normalize_or_zero();
+    let up = face.y_axis.truncate().normalize_or_zero();
+    let target = match set {
+        Pictures::Eyebrows => eyes + up * 0.018,
+        Pictures::Mouth => eye("cf_J_MouthMove")?,
+        _ => eyes,
+    };
+    // Both eyes across the picture; the mouth closer.
+    let fov_y_deg = if set == Pictures::Mouth { 9.0 } else { 15.0 };
+    Some(Camera {
+        eye: target + forward * 0.3,
+        target,
+        fov_y_deg,
+    })
+}
+
+/// A camera on a hand, from in front of the character and a little above.
+fn hand_camera(chara: &rk_chara::Character, side: usize) -> Option<Camera> {
+    let (world, _) = chara.scene.world();
+    let hand = world[chara.scene.find(chara.top, rk_chara::hand_pattern::HAND_NODES[side])?]
+        .w_axis
+        .truncate();
+    let body = world[chara.top];
+    let forward = body.z_axis.truncate().normalize_or_zero();
+    let up = body.y_axis.truncate().normalize_or_zero();
+    Some(Camera {
+        eye: hand + (forward + up * 0.4).normalize_or_zero() * 0.4,
+        target: hand,
+        fov_y_deg: 17.0,
+    })
 }
 
 /// What an actor asks to have read from the game.
@@ -1426,6 +1601,7 @@ impl Live {
                 }
             }
         }
+        self.make_pictures(scene, games, &mods);
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
         self.send_doors(scene, &clock);
@@ -2100,6 +2276,8 @@ impl Live {
             playing: None,
             animation_problem: None,
             hand_problems: Vec::new(),
+            pictures: Default::default(),
+            pictures_wanted: Vec::new(),
             phase: None,
             fk,
             warm: false,

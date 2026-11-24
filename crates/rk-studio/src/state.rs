@@ -337,11 +337,6 @@ pub struct State {
     pub fk_open: bool,
     /// The Pose palette's Inverse kinematics category is open.
     pub ik_open: bool,
-    /// The Pose palette's Hands category is open, showing each hand's
-    /// pattern.
-    pub hands_open: bool,
-    /// The Pose palette's Expression category is open.
-    pub face_open: bool,
     /// The IK target chosen for the gizmo, by its place in the layer.
     pub pose_ik: Option<usize>,
     /// What the Animator panel's skeleton is searched by.
@@ -472,7 +467,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 19],
+    pub sections: [bool; 21],
     /// The page of a character's Properties: the scene's settings, the
     /// card's profile or its likes.
     pub property_tab: usize,
@@ -873,8 +868,6 @@ impl State {
             ik_wanted: false,
             pose_bone: None,
             fk_open: false,
-            hands_open: false,
-            face_open: false,
             ik_open: false,
             pose_ik: None,
             animator_search: String::new(),
@@ -938,7 +931,7 @@ impl State {
             clock: 0.0,
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true,
+                true, true, true, true,
             ],
             property_tab: 0,
             profiles: Default::default(),

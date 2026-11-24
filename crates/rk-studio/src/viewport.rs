@@ -1048,12 +1048,7 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
         rows += IK_ROWS;
     }
-    if MODES[mode].name == "Pose" && st.hands_open && fk_layer(st).is_some() {
-        rows += 2;
-    }
-    if MODES[mode].name == "Pose" && st.face_open && face_now(st).is_some() {
-        rows += FACE_ROWS;
-    }
+
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
@@ -1226,38 +1221,21 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     }
                     continue;
                 }
-                if *name == "Expression" {
-                    let on = fk_layer(st).is_some_and(|l| l.face.is_some());
-                    let mut open = st.face_open;
-                    open_category(ui, k, row, id, g, name, on, &mut open);
-                    st.face_open = open;
+                if *name == "Expression" || *name == "Hands" {
+                    // The values are the character's: they live in the
+                    // Animation tab of Properties, which this opens.
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() {
+                        st.property_tab = 1;
+                        let section = if *name == "Hands" {
+                            crate::properties::HANDS_SECTION
+                        } else {
+                            crate::properties::FACE_SECTION
+                        };
+                        st.sections[section] = true;
+                    }
                     y += palette_row(k);
                     index += 1;
-                    if st.face_open && face_now(st).is_some() {
-                        face_rows(ui, k, st, Rect::from_min_max(Pos2::new(rect.left(), y), rect.max));
-                        y += FACE_ROWS as f32 * palette_row(k);
-                    }
-                    continue;
-                }
-                if *name == "Hands" {
-                    let on = fk_layer(st).is_some_and(|l| l.hands != [0, 0]);
-                    let mut open = st.hands_open;
-                    open_category(ui, k, row, id, g, name, on, &mut open);
-                    st.hands_open = open;
-                    y += palette_row(k);
-                    index += 1;
-                    if st.hands_open {
-                        if let Some(layer) = fk_layer(st) {
-                            hand_rows(
-                                ui,
-                                k,
-                                st,
-                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
-                                &layer,
-                            );
-                            y += 2.0 * palette_row(k);
-                        }
-                    }
                     continue;
                 }
                 if *name == "Mirror pose" || *name == "Copy to other side" {
@@ -1443,137 +1421,6 @@ fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::
     );
     if optimize != layer.optimize_ik {
         edit_fk_layer(st, |l| l.optimize_ik = optimize);
-    }
-}
-
-/// A category's row that opens on its settings, bright while they are
-/// set.
-#[allow(clippy::too_many_arguments)]
-fn open_category(ui: &mut Ui, k: &Look, row: Rect, id: egui::Id, g: &str, name: &str, on: bool, open: &mut bool) {
-    let resp = ui.interact(row, id, Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(row, 2.0, k.t.control);
-    }
-    let y = row.center().y;
-    let arrow = if *open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-    glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
-    let tint = if on { k.t.text_bright } else { k.t.text };
-    glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
-    widgets::label(p, k, Pos2::new(row.left() + 38.0, y), name, tint);
-    if resp.clicked() {
-        *open = !*open;
-    }
-}
-
-/// The rows of the Expression category.
-const FACE_ROWS: usize = 6;
-
-/// The selected character's face as shown, its eye patterns and how many
-/// eyebrow and mouth patterns it has.
-fn face_now(st: &State) -> Option<(rk_chara::face::Face, Vec<i32>, (usize, usize))> {
-    let id = st.doc.selected?;
-    let rig = st.live.as_ref()?.face_rig(id)?;
-    let face = fk_layer(st).and_then(|l| l.face).unwrap_or(rig.start);
-    Some((face, rig.eye_choices(), rig.counts()))
-}
-
-/// Studio's face panel: the eyebrow, eye and mouth patterns, how open the
-/// eyes and mouth are, and blinking.
-fn face_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect) {
-    let Some((face, eyesets, (eyebrows, mouths))) = face_now(st) else {
-        return;
-    };
-    let mut next = face;
-    let cell = |i: usize| {
-        Rect::from_min_size(
-            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
-            Vec2::new(area.width() - 50.0, palette_row(k)),
-        )
-    };
-    let field = |row: Rect| {
-        Rect::from_min_max(
-            Pos2::new(row.left() + 86.0, row.top() + 2.0),
-            Pos2::new(row.right(), row.bottom() - 2.0),
-        )
-    };
-    let pick = |ui: &mut Ui, i: usize, label: &str, numbers: &[i32], named: bool, value: &mut i32| {
-        let row = cell(i);
-        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);
-        let names: Vec<String> = numbers
-            .iter()
-            .map(|n| match rk_chara::face::eye_label(*n).filter(|_| named) {
-                Some(name) => name.to_owned(),
-                None => n.to_string(),
-            })
-            .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut chosen = numbers.iter().position(|n| n == value).unwrap_or(0);
-        widgets::combo(ui, k, field(row), ui.id().with(("face", label)), &mut chosen, &names);
-        if let Some(&n) = numbers.get(chosen) {
-            *value = n;
-        }
-    };
-    let count = |n: usize| (0..n as i32).collect::<Vec<_>>();
-    pick(ui, 0, "Eyebrows", &count(eyebrows), false, &mut next.eyebrows);
-    pick(ui, 1, "Eyes", &eyesets, true, &mut next.eyes);
-    pick(ui, 2, "Mouth", &count(mouths), false, &mut next.mouth);
-    let amount = |ui: &mut Ui, i: usize, label: &str, value: &mut f32| {
-        let row = cell(i);
-        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), label, k.t.text);
-        widgets::number(
-            ui,
-            k,
-            field(row),
-            ui.id().with(("face", label)),
-            value,
-            widgets::Marker::None,
-            true,
-            0.01,
-        );
-        *value = value.clamp(0.0, 1.0);
-    };
-    amount(ui, 3, "Eyes open", &mut next.eyes_open);
-    widgets::checkbox(ui, k, cell(4), ui.id().with("face blink"), &mut next.blink, "Blink");
-    amount(ui, 5, "Mouth open", &mut next.mouth_open);
-    if next != face {
-        let held = ui.input(|i| i.pointer.any_down());
-        edit_layer_held(st, held, |l| l.face = Some(next));
-    }
-}
-
-/// Each hand's pattern as CharaStudio lists them, the first choice
-/// leaving the fingers to the animation.
-fn hand_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
-    let lists = crate::live::hand_lists_read();
-    for (side, hand) in ["Left", "Right"].into_iter().enumerate() {
-        let row = Rect::from_min_size(
-            Pos2::new(area.left() + 38.0, area.top() + side as f32 * palette_row(k)),
-            Vec2::new(area.width() - 50.0, palette_row(k)),
-        );
-        widgets::label(ui.painter(), k, Pos2::new(row.left(), row.center().y), hand, k.t.text);
-        let patterns: Vec<(i32, String)> = std::iter::once((0, "Animation".to_owned()))
-            .chain(
-                lists
-                    .into_iter()
-                    .flat_map(|l| l[side].values().map(|a| (a.no, a.label()))),
-            )
-            .collect();
-        let names: Vec<&str> = patterns.iter().map(|(_, n)| n.as_str()).collect();
-        let was = patterns
-            .iter()
-            .position(|(no, _)| *no == layer.hands[side])
-            .unwrap_or(0);
-        let mut chosen = was;
-        let field = Rect::from_min_max(
-            Pos2::new(row.left() + 46.0, row.top() + 2.0),
-            Pos2::new(row.right(), row.bottom() - 2.0),
-        );
-        widgets::combo(ui, k, field, ui.id().with(("hand pattern", side)), &mut chosen, &names);
-        if chosen != was {
-            let pattern = patterns[chosen].0;
-            edit_fk_layer(st, |l| l.hands[side] = pattern);
-        }
     }
 }
 
