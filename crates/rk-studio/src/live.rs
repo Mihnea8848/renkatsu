@@ -96,6 +96,11 @@ struct Actor {
     hand_problems: Vec<(usize, i32)>,
     /// The point of the animation the bones were last posed at.
     phase: Option<f32>,
+    /// Frames the cloth nets still have to settle for while the scene
+    /// stands, which they do a few at a time as it is drawn.
+    cloth_owed: u32,
+    /// What the character is among changed since it last settled.
+    among_changed: bool,
     /// The edits made by hand the bones were last posed with, and their
     /// bones' nodes.
     layer: Option<rk_chara::pose::Layer>,
@@ -390,6 +395,10 @@ impl Clock {
     }
 }
 
+/// Frames the cloth nets of one character settle for in each frame that
+/// is drawn while the scene stands.
+const CLOTH_FRAMES: u32 = 3;
+
 impl Actor {
     /// The character as something to focus on, where its transform put it.
     fn subject(&self) -> Focus {
@@ -461,6 +470,12 @@ impl Actor {
     /// clothes states, the pose or animation, the place, and the physics.
     /// `game` reads an animation or a hand pattern that is not loaded
     /// yet. Returns whether the character moved as a whole.
+    ///
+    /// While the scene stands, a change settles the hair and the chains
+    /// at once. The cloth nets of Advanced Skirt Physics cost far more:
+    /// they settle over the next frames that are drawn (`cloth_owed`),
+    /// unless `patient`, when they settle at once too.
+    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
         object: &crate::scene::Object,
@@ -468,6 +483,7 @@ impl Actor {
         game: &mut dyn FnMut(Load) -> Result<Motion>,
         clock: &Clock,
         keys: Option<&rk_chara::keys::Keys>,
+        patient: bool,
         log: &mut Log,
     ) -> bool {
         let Content::Character {
@@ -569,6 +585,10 @@ impl Actor {
                 l
             });
         let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());
+        // A new animation, other clothes or a stop put the body somewhere
+        // else at once, and the cloth nets start again there. An edit by
+        // hand moves it a little, and they follow.
+        let fresh = again;
         if layer != self.layer.as_ref() {
             self.layer = layer.cloned();
             // A bone of CharaStudio's FK table takes its edit while one of
@@ -630,20 +650,34 @@ impl Actor {
                 self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
             }
             self.phase = phase;
+            self.cloth_owed = 0;
+            self.among_changed = false;
             return moved;
         }
+        let lazy = !patient && *simulate && self.chara.physics.has_nets();
+        let among = std::mem::take(&mut self.among_changed);
         if !again && phase == self.phase {
             let moved = self.place(world, false);
-            // Moved onto a chair or a bed, the skirts settle on it.
+            // Moved onto a chair or a bed, or with a map that came or
+            // changed around it, the skirts settle on it.
             let physics = &self.chara.physics;
-            if moved && *simulate && physics.advanced() && physics.has_obstacles() {
+            if (moved || among) && *simulate && physics.advanced() && physics.has_obstacles() {
+                self.chara.physics.hold_cloth(lazy);
                 for _ in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
                     self.chara
                         .physics
                         .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
                 }
+                self.chara.physics.hold_cloth(false);
+                if lazy {
+                    self.cloth_owed = rk_chara::physics::SETTLE_FRAMES;
+                }
             }
+            if !*simulate {
+                self.cloth_owed = 0;
+            }
+            self.settle_cloth(CLOTH_FRAMES);
             return moved;
         }
         // Nothing plays: the character is posed once and holds still.
@@ -663,19 +697,51 @@ impl Actor {
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
+                self.chara.physics.hold_cloth(lazy);
                 for frame in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
                     self.pose_frame(phase, &states);
                     let amount = (frame + 1) as f32 / (rk_chara::physics::EASE_FRAMES + 1) as f32;
                     self.chara.physics.ease(&mut self.chara.scene, &from, amount);
+                    // The cloth nets start again once a new pose is
+                    // reached, as in `Character::settle_pose`.
+                    if fresh && frame == rk_chara::physics::EASE_FRAMES {
+                        self.chara.physics.restart_cloth();
+                    }
                     self.chara
                         .physics
                         .end_frame(&mut self.chara.scene, rk_chara::physics::FRAME_TIME);
                 }
+                self.chara.physics.hold_cloth(false);
+            }
+        } else if *simulate {
+            // Back in the pose it was loaded in: nothing settles but the
+            // nets, which start again there.
+            self.chara.physics.restart_cloth();
+            if !lazy {
+                self.chara.physics.settle_cloth(
+                    &mut self.chara.scene,
+                    rk_chara::physics::SETTLE_FRAMES,
+                    rk_chara::physics::FRAME_TIME,
+                );
             }
         }
+        self.cloth_owed = if lazy { rk_chara::physics::SETTLE_FRAMES } else { 0 };
+        self.settle_cloth(CLOTH_FRAMES);
         self.phase = phase;
         true
+    }
+
+    /// Settles the cloth nets for up to `frames` of the frames they are
+    /// still owed.
+    fn settle_cloth(&mut self, frames: u32) {
+        let frames = self.cloth_owed.min(frames);
+        if frames > 0 {
+            self.chara
+                .physics
+                .settle_cloth(&mut self.chara.scene, frames, rk_chara::physics::FRAME_TIME);
+            self.cloth_owed -= frames;
+        }
     }
 }
 
@@ -1577,7 +1643,8 @@ impl Live {
         let obstacles = self.obstacles();
         for at in order {
             let actor = &mut self.actors[at];
-            actor.chara.physics.set_obstacles(obstacles.clone());
+            // A map that came or changed has the skirts settle on it.
+            actor.among_changed |= actor.chara.physics.set_obstacles(obstacles.clone());
             let Some(object) = scene.get(actor.id) else { continue };
             let options = match &object.content {
                 Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
@@ -1628,7 +1695,7 @@ impl Live {
             };
             let world = scene.world_by(actor.id, &self.poses);
             let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
-            if actor.update(object, world, &mut read, &clock, keys, log) {
+            if actor.update(object, world, &mut read, &clock, keys, self.patient, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
             }
             // The bones that objects follow, now that they are posed.
@@ -2265,6 +2332,12 @@ impl Live {
         Some((owner, t))
     }
 
+    /// Whether a character's cloth still settles while the scene stands,
+    /// so that frames are drawn until it has.
+    pub fn settling(&self) -> bool {
+        self.actors.iter().any(|a| a.cloth_owed > 0)
+    }
+
     /// Whether a map is shown that things can be dropped on, so that the
     /// ground at height 0 is not.
     /// Whether the camera has framed a character since the scene opened.
@@ -2311,6 +2384,8 @@ impl Live {
             distance: (home.eye - home.target).length(),
             applied: None,
             physics_at: None,
+            cloth_owed: 0,
+            among_changed: false,
             outfits: card.coordinates.len(),
             outfit_names: rk_chara::more_outfits::names(&card.ext, card.coordinates.len()),
             clothes: [cs::ON; cs::KINDS],

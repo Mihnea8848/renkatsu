@@ -418,6 +418,9 @@ pub struct Scene {
     /// Advanced Skirt Physics' last word on the skirts: what their
     /// vertices are pushed out of after skinning. Set by the physics.
     pub push_out: Option<PushOut>,
+    /// Advanced Skirt Physics' cloth nets, which the skirts' vertices are
+    /// put on after skinning. Set by the physics.
+    pub cloth: Option<crate::physics::net::ClothDraw>,
 }
 
 /// Most capsules a skinned mesh is pushed out of; the shader holds a
@@ -603,6 +606,9 @@ pub struct DrawMesh<'a> {
     pub bounds: Option<[[f32; 3]; 2]>,
     /// Advanced Skirt Physics' push-out, for a mesh with skirt bones.
     pub push: Option<PushDraw>,
+    /// Tangents of vertices already in the world, for a mesh posed on the
+    /// CPU (a skirt on a cloth net); `None` takes the mesh's own.
+    pub base_tangents: Option<Vec<[f32; 4]>>,
 }
 
 /// How a posed mesh's vertices reach the world.
@@ -695,7 +701,10 @@ impl DrawMesh<'_> {
             }
             out.positions.push(p.to_array());
             out.tangents.push(if has_tangents {
-                let t = self.renderer.mesh.tangents[vi];
+                let t = match &self.base_tangents {
+                    Some(tangents) => tangents[vi],
+                    None => self.renderer.mesh.tangents[vi],
+                };
                 let dir = mat.transform_vector3(Vec3::new(t[0], t[1], t[2])).normalize_or_zero();
                 [dir.x, dir.y, dir.z, t[3]]
             } else {
@@ -723,10 +732,23 @@ impl Scene {
     pub fn pose(&self) -> Vec<DrawMesh<'_>> {
         let (world, active) = self.world();
         let mut out = Vec::new();
-        for r in &self.renderers {
+        for (ri, r) in self.renderers.iter().enumerate() {
             if !r.enabled || !active[r.node] || r.mesh.positions.is_empty() {
                 continue;
             }
+            let mut d = self.draw_mesh(r, &world);
+            if let Some(cloth) = &self.cloth {
+                cloth.dress(ri, &mut d);
+            }
+            out.push(d);
+        }
+        out
+    }
+
+    /// Poses one renderer, shown or not, with `world` the world matrix of
+    /// every node (`Scene::world`).
+    pub fn draw_mesh<'a>(&'a self, r: &'a RendererInst, world: &[Mat4]) -> DrawMesh<'a> {
+        {
             let m = &r.mesh;
             // Blend shapes move vertices before skinning.
             let mut base_positions = Cow::Borrowed(&m.positions[..]);
@@ -798,15 +820,15 @@ impl Scene {
                     skirt_slots,
                 })
             });
-            out.push(DrawMesh {
+            DrawMesh {
                 renderer: r,
                 base_positions,
                 base_normals,
                 skinning,
                 bounds,
                 push,
-            });
+                base_tangents: None,
+            }
         }
-        out
     }
 }
