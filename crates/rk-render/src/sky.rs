@@ -530,6 +530,7 @@ mod tests {
             eye: Vec3::new(1.0, 2.0, -3.0),
             target: Vec3::new(4.0, 2.5, 5.0),
             fov_y_deg: 50.0,
+            up: glam::Vec3::Y,
         }
     }
 

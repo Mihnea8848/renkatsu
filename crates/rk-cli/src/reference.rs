@@ -209,6 +209,7 @@ impl Capture {
                 target: eye + rot * Vec3::Z,
                 // A view with its own opening angle says so.
                 fov_y_deg: view["fov"].as_f64().map_or(fov_y_deg, |f| f as f32),
+                up: Vec3::Y,
             };
             views.push((view["name"].as_str().context("view name")?.to_owned(), camera));
             view_lights.push(

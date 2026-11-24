@@ -866,10 +866,14 @@ fn face_camera(chara: &rk_chara::Character, set: Pictures) -> Option<Camera> {
     };
     // Both eyes across the picture; the mouth closer.
     let fov_y_deg = if set == Pictures::Mouth { 9.0 } else { 15.0 };
+    // Seen in the face's own space, so that no pose or turn of the
+    // character tips the picture over, with the same slight tilt in all.
+    let tilted = Quat::from_axis_angle(forward, PICTURE_TILT.to_radians()) * up;
     Some(Camera {
         eye: target + forward * 0.3,
         target,
         fov_y_deg,
+        up: tilted,
     })
 }
 
@@ -882,12 +886,17 @@ fn hand_camera(chara: &rk_chara::Character, side: usize) -> Option<Camera> {
     let body = world[chara.top];
     let forward = body.z_axis.truncate().normalize_or_zero();
     let up = body.y_axis.truncate().normalize_or_zero();
+    // In the body's own space, whatever way the character is turned.
     Some(Camera {
         eye: hand + (forward + up * 0.4).normalize_or_zero() * 0.4,
         target: hand,
         fov_y_deg: 17.0,
+        up,
     })
 }
+
+/// How far the face pictures lean, in degrees.
+const PICTURE_TILT: f32 = 8.0;
 
 /// What an actor asks to have read from the game.
 #[derive(Debug, Clone, Copy)]
@@ -2047,6 +2056,7 @@ impl Live {
             eye,
             target: eye + forward * reach.max(0.5),
             fov_y_deg: 23.0,
+            up: glam::Vec3::Y,
         }
     }
 

@@ -87,6 +87,7 @@ impl Orbit {
             eye: self.target + self.out() * self.distance,
             target: self.target,
             fov_y_deg: self.fov_y_deg,
+            up: glam::Vec3::Y,
         }
     }
 
@@ -688,6 +689,7 @@ mod tests {
             eye: Vec3::new(0.3, 1.4, -2.5),
             target: Vec3::new(0.0, 0.9, 0.0),
             fov_y_deg: 30.0,
+            up: glam::Vec3::Y,
         };
         let back = Orbit::from_camera(&c).camera();
         assert!((back.eye - c.eye).length() < 1e-4, "{:?}", back.eye);

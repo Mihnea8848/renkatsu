@@ -80,6 +80,9 @@ pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
     pub fov_y_deg: f32,
+    /// Which way is up in the picture; the world's up for a view of the
+    /// scene.
+    pub up: Vec3,
 }
 
 impl Camera {
@@ -99,6 +102,7 @@ impl Camera {
             eye: center + dir * dist,
             target: center,
             fov_y_deg,
+            up: glam::Vec3::Y,
         }
     }
 
@@ -121,7 +125,7 @@ impl Camera {
 
     fn view_proj_within(&self, aspect: f32, near: f32, far: f32) -> Mat4 {
         let proj = Mat4::perspective_lh(self.fov_y_deg.to_radians(), aspect, near, far);
-        proj * Mat4::look_at_lh(self.eye, self.target, Vec3::Y)
+        proj * Mat4::look_at_lh(self.eye, self.target, self.up)
     }
 }
 
