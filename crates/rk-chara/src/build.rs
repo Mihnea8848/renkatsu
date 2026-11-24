@@ -145,6 +145,8 @@ pub struct Character {
     pub heels: Option<crate::stiletto::Heels>,
     /// The body's FullBodyBipedIK as the prefab stores it.
     pub ik: Option<crate::fbbik::Settings>,
+    /// Its solver, set up in the pose the character was built in.
+    pub ik_rig: Option<crate::ik::Rig>,
     /// Skeleton bones by name.
     pub bones: HashMap<String, usize>,
     /// The scene's shading ramp: light amount to brightness.
@@ -2849,7 +2851,12 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     if ramp.is_none() {
         b.loader.warn("shading ramp not found, using a hard edge");
     }
+    let loaded: Vec<crate::scene::Trs> = b.scene.nodes.iter().map(|n| n.local).collect();
+    let ik_rig = ik
+        .as_ref()
+        .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root));
     Ok(Character {
+        ik_rig,
         scene: b.scene,
         top,
         animator: anim.root,
@@ -2947,18 +2954,24 @@ impl Character {
     /// Writes one frame of a motion to the bones: the heels come off, the
     /// motion writes the bones it names, and the heels go on again.
     pub fn animate(&mut self, motion: &crate::motion::Bound, phase: f32, states: &crate::clothes_state::States) {
-        self.pose_frame(Some((motion, phase)), &[], states);
+        self.pose_frame(Some((motion, phase)), &[], None, states);
     }
 
     /// Poses one frame: the heels come off, the motion (if any) writes the
     /// bones it names, the edits made by hand go on top of that
-    /// (`crate::pose`), and the heels go on again.
+    /// (`crate::pose`), IK moves the body to the layer's targets while it
+    /// is on (`crate::ik`), and the heels go on again.
     pub fn pose_frame(
         &mut self,
         motion: Option<(&crate::motion::Bound, f32)>,
         edits: &[(usize, crate::pose::BoneEdit)],
+        layer: Option<&crate::pose::Layer>,
         states: &crate::clothes_state::States,
     ) {
+        let ik = layer.filter(|l| l.ik_on);
+        if let (Some(rig), Some(_)) = (&self.ik_rig, ik) {
+            rig.fix(&mut self.scene);
+        }
         if let Some(heels) = &self.heels {
             heels.reset(&mut self.scene);
         }
@@ -2966,6 +2979,10 @@ impl Character {
             motion.apply(&mut self.scene, phase);
         }
         crate::pose::apply(&mut self.scene, edits);
+        // IK over the animation and FK, before the heels go on.
+        if let (Some(rig), Some(layer)) = (self.ik_rig.as_mut(), ik) {
+            rig.solve(&mut self.scene, self.top, layer);
+        }
         self.wear_heels(states);
     }
 }

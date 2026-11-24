@@ -27,6 +27,7 @@ pub mod fbbik;
 pub mod foreground;
 pub mod hair_accessories;
 pub mod hand_size;
+pub mod ik;
 pub mod invisible_body;
 pub mod keys;
 pub mod loader;

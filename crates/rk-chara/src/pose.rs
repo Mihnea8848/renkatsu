@@ -33,6 +33,21 @@ pub struct Layer {
     /// Edited bones by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fk: BTreeMap<String, BoneEdit>,
+    /// Whether IK moves the body to its targets, over the animation and
+    /// FK.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ik_on: bool,
+    /// The IK groups switched on, as CharaStudio's.
+    #[serde(default = "all_ik_groups", skip_serializing_if = "is_all_ik_groups")]
+    pub ik_groups: Vec<IkGroup>,
+    /// The 13 targets in the order of CharaStudio's `IKTargetEN`, in the
+    /// character's own space; empty until IK is first switched on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ik: Vec<IkTarget>,
+    /// KKPE's Optimize IK, on by default for every character: the spine's
+    /// stiffness and the body's vertical pull are 0.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub optimize_ik: bool,
 }
 
 impl Default for Layer {
@@ -41,8 +56,106 @@ impl Default for Layer {
             fk_on: false,
             fk_parts: start_parts(),
             fk: BTreeMap::new(),
+            ik_on: false,
+            ik_groups: all_ik_groups(),
+            ik: Vec::new(),
+            optimize_ik: true,
         }
     }
+}
+
+/// CharaStudio's IK groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IkGroup {
+    Body,
+    LeftArm,
+    RightArm,
+    LeftLeg,
+    RightLeg,
+}
+
+impl IkGroup {
+    pub const ALL: [IkGroup; 5] = [
+        IkGroup::Body,
+        IkGroup::RightArm,
+        IkGroup::LeftArm,
+        IkGroup::RightLeg,
+        IkGroup::LeftLeg,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IkGroup::Body => "Body",
+            IkGroup::LeftArm => "Left arm",
+            IkGroup::RightArm => "Right arm",
+            IkGroup::LeftLeg => "Left leg",
+            IkGroup::RightLeg => "Right leg",
+        }
+    }
+
+    /// The group of a target, by its place in `Layer::ik`.
+    pub fn of_target(target: usize) -> IkGroup {
+        match target {
+            0 => IkGroup::Body,
+            1..=3 => IkGroup::LeftArm,
+            4..=6 => IkGroup::RightArm,
+            7..=9 => IkGroup::LeftLeg,
+            _ => IkGroup::RightLeg,
+        }
+    }
+}
+
+/// How many IK targets a character has.
+pub const IK_TARGETS: usize = 13;
+
+/// The targets' names, as CharaStudio's `IKTargetEN`.
+pub const IK_TARGET_NAMES: [&str; IK_TARGETS] = [
+    "Body",
+    "LeftShoulder",
+    "LeftArmChain",
+    "LeftHand",
+    "RightShoulder",
+    "RightArmChain",
+    "RightHand",
+    "LeftThigh",
+    "LeftLegChain",
+    "LeftFoot",
+    "RightThigh",
+    "RightLegChain",
+    "RightFoot",
+];
+
+/// An IK target, in the character's own space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IkTarget {
+    pub pos: Vec3,
+    #[serde(default = "no_turn", skip_serializing_if = "is_no_turn")]
+    pub rot: Quat,
+}
+
+/// Whether a target has a turn of its own, as the hands and feet do;
+/// the others are points (CharaStudio's `usedRot`).
+pub fn ik_target_turns(target: usize) -> bool {
+    matches!(target, 3 | 6 | 9 | 12)
+}
+
+fn all_ik_groups() -> Vec<IkGroup> {
+    IkGroup::ALL.to_vec()
+}
+
+// serde's `skip_serializing_if` hands it the field as it is.
+#[allow(clippy::ptr_arg)]
+fn is_all_ik_groups(groups: &Vec<IkGroup>) -> bool {
+    IkGroup::ALL.iter().all(|g| groups.contains(g)) && groups.len() == IkGroup::ALL.len()
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 fn start_parts() -> Vec<Part> {
@@ -63,7 +176,18 @@ impl Layer {
     /// Whether the layer holds nothing: FK off, its parts as they start and
     /// no edits kept.
     pub fn is_empty(&self) -> bool {
-        !self.fk_on && is_start_parts(&self.fk_parts) && self.fk.values().all(BoneEdit::is_identity)
+        !self.fk_on
+            && is_start_parts(&self.fk_parts)
+            && self.fk.values().all(BoneEdit::is_identity)
+            && !self.ik_on
+            && self.ik.is_empty()
+            && is_all_ik_groups(&self.ik_groups)
+            && self.optimize_ik
+    }
+
+    /// Whether an IK target's group is on.
+    pub fn ik_group_on(&self, target: usize) -> bool {
+        self.ik_groups.contains(&IkGroup::of_target(target))
     }
 
     /// Whether a bone of the FK table, in `parts`, takes its edit: one of

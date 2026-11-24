@@ -327,11 +327,15 @@ pub struct State {
     pub bake_pending: bool,
     /// `--save-pose`: save the pose once the character is built.
     pub save_pose_pending: bool,
+    /// `--ik-move`: targets to move once the character is built.
+    pub ik_pending: Vec<(usize, glam::Vec3)>,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
     /// parts.
     pub fk_open: bool,
+    /// The Pose palette's Inverse kinematics category is open.
+    pub ik_open: bool,
     /// What the Animator panel's skeleton is searched by.
     pub animator_search: String,
     /// The project that is open; `Project::none()` while the project
@@ -857,8 +861,10 @@ impl State {
             mirror_pending: false,
             bake_pending: false,
             save_pose_pending: false,
+            ik_pending: Vec::new(),
             pose_bone: None,
             fk_open: false,
+            ik_open: false,
             animator_search: String::new(),
             library: Library::new(&project),
             project,

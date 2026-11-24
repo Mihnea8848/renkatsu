@@ -175,6 +175,11 @@ struct Cli {
     /// built, to picture it.
     #[arg(long, hide = true)]
     bake_pose: bool,
+    /// Switch IK on for the selected character once she is built, with
+    /// this target (a name of CharaStudio's IKTargetEN) moved by X,Y,Z in
+    /// her own space, as `LeftHand:0,0.15,0.1`, to picture IK.
+    #[arg(long, hide = true)]
+    ik_move: Vec<String>,
     /// Save the selected character's pose once she is built (after a
     /// bake or a mirror asked for), to picture it.
     #[arg(long, hide = true)]
@@ -737,6 +742,16 @@ impl Studio {
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
         state.bake_pending = cli.bake_pose;
+        for spec in &cli.ik_move {
+            let (name, by) = spec.split_once(':').context("--ik-move is Target:x,y,z")?;
+            let target = rk_chara::pose::IK_TARGET_NAMES
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))
+                .with_context(|| format!("no IK target {name}"))?;
+            let p: Vec<f32> = by.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            anyhow::ensure!(p.len() == 3, "--ik-move is Target:x,y,z");
+            state.ik_pending.push((target, glam::Vec3::new(p[0], p[1], p[2])));
+        }
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
@@ -1167,6 +1182,29 @@ impl eframe::App for Studio {
             if ready {
                 viewport::bake_animation(&mut self.state);
                 self.state.bake_pending = false;
+            }
+        }
+
+        // IK asked for at the start, once the character is built and any
+        // bake is done: the targets on her bones, then moved.
+        if !self.state.ik_pending.is_empty() && !self.state.bake_pending {
+            let on_bones = self
+                .state
+                .doc
+                .selected
+                .and_then(|id| self.state.live.as_ref()?.ik_targets_on_bones(id));
+            if let (Some(id), Some(mut targets)) = (self.state.doc.selected, on_bones) {
+                for (target, by) in std::mem::take(&mut self.state.ik_pending) {
+                    targets[target].pos += by;
+                }
+                if let Some(mut object) = self.state.doc.scene().get(id).cloned() {
+                    if let scene::Content::Character { pose_layer, .. } = &mut object.content {
+                        let layer = pose_layer.get_or_insert_with(Default::default);
+                        layer.ik_on = true;
+                        layer.ik = targets;
+                    }
+                    self.state.doc.edit(object, false);
+                }
             }
         }
 

@@ -25,6 +25,7 @@ rk-unityfs = { path = "crates/rk-unityfs" }
 rk-vfs = { path = "crates/rk-vfs" }
 rk-packages = { path = "crates/rk-packages" }
 rk-chara = { path = "crates/rk-chara" }
+rk-ik = { path = "crates/rk-ik" }
 rk-render = { path = "crates/rk-render" }
 rk-map = { path = "crates/rk-map" }
 rk-asset = { path = "crates/rk-asset" }

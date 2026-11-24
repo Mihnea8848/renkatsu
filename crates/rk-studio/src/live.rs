@@ -440,7 +440,7 @@ impl Actor {
             }
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
-        self.chara.pose_frame(motion, &self.edits, states);
+        self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
     }
 
     /// Puts the bones back as they were loaded.
@@ -947,6 +947,14 @@ impl Live {
     /// Where a built character's animation was last posed, in passes.
     pub fn phase(&self, id: ObjectId) -> Option<f32> {
         self.actors.iter().find(|a| a.id == id)?.phase
+    }
+
+    /// A built character's IK targets on her bones as they stand, as
+    /// Studio's copy puts them.
+    pub fn ik_targets_on_bones(&self, id: ObjectId) -> Option<Vec<rk_chara::pose::IkTarget>> {
+        let actor = self.actors.iter().find(|a| a.id == id)?;
+        let rig = actor.chara.ik_rig.as_ref()?;
+        Some(rig.targets_on_bones(&actor.chara.scene, actor.chara.top))
     }
 
     /// The names of a built character's FK bones in `part`.

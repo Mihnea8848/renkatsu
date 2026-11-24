@@ -2960,6 +2960,7 @@ dependencies = [
  "rayon",
  "rk-card",
  "rk-core",
+ "rk-ik",
  "rk-unityfs",
  "rk-vfs",
  "rmpv",

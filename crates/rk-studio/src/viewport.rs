@@ -1045,11 +1045,16 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.fk_open && fk_layer(st).is_some() {
         rows += FK_PART_ROWS;
     }
+    if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
+        rows += IK_ROWS;
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
 /// The rows the FK parts take in the Pose palette, one each.
 const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len();
+/// The rows of the IK category: its groups, and Optimize IK.
+const IK_ROWS: usize = rk_chara::pose::IkGroup::ALL.len() + 1;
 
 /// The pose layer of the selected character, when a character is selected.
 fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
@@ -1160,7 +1165,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     continue;
                 }
                 if *name == "Forward kinematics" {
-                    fk_category(ui, k, st, row, id, g, name);
+                    kinematics_category(ui, k, st, row, id, g, name, false);
                     y += palette_row(k);
                     index += 1;
                     if st.fk_open {
@@ -1173,6 +1178,24 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                                 &layer,
                             );
                             y += FK_PART_ROWS as f32 * palette_row(k);
+                        }
+                    }
+                    continue;
+                }
+                if *name == "Inverse kinematics" {
+                    kinematics_category(ui, k, st, row, id, g, name, true);
+                    y += palette_row(k);
+                    index += 1;
+                    if st.ik_open {
+                        if let Some(layer) = fk_layer(st) {
+                            ik_rows(
+                                ui,
+                                k,
+                                st,
+                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
+                                &layer,
+                            );
+                            y += IK_ROWS as f32 * palette_row(k);
                         }
                     }
                     continue;
@@ -1273,20 +1296,18 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
 /// A category of the Pose palette that is switched on and opened: an
 /// arrow that opens or closes it, its name, and a box that switches it for
 /// the selected character. Switching it on opens it, off closes it.
-fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
+#[allow(clippy::too_many_arguments)]
+fn kinematics_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str, ik: bool) {
     let layer = fk_layer(st);
-    let on = layer.as_ref().is_some_and(|l| l.fk_on);
+    let on = layer.as_ref().is_some_and(|l| if ik { l.ik_on } else { l.fk_on });
+    let open = if ik { st.ik_open } else { st.fk_open };
     let resp = ui.interact(row, id, Sense::click());
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(row, 2.0, k.t.control);
     }
     let y = row.center().y;
-    let arrow = if st.fk_open {
-        icon::CARET_DOWN
-    } else {
-        icon::CARET_RIGHT
-    };
+    let arrow = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
     glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
     let tint = if on { k.t.text_bright } else { k.t.text };
     glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
@@ -1300,12 +1321,68 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
     if layer.is_some() {
         widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
     }
-    if ticked != on {
+    if ticked != on && ik {
+        // The targets start on the bones, as Studio's copy puts them.
+        let on_bones = st.doc.selected.and_then(|id| st.live.as_ref()?.ik_targets_on_bones(id));
+        edit_fk_layer(st, |l| {
+            l.ik_on = ticked;
+            if ticked && l.ik.is_empty() {
+                l.ik = on_bones.unwrap_or_default();
+            }
+        });
+        st.ik_open = ticked;
+    } else if ticked != on {
         edit_fk_layer(st, |l| l.fk_on = ticked);
         st.fk_open = ticked;
         st.show_animator |= ticked;
+    } else if resp.clicked() && ik {
+        st.ik_open = !st.ik_open;
     } else if resp.clicked() {
         st.fk_open = !st.fk_open;
+    }
+}
+
+/// The IK groups as boxes to tick, one to a row, and Optimize IK, under
+/// the category's name.
+fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
+    let cell = |i: usize| {
+        Rect::from_min_size(
+            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
+        )
+    };
+    for (i, group) in rk_chara::pose::IkGroup::ALL.into_iter().enumerate() {
+        let mut on = layer.ik_groups.contains(&group);
+        let was = on;
+        widgets::checkbox(
+            ui,
+            k,
+            cell(i),
+            ui.id().with(("ik group", group.label())),
+            &mut on,
+            group.label(),
+        );
+        if on != was {
+            edit_fk_layer(st, |l| {
+                if on {
+                    l.ik_groups.push(group);
+                } else {
+                    l.ik_groups.retain(|g| *g != group);
+                }
+            });
+        }
+    }
+    let mut optimize = layer.optimize_ik;
+    widgets::checkbox(
+        ui,
+        k,
+        cell(rk_chara::pose::IkGroup::ALL.len()),
+        ui.id().with("optimize ik"),
+        &mut optimize,
+        "Optimize IK",
+    );
+    if optimize != layer.optimize_ik {
+        edit_fk_layer(st, |l| l.optimize_ik = optimize);
     }
 }
 
@@ -1453,13 +1530,12 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 18] = [
+const LATER_TOOLS: [&str; 17] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
-    "Inverse kinematics",
     "Hands",
     "Look at camera",
     "Depth of field",
