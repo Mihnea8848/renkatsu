@@ -59,13 +59,23 @@ fn split_outfit(line: &str) -> (&str, Option<usize>) {
     }
 }
 
-pub fn bench(list: &Path, captures: &Path, out_dir: &Path, show: &[String], studio: bool) -> Result<()> {
+pub fn bench(
+    list: &Path,
+    captures: &Path,
+    out_dir: &Path,
+    show: &[String],
+    studio: bool,
+    game_skirts: bool,
+) -> Result<()> {
     let cfg = Config::load()?;
     let root = cfg.game_dir.join("UserData/chara/female");
     let game = Game::open(&cfg)?;
     let mut renderer = Renderer::new()?;
     std::fs::create_dir_all(out_dir)?;
-    let opts = BuildOptions::default();
+    let opts = BuildOptions {
+        advanced_skirts: !game_skirts,
+        ..Default::default()
+    };
     let mut summaries = Vec::new();
     let lines: Vec<String> = std::fs::read_to_string(list)?
         .lines()

@@ -254,6 +254,10 @@ enum Cmd {
         /// Compare with the pictures taken with Studio's screen effects on.
         #[arg(long)]
         studio: bool,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics, to compare the rest with the game.
+        #[arg(long)]
+        game_skirts: bool,
     },
     /// Compare every case of a capture batch (the plugin's `out/batch`
     /// folder) with our render of it: one line per case, with the camera,
@@ -588,7 +592,8 @@ fn main() -> Result<()> {
             out,
             show,
             studio,
-        } => bench::bench(&list, &captures, &out, &show, studio),
+            game_skirts,
+        } => bench::bench(&list, &captures, &out, &show, studio, game_skirts),
         Cmd::CaptureCheck {
             dir,
             out,
