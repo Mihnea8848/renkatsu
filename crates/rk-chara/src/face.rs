@@ -27,6 +27,47 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// How often the shaking highlights take a new size, in seconds: the
+/// game's `YureTime` of 0.3, on a timer that gains a frame's time once a
+/// frame and once more for each of the two shaking highlights.
+pub const SHAKE_STEP: f32 = 0.1;
+
+/// The shaking highlights' size factor `seconds` after they began, across
+/// and up (`YureAddScale`): 1 at first, then a new draw of 1 to 2 across
+/// and 1 to 1.5 up each step. The game draws at random; here the draw
+/// comes from the step and the eye, so a moment always looks the same.
+pub fn shake_factor(seconds: f32, eye: usize) -> [f32; 2] {
+    let step = (seconds.max(0.0) / SHAKE_STEP) as u64;
+    if step == 0 {
+        return [1.0, 1.0];
+    }
+    // SplitMix64.
+    let mut z = (step * 2 + eye as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let unit = |bits: u64| (bits & 0xFF_FFFF) as f32 / 16_777_216.0;
+    [1.0 + unit(z), 1.0 + 0.5 * unit(z >> 32)]
+}
+
+/// A highlight's placement while it shakes, from where the eye look put it
+/// and where it put the iris (`EyeLookMaterialControll.Update` with
+/// `isYure`): it follows the gaze 0.8 across and 0.5 up as far, and grows
+/// by the iris's growth times `factor` about its middle.
+pub fn shaken(place: [f32; 4], iris: [f32; 4], factor: [f32; 2]) -> [f32; 4] {
+    let grow = [iris[0] - 1.0, iris[1] - 1.0];
+    let moved = [iris[2] + grow[0] * 0.5, iris[3] + grow[1] * 0.5];
+    // The highlight's own shift up or down, which the iris does not have.
+    let shift = place[3] - iris[3];
+    let grown = [grow[0] * factor[0], grow[1] * factor[1]];
+    [
+        1.0 + grown[0],
+        1.0 + grown[1],
+        moved[0] * 0.8 - grown[0] * 0.5,
+        moved[1] * 0.5 - grown[1] * 0.5 + shift,
+    ]
+}
+
 /// The iris textures the eye look moves (`EyeLookMaterialControll.texStates`).
 const IRIS_TEXTURES: [&str; 3] = ["_MainTex", "_overtex1", "_overtex2"];
 
@@ -45,6 +86,79 @@ pub struct EyeRow {
     pub gag: i32,
     /// The picture in the irises.
     pub expression: Option<Arc<Image>>,
+}
+
+/// The game's eyebrow patterns by the names given here, from their
+/// Japanese ones.
+pub fn eyebrow_label(pattern: i32) -> Option<&'static str> {
+    const NAMES: [&str; 17] = [
+        "Default",
+        "Angry",
+        "Troubled",
+        "Bored",
+        "Doubtful left",
+        "Doubtful right",
+        "Thinking left",
+        "Thinking right",
+        "Cross left",
+        "Cross right",
+        "Serious",
+        "Uneasy",
+        "Surprised",
+        "Dejected",
+        "Smug",
+        "Wink left",
+        "Wink right",
+    ];
+    usize::try_from(pattern).ok().and_then(|i| NAMES.get(i)).copied()
+}
+
+/// The game's mouth patterns by the names given here, from their Japanese
+/// ones; the vowels are the mouth shapes of speech.
+pub fn mouth_label(pattern: i32) -> Option<&'static str> {
+    const NAMES: [&str; 40] = [
+        "Default",
+        "Smile",
+        "Happy",
+        "Happy, small",
+        "Happy, smaller",
+        "Excited",
+        "Excited, small",
+        "Excited, smaller",
+        "Angry",
+        "Angry 2",
+        "Serious",
+        "Serious 2",
+        "Disgusted",
+        "Lonely",
+        "Flustered",
+        "Displeased",
+        "Fed up",
+        "Surprised",
+        "Surprised, small",
+        "Smug",
+        "Tongue out",
+        "Licking",
+        "Holding in the mouth",
+        "Kiss",
+        "Open, tongue out",
+        "A, small",
+        "A, large",
+        "I, small",
+        "I, large",
+        "U, small",
+        "U, large",
+        "E, small",
+        "E, large",
+        "O, small",
+        "O, large",
+        "N, small",
+        "N, large",
+        "Cat mouth",
+        "Triangle",
+        "Cartoon grin",
+    ];
+    usize::try_from(pattern).ok().and_then(|i| NAMES.get(i)).copied()
 }
 
 /// The game's eye patterns by the names given here, from their Japanese
@@ -128,6 +242,10 @@ pub struct Face {
     /// by this much about their middle.
     #[serde(default)]
     pub eye_small: f32,
+    /// The eyes' highlights shake (`ChaControl.ChangeEyesShaking`, which
+    /// KK_EyeShaking switches in Studio).
+    #[serde(default)]
+    pub shaking: bool,
 }
 
 impl Default for Face {
@@ -145,6 +263,7 @@ impl Default for Face {
             hide_highlight: false,
             eye_y: 0.0,
             eye_small: 0.0,
+            shaking: false,
         }
     }
 }
@@ -157,8 +276,8 @@ impl std::str::FromStr for Face {
     fn from_str(spec: &str) -> anyhow::Result<Face> {
         let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
         anyhow::ensure!(
-            (3..=11).contains(&parts.len()),
-            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN[,TEARS[,BLUSH[,HIDE_HIGHLIGHT[,EYE_Y[,EYE_SMALL]]]]]]]]"
+            (3..=12).contains(&parts.len()),
+            "a face is EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN[,TEARS[,BLUSH[,HIDE_HIGHLIGHT[,EYE_Y[,EYE_SMALL[,SHAKING]]]]]]]]]"
         );
         let mut face = Face {
             eyebrows: parts[0].parse()?,
@@ -189,6 +308,9 @@ impl std::str::FromStr for Face {
         }
         if let Some(v) = parts.get(10) {
             face.eye_small = v.parse()?;
+        }
+        if let Some(v) = parts.get(11) {
+            face.shaking = *v != "0";
         }
         Ok(face)
     }
@@ -276,6 +398,12 @@ pub struct Rig {
 impl Rig {
     /// Shows `face`, or the face the character was built with.
     pub fn show(&self, scene: &mut Scene, face: Option<&Face>) {
+        self.show_at(scene, face, 0.0);
+    }
+
+    /// As `show`, with shaking highlights where they are `seconds` after
+    /// they began.
+    pub fn show_at(&self, scene: &mut Scene, face: Option<&Face>, seconds: f32) {
         let (face, eyes_rate) = match face {
             Some(f) => (f, Rig::eyes_rate(f)),
             None => (&self.start, self.start_rate),
@@ -296,7 +424,7 @@ impl Rig {
             part.show(scene, pattern, lerp(c.open_min, limit, eyes_rate));
         }
         self.show_eye_row(scene, face.eyes);
-        self.show_irises(scene, face);
+        self.show_irises(scene, face, seconds);
         if let Some(part) = &self.mouth {
             // Studio fixes the mouth at its slider (`FixedRate`).
             part.show(scene, face.mouth, face.mouth_open.clamp(0.0, 1.0));
@@ -349,18 +477,22 @@ impl Rig {
     /// it lays every frame over the eye look's placement
     /// (`ProcEyeY`, `ProcEyeSmall`): the scale grows by the size, the
     /// offset moves back by half of it, and up by the roll.
-    fn show_irises(&self, scene: &mut Scene, face: &Face) {
+    fn show_irises(&self, scene: &mut Scene, face: &Face, seconds: f32) {
         let small = face.eye_small.clamp(0.0, 1.0);
         let roll = face.eye_y.clamp(0.0, 0.5);
-        for (r, places) in &self.iris_places {
+        for (eye, (r, places)) in self.iris_places.iter().enumerate() {
             let Some(m) = scene.renderers[*r].materials.first_mut() else {
                 continue;
             };
             m.set_float("_isHighLight", if face.hide_highlight { 0.0 } else { 1.0 });
-            for (name, place) in IRIS_TEXTURES.iter().zip(places) {
-                let (Some(place), Some(slot)) = (place, m.textures.get_mut(*name)) else {
+            let shake = face.shaking.then(|| shake_factor(seconds, eye));
+            for (i, (name, place)) in IRIS_TEXTURES.iter().zip(places).enumerate() {
+                let (Some(mut place), Some(slot)) = (*place, m.textures.get_mut(*name)) else {
                     continue;
                 };
+                if let (Some(r), Some(iris), true) = (shake, places[0], i > 0) {
+                    place = shaken(place, iris, r);
+                }
                 slot.scale = [place[0] + small, place[1] + small];
                 slot.offset = [place[2] - small / 2.0, place[3] - small / 2.0 - roll];
             }
@@ -509,6 +641,34 @@ mod tests {
             "the material's placement"
         );
         assert_eq!(iris.floats.get("_exppower"), Some(&1.0));
+    }
+
+    #[test]
+    fn shaking_highlights_start_still_and_draw_in_the_games_ranges() {
+        assert_eq!(shake_factor(0.05, 0), [1.0, 1.0]);
+        for step in 1..200 {
+            let f = shake_factor(step as f32 * SHAKE_STEP + 0.01, step % 2);
+            assert!((1.0..=2.0).contains(&f[0]) && (1.0..=1.5).contains(&f[1]), "{f:?}");
+        }
+        assert_eq!(
+            shake_factor(1.23, 1),
+            shake_factor(1.23, 1),
+            "a moment always looks the same"
+        );
+        assert_ne!(
+            shake_factor(1.23, 0),
+            shake_factor(1.23, 1),
+            "each eye shakes on its own"
+        );
+        // An iris grown by 0.4 and moved, its highlight 0.1 higher: still,
+        // the highlight follows less of the move; shaking, it grows more.
+        let iris = [1.4, 1.4, -0.2 + 0.1, -0.2 - 0.04];
+        let place = [1.4, 1.4, iris[2], iris[3] + 0.1];
+        let still = shaken(place, iris, [1.0, 1.0]);
+        assert!((still[0] - 1.4).abs() < 1e-6);
+        assert!((still[2] - (0.1 * 0.8 - 0.2)).abs() < 1e-6);
+        assert!((still[3] - (-0.04 * 0.5 - 0.2 + 0.1)).abs() < 1e-6);
+        assert!(shaken(place, iris, [2.0, 1.5])[0] > 1.7);
     }
 
     #[test]

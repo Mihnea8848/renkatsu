@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod audit;
 mod bench;
+mod bp_check;
 mod bundle;
 mod capture_check;
 mod card;
@@ -131,6 +132,18 @@ enum Cmd {
         /// Where in the animation, in passes: 0 the start, 0.5 half way.
         #[arg(long, default_value_t = 0.0)]
         time: f32,
+        /// Play the animation on for this many frames of 1/60 s from
+        /// there, the physics moving with it, before the picture.
+        #[arg(long, default_value_t = 0)]
+        play: u32,
+        /// While playing, also save a picture every this many frames,
+        /// numbered after the output's name.
+        #[arg(long, default_value_t = 0)]
+        every: u32,
+        /// Play this animation instead of `--pose`, which the character
+        /// starts settled in: a switch from one to the other.
+        #[arg(long)]
+        then: Option<String>,
         /// Draw as Renkatsu Studio's viewport does: CharaStudio's screen
         /// effects (occlusion, bloom, vignette) and its first colour filter.
         #[arg(long)]
@@ -257,6 +270,19 @@ enum Cmd {
     /// folder) with our render of it: one line per case, with the camera,
     /// light, outfit, clothing states and pose the capture recorded. Cases
     /// taken in a map are listed with what they recorded.
+    /// BetterPenetration against CharaStudio captures with a partner: both
+    /// characters posed from the capture, then our targets, shaft aim,
+    /// colliders and mouth measured against the plugin's, in millimetres
+    BpCheck {
+        /// Folder with the cases' .json and .partner.json files.
+        dir: PathBuf,
+        /// Only the cases whose file name contains one of these texts.
+        #[arg(long)]
+        only: Vec<String>,
+        /// List the shaft's and her vagina's bones one by one.
+        #[arg(long)]
+        bones: bool,
+    },
     CaptureCheck {
         /// Folder with the batch's .json files and pictures.
         dir: PathBuf,
@@ -587,6 +613,7 @@ fn main() -> Result<()> {
             show,
             studio,
         } => bench::bench(&list, &captures, &out, &show, studio),
+        Cmd::BpCheck { dir, only, bones } => bp_check::check(&dir, &only, bones),
         Cmd::CaptureCheck {
             dir,
             out,
@@ -627,6 +654,9 @@ fn main() -> Result<()> {
             dry_clothes,
             pose,
             time,
+            play,
+            every,
+            then,
             studio_look,
             background,
             alpha_to_coverage,
@@ -660,6 +690,9 @@ fn main() -> Result<()> {
             dry_clothes,
             pose: pose.as_deref(),
             time,
+            play,
+            every,
+            then: then.as_deref(),
             studio_look,
             background: background.as_deref(),
             alpha_to_coverage,

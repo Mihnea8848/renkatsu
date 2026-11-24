@@ -280,6 +280,11 @@ struct Cli {
     /// gizmo being dragged or a selection box.
     #[arg(long, hide = true, value_parser = parse_drag)]
     drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// Rest the pointer at X,Y after the clicks and turn the wheel by DY
+    /// points (down is negative), as X,Y,DY: to picture something
+    /// scrolled.
+    #[arg(long, hide = true, value_parser = parse_wheel)]
+    wheel: Option<(egui::Pos2, f32)>,
     /// Press these keys after the clicks, one a frame, each as the
     /// settings write a key: `ctrl+z`.
     #[arg(long, hide = true)]
@@ -403,6 +408,16 @@ fn parse_drag(text: &str) -> Result<(egui::Pos2, egui::Pos2), String> {
     Ok((parse_point(from)?, parse_point(to)?))
 }
 
+fn parse_wheel(text: &str) -> Result<(egui::Pos2, f32), String> {
+    let (point, dy) = text
+        .rsplit_once(',')
+        .ok_or_else(|| "a wheel turn must look like 120,48,-300".to_owned())?;
+    Ok((
+        parse_point(point)?,
+        dy.trim().parse().map_err(|_| "the turn is a number".to_owned())?,
+    ))
+}
+
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
     text.split_once(',')
         .and_then(|(x, y)| Some(egui::Pos2::new(x.trim().parse().ok()?, y.trim().parse().ok()?)))
@@ -424,6 +439,8 @@ struct Studio {
     type_after: Option<usize>,
     hover: Option<egui::Pos2>,
     drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// The pointer's rest and a wheel turn once the clicks are done.
+    wheel: Option<(egui::Pos2, f32)>,
     /// Keys pressed once the clicks are done, one a frame.
     keys: Vec<keymap::Chord>,
     frames: u32,
@@ -958,6 +975,7 @@ impl Studio {
             type_after: cli.type_after,
             hover: cli.hover,
             drag: cli.drag,
+            wheel: cli.wheel,
             keys: cli
                 .key
                 .iter()
@@ -1276,7 +1294,7 @@ impl eframe::App for Studio {
                 }
             }
         }
-        if self.state.settings.frame_rate.continuous() {
+        if self.state.settings.frame_rate.continuous() || self.state.live.as_ref().is_some_and(live::Live::settling) {
             ctx.request_repaint();
         }
         let dt = ctx.input(|i| i.unstable_dt);
@@ -1519,6 +1537,19 @@ impl Studio {
                     }
                 }
                 return;
+            }
+        }
+        // The scripted wheel, once the clicks are done: the pointer rests
+        // there, and the wheel turns on the first of those frames.
+        if let (Some((at, dy)), true) = (self.wheel, index >= self.clicks.len() && self.frames >= 2) {
+            input.events.push(egui::Event::PointerMoved(at));
+            if step == self.clicks.len() as u32 * CLICK_FRAMES {
+                input.events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, dy),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                });
             }
         }
         // The scripted keys, once the clicks are done: one a frame.

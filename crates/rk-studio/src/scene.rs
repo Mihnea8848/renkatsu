@@ -210,6 +210,14 @@ impl Animation {
     }
 }
 
+/// Where a character's shaft goes: a partner, by object, and the place on
+/// her (BetterPenetration's two targets, held to her bones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PenetrationTarget {
+    pub partner: ObjectId,
+    pub mode: rk_chara::better_penetration::Mode,
+}
+
 /// What an object is, with the values only that kind has.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -258,6 +266,14 @@ pub enum Content {
         /// scene has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         light_group: Option<String>,
+        /// BetterPenetration's settings as changed in this scene; none
+        /// keeps the card's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        better_penetration: Option<Box<rk_chara::better_penetration::Settings>>,
+        /// The partner and the place BetterPenetration aims at, as chosen;
+        /// none leaves it to the settings' auto-target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        penetration_target: Option<PenetrationTarget>,
     },
     Light {
         /// What the light lights and how it shines. Scenes of Renkatsu
@@ -426,6 +442,8 @@ impl Content {
             game_skirts: Vec::new(),
             animation: None,
             pose_layer: None,
+            better_penetration: None,
+            penetration_target: None,
             profile: None,
             light_group: None,
         }
@@ -3427,6 +3445,52 @@ speed = 0.5
         let text = toml::to_string(&scene).unwrap();
         assert!(text.contains("[objects.animation]"), "{text}");
         assert!(!text.contains("pose"), "{text}");
+    }
+
+    #[test]
+    fn a_penetration_target_and_settings_are_saved_with_the_character() {
+        use rk_chara::better_penetration::{AutoTarget, Mode, Settings};
+        let mut doc = Document::new(Scene::new());
+        let her = doc.add("Her", Content::character(PathBuf::from("Characters/a.png")));
+        let him = doc.add("Him", Content::character(PathBuf::from("Characters/b.png")));
+        let mut edited = doc.scene().get(him).unwrap().clone();
+        if let Content::Character {
+            penetration_target,
+            better_penetration,
+            ..
+        } = &mut edited.content
+        {
+            *penetration_target = Some(PenetrationTarget {
+                partner: her,
+                mode: Mode::Oral,
+            });
+            *better_penetration = Some(Box::new(Settings {
+                auto_target: AutoTarget::Anal,
+                ..Settings::default()
+            }));
+        }
+        doc.edit(edited, false);
+        let text = toml::to_string(doc.scene()).unwrap();
+        let back: Scene = toml::from_str(&text).unwrap();
+        let Some(Content::Character {
+            penetration_target,
+            better_penetration,
+            ..
+        }) = back.get(him).map(|o| &o.content)
+        else {
+            panic!("he is a character");
+        };
+        assert_eq!(
+            *penetration_target,
+            Some(PenetrationTarget {
+                partner: her,
+                mode: Mode::Oral
+            })
+        );
+        assert_eq!(
+            better_penetration.as_deref().map(|s| s.auto_target),
+            Some(AutoTarget::Anal)
+        );
     }
 
     #[test]

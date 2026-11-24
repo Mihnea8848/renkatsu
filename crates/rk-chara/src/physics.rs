@@ -168,6 +168,8 @@ impl Curve {
 }
 
 pub mod cloth;
+pub mod net;
+pub mod shell;
 
 // ---------------------------------------------------------------------------
 // DynamicBoneCollider.
@@ -199,9 +201,12 @@ impl Default for Collider {
     }
 }
 
+/// Colliders lent to dynamic bones by their place in `Physics::bones`.
+pub type Guests = Vec<(usize, Vec<Shape>)>;
+
 /// A collider placed in the world for one update.
-#[derive(Debug, Clone, Copy)]
-struct Shape {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shape {
     p0: Vec3,
     p1: Vec3,
     radius: f32,
@@ -211,15 +216,22 @@ struct Shape {
 
 impl Collider {
     fn shape(&self, scene: &Scene) -> Shape {
+        self.scaled_shape(scene, 1.0, 1.0)
+    }
+
+    /// Where the collider is in the world, its radius and height times
+    /// these, for another character's dynamic bones to meet.
+    pub fn scaled_shape(&self, scene: &Scene, radius_scale: f32, height_scale: f32) -> Shape {
         let m = world(scene, self.node);
-        let radius = self.radius * lossy_scale_z(scene, self.node).abs();
-        let half = (self.height - self.radius) * 0.5;
+        let (radius, height) = (self.radius * radius_scale, self.height * height_scale);
+        let radius_world = radius * lossy_scale_z(scene, self.node).abs();
+        let half = (height - radius) * 0.5;
         if half <= 0.0 {
             let c = m.transform_point3(self.center);
             return Shape {
                 p0: c,
                 p1: c,
-                radius,
+                radius: radius_world,
                 capsule: false,
                 inside: self.inside,
             };
@@ -231,7 +243,7 @@ impl Collider {
         Shape {
             p0: m.transform_point3(c0),
             p1: m.transform_point3(c1),
-            radius,
+            radius: radius_world,
             capsule: true,
             inside: self.inside,
         }
@@ -518,6 +530,9 @@ pub struct DynamicBone {
     object_scale: f32,
     time: f32,
     weight: f32,
+    /// A scale on the particles' radius, which BetterPenetration's belly
+    /// bulge sets (`UpdateBellyBones`).
+    radius_scale: f32,
 }
 
 impl DynamicBone {
@@ -533,7 +548,25 @@ impl DynamicBone {
             object_scale: 1.0,
             time: 0.0,
             weight,
+            radius_scale: 1.0,
         }
+    }
+
+    /// Scales the particles' radius from what the bone gives them. The
+    /// game's DynamicBone reads `m_Radius` only when it sets up its
+    /// particles, so in Studio the plugin's later change is lost; here it
+    /// takes at once. Returns whether anything changed.
+    pub fn set_radius_scale(&mut self, scale: f32) -> bool {
+        let scale = scale.max(0.01);
+        if scale == self.radius_scale {
+            return false;
+        }
+        let ratio = scale / self.radius_scale;
+        for p in &mut self.particles {
+            p.radius *= ratio;
+        }
+        self.radius_scale = scale;
+        true
     }
 
     /// `SetupParticles`.
@@ -547,12 +580,13 @@ impl DynamicBone {
         self.bone_total_length = 0.0;
         self.append(scene, Some(root), None, 0.0);
         let d = &self.def;
+        let radius_scale = self.radius_scale;
         for p in &mut self.particles {
             p.damping = d.damping;
             p.elasticity = d.elasticity;
             p.stiffness = d.stiffness;
             p.inert = d.inert;
-            p.radius = d.radius;
+            p.radius = d.radius * radius_scale;
             if self.bone_total_length > 0.0 {
                 let t = p.bone_length / self.bone_total_length;
                 p.damping *= Curve::scale(&d.damping_distrib, t);
@@ -653,8 +687,9 @@ impl DynamicBone {
         }
     }
 
-    /// `UpdateDynamicBones`.
-    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], dt: f32) {
+    /// `UpdateDynamicBones`, `guests` met after the component's own
+    /// colliders.
+    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], guests: &[Shape], dt: f32) {
         let Some(root) = self.def.root else { return };
         if self.particles.is_empty() {
             return;
@@ -666,7 +701,8 @@ impl DynamicBone {
         let n = loops(&mut self.time, self.def.update_rate, dt, 3);
         if n > 0 {
             let mats = rest_mats(scene, &self.particles);
-            let shapes = shapes(scene, colliders, &self.def.colliders, false);
+            let mut shapes = shapes(scene, colliders, &self.def.colliders, false);
+            shapes.extend_from_slice(guests);
             let root_rot = rotation(scene, root);
             for _ in 0..n {
                 self.update_particles1(&mats, root_rot);
@@ -1818,6 +1854,14 @@ pub struct Physics {
     advanced: bool,
     /// What the character is among, for Advanced Skirt Physics.
     obstacles: Option<std::sync::Arc<cloth::Obstacles>>,
+    /// While set, `end_frame` leaves the cloth nets as they are
+    /// (`hold_cloth`).
+    cloth_held: bool,
+    /// Which of `bones` ran in the last `end_frame`.
+    ran: Vec<bool>,
+    /// Another character's colliders that dynamic bones meet too, by the
+    /// bone's place in `bones` (`set_guests`).
+    guests: Guests,
 }
 
 impl Physics {
@@ -1933,6 +1977,18 @@ impl Physics {
         self.still = still.to_vec();
     }
 
+    /// Colliders of another character that dynamic bones meet as well as
+    /// their own, placed in the world, by the bone's place in `bones`;
+    /// they stay until set again.
+    pub fn set_guests(&mut self, guests: Guests) {
+        self.guests = guests;
+    }
+
+    /// The guests set last.
+    pub fn guests(&self) -> &[(usize, Vec<Shape>)] {
+        &self.guests
+    }
+
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
@@ -1943,13 +1999,14 @@ impl Physics {
             cloth.begin(scene, &self.bones);
         }
         let mut live = vec![false; self.bones.len()];
-        for ((b, moves), live) in self.bones.iter_mut().zip(moving).zip(&mut live) {
+        for (i, ((b, moves), live)) in self.bones.iter_mut().zip(moving).zip(&mut live).enumerate() {
             if !moves {
                 continue;
             }
             match b {
                 Bone::Dynamic(d) if d.running() => {
-                    d.late_update(scene, &self.colliders, dt);
+                    let guests = self.guests.iter().find(|(b, _)| *b == i).map_or(&[][..], |(_, g)| g);
+                    d.late_update(scene, &self.colliders, guests, dt);
                     *live = true;
                 }
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),
@@ -1959,12 +2016,67 @@ impl Physics {
         }
         if let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) {
             cloth.solve(scene, &mut self.bones, &live, self.obstacles.as_ref());
+            if !self.cloth_held {
+                cloth.step_nets(scene, &live, self.obstacles.as_ref(), dt);
+            }
         }
+        self.ran = live;
         // The vertices between the skirt's bones, after skinning.
         scene.push_out = match &self.cloth {
             Some(cloth) if self.advanced => cloth.push_out(self.has_obstacles()),
             _ => None,
         };
+        scene.cloth = match &self.cloth {
+            Some(cloth) if self.advanced => cloth.draw(),
+            _ => None,
+        };
+    }
+
+    /// While `held`, `end_frame` moves everything but the cloth nets,
+    /// which stay as they are until `settle_cloth` moves them. A scene
+    /// that stands still settles its hair and chains at once and its
+    /// nets, which cost far more, over the frames it is drawn in.
+    pub fn hold_cloth(&mut self, held: bool) {
+        self.cloth_held = held;
+    }
+
+    /// Has `solver` run the steps of the cloth nets in place of the CPU's
+    /// own solver; none goes back to that. Call after `fit_cloth`.
+    pub fn solve_cloth_with(&mut self, solver: Option<net::SharedSolver>) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.solve_with(solver);
+        }
+    }
+
+    /// One line per skirt that Advanced Skirt Physics found, whether it
+    /// runs or not: its chains, its net and the meshes on the net.
+    pub fn skirts(&self, scene: &Scene) -> Vec<String> {
+        self.cloth
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.summary(scene, &self.bones))
+    }
+
+    /// Whether Advanced Skirt Physics runs and the character has cloth
+    /// nets for it.
+    pub fn has_nets(&self) -> bool {
+        self.advanced && self.cloth.as_ref().is_some_and(cloth::Cloth::has_nets)
+    }
+
+    /// Moves only the cloth nets on by `frames` frames of `dt` seconds,
+    /// among the body as it is posed now. The first of them takes the
+    /// body from where the nets last saw it to where it is. With
+    /// Advanced Skirt Physics off the skirts are drawn as the game moves
+    /// them.
+    pub fn settle_cloth(&mut self, scene: &mut Scene, frames: u32, dt: f32) {
+        let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) else {
+            scene.cloth = None;
+            scene.push_out = None;
+            return;
+        };
+        for _ in 0..frames {
+            cloth.step_nets(scene, &self.ran, self.obstacles.as_ref(), dt);
+        }
+        scene.cloth = cloth.draw();
     }
 
     /// Fits Advanced Skirt Physics to the character as it is now, which
@@ -1976,8 +2088,15 @@ impl Physics {
 
     /// What the character is among (a map's floors and furniture), for
     /// Advanced Skirt Physics to rest skirts on; `None` for nothing.
-    pub fn set_obstacles(&mut self, obstacles: Option<std::sync::Arc<cloth::Obstacles>>) {
+    /// Returns whether that is something else than before.
+    pub fn set_obstacles(&mut self, obstacles: Option<std::sync::Arc<cloth::Obstacles>>) -> bool {
+        let same = match (&self.obstacles, &obstacles) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
         self.obstacles = obstacles;
+        !same
     }
 
     /// Whether there is anything around the character for skirts to rest
@@ -2062,6 +2181,18 @@ impl Physics {
         for b in &mut self.bones {
             b.reset(scene);
         }
+        if let Some(cloth) = &mut self.cloth {
+            cloth.reset_nets();
+        }
+    }
+
+    /// Starts the cloth nets again in the pose the body is in at the next
+    /// step: they then take the body from their rest shape into that pose
+    /// at their own pace (`Net::start`), whatever way the bones came by.
+    pub fn restart_cloth(&mut self) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.reset_nets();
+        }
     }
 
     /// Moves every particle with the character when it is placed somewhere
@@ -2084,6 +2215,9 @@ impl Physics {
                 Bone::Ver01(d) => carry(&mut d.particles, &mut d.object_prev),
                 Bone::Ver02(d) => carry(&mut d.particles, &mut d.object_prev),
             }
+        }
+        if let Some(cloth) = &mut self.cloth {
+            cloth.carry(moved);
         }
     }
 }
@@ -2310,6 +2444,85 @@ mod tests {
             "{:?} {placed:?}",
             position(&scene, b)
         );
+    }
+
+    /// A waist with four skirt chains round it, as the game names them,
+    /// and their physics with Advanced Skirt Physics fitted and on.
+    fn skirt() -> (Scene, Physics, usize) {
+        let mut scene = Scene::default();
+        let waist = scene.add_node("cf_j_waist02", None, at(Vec3::new(0.0, 1.0, 0.0)));
+        let mut bones = Vec::new();
+        for k in 0..4 {
+            let angle = k as f32 * std::f32::consts::FRAC_PI_2;
+            let mut parent = scene.add_node(
+                &format!("cf_j_sk_{k:02}_00"),
+                Some(waist),
+                at(Vec3::new(angle.cos() * 0.1, 0.0, angle.sin() * 0.1)),
+            );
+            let root = parent;
+            for i in 1..4 {
+                parent = scene.add_node(
+                    &format!("cf_j_sk_{k:02}_{i:02}"),
+                    Some(parent),
+                    at(Vec3::new(0.0, -0.1, 0.0)),
+                );
+            }
+            bones.push(Bone::Dynamic(DynamicBone::new(DynamicBoneDef {
+                node: waist,
+                root: Some(root),
+                enabled: true,
+                ..Default::default()
+            })));
+        }
+        let mut physics = Physics {
+            bones,
+            ..Physics::default()
+        };
+        physics.start(&mut scene);
+        physics.fit_cloth(&scene, &std::collections::HashMap::new(), true);
+        (scene, physics, waist)
+    }
+
+    #[test]
+    fn held_cloth_nets_wait_for_their_own_settle() {
+        let (mut scene, mut physics, waist) = skirt();
+        assert!(physics.has_nets());
+        let told = physics.skirts(&scene);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].starts_with("4 chains") && told[0].contains("net "), "{told:?}");
+        physics.step(&mut scene, FRAME_TIME);
+        let top = |scene: &Scene| scene.cloth.as_ref().expect("a net").nets[0].pos[0][0];
+        let was = top(&scene);
+        // The body goes up half a metre while the nets are held: the
+        // chains go along, the net stays.
+        physics.hold_cloth(true);
+        scene.nodes[waist].local.pos.y += 0.5;
+        physics.step(&mut scene, FRAME_TIME);
+        assert_eq!(top(&scene), was);
+        // Its own settle takes it there.
+        physics.hold_cloth(false);
+        physics.settle_cloth(&mut scene, 1, FRAME_TIME);
+        assert!(
+            close(top(&scene), was + Vec3::new(0.0, 0.5, 0.0), 1e-4),
+            "{}",
+            top(&scene)
+        );
+        // With Advanced Skirt Physics off the skirts are drawn as the
+        // game moves them.
+        assert!(physics.set_advanced(false));
+        assert!(!physics.has_nets());
+        physics.settle_cloth(&mut scene, 1, FRAME_TIME);
+        assert!(scene.cloth.is_none() && scene.push_out.is_none());
+    }
+
+    #[test]
+    fn new_obstacles_are_told_from_the_same_ones() {
+        let (_, mut physics, _) = skirt();
+        let map = std::sync::Arc::new(cloth::Obstacles::default());
+        assert!(physics.set_obstacles(Some(map.clone())));
+        assert!(!physics.set_obstacles(Some(map)));
+        assert!(physics.set_obstacles(None));
+        assert!(!physics.set_obstacles(None));
     }
 
     #[test]

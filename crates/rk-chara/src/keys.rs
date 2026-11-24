@@ -106,10 +106,26 @@ pub fn sample(list: &[Key], time: f32) -> Option<BoneEdit> {
     Some(blend(a.edit, b.edit, t))
 }
 
-/// Every keyed bone's edit at `time`.
+/// The edit at `time` of keys that hold from one to the next: the last
+/// key's at or before it, the first's before that.
+pub fn sample_held(list: &[Key], time: f32) -> Option<BoneEdit> {
+    let next = list.partition_point(|k| k.time <= time + 1e-6);
+    list.get(next.saturating_sub(1)).map(|k| k.edit)
+}
+
+/// The edit at `time` of a name's keys, held for a value that holds
+/// (`crate::channels::Channel::held`).
+pub fn sample_named(name: &str, list: &[Key], time: f32) -> Option<BoneEdit> {
+    match crate::channels::Channel::of_key(name) {
+        Some(c) if c.held() => sample_held(list, time),
+        _ => sample(list, time),
+    }
+}
+
+/// Every keyed bone's and value's edit at `time`.
 pub fn pose_at(keys: &Keys, time: f32) -> BTreeMap<String, BoneEdit> {
     keys.iter()
-        .filter_map(|(bone, list)| Some((bone.clone(), sample(list, time)?)))
+        .filter_map(|(name, list)| Some((name.clone(), sample_named(name, list, time)?)))
         .collect()
 }
 

@@ -40,6 +40,9 @@ pub struct BuildOptions {
     /// whether `n_dankon` is drawn at all; the clothes states then say
     /// when. `None` keeps what the card's status says.
     pub visible_son: Option<bool>,
+    /// The uncensor body to wear, by its GUID, in place of the one the
+    /// card names or the plugin picks.
+    pub uncensor_body: Option<String>,
     /// Let hair, skirts, ribbons and the bust settle as the game's
     /// DynamicBone physics does.
     pub physics: bool,
@@ -106,6 +109,7 @@ impl Default for BuildOptions {
             outdoor_shoes: false,
             censor: false,
             visible_son: None,
+            uncensor_body: None,
             physics: true,
             settle_frames: crate::physics::SETTLE_FRAMES,
             frame_time: crate::physics::FRAME_TIME,
@@ -152,6 +156,10 @@ pub struct Character {
     pub hands: [Option<crate::hand_pattern::HandClip>; 2],
     /// The face's controllers, to show another face.
     pub face: Option<crate::face::Rig>,
+    /// BetterPenetration's settings as the card holds them.
+    pub better_penetration: crate::better_penetration::Settings,
+    /// The shaft BetterPenetration moves, when the body has one.
+    pub shaft: Option<crate::better_penetration::Shaft>,
     /// The body's and the face's skin textures before the skin effects,
     /// with the renderers wearing them, and the levels shown.
     skin_base: [Option<(Vec<usize>, Arc<Image>)>; 2],
@@ -279,6 +287,35 @@ impl<'g> Builder<'g> {
             slot: None,
             root: inst.root,
             belongs,
+            object: None,
+        });
+    }
+
+    /// The physics an uncensor's prefab brings: in the game UncensorSelector
+    /// destroys the prefab once its meshes are taken, and only what Mod
+    /// Bone Implantor moved into the skeleton lives on
+    /// (`TransferBonesOverride`), with the dynamic bones and colliders on
+    /// it. Those take their own colliders, as their prefab set them.
+    fn implanted_physics(&mut self, donor: &Instance, implants: Option<&crate::uncensor_selector::Implants>) {
+        let Some(implants) = implants else { return };
+        let scripts: Vec<(usize, rk_vfs::ObjRef)> = donor
+            .scripts
+            .iter()
+            .filter(|(node, _)| implants.bones.contains(node))
+            .cloned()
+            .collect();
+        if scripts.is_empty() {
+            return;
+        }
+        self.physics_sources.push(PhysicsSource {
+            scripts,
+            transforms: donor.transform_nodes.clone(),
+            part: false,
+            copy: false,
+            shake: true,
+            slot: None,
+            root: donor.root,
+            belongs: crate::physics::Belongs::Body,
             object: None,
         });
     }
@@ -2216,7 +2253,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         use crate::uncensor_selector as us;
         use rk_vfs::uncensor::defaults as ud;
         let uncensors = game.assets.uncensors();
-        let guid = us::stored_body(&card.ext, uncensors);
+        let guid = opts
+            .uncensor_body
+            .clone()
+            .or_else(|| us::stored_body(&card.ext, uncensors));
         let chosen = us::stored_parts(&card.ext, uncensors, u8::from(female));
         let voice_rate = rk_card::map_get(&card.parameter, "voiceRate")
             .and_then(rk_card::Value::as_f64)
@@ -2242,6 +2282,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         // have moved into the skeleton.
                         let pairs = b.implant_pairs(&donor);
                         let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        b.implanted_physics(&donor, implants.as_ref());
                         us::swap_meshes(&mut b.scene, &mut body, &donor, data, uncensors, implants.as_ref());
                         from = (vpath.clone(), data.asset.clone());
                     }
@@ -2293,6 +2334,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                     Ok(donor) => {
                         let pairs = b.implant_pairs(&donor);
                         let implants = us::implant(&mut b.scene, &pairs, &bones);
+                        b.implanted_physics(&donor, implants.as_ref());
                         us::swap_parts(&mut b.scene, &body, &donor, names, implants.as_ref());
                     }
                     Err(e) => b.loader.warn(format!("uncensor {what} {}: {e:#}", data.guid)),
@@ -2947,10 +2989,22 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let ik_rig = ik
         .as_ref()
         .and_then(|s| crate::ik::Rig::new(s, &b.scene, &loaded, anim.root, top));
+    // BetterPenetration measures the shaft in the pose it is found in.
+    let shaft = {
+        let (world, _) = b.scene.world();
+        let named = crate::better_penetration::bones_by_name(&b.scene, top);
+        let mut shaft = crate::better_penetration::Shaft::find(&b.scene, &world, |n| named.get(n).copied());
+        if let Some(shaft) = shaft.as_mut() {
+            shaft.wire(&mut physics, &b.scene);
+        }
+        shaft
+    };
     Ok(Character {
         ik_rig,
         hands: [None, None],
         face: b.face.take(),
+        better_penetration: crate::better_penetration::read(&card.ext),
+        shaft,
         skin_base: std::mem::take(&mut b.skin_base),
         skin_shown: Default::default(),
         scene: b.scene,
@@ -3043,6 +3097,12 @@ impl Character {
             pose(self);
             let amount = (frame + 1) as f32 / (crate::physics::EASE_FRAMES + 1) as f32;
             self.physics.ease(&mut self.scene, &from, amount);
+            // The eased bones pass through poses no body takes (each
+            // turns on its own): the cloth nets start again once the
+            // pose is reached and move into it themselves.
+            if frame == crate::physics::EASE_FRAMES {
+                self.physics.restart_cloth();
+            }
             self.physics.end_frame(&mut self.scene, dt);
         }
     }

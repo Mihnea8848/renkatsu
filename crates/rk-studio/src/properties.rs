@@ -181,7 +181,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 section_end(ui, k);
             }
             let waiting = built.is_none().then_some("The character is not built");
-            skin_effects_section(ui, k, st, waiting, pose_layer);
+            skin_effects_section(ui, k, st, object.id, waiting, pose_layer);
+            if let Some(card) = built.as_ref().and_then(|b| b.better_penetration) {
+                penetration_section(ui, k, st, &mut object, card);
+            }
             return;
         }
         let page_name = pages.get(page).copied().unwrap_or_default();
@@ -1275,19 +1278,23 @@ fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
 pub const HANDS_SECTION: usize = 19;
 pub const FACE_SECTION: usize = 20;
 pub const SKIN_SECTION: usize = 21;
+pub const PENETRATION_SECTION: usize = 22;
 
 /// The hands' patterns and the face, as Studio's hand and face panels set
 /// them: each pattern a picture that opens a grid of the others.
 fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
     use crate::live::Pictures;
+    use rk_chara::channels::Channel;
     let Content::Character { pose_layer, .. } = content else {
         return;
     };
     let rig = st.live.as_ref().and_then(|l| l.face_rig(id)).cloned();
     let waiting = rig.is_none().then_some("The character is not built");
+    let start = rig.as_ref().map(|r| r.start).unwrap_or_default();
     let ui_id = ui.id().with("face");
-    let layer = pose_layer.clone().unwrap_or_default();
-    let mut next = layer.clone();
+    let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
+    let mut next = keyed.shown.clone();
+    let mut toggled = Vec::new();
     if section(ui, k, st, HANDS_SECTION, "Hands") {
         for (side, name) in ["Left", "Right"].into_iter().enumerate() {
             let label_of = |n: i32| -> String {
@@ -1298,7 +1305,8 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                     .and_then(|l| l[side].get(&n))
                     .map_or_else(|| format!("Pattern {n}"), |a| a.label())
             };
-            pattern_row(
+            let mark = keyed.mark(Channel::Hand(side));
+            let picked = pattern_row(
                 ui,
                 k,
                 st,
@@ -1309,141 +1317,255 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 ui_id.with(("hand", side)),
                 &label_of,
                 &mut next.hands[side],
+                mark,
             );
+            if picked {
+                toggled.push(Channel::Hand(side));
+            }
         }
         section_end(ui, k);
     }
     if section(ui, k, st, FACE_SECTION, "Expression") {
-        let mut face = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
+        let mut face = next.face.unwrap_or(start);
         preset_row(ui, k, st, waiting, ui_id.with("preset"), &mut face);
-        let number = |n: i32| n.to_string();
+        let eyebrow_name = |n: i32| rk_chara::face::eyebrow_label(n).map_or_else(|| n.to_string(), str::to_owned);
+        let mouth_name = |n: i32| rk_chara::face::mouth_label(n).map_or_else(|| n.to_string(), str::to_owned);
         let eye_name = |n: i32| rk_chara::face::eye_label(n).map_or_else(|| n.to_string(), str::to_owned);
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Eyebrows,
-            "Eyebrows",
-            waiting,
-            ui_id.with("eyebrows"),
-            &number,
-            &mut face.eyebrows,
-        );
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Eyes,
-            "Eyes",
-            waiting,
-            ui_id.with("eyes"),
-            &eye_name,
-            &mut face.eyes,
-        );
-        pattern_row(
-            ui,
-            k,
-            st,
-            id,
-            Pictures::Mouth,
-            "Mouth",
-            waiting,
-            ui_id.with("mouth"),
-            &number,
-            &mut face.mouth,
-        );
-        row(ui, k, "Eyes open", waiting, |ui, rect| {
-            widgets::number(
+        for (set, name, label_of, value, channel) in [
+            (
+                Pictures::Eyebrows,
+                "Eyebrows",
+                &eyebrow_name as &dyn Fn(i32) -> String,
+                &mut face.eyebrows,
+                Channel::Eyebrows,
+            ),
+            (Pictures::Eyes, "Eyes", &eye_name, &mut face.eyes, Channel::Eyes),
+            (Pictures::Mouth, "Mouth", &mouth_name, &mut face.mouth, Channel::Mouth),
+        ] {
+            let mark = keyed.mark(channel);
+            if pattern_row(
                 ui,
                 k,
-                rect,
-                ui_id.with("eyes open"),
-                &mut face.eyes_open,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+                st,
+                id,
+                set,
+                name,
+                waiting,
+                ui_id.with(name),
+                label_of,
+                value,
+                mark,
+            ) {
+                toggled.push(channel);
+            }
+        }
+        let amount = |ui: &mut Ui, name: &str, value: &mut f32, channel: Channel, toggled: &mut Vec<Channel>| {
+            row(ui, k, name, waiting, |ui, rect| {
+                let (rect, click) = key_mark(ui, k, rect, ui_id.with((name, "key")), keyed.mark(channel));
+                widgets::number(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE);
+                if click {
+                    toggled.push(channel);
+                }
+            });
+        };
+        amount(ui, "Eyes open", &mut face.eyes_open, Channel::EyesOpen, &mut toggled);
         row(ui, k, "Blink", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("blink key"), keyed.mark(Channel::Blink));
             widgets::checkbox(ui, k, rect, ui_id.with("blink"), &mut face.blink, "Blink");
+            if click {
+                toggled.push(Channel::Blink);
+            }
         });
-        row(ui, k, "Mouth open", waiting, |ui, rect| {
-            widgets::number(
-                ui,
-                k,
-                rect,
-                ui_id.with("mouth open"),
-                &mut face.mouth_open,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+        amount(ui, "Mouth open", &mut face.mouth_open, Channel::MouthOpen, &mut toggled);
         row(ui, k, "Tears", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
             let options = [("None", true), ("Small", true), ("Middle", true), ("Large", true)];
             let chosen = usize::from(face.tears.min(3));
             if let Some(i) = choices(ui, k, rect, ui_id.with("tears"), Some(chosen), &options) {
                 face.tears = i as u8;
             }
+            if click {
+                toggled.push(Channel::Tears);
+            }
         });
-        row(ui, k, "Blush", waiting, |ui, rect| {
-            widgets::number(
+        amount(ui, "Blush", &mut face.blush, Channel::Blush, &mut toggled);
+        row(ui, k, "Highlights", waiting, |ui, rect| {
+            let (rect, click) = key_mark(
                 ui,
                 k,
                 rect,
-                ui_id.with("blush"),
-                &mut face.blush,
-                Marker::None,
-                true,
-                FINE,
+                ui_id.with("highlights key"),
+                keyed.mark(Channel::Highlights),
             );
-        });
-        face.blush = face.blush.clamp(0.0, 1.0);
-        row(ui, k, "Highlights", waiting, |ui, rect| {
             let mut shown = !face.hide_highlight;
             widgets::checkbox(ui, k, rect, ui_id.with("highlights"), &mut shown, "Shown");
             face.hide_highlight = !shown;
+            if click {
+                toggled.push(Channel::Highlights);
+            }
         });
         // KK_ExpressionControl's eye roll and smaller irises.
-        row(ui, k, "Eye roll", waiting, |ui, rect| {
-            widgets::number(
+        amount(ui, "Eye roll", &mut face.eye_y, Channel::EyeRoll, &mut toggled);
+        amount(
+            ui,
+            "Small irises",
+            &mut face.eye_small,
+            Channel::SmallIrises,
+            &mut toggled,
+        );
+        row(ui, k, "Shaking", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("shaking key"), keyed.mark(Channel::Shaking));
+            widgets::checkbox(
                 ui,
                 k,
                 rect,
-                ui_id.with("eye roll"),
-                &mut face.eye_y,
-                Marker::None,
-                true,
-                FINE,
+                ui_id.with("shaking"),
+                &mut face.shaking,
+                "Highlights shake",
             );
+            if click {
+                toggled.push(Channel::Shaking);
+            }
         });
-        row(ui, k, "Small irises", waiting, |ui, rect| {
-            widgets::number(
-                ui,
-                k,
-                rect,
-                ui_id.with("small irises"),
-                &mut face.eye_small,
-                Marker::None,
-                true,
-                FINE,
-            );
-        });
+        face.blush = face.blush.clamp(0.0, 1.0);
         face.eye_y = face.eye_y.clamp(0.0, 0.5);
         face.eye_small = face.eye_small.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
-        let shown = layer.face.or(rig.as_ref().map(|r| r.start)).unwrap_or_default();
-        if face != shown {
+        if face != next.face.unwrap_or(start) {
             next.face = Some(face);
         }
         section_end(ui, k);
     }
-    if next != layer {
-        *pose_layer = (!next.is_empty()).then_some(next);
+    let held = ui.input(|i| i.pointer.any_down());
+    keyed.commit(st, id, pose_layer, &next, &toggled, held);
+}
+
+/// The values that take keys (`rk_chara::channels`) of a character as
+/// the Properties show them: the pose layer with their keys at the
+/// playhead, and each value's keys.
+struct KeyedValues {
+    start: rk_chara::face::Face,
+    /// The layer as stored.
+    layer: rk_chara::pose::Layer,
+    /// The layer with the values' keys at the playhead.
+    shown: rk_chara::pose::Layer,
+    /// Each keyed value's keys: whether it has any, and one at the
+    /// playhead.
+    marks: std::collections::HashMap<String, (bool, bool)>,
+}
+
+impl KeyedValues {
+    fn of(
+        st: &State,
+        id: crate::scene::ObjectId,
+        layer: Option<&rk_chara::pose::Layer>,
+        start: &rk_chara::face::Face,
+    ) -> Self {
+        use rk_chara::channels::Channel;
+        let layer = layer.cloned().unwrap_or_default();
+        let mut shown = layer.clone();
+        let mut marks = std::collections::HashMap::new();
+        if let Some(track) = st.doc.scene().sequence.track(id) {
+            let mut at = rk_chara::keys::pose_at(&track.keys, st.clock);
+            at.retain(|name, _| Channel::of_key(name).is_some());
+            shown.with_keys_from(at, start);
+            let now = crate::keying::now(st);
+            let near = st.doc.scene().sequence.near();
+            for (name, list) in &track.keys {
+                if Channel::of_key(name).is_some() {
+                    let here = list.iter().any(|key| (key.time - now).abs() <= near);
+                    marks.insert(name.clone(), (true, here));
+                }
+            }
+        }
+        KeyedValues {
+            start: *start,
+            layer,
+            shown,
+            marks,
+        }
     }
+
+    fn mark(&self, channel: rk_chara::channels::Channel) -> (bool, bool) {
+        self.marks.get(&channel.key()).copied().unwrap_or_default()
+    }
+
+    /// Where the edits go: a keyed value's to its key at the playhead, the
+    /// others' to the pose layer. A diamond clicked sets the value's key
+    /// at the playhead, or takes it away when there is one.
+    fn commit(
+        &self,
+        st: &mut State,
+        id: crate::scene::ObjectId,
+        pose_layer: &mut Option<Box<rk_chara::pose::Layer>>,
+        next: &rk_chara::pose::Layer,
+        toggled: &[rk_chara::channels::Channel],
+        held: bool,
+    ) {
+        use rk_chara::channels::Channel;
+        let mut out = self.layer.clone();
+        for channel in Channel::all() {
+            let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
+            if was == now {
+                continue;
+            }
+            if self.mark(channel).0 {
+                crate::keying::write_value(st, id, &channel.key(), now, held);
+            } else {
+                channel.set(&mut out, &self.start, now);
+            }
+        }
+        for &channel in toggled {
+            if self.mark(channel).1 {
+                crate::keying::delete_keys(st, id, &[channel.key()]);
+            } else {
+                crate::keying::write_value(st, id, &channel.key(), channel.get(next, &self.start), false);
+            }
+        }
+        if out != self.layer {
+            *pose_layer = (!out.is_empty()).then(|| Box::new(out));
+        }
+    }
+}
+
+/// A value's key diamond at the right of its row: hollow with no keys,
+/// half with keys elsewhere, full with one at the playhead. Gives the rest
+/// of the row and whether the diamond was clicked.
+fn key_mark(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, (any, here): (bool, bool)) -> (Rect, bool) {
+    let side = 18.0;
+    let cell = Rect::from_min_max(Pos2::new(rect.right() - side, rect.top()), rect.max);
+    let resp = ui
+        .interact(cell, id, Sense::click())
+        .on_hover_text(if here { "Delete key" } else { "Set key" });
+    let c = cell.center();
+    let r = 4.5;
+    let points = vec![
+        c + Vec2::new(0.0, -r),
+        c + Vec2::new(r, 0.0),
+        c + Vec2::new(0.0, r),
+        c + Vec2::new(-r, 0.0),
+    ];
+    let line = if resp.hovered() { k.t.text_bright } else { k.t.text_dim };
+    let p = ui.painter();
+    if here {
+        p.add(egui::Shape::convex_polygon(
+            points,
+            k.t.select,
+            egui::Stroke::new(1.0, line),
+        ));
+    } else {
+        p.add(egui::Shape::closed_line(points.clone(), egui::Stroke::new(1.0, line)));
+        if any {
+            // Half filled: keys at other times.
+            p.add(egui::Shape::convex_polygon(
+                vec![points[0], points[2], points[3]],
+                line,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+    (rect.with_max_x(cell.left() - 4.0), resp.clicked())
 }
 
 /// KK_SkinEffects: a level for each of its effects, kept in the pose so
@@ -1452,17 +1574,27 @@ fn skin_effects_section(
     ui: &mut Ui,
     k: &Look,
     st: &mut State,
+    id: crate::scene::ObjectId,
     waiting: Option<&str>,
     pose_layer: &mut Option<Box<rk_chara::pose::Layer>>,
 ) {
+    use rk_chara::channels::Channel;
     if !section(ui, k, st, SKIN_SECTION, "Skin effects") {
         return;
     }
     let ui_id = ui.id().with("skin effects");
-    let layer = pose_layer.clone().unwrap_or_default();
-    let mut next = layer.clone();
+    let start = st
+        .live
+        .as_ref()
+        .and_then(|l| l.face_rig(id))
+        .map(|r| r.start)
+        .unwrap_or_default();
+    let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
+    let mut next = keyed.shown.clone();
+    let mut toggled = Vec::new();
     for (i, effect) in rk_chara::skin_effects::EFFECTS.iter().enumerate() {
         row(ui, k, effect.name, waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with((i, "key")), keyed.mark(Channel::Skin(i)));
             let names = ["None", "1", "2", "3"];
             let options: Vec<(&str, bool)> = names[..=usize::from(effect.levels)]
                 .iter()
@@ -1472,12 +1604,181 @@ fn skin_effects_section(
             if let Some(level) = choices(ui, k, rect, ui_id.with(i), Some(chosen), &options) {
                 next.skin[i] = level as u8;
             }
+            if click {
+                toggled.push(Channel::Skin(i));
+            }
         });
     }
     section_end(ui, k);
-    if next != layer {
-        *pose_layer = (!next.is_empty()).then_some(next);
+    keyed.commit(st, id, pose_layer, &next, &toggled, false);
+}
+
+/// BetterPenetration for a character with a shaft: the plugin's settings,
+/// with its sliders' ranges, and the partner it aims at, which in Studio
+/// NodesConstraints holds. Settings left as the card has them stay the
+/// card's.
+fn penetration_section(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    object: &mut crate::scene::Object,
+    card: rk_chara::better_penetration::Settings,
+) {
+    use rk_chara::better_penetration::{AutoTarget, Mode};
+    let others: Vec<(crate::scene::ObjectId, String)> = st
+        .doc
+        .scene()
+        .objects()
+        .iter()
+        .filter(|o| o.kind() == Kind::Character && o.id != object.id)
+        .map(|o| (o.id, o.name.clone()))
+        .collect();
+    // The partners whose body has belly bones a bulge can push.
+    let bellies: Vec<crate::scene::ObjectId> = others
+        .iter()
+        .filter(|(id, _)| st.live.as_ref().and_then(|l| l.built(*id)).is_some_and(|b| b.belly))
+        .map(|(id, _)| *id)
+        .collect();
+    if !section(ui, k, st, PENETRATION_SECTION, "Penetration") {
+        return;
     }
+    let Content::Character {
+        better_penetration,
+        penetration_target,
+        ..
+    } = &mut object.content
+    else {
+        return;
+    };
+    let ui_id = ui.id().with("penetration");
+    let mut s = better_penetration.as_deref().copied().unwrap_or(card);
+    row(ui, k, "Enabled", None, |ui, rect| {
+        widgets::checkbox(ui, k, rect, ui_id.with("enabled"), &mut s.enabled, "On");
+    });
+    let off = (!s.enabled).then_some("BetterPenetration is off");
+    row(ui, k, "Partner", off, |ui, rect| {
+        let name = penetration_target
+            .and_then(|t| others.iter().find(|(id, _)| *id == t.partner))
+            .map_or("None", |(_, name)| name.as_str());
+        let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(rect.width());
+            if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
+                *penetration_target = None;
+                ui.close();
+            }
+            for (id, name) in &others {
+                let on = penetration_target.is_some_and(|t| t.partner == *id);
+                if widgets::check_item(ui, k, on, name, "").clicked() {
+                    let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
+                    *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+                    ui.close();
+                }
+            }
+        });
+    });
+    if let Some(target) = penetration_target.as_mut() {
+        row(ui, k, "Target", off, |ui, rect| {
+            let options: Vec<(&str, bool)> = Mode::ALL.iter().map(|m| (m.label(), true)).collect();
+            let chosen = Mode::ALL.iter().position(|m| *m == target.mode);
+            if let Some(i) = choices(ui, k, rect, ui_id.with("target"), chosen, &options) {
+                target.mode = Mode::ALL[i];
+            }
+        });
+    } else {
+        // Auto is Renkatsu's own link, by the game's H positions or the
+        // nearest place; the rest are the plugin's auto-target.
+        row(ui, k, "Auto-target", off, |ui, rect| {
+            let mut options: Vec<&str> = vec!["Auto"];
+            options.extend(AutoTarget::ALL.iter().map(|a| a.label()));
+            let mut chosen = if s.auto_target == AutoTarget::Off && s.auto_link {
+                0
+            } else {
+                AutoTarget::ALL
+                    .iter()
+                    .position(|a| *a == s.auto_target)
+                    .map_or(1, |i| i + 1)
+            };
+            widgets::combo(ui, k, rect, ui_id.with("auto"), &mut chosen, &options);
+            s.auto_link = chosen == 0;
+            s.auto_target = if chosen == 0 {
+                AutoTarget::Off
+            } else {
+                AutoTarget::ALL[chosen - 1]
+            };
+        });
+    }
+    // Where the shaft goes, if anywhere: the partner's place, or the one
+    // auto-target looks for.
+    let aimed = match penetration_target {
+        Some(t) => Some(t.mode),
+        None if s.auto_target == AutoTarget::Off && s.auto_link => {
+            st.live.as_ref().and_then(|l| l.aim(object.id)).map(|a| a.mode)
+        }
+        None => Mode::of_auto(s.auto_target),
+    };
+    // The plugin's sliders, by their ranges in Studio, each where it does
+    // something: the squish while the shaft is aimed; the colliders'
+    // size always, since his own balls meet two of them; the pull and its
+    // return only on a mouth, the one bone the plugin pulls in Studio.
+    let mut sliders: Vec<(&str, &mut f32, f32, f32)> = Vec::new();
+    if aimed.is_some() {
+        sliders.extend([
+            ("Length squish", &mut s.length_squish, 0.0, 1.0),
+            ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
+            ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
+        ]);
+    }
+    sliders.extend([
+        ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
+        ("Hit length", &mut s.collider_length_scale, 0.5, 1.5),
+    ]);
+    if aimed == Some(Mode::Oral) {
+        sliders.extend([
+            ("Max push", &mut s.max_push, 0.0, 0.3),
+            ("Max pull", &mut s.max_pull, 0.0, 0.3),
+            ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
+            // How fast the mouth returns with no stroke in it, as the
+            // plugin does in the main game; 0 holds it as Studio does.
+            ("Return rate", &mut s.return_rate, 0.0, 1.0),
+        ]);
+    }
+    for (name, value, low, high) in sliders {
+        row(ui, k, name, off, |ui, rect| {
+            widgets::number_to(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE, 3);
+            *value = value.clamp(low, high);
+        });
+    }
+    // The plugin keeps this on the card without a control in Studio: the
+    // shaft's deeper points push her belly's dynamic bone.
+    let belly = match penetration_target {
+        Some(t) => bellies.contains(&t.partner),
+        None => !bellies.is_empty(),
+    };
+    if aimed == Some(Mode::Vaginal) && belly {
+        row(ui, k, "Belly", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("belly"), &mut s.belly_bulge, "Bulge");
+        });
+        // The plugin has no range for it; Renkatsu offers up to three times.
+        if s.belly_bulge {
+            row(ui, k, "Bulge size", off, |ui, rect| {
+                widgets::number_to(
+                    ui,
+                    k,
+                    rect,
+                    ui_id.with("bulge size"),
+                    &mut s.belly_bulge_scale,
+                    Marker::None,
+                    true,
+                    FINE,
+                    3,
+                );
+                s.belly_bulge_scale = s.belly_bulge_scale.clamp(0.5, 3.0);
+            });
+        }
+    }
+    section_end(ui, k);
+    *better_penetration = (s != card).then(|| Box::new(s));
 }
 
 /// The file of Renkatsu's own expression presets, beside the settings.
@@ -1509,10 +1810,17 @@ fn preset_row(
         st.expressions = Some((own, plugin));
     }
     let (own, plugin) = st.expressions.clone().unwrap_or_default();
+    // Presets do not shake the eyes: a pick keeps the shaking as it is.
+    let same = |a: &rk_chara::face::Face, b: &rk_chara::face::Face| {
+        rk_chara::face::Face {
+            shaking: b.shaking,
+            ..*a
+        } == *b
+    };
     let shown = own
         .iter()
         .chain(&plugin)
-        .find(|p| p.face == *face)
+        .find(|p| same(&p.face, face))
         .map_or("Custom", |p| p.name.as_str())
         .to_owned();
     let mut save = false;
@@ -1528,8 +1836,11 @@ fn preset_row(
             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                 for (i, preset) in own.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
-                            *face = preset.face;
+                        if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
+                            *face = rk_chara::face::Face {
+                                shaking: face.shaking,
+                                ..preset.face
+                            };
                             ui.close();
                         }
                         if icon_button(ui, k, icon::TRASH, false).on_hover_text("Delete").clicked() {
@@ -1544,8 +1855,11 @@ fn preset_row(
                             .size(k.d.text - 1.0),
                     );
                     for preset in &plugin {
-                        if widgets::check_item(ui, k, preset.face == *face, &preset.name, "").clicked() {
-                            *face = preset.face;
+                        if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
+                            *face = rk_chara::face::Face {
+                                shaking: face.shaking,
+                                ..preset.face
+                            };
                             ui.close();
                         }
                     }
@@ -1599,7 +1913,9 @@ fn pattern_row(
     ui_id: egui::Id,
     label_of: &dyn Fn(i32) -> String,
     value: &mut i32,
-) {
+    key: (bool, bool),
+) -> bool {
+    let mut clicked = false;
     let pictures: Vec<(i32, std::sync::Arc<egui::ColorImage>)> = st
         .live
         .as_mut()
@@ -1609,6 +1925,8 @@ fn pattern_row(
     let [w, h] = set.size();
     let (w, h) = (w as f32 * 0.5, h as f32 * 0.5);
     sized_row(ui, k, name, off, (h + 4.0 - k.d.row).max(0.0), |ui, rect| {
+        let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
+        clicked = click;
         let field = Rect::from_min_size(rect.min, Vec2::new(rect.width(), h + 4.0));
         let resp = ui.interact(field, ui_id, Sense::click());
         let p = ui.painter();
@@ -1680,6 +1998,7 @@ fn pattern_row(
             });
         });
     });
+    clicked
 }
 
 /// A pattern picture's texture, kept for as long as the picture.

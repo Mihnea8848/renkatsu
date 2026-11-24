@@ -40,12 +40,21 @@
 //   fk=on                switch on FK with the animation copied into it
 //   fk=cf_j_neck:x,y,z   the same, with that bone's Euler angles in
 //                        Studio's FK fields raised by x,y,z
+//   body=bp.profundis_nt  give her this UncensorSelector body
+//   partner=Gallagher.png  a male (paths start at UserData/chara/male)
+//                        at her place, for BetterPenetration
+//   partner_pose=2/0/5   his animation, held at the same time as hers
+//   bp=vaginal|anal|oral  link his shaft to her by the plugin's
+//                        auto-target, and write his bones, the link and
+//                        her dynamic bones' colliders to
+//                        <name>.partner.json
 // Without a list, the default card.
 //
 // Output: <name>.<view>.studio.png  with Studio's effects
 //         <name>.<view>.plain.png   image effects off
 //         <name>.json
 //         <name>.ik.json            with ik=
+//         <name>.partner.json       with partner=
 //         index.txt (batch only): one line per case
 //         The views are "body" and "face" unless the line says otherwise.
 
@@ -147,6 +156,7 @@ namespace Renkatsu
             Saved saved = null;
             string mapNow = null;
             OCICharFemale chara = null;
+            OCICharMale partner = null;
             string loaded = null;
             bool reload = false;
             bool posed = false;
@@ -161,6 +171,15 @@ namespace Renkatsu
                 Entry e = entries[n];
                 float began = Time.realtimeSinceStartup;
                 string name = CaseName(e);
+                if (partner != null)
+                {
+                    studio.treeNodeCtrl.DeleteNode(partner.treeNodeObject);
+                    partner = null;
+                    for (int i = 0; i < 5; i++)
+                    {
+                        yield return null;
+                    }
+                }
 
                 if (e.Map != mapNow)
                 {
@@ -263,6 +282,53 @@ namespace Renkatsu
                     }
                 }
 
+                // Her body before anything else. UncensorSelector swaps only
+                // the mesh at once; Mod Bone Implantor adds a body's bones
+                // when a card is loaded with it. So a copy of the card is
+                // saved with the body and loaded in her place. The next
+                // case loads her card again.
+                if (chara != null && e.Body != null)
+                {
+                    string withBody = null;
+                    try
+                    {
+                        withBody = CardWithBody(chara.charInfo, e.Body, e.Path, Path.Combine(root, "cards"));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not give " + name + " the body: " + ex);
+                    }
+                    reload = true;
+                    if (withBody == null)
+                    {
+                        index.Append(name).Append("\tno body ").Append(e.Body).Append("\n");
+                        continue;
+                    }
+                    studio.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
+                    chara = null;
+                    for (int i = 0; i < 5; i++)
+                    {
+                        yield return null;
+                    }
+                    try
+                    {
+                        chara = AddObjectFemale.Add(withBody);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not load " + withBody + ": " + ex);
+                    }
+                    if (chara == null)
+                    {
+                        index.Append(name).Append("\tcould not load the card with the body\n");
+                        continue;
+                    }
+                    for (int i = 0; i < 30; i++)
+                    {
+                        yield return null;
+                    }
+                }
+
                 if (chara != null)
                 {
                     try
@@ -318,6 +384,56 @@ namespace Renkatsu
                         Logger.LogError("Reference capture: could not set up " + name + ": " + ex);
                     }
                 }
+                // Him at her place in his pose, then the link by the
+                // plugin's auto-target, which it checks every 60 frames.
+                if (chara != null && e.Partner != null)
+                {
+                    try
+                    {
+                        partner = AddObjectMale.Add(e.Partner);
+                        partner.oiCharInfo.changeAmount.pos = chara.oiCharInfo.changeAmount.pos;
+                        partner.oiCharInfo.changeAmount.rot = chara.oiCharInfo.changeAmount.rot;
+                        if (e.PartnerPose != null)
+                        {
+                            partner.LoadAnime(e.PartnerPose[0], e.PartnerPose[1], e.PartnerPose[2], e.Time);
+                            partner.charInfo.animBody.Play(partner.charAnimeCtrl.nameHadh, 0, e.Time);
+                        }
+                        partner.animeSpeed = 0f;
+                        partner.charInfo.ChangeEyesBlinkFlag(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError("Reference capture: could not add the partner of " + name + ": " + ex);
+                    }
+                    if (partner == null)
+                    {
+                        index.Append(name).Append("\tcould not load the partner\n");
+                        continue;
+                    }
+                    bool linked = e.Bp == 0;
+                    for (int i = 0; i < 30 && !linked; i++)
+                    {
+                        yield return null;
+                        try
+                        {
+                            linked = SetAutoTarget(partner.charInfo, e.Bp);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError("Reference capture: could not set BetterPenetration on " + name + ": " + ex);
+                            break;
+                        }
+                    }
+                    if (!linked)
+                    {
+                        index.Append(name).Append("\tno BetterPenetration shaft\n");
+                        continue;
+                    }
+                    for (int i = 0; e.Bp > 0 && i < 130; i++)
+                    {
+                        yield return null;
+                    }
+                }
                 for (int i = 0; i < e.Settle; i++)
                 {
                     yield return null;
@@ -352,6 +468,7 @@ namespace Renkatsu
                 try
                 {
                     Capture(chara, e, Path.Combine(outDir, e.Frames > 0 ? name + ".f00" : name), 0);
+                    WritePartner(partner, chara, Path.Combine(outDir, e.Frames > 0 ? name + ".f00" : name));
                     ok = true;
                     done++;
                 }
@@ -377,6 +494,10 @@ namespace Renkatsu
                     int oldRate = Time.captureFramerate;
                     Time.captureFramerate = SequenceRate;
                     chara.animeSpeed = 1f;
+                    if (partner != null)
+                    {
+                        partner.animeSpeed = 1f;
+                    }
                     for (int f = 1; f <= e.Frames; f++)
                     {
                         for (int k = 0; k < e.Step; k++)
@@ -387,6 +508,7 @@ namespace Renkatsu
                         try
                         {
                             Capture(chara, e, Path.Combine(outDir, name + ".f" + f.ToString("00")), f);
+                            WritePartner(partner, chara, Path.Combine(outDir, name + ".f" + f.ToString("00")));
                         }
                         catch (Exception ex)
                         {
@@ -394,6 +516,10 @@ namespace Renkatsu
                         }
                     }
                     chara.animeSpeed = 0f;
+                    if (partner != null)
+                    {
+                        partner.animeSpeed = 0f;
+                    }
                     Time.captureFramerate = oldRate;
                 }
 
@@ -416,6 +542,11 @@ namespace Renkatsu
                 Logger.LogMessage("Reference capture: " + (n + 1) + "/" + entries.Count + " " + name);
             }
 
+            if (partner != null)
+            {
+                studio.treeNodeCtrl.DeleteNode(partner.treeNodeObject);
+                partner = null;
+            }
             if (chara != null)
             {
                 studio.treeNodeCtrl.DeleteNode(chara.treeNodeObject);
@@ -565,9 +696,17 @@ namespace Renkatsu
             public List<KeyValuePair<int, Vector3[]>> IkMoves = new List<KeyValuePair<int, Vector3[]>>();
             public bool Fk;
             public List<KeyValuePair<string, Vector3>> FkTurns = new List<KeyValuePair<string, Vector3>>();
+            // UncensorSelector body GUID, or null for the card's.
+            public string Body;
+            // A male partner's card, his animation, and BetterPenetration's
+            // auto-target (0 off, 1 vaginal, 2 anal, 3 oral).
+            public string Partner;
+            public int[] PartnerPose;
+            public int Bp;
         }
 
         private static readonly string[] SunNames = { "day", "evening", "night" };
+        private static readonly string[] BpNames = { "vaginal", "anal", "oral" };
 
         private static string CaseName(Entry e)
         {
@@ -764,6 +903,23 @@ namespace Renkatsu
                         e.FkTurns.Add(new KeyValuePair<string, Vector3>(parts[0], Point(parts[1])));
                     }
                     break;
+                case "body":
+                    e.Body = value;
+                    break;
+                case "partner":
+                    e.Partner = value;
+                    break;
+                case "partner_pose":
+                    string[] q = value.Split('/');
+                    e.PartnerPose = new[] { int.Parse(q[0]), int.Parse(q[1]), int.Parse(q[2]) };
+                    break;
+                case "bp":
+                    e.Bp = Array.IndexOf(BpNames, value) + 1;
+                    if (e.Bp == 0)
+                    {
+                        throw new FormatException("unknown BetterPenetration target " + value);
+                    }
+                    break;
                 default:
                     throw new FormatException("unknown field " + key);
             }
@@ -805,6 +961,10 @@ namespace Renkatsu
                     {
                         Logger.LogWarning("Reference capture: skipped line \"" + line + "\": " + ex.Message);
                         continue;
+                    }
+                    if (e.Partner != null && !Path.IsPathRooted(e.Partner))
+                    {
+                        e.Partner = Path.Combine(Path.Combine(Paths.GameRootPath, "UserData/chara/male"), e.Partner);
                     }
                     if (e.Path == null && e.Map == null)
                     {
@@ -1173,6 +1333,146 @@ namespace Renkatsu
             }
         }
 
+        // Every bone with its parent, so the exact pose and shape can be rebuilt.
+        private static void AppendBones(StringBuilder s, ChaControl cha)
+        {
+            Transform[] bones = cha.objBodyBone.GetComponentsInChildren<Transform>(true);
+            Dictionary<Transform, int> index = new Dictionary<Transform, int>();
+            for (int i = 0; i < bones.Length; i++)
+            {
+                index[bones[i]] = i;
+            }
+            s.Append("\"bones\": [");
+            for (int i = 0; i < bones.Length; i++)
+            {
+                Transform t = bones[i];
+                int parent;
+                if (t.parent == null || !index.TryGetValue(t.parent, out parent))
+                {
+                    parent = -1;
+                }
+                s.Append(i == 0 ? "\n" : ",\n");
+                s.Append("{\"name\": ").Append(Str(t.name));
+                s.Append(", \"parent\": ").Append(parent);
+                s.Append(", \"active\": ").Append(B(t.gameObject.activeInHierarchy));
+                s.Append(", \"t\": ").Append(V(t.localPosition));
+                s.Append(", \"r\": ").Append(Q(t.localRotation));
+                s.Append(", \"s\": ").Append(V(t.localScale));
+                s.Append(", \"world\": ").Append(M(t.localToWorldMatrix));
+                s.Append("}");
+            }
+            s.Append("\n]");
+        }
+
+        // A component of a plugin this one does not reference, by its
+        // class name.
+        private static MonoBehaviour PluginPart(ChaControl cha, string type)
+        {
+            foreach (MonoBehaviour b in cha.GetComponents<MonoBehaviour>())
+            {
+                if (b != null && b.GetType().Name == type)
+                {
+                    return b;
+                }
+            }
+            return null;
+        }
+
+        private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+        // Saves a copy of a character's card with an UncensorSelector body,
+        // when the plugin has one by that GUID, and returns its path.
+        private static string CardWithBody(ChaControl cha, string guid, string card, string dir)
+        {
+            MonoBehaviour part = PluginPart(cha, "UncensorSelectorController");
+            if (part == null)
+            {
+                return null;
+            }
+            Type type = part.GetType();
+            FieldInfo list = type.DeclaringType != null ? type.DeclaringType.GetField("BodyDictionary", Any) : null;
+            System.Collections.IDictionary bodies = list != null ? list.GetValue(null) as System.Collections.IDictionary : null;
+            if (bodies == null || !bodies.Contains(guid))
+            {
+                return null;
+            }
+            type.GetProperty("BodyGUID", Any).SetValue(part, guid, null);
+            MethodInfo save = type.GetMethod("OnCardBeingSaved", Any);
+            save.Invoke(part, new[] { Enum.ToObject(save.GetParameters()[0].ParameterType, 0) });
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, Path.GetFileNameWithoutExtension(card) + "." + guid + ".png");
+            using (FileStream st = new FileStream(path, FileMode.Create, FileAccess.Write))
+            {
+                cha.chaFile.SaveCharaFile(st, true);
+            }
+            return path;
+        }
+
+        // Sets BetterPenetration's auto-target on a male; false until the
+        // plugin has found his shaft.
+        private static bool SetAutoTarget(ChaControl cha, int target)
+        {
+            MonoBehaviour part = PluginPart(cha, "BetterPenetrationController");
+            if (part == null)
+            {
+                return false;
+            }
+            PropertyInfo auto = part.GetType().GetProperty("DanAutoTarget", Any);
+            auto.SetValue(part, target, null);
+            return (int)auto.GetValue(part, null) == target;
+        }
+
+        private static string FieldText(object owner, string name)
+        {
+            FieldInfo f = owner.GetType().GetField(name, Any);
+            object v = f != null ? f.GetValue(owner) : null;
+            if (v is bool)
+            {
+                return B((bool)v);
+            }
+            return v == null ? "null" : Str(v.ToString());
+        }
+
+        // His bones, the link BetterPenetration made and her dynamic bones'
+        // colliders, beside a capture of her.
+        private static void WritePartner(OCICharMale partner, OCICharFemale chara, string outBase)
+        {
+            if (partner == null)
+            {
+                return;
+            }
+            StringBuilder s = new StringBuilder("{\n");
+            s.Append("\"card\": ").Append(Str(partner.charInfo.chaFile.charaFileName ?? "")).Append(",\n");
+            MonoBehaviour bp = PluginPart(partner.charInfo, "BetterPenetrationController");
+            if (bp != null)
+            {
+                s.Append("\"bp\": {");
+                string[] fields = { "danTargetsValid", "danEntryParentName", "danEndParentName", "isKokan", "isAna", "isOral" };
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    s.Append(i == 0 ? "" : ", ").Append(Str(fields[i])).Append(": ").Append(FieldText(bp, fields[i]));
+                }
+                s.Append("},\n");
+            }
+            s.Append("\"her_dynamic_bones\": [");
+            bool first = true;
+            foreach (DynamicBone db in chara.charInfo.GetComponentsInChildren<DynamicBone>(true))
+            {
+                s.Append(first ? "\n" : ",\n");
+                first = false;
+                s.Append("{\"name\": ").Append(Str(db.name));
+                s.Append(", \"root\": ").Append(Str(db.m_Root != null ? db.m_Root.name : ""));
+                s.Append(", \"enabled\": ").Append(B(db.enabled));
+                s.Append(", \"radius\": ").Append(F(db.m_Radius));
+                s.Append(", \"colliders\": ").Append(db.m_Colliders != null ? db.m_Colliders.Count : 0);
+                s.Append("}");
+            }
+            s.Append("\n],\n");
+            AppendBones(s, partner.charInfo);
+            s.Append("\n}\n");
+            File.WriteAllText(outBase + ".partner.json", s.ToString(), new UTF8Encoding(false));
+        }
+
         private static string Describe(Camera cam, ChaControl cha, OCICharFemale chara, Entry e, int frame, Light charaLight, Renderer[] renderers, List<Behaviour> effects, float aspect, List<View> views)
         {
             SceneInfo scene = Singleton<Studio.Studio>.Instance.sceneInfo;
@@ -1454,33 +1754,8 @@ namespace Renkatsu
             }
             s.Append(",\n");
 
-            // Every bone with its parent, so the exact pose and shape can be rebuilt.
-            Transform[] bones = cha.objBodyBone.GetComponentsInChildren<Transform>(true);
-            Dictionary<Transform, int> index = new Dictionary<Transform, int>();
-            for (int i = 0; i < bones.Length; i++)
-            {
-                index[bones[i]] = i;
-            }
-            s.Append("\"bones\": [");
-            for (int i = 0; i < bones.Length; i++)
-            {
-                Transform t = bones[i];
-                int parent;
-                if (t.parent == null || !index.TryGetValue(t.parent, out parent))
-                {
-                    parent = -1;
-                }
-                s.Append(i == 0 ? "\n" : ",\n");
-                s.Append("{\"name\": ").Append(Str(t.name));
-                s.Append(", \"parent\": ").Append(parent);
-                s.Append(", \"active\": ").Append(B(t.gameObject.activeInHierarchy));
-                s.Append(", \"t\": ").Append(V(t.localPosition));
-                s.Append(", \"r\": ").Append(Q(t.localRotation));
-                s.Append(", \"s\": ").Append(V(t.localScale));
-                s.Append(", \"world\": ").Append(M(t.localToWorldMatrix));
-                s.Append("}");
-            }
-            s.Append("\n],\n");
+            AppendBones(s, cha);
+            s.Append(",\n");
 
             s.Append("\"renderers\": [");
             first = true;

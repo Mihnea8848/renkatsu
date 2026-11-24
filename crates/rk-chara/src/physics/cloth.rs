@@ -12,10 +12,12 @@
 //!   only and a leg slips through the 17 to 20 cm between two chains;
 //! - a floor at the character's root, where there is no map;
 //! - what the character is among (`Obstacles`): a map's floors, seats,
-//!   beds and desks, as the triangles that are drawn. Each segment of a
-//!   chain, from the waist down, is kept on the side of a surface its
-//!   upper end is on, so a dress rests on a chair seat or a bed and
-//!   slides along it instead of passing through.
+//!   beds and desks, as the triangles that are drawn. A segment of a
+//!   chain, from the waist down, does not go into a surface from its
+//!   front, the side it is drawn from, so a dress rests on a chair seat
+//!   or a bed and slides along it instead of passing through. It may
+//!   come out through the back of one, as the skirt of a character sunk
+//!   into a mattress does.
 //!
 //! Every constraint only pushes out, so a skirt that touches nothing stays
 //! where the game's step put it.
@@ -40,34 +42,160 @@ const SURFACE_ROUNDS: usize = 3;
 /// How much further than a skirt reaches its nearby triangles are
 /// gathered, so that they serve while it moves a little.
 const GATHER_MARGIN: f32 = 0.3;
-
-/// A triangle of `Obstacles` in the world, with the box around it.
+/// A triangle of `Obstacles` in the world, with the box around it and
+/// the way its front faces: the side it is drawn from (the game's
+/// meshes wind clockwise seen from there), which is the outside of the
+/// thing it is part of.
 #[derive(Debug, Clone, Copy)]
-struct Triangle {
-    corners: [Vec3; 3],
+pub(super) struct Triangle {
+    pub(super) corners: [Vec3; 3],
+    front: Vec3,
     lo: Vec3,
     hi: Vec3,
 }
 
 impl Triangle {
-    fn new(corners: [Vec3; 3]) -> Self {
+    pub(super) fn new(corners: [Vec3; 3]) -> Self {
         let [a, b, c] = corners;
         Self {
             corners,
+            front: (b - a).cross(c - a).normalize_or_zero(),
             lo: a.min(b).min(c),
             hi: a.max(b).max(c),
         }
     }
 }
 
+/// The side of a box of `Surfaces`.
+const SURFACE_BOX: f32 = 0.05;
+
+/// Some boxes of `Surfaces`: the first and the last along each axis.
+type Span = ([usize; 3], [usize; 3]);
+
+/// Calls `f` with the number of each box of `span`.
+#[inline]
+fn boxes(span: &Span, dims: [usize; 3], mut f: impl FnMut(usize)) {
+    let ([x0, y0, z0], [x1, y1, z1]) = *span;
+    for z in z0..=z1 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                f((z * dims[1] + y) * dims[0] + x);
+            }
+        }
+    }
+}
+
+/// Triangles sorted into boxes `SURFACE_BOX` wide, so that a segment is
+/// tested against the ones near it only.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Surfaces {
+    triangles: Vec<Triangle>,
+    lo: Vec3,
+    dims: [usize; 3],
+    /// Per box: where its triangles start in `held`, and one more.
+    first: Vec<u32>,
+    held: Vec<u32>,
+}
+
+impl Surfaces {
+    /// The triangles as far as they are in the box from `lo` to `hi`.
+    pub(super) fn new(triangles: Vec<Triangle>, lo: Vec3, hi: Vec3) -> Self {
+        let d = ((hi - lo).max(Vec3::ZERO) / SURFACE_BOX).ceil().max(Vec3::ONE);
+        let dims = [d.x as usize, d.y as usize, d.z as usize];
+        let mut out = Surfaces {
+            triangles,
+            lo,
+            dims,
+            first: Vec::new(),
+            held: Vec::new(),
+        };
+        let spans: Vec<Option<Span>> = out.triangles.iter().map(|t| out.span(t.lo, t.hi)).collect();
+        let mut first = vec![0u32; dims[0] * dims[1] * dims[2] + 1];
+        for span in spans.iter().flatten() {
+            boxes(span, dims, |b| first[b + 1] += 1);
+        }
+        for b in 1..first.len() {
+            first[b] += first[b - 1];
+        }
+        let mut filled = first.clone();
+        let mut held = vec![0u32; first[first.len() - 1] as usize];
+        for (t, span) in spans.iter().enumerate() {
+            let Some(span) = span else { continue };
+            boxes(span, dims, |b| {
+                held[filled[b] as usize] = t as u32;
+                filled[b] += 1;
+            });
+        }
+        out.first = first;
+        out.held = held;
+        out
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.triangles.is_empty()
+    }
+
+    /// The boxes that the box from `lo` to `hi` touches, if any.
+    fn span(&self, lo: Vec3, hi: Vec3) -> Option<Span> {
+        let top = Vec3::new(self.dims[0] as f32, self.dims[1] as f32, self.dims[2] as f32);
+        let a = ((lo - self.lo) / SURFACE_BOX).floor();
+        let b = ((hi - self.lo) / SURFACE_BOX).floor();
+        if b.cmplt(Vec3::ZERO).any() || a.cmpge(top).any() {
+            return None;
+        }
+        let (a, b) = (a.max(Vec3::ZERO), b.min(top - 1.0));
+        Some((
+            [a.x as usize, a.y as usize, a.z as usize],
+            [b.x as usize, b.y as usize, b.z as usize],
+        ))
+    }
+
+    /// Calls `f` with every triangle in the boxes that the box from
+    /// `lo` to `hi` touches; one that lies in several of them comes
+    /// more than once.
+    fn near(&self, lo: Vec3, hi: Vec3, mut f: impl FnMut(&Triangle)) {
+        let Some(span) = self.span(lo, hi) else { return };
+        boxes(&span, self.dims, |b| {
+            for &t in &self.held[self.first[b] as usize..self.first[b + 1] as usize] {
+                f(&self.triangles[t as usize]);
+            }
+        });
+    }
+}
+
 /// The triangles near one skirt, kept while the skirt stays in the box
 /// they were gathered for and the obstacles are the same.
 #[derive(Debug, Clone, Default)]
-struct Nearby {
+pub(super) struct Nearby {
     from: usize,
     lo: Vec3,
     hi: Vec3,
-    triangles: Vec<Triangle>,
+    pub(super) surfaces: Arc<Surfaces>,
+}
+
+impl Nearby {
+    /// Gathers the triangles of `obstacles` again when the box from `lo`
+    /// to `hi` left the one they were gathered for, or they changed.
+    pub(super) fn refresh(&mut self, obstacles: Option<&Arc<Obstacles>>, lo: Vec3, hi: Vec3) {
+        let Some(obstacles) = obstacles else {
+            *self = Nearby::default();
+            return;
+        };
+        let from = Arc::as_ptr(obstacles) as usize;
+        let inside = self.lo.cmple(lo).all() && self.hi.cmpge(hi).all();
+        if self.from != from || !inside {
+            let grow = Vec3::splat(GATHER_MARGIN);
+            let (lo, hi) = (lo - grow, hi + grow);
+            let mut triangles = Vec::new();
+            obstacles.gather(lo, hi, &mut triangles);
+            *self = Nearby {
+                from,
+                lo,
+                hi,
+                surfaces: Arc::new(Surfaces::new(triangles, lo, hi)),
+            };
+        }
+    }
 }
 
 /// The triangles around a character that its skirts rest on, other than
@@ -91,13 +219,15 @@ pub struct Obstacle {
 impl Obstacles {
     /// The triangles, in the world, of every mesh that may reach into the
     /// box from `lo` to `hi`.
-    fn gather(&self, lo: Vec3, hi: Vec3, out: &mut Vec<Triangle>) {
+    pub(super) fn gather(&self, lo: Vec3, hi: Vec3, out: &mut Vec<Triangle>) {
         for piece in &self.pieces {
             if piece.world.determinant().abs() < 1e-12 {
                 continue;
             }
             // The world box as a box in the piece's space.
             let back = piece.world.inverse();
+            // A mirrored piece winds the other way round.
+            let mirrored = piece.world.determinant() < 0.0;
             let (mut llo, mut lhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             for k in 0..8 {
                 let corner = Vec3::new(
@@ -121,7 +251,11 @@ impl Obstacles {
                 let (tlo, thi) = (a.min(b).min(c), a.max(b).max(c));
                 if tlo.cmple(lhi).all() && thi.cmpge(llo).all() {
                     let w = |p: Vec3| piece.world.transform_point3(p);
-                    out.push(Triangle::new([w(a), w(b), w(c)]));
+                    out.push(Triangle::new(if mirrored {
+                        [w(a), w(c), w(b)]
+                    } else {
+                        [w(a), w(b), w(c)]
+                    }));
                 }
             }
         }
@@ -153,27 +287,31 @@ fn segment_meets(p: Vec3, q: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
     (0.0..=1.0).contains(&t).then_some(t)
 }
 
-/// Keeps each segment of a chain, from the root down, on the side of the
-/// surfaces its upper end is on: a lower end that went through a surface
-/// is put back onto it, a little off, where it went through.
-fn rest_on(chain: &mut [Vec3], triangles: &[Triangle]) {
+/// Keeps each segment of a chain, from the root down, out of the things
+/// around it: a lower end that went into a surface from its front is put
+/// back onto it, a little off, where it went in. A segment that comes
+/// out through the back of a surface is left alone: a character sunk
+/// into a mattress has the top of its skirt inside it, and the cloth
+/// that comes out of it with the body then rests on it like the rest.
+pub(super) fn rest_on(chain: &mut [Vec3], surfaces: &Surfaces) {
     for i in 1..chain.len() {
         for _ in 0..SURFACE_ROUNDS {
             let (p, q) = (chain[i - 1], chain[i]);
             let (lo, hi) = (p.min(q), p.max(q));
-            let Some((t, tri)) = triangles
-                .iter()
-                .filter(|tri| tri.lo.cmple(hi).all() && tri.hi.cmpge(lo).all())
-                .filter_map(|tri| segment_meets(p, q, &tri.corners).map(|t| (t, &tri.corners)))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-            else {
+            let mut first: Option<(f32, Vec3)> = None;
+            surfaces.near(lo, hi, |tri| {
+                if tri.lo.cmple(hi).all() && tri.hi.cmpge(lo).all() && tri.front.dot(q - p) < 0.0 {
+                    if let Some(t) = segment_meets(p, q, &tri.corners) {
+                        if first.is_none_or(|(best, _)| t < best) {
+                            first = Some((t, tri.front));
+                        }
+                    }
+                }
+            });
+            let Some((t, n)) = first else {
                 break;
             };
             let hit = p + (q - p) * t;
-            let mut n = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
-            if n.dot(p - hit) < 0.0 {
-                n = -n;
-            }
             let depth = (q - hit).dot(n);
             chain[i] = q + n * (SURFACE_GAP - depth);
         }
@@ -196,19 +334,21 @@ pub struct Capsule {
     pub fb: f32,
     /// Whether the skirt's chains collide with it, or only its vertices.
     pub chains: bool,
+    /// Whether the cloth net collides with it: everything but the hands.
+    pub net: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct WorldCapsule {
-    a: Vec3,
-    b: Vec3,
-    ra: f32,
-    rb: f32,
+pub(super) struct WorldCapsule {
+    pub(super) a: Vec3,
+    pub(super) b: Vec3,
+    pub(super) ra: f32,
+    pub(super) rb: f32,
 }
 
 impl WorldCapsule {
     /// The box around the capsule.
-    fn bounds(&self) -> (Vec3, Vec3) {
+    pub(super) fn bounds(&self) -> (Vec3, Vec3) {
         let r = Vec3::splat(self.ra.max(self.rb));
         (self.a.min(self.b) - r, self.a.max(self.b) + r)
     }
@@ -233,6 +373,15 @@ pub struct Cloth {
     /// The skirts' moving bones, by node, for the push-out of their
     /// vertices.
     skirt: Arc<Vec<bool>>,
+    /// The cloth nets, and the ring each was built from.
+    nets: Vec<super::net::Net>,
+    net_rings: Vec<usize>,
+    /// The garments' vertices bound to the nets.
+    bindings: Arc<Vec<super::net::Binding>>,
+    /// The body the nets and their vertices collide with, as fitted and
+    /// as it is in the world at the last step.
+    pub shells: Vec<super::shell::Shell>,
+    world_shells: Arc<Vec<super::shell::WorldShell>>,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -299,13 +448,124 @@ impl Cloth {
                 }
             }
         }
+        // The cloth nets.
+        let mut nets = Vec::new();
+        let mut net_rings = Vec::new();
+        for (i, ring) in rings.iter().enumerate() {
+            if let Some(net) = super::net::Net::build(scene, bones, ring) {
+                nets.push(net);
+                net_rings.push(i);
+            }
+        }
+        let bindings = Arc::new(super::net::bind(scene, &mut nets));
+        let shells = if nets.is_empty() {
+            Vec::new()
+        } else {
+            super::shell::fit(scene, names)
+        };
+        for net in &mut nets {
+            net.fitted(scene, &shells);
+        }
         Self {
             capsules,
+            shells,
+            world_shells: Arc::default(),
             floor: names.get("cf_j_root").copied(),
             rest: Vec::new(),
             nearby: Vec::new(),
             skirt: Arc::new(skirt),
             rings,
+            nets,
+            net_rings,
+            bindings,
+        }
+    }
+
+    /// Moves the cloth nets on by `dt` seconds after the chains moved;
+    /// `live` says which bones ran.
+    pub(super) fn step_nets(&mut self, scene: &Scene, live: &[bool], obstacles: Option<&Arc<Obstacles>>, dt: f32) {
+        if self.nets.is_empty() {
+            return;
+        }
+        // The body in the world.
+        self.world_shells = Arc::new(self.shells.iter().map(|s| s.in_world(&world(scene, s.node))).collect());
+        let mapped = obstacles.is_some_and(|o| !o.pieces.is_empty());
+        let floor = self.floor.filter(|_| !mapped).map(|n| {
+            let m = world(scene, n);
+            (m.w_axis.truncate(), m.y_axis.truncate().normalize_or_zero())
+        });
+        for (net, &ring) in self.nets.iter_mut().zip(&self.net_rings) {
+            let active = self.rings[ring].iter().all(|&b| live.get(b).copied().unwrap_or(false));
+            net.step(scene, active, &self.shells, &self.world_shells, floor, obstacles, dt);
+        }
+    }
+
+    /// One line per skirt: its chains, its net and the meshes bound to
+    /// the net, for the command line to print.
+    pub(super) fn summary(&self, scene: &Scene, bones: &[Bone]) -> Vec<String> {
+        self.rings
+            .iter()
+            .enumerate()
+            .map(|(i, ring)| {
+                let longest = ring
+                    .iter()
+                    .filter_map(|&b| particles(&bones[b]))
+                    .map(<[Particle]>::len)
+                    .max()
+                    .unwrap_or(0);
+                let net = self.net_rings.iter().position(|&r| r == i);
+                let grid = net.map_or("no net".to_string(), |k| {
+                    let (cols, rows) = self.nets[k].size();
+                    format!("net {cols}x{rows}")
+                });
+                let bound: Vec<String> = self
+                    .bindings
+                    .iter()
+                    .filter_map(|b| {
+                        let count = b.vertices.iter().filter(|v| Some(v.net as usize) == net).count();
+                        (count > 0).then(|| format!("{} ({count})", scene.renderers[b.renderer].name))
+                    })
+                    .collect();
+                format!(
+                    "{} chains of up to {longest} particles, {grid}, bound: {}",
+                    ring.len(),
+                    if bound.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        bound.join(", ")
+                    }
+                )
+            })
+            .collect()
+    }
+
+    /// Has `solver` run the nets' steps; none for the CPU's own.
+    pub(super) fn solve_with(&mut self, solver: Option<super::net::SharedSolver>) {
+        for net in &mut self.nets {
+            net.solve_with(solver.clone());
+        }
+    }
+
+    /// Whether any skirt has a cloth net.
+    pub(super) fn has_nets(&self) -> bool {
+        !self.nets.is_empty()
+    }
+
+    /// The nets for drawing, when there are any.
+    pub(super) fn draw(&self) -> Option<super::net::ClothDraw> {
+        (!self.nets.is_empty())
+            .then(|| super::net::ClothDraw::from_nets(&self.nets, &self.bindings, &self.world_shells))
+    }
+
+    /// Starts the nets again on their targets.
+    pub(super) fn reset_nets(&mut self) {
+        self.nets.iter_mut().for_each(super::net::Net::reset);
+    }
+
+    /// Moves the nets with the character.
+    pub(super) fn carry(&mut self, moved: Mat4) {
+        for net in &mut self.nets {
+            net.carry(moved);
         }
     }
 
@@ -419,26 +679,9 @@ impl Cloth {
                 })
                 .copied()
                 .collect();
-            match obstacles {
-                Some(obstacles) => {
-                    let (want_lo, want_hi) = (lo - Vec3::splat(margin), hi + Vec3::splat(margin));
-                    let from = std::sync::Arc::as_ptr(obstacles) as usize;
-                    let inside = nearby.lo.cmple(want_lo).all() && nearby.hi.cmpge(want_hi).all();
-                    if nearby.from != from || !inside {
-                        let grow = Vec3::splat(GATHER_MARGIN);
-                        *nearby = Nearby {
-                            from,
-                            lo: want_lo - grow,
-                            hi: want_hi + grow,
-                            triangles: Vec::new(),
-                        };
-                        obstacles.gather(nearby.lo, nearby.hi, &mut nearby.triangles);
-                    }
-                }
-                None => *nearby = Nearby::default(),
-            }
-            let triangles = &nearby.triangles;
-            if capsules.is_empty() && floor.is_none() && triangles.is_empty() {
+            nearby.refresh(obstacles, lo - Vec3::splat(margin), hi + Vec3::splat(margin));
+            let surfaces = &nearby.surfaces;
+            if capsules.is_empty() && floor.is_none() && surfaces.is_empty() {
                 continue;
             }
             let n = ring.len();
@@ -491,9 +734,9 @@ impl Cloth {
                     }
                 }
             }
-            if !triangles.is_empty() {
+            if !surfaces.is_empty() {
                 for chain in &mut pos {
-                    rest_on(chain, triangles);
+                    rest_on(chain, surfaces);
                 }
             }
             for (c, &b) in ring.iter().enumerate() {
@@ -540,7 +783,7 @@ fn closest(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> (f32, f32) {
     (s, t)
 }
 
-fn point_capsule(p: &mut Vec3, cap: &WorldCapsule) {
+pub(super) fn point_capsule(p: &mut Vec3, cap: &WorldCapsule) {
     let axis = cap.b - cap.a;
     let len2 = axis.length_squared();
     let t = if len2 > 0.0 {
@@ -656,6 +899,7 @@ pub fn fit_limbs(scene: &Scene, names: &HashMap<String, usize>) -> Vec<Capsule> 
                     (c.fa, c.fb) = (c.ra, c.rb);
                 }
                 c.chains = !VERTICES_ONLY.iter().any(|j| scene.nodes[from].name.starts_with(j));
+                c.net = !scene.nodes[from].name.starts_with("cf_j_hand");
             }
             out.extend(fitted);
         }
@@ -685,6 +929,7 @@ fn fit_ball(scene: &Scene, verts: &[Vec3], at: usize) -> Vec<Capsule> {
         fa: tenth / scale,
         fb: tenth / scale,
         chains: true,
+        net: true,
     }]
 }
 
@@ -733,6 +978,7 @@ fn fit_bone(scene: &Scene, verts: &[Vec3], from: usize, to: usize, stations: usi
                 fa: radii[k].1 / scale,
                 fb: radii[k + 1].1 / scale,
                 chains: true,
+                net: true,
             }
         })
         .collect()
@@ -780,14 +1026,61 @@ mod tests {
     }
 
     /// A square seat at height 0.5, one metre across.
-    fn seat() -> Vec<Triangle> {
+    fn seat() -> Surfaces {
         let (a, b, c, d) = (
             Vec3::new(-0.5, 0.5, -0.5),
             Vec3::new(0.5, 0.5, -0.5),
             Vec3::new(0.5, 0.5, 0.5),
             Vec3::new(-0.5, 0.5, 0.5),
         );
-        vec![Triangle::new([a, b, c]), Triangle::new([a, c, d])]
+        // Wound to face up.
+        Surfaces::new(
+            vec![Triangle::new([a, c, b]), Triangle::new([a, d, c])],
+            Vec3::splat(-1.0),
+            Vec3::splat(1.0),
+        )
+    }
+
+    #[test]
+    fn surfaces_give_a_segment_the_triangles_near_it() {
+        // A big seat and a small triangle far off to one side.
+        let far = Triangle::new([
+            Vec3::new(0.80, 0.9, 0.80),
+            Vec3::new(0.85, 0.9, 0.80),
+            Vec3::new(0.80, 0.9, 0.85),
+        ]);
+        let mut triangles = seat().triangles;
+        triangles.push(far);
+        let all = Surfaces::new(triangles, Vec3::splat(-1.0), Vec3::splat(1.0));
+        let count = |lo: Vec3, hi: Vec3| {
+            let mut seen = Vec::new();
+            all.near(lo, hi, |t| seen.push(t.corners[0]));
+            seen.dedup();
+            seen.len()
+        };
+        // Anywhere over the seat: its two triangles, not the far one.
+        assert_eq!(count(Vec3::new(0.3, 0.45, -0.4), Vec3::new(0.32, 0.55, -0.38)), 1);
+        assert_eq!(count(Vec3::new(0.82, 0.88, 0.82), Vec3::new(0.83, 0.92, 0.83)), 1);
+        // High over everything, and outside the boxes: nothing.
+        assert_eq!(count(Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.05, 0.75, 0.05)), 0);
+        assert_eq!(count(Vec3::splat(3.0), Vec3::splat(4.0)), 0);
+    }
+
+    #[test]
+    fn a_chain_that_starts_inside_a_thing_comes_out_of_it_and_rests_on_it() {
+        // The top of the chain is under the seat's surface, as the waist
+        // of a character sunk into a mattress: it goes up through the
+        // surface from behind, and down onto it again further on.
+        let mut chain = vec![
+            Vec3::new(0.0, 0.4, 0.0),
+            Vec3::new(0.1, 0.6, 0.0),
+            Vec3::new(0.2, 0.6, 0.0),
+            Vec3::new(0.3, 0.4, 0.0),
+        ];
+        rest_on(&mut chain, &seat());
+        assert_eq!(chain[1], Vec3::new(0.1, 0.6, 0.0));
+        assert_eq!(chain[2], Vec3::new(0.2, 0.6, 0.0));
+        assert!((chain[3].y - 0.5 - SURFACE_GAP).abs() < 1e-5, "{:?}", chain[3]);
     }
 
     #[test]
@@ -829,6 +1122,27 @@ mod tests {
         out.clear();
         o.gather(Vec3::new(0.2, 0.0, 0.2), Vec3::new(0.3, 0.2, 0.3), &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_mirrored_piece_still_faces_the_way_it_is_drawn() {
+        // A triangle that faces up, in a piece mirrored from left to
+        // right: its corners then go round the other way, and its front
+        // is still up.
+        let piece = |world: Mat4| Obstacles {
+            pieces: vec![Obstacle {
+                positions: Arc::new(vec![[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]),
+                indices: Arc::new(vec![0, 1, 2]),
+                bounds: ([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+                world,
+            }],
+        };
+        for world in [Mat4::IDENTITY, Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))] {
+            let mut out = Vec::new();
+            piece(world).gather(Vec3::splat(-2.0), Vec3::splat(2.0), &mut out);
+            assert_eq!(out.len(), 1);
+            assert!(out[0].front.y > 0.99, "{:?}", out[0].front);
+        }
     }
 
     #[test]
