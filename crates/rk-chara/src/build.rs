@@ -2818,6 +2818,10 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let mut physics = b.read_physics(top, &bones, &bone_edits, &dbde_edits, collider_plugin);
     if opts.physics {
         physics.start(&mut b.scene);
+        // A finer skirt mesh, for the study of what the cloth needs.
+        if let Some(times) = std::env::var("RK_NET_SUBDIV").ok().and_then(|t| t.parse().ok()) {
+            crate::physics::subdivide::skirts(&mut b.scene, times);
+        }
         // Advanced Skirt Physics is fitted to the body as built.
         physics.fit_cloth(&b.scene, &bones, opts.advanced_skirts);
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);

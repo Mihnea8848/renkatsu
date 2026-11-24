@@ -169,6 +169,8 @@ impl Curve {
 
 pub mod cloth;
 pub mod net;
+pub mod shell;
+pub mod subdivide;
 
 // ---------------------------------------------------------------------------
 // DynamicBoneCollider.

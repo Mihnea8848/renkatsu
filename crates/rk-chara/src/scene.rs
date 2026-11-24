@@ -740,6 +740,16 @@ impl Scene {
             if let Some(cloth) = &self.cloth {
                 cloth.dress(ri, &mut d);
             }
+            if let Ok(dir) = std::env::var("RK_NET_MESH") {
+                let mut text = String::new();
+                for p in &d.posed().positions {
+                    text += &format!("v {} {} {}\n", p[0], p[1], p[2]);
+                }
+                for t in r.mesh.indices.chunks_exact(3) {
+                    text += &format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1);
+                }
+                let _ = std::fs::write(format!("{dir}/all{ri}_{:?}_{}.obj", r.part, r.name), text);
+            }
             out.push(d);
         }
         out

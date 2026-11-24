@@ -40,10 +40,6 @@ const SURFACE_ROUNDS: usize = 3;
 /// How much further than a skirt reaches its nearby triangles are
 /// gathered, so that they serve while it moves a little.
 const GATHER_MARGIN: f32 = 0.3;
-/// How much thicker than the bare foot the cloth net takes the feet to be:
-/// shoes, soles and heels, which the fit to the body does not see.
-const SHOES: f32 = 0.05;
-
 /// A triangle of `Obstacles` in the world, with the box around it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Triangle {
@@ -266,6 +262,10 @@ pub struct Cloth {
     net_rings: Vec<usize>,
     /// The garments' vertices bound to the nets.
     bindings: Arc<Vec<super::net::Binding>>,
+    /// The body the nets and their vertices collide with, as fitted and
+    /// as it is in the world at the last step.
+    pub shells: Vec<super::shell::Shell>,
+    world_shells: Arc<Vec<super::shell::WorldShell>>,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -344,9 +344,19 @@ impl Cloth {
                 }
             }
         }
-        let bindings = Arc::new(super::net::bind(scene, &nets));
+        let bindings = Arc::new(super::net::bind(scene, &mut nets));
+        let shells = if nets.is_empty() {
+            Vec::new()
+        } else {
+            super::shell::fit(scene, names)
+        };
+        for net in &mut nets {
+            net.fitted(scene, &shells);
+        }
         Self {
             capsules,
+            shells,
+            world_shells: Arc::default(),
             floor: names.get("cf_j_root").copied(),
             rest: Vec::new(),
             nearby: Vec::new(),
@@ -364,34 +374,8 @@ impl Cloth {
         if self.nets.is_empty() {
             return;
         }
-        // The thickness the vertices are pushed out of, but not the hands:
-        // a hand on the lap would hold a whole panel up. With each, how
-        // deep the net may go into it.
-        let mut capsules: Vec<(WorldCapsule, f32)> = Vec::new();
-        let feet = super::net::tune("feet", SHOES);
-        for c in self.capsules.iter().filter(|c| c.net) {
-            let m = world(scene, c.node);
-            let s = m.x_axis.truncate().length();
-            let foot = scene.nodes[c.node].name.starts_with("cf_j_leg03");
-            let more = if foot { feet } else { 0.0 };
-            // The buttocks and thighs let a standing skirt's net in as
-            // deep as its target.
-            let name = &scene.nodes[c.node].name;
-            let give = if name.starts_with("cf_j_siri") || name.starts_with("cf_j_thigh00") {
-                super::net::DEEPEST
-            } else {
-                0.0
-            };
-            capsules.push((
-                WorldCapsule {
-                    a: m.transform_point3(c.a),
-                    b: m.transform_point3(c.b),
-                    ra: c.fa * s + more,
-                    rb: c.fb * s + more,
-                },
-                give,
-            ));
-        }
+        // The body in the world.
+        self.world_shells = Arc::new(self.shells.iter().map(|s| s.in_world(&world(scene, s.node))).collect());
         let mapped = obstacles.is_some_and(|o| !o.pieces.is_empty());
         let floor = self.floor.filter(|_| !mapped).map(|n| {
             let m = world(scene, n);
@@ -399,13 +383,14 @@ impl Cloth {
         });
         for (net, &ring) in self.nets.iter_mut().zip(&self.net_rings) {
             let active = self.rings[ring].iter().all(|&b| live.get(b).copied().unwrap_or(false));
-            net.step(scene, active, &capsules, floor, obstacles, dt);
+            net.step(scene, active, &self.shells, &self.world_shells, floor, obstacles, dt);
         }
     }
 
     /// The nets for drawing, when there are any.
     pub(super) fn draw(&self) -> Option<super::net::ClothDraw> {
-        (!self.nets.is_empty()).then(|| super::net::ClothDraw::from_nets(&self.nets, &self.bindings))
+        (!self.nets.is_empty())
+            .then(|| super::net::ClothDraw::from_nets(&self.nets, &self.bindings, &self.world_shells))
     }
 
     /// Starts the nets again on their targets.
