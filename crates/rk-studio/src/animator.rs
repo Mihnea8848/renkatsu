@@ -330,7 +330,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             let can_paste = st.key_clipboard.is_some();
             resp.context_menu(|ui| {
                 let bone = (*name).clone();
-                if widgets::menu_item(ui, k, icon::KEY, "Set key", "", true) {
+                if widgets::menu_item(ui, k, icon::DIAMOND, "Set key", "", true) {
                     acts.push(KeyAct::Set(bone.clone()));
                     ui.close();
                 }

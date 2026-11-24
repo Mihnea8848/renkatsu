@@ -1336,7 +1336,7 @@ fn keys_tile(ui: &mut Ui, k: &Look, st: &mut State, cell: Rect, rel: &str, asks:
         cell,
         &resp,
         on,
-        Thumb::Glyph(icon::KEY, Kind::Animation.color()),
+        Thumb::Glyph(icon::DIAMOND, Kind::Animation.color()),
         Kind::Animation.color(),
         text,
         asks,
