@@ -117,6 +117,46 @@ impl Sequence {
     }
 }
 
+/// The extension of a character's keys saved as an animation of the
+/// project, to give to any character.
+pub const KEYS_EXTENSION: &str = "rkkeys";
+
+/// A character's keys as a file of their own, in the project's
+/// Animations folder beside the game's premade animations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeysFile {
+    pub format: u32,
+    #[serde(default = "ten")]
+    pub length: f32,
+    #[serde(default = "thirty")]
+    pub fps: f32,
+    #[serde(default)]
+    pub keys: Keys,
+}
+
+impl KeysFile {
+    pub fn read(path: &Path) -> Result<KeysFile> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let file: KeysFile = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        anyhow::ensure!(
+            file.format <= FORMAT,
+            "{} was saved by a newer Renkatsu",
+            path.display()
+        );
+        Ok(file)
+    }
+
+    pub fn write(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("writing the keys")?;
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+/// Whether a file of the project is a character's keys.
+pub fn is_keys(rel: &str) -> bool {
+    rel.to_lowercase().ends_with(&format!(".{KEYS_EXTENSION}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

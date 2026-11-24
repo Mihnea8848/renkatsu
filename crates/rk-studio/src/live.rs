@@ -366,6 +366,9 @@ pub struct Clock {
     pub now: Playback,
     pub dt: f32,
     pub time: f32,
+    /// A character whose keys play on a time of their own, as the
+    /// Animator's solo play does, while the scene stands.
+    pub solo: Option<(ObjectId, f32)>,
 }
 
 impl Clock {
@@ -376,6 +379,7 @@ impl Clock {
             now: Playback::Stopped,
             dt: 0.0,
             time: 0.0,
+            solo: None,
         }
     }
 }
@@ -551,7 +555,11 @@ impl Actor {
             .zip(keys.filter(|k| !k.is_empty()))
             .map(|(l, k)| {
                 let mut l = l.clone();
-                l.fk.extend(rk_chara::keys::pose_at(k, clock.time));
+                let time = match clock.solo {
+                    Some((solo, time)) if solo == self.id => time,
+                    _ => clock.time,
+                };
+                l.fk.extend(rk_chara::keys::pose_at(k, time));
                 l
             });
         let layer = keyed.as_ref().or(pose_layer.as_deref()).filter(|l| !l.is_empty());

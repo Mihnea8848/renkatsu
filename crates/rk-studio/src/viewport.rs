@@ -1975,6 +1975,11 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         crate::state::Playback::Paused => {}
         crate::state::Playback::Stopped => st.clock = 0.0,
     }
+    // A character playing alone loops her keys on a time of her own.
+    if st.solo.is_some() {
+        let length = st.doc.scene().sequence.length.max(0.01);
+        st.solo_time = (st.solo_time + dt).rem_euclid(length);
+    }
     // A sequence with keys plays to its end, then starts over or holds.
     let sequence = &st.doc.scene().sequence;
     if st.playback == crate::state::Playback::Playing && !sequence.tracks.is_empty() && st.clock > sequence.length {
@@ -1995,6 +2000,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
             now: st.playback,
             dt,
             time: st.clock,
+            solo: st.solo.map(|id| (id, st.solo_time)),
         },
         &mut st.log,
     );

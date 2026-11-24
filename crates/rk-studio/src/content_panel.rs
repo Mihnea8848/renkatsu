@@ -191,6 +191,12 @@ fn file_menu(ui: &mut Ui, k: &Look, st: &State, rel: &str, asks: &mut Asks) {
         {
             asks.commands.push(Command::LoadPose(rel.to_owned()));
         }
+        project::ANIMATIONS
+            if crate::sequence::is_keys(rel)
+                && widgets::menu_item(ui, k, icon::PLAY, "Apply to selected character", "", character) =>
+        {
+            asks.commands.push(Command::LoadKeys(rel.to_owned()));
+        }
         project::ANIMATIONS => {
             let item = st.animations.find(rel);
             if widgets::menu_item(
@@ -461,7 +467,13 @@ fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
         .as_ref()
         .and_then(|a| st.animations.find(&slashes(a)))
         .map(|i| i.reference());
-    let why = match (character, chosen.is_some()) {
+    // Keys saved as an animation apply as keys.
+    let keys = st
+        .asset
+        .as_ref()
+        .map(|a| slashes(a))
+        .filter(|rel| crate::sequence::is_keys(rel));
+    let why = match (character, chosen.is_some() || keys.is_some()) {
         (false, _) => Some("No character selected"),
         (true, false) => Some("No animation selected"),
         (true, true) => None,
@@ -473,7 +485,10 @@ fn animation_tools(ui: &mut Ui, k: &Look, st: &mut State, asks: &mut Asks) {
             None => apply,
         };
         if apply.clicked() {
-            asks.commands.push(Command::Animate(chosen.clone()));
+            asks.commands.push(match &keys {
+                Some(rel) => Command::LoadKeys(rel.clone()),
+                None => Command::Animate(chosen.clone()),
+            });
         }
     });
     let (rect, _) = ui.allocate_exact_size(Vec2::new(210.0, k.field()), Sense::hover());
@@ -1019,7 +1034,26 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
                 || item.category().to_lowercase().contains(&search))
         })
         .collect();
-    if here.is_empty() && inside.is_empty() {
+    // A character's keys saved as animations, which move.
+    let keyed: Vec<String> = if filter == 1 {
+        Vec::new()
+    } else {
+        let mut folders = vec![open.to_owned()];
+        if searching {
+            folders.extend(
+                content::folders(&st.project, content::top(open))
+                    .into_iter()
+                    .filter(|f| in_open(f, open) && f != open),
+            );
+        }
+        folders
+            .iter()
+            .flat_map(|f| content::files(&st.project, f))
+            .filter(|f| crate::sequence::is_keys(f))
+            .filter(|f| !searching || content::stem(f).to_lowercase().contains(&search))
+            .collect()
+    };
+    if here.is_empty() && inside.is_empty() && keyed.is_empty() {
         if searching {
             note(ui, k, grid, "No animation matches");
         } else if !bare(st, project::ANIMATIONS) {
@@ -1037,7 +1071,7 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
         }
         return;
     }
-    if shown.is_empty() && inside.is_empty() {
+    if shown.is_empty() && inside.is_empty() && keyed.is_empty() {
         note(ui, k, grid, "No animation matches");
         return;
     }
@@ -1046,56 +1080,66 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
         _ => None,
     });
     let worn_rel = worn.as_ref().and_then(|a| st.animations.of(a)).map(|i| i.rel.clone());
-    tile_grid(ui, k, "animations", inside.len() + shown.len(), |ui, n, cell| {
-        if let Some(rel) = inside.get(n) {
-            folder_tile(ui, k, st, cell, rel, asks);
-            return;
-        }
-        let item = st.animations.items[shown[n - inside.len()]].clone();
-        let resp = ui.interact(cell, ui.id().with(("animation", &item.rel)), Sense::click_and_drag());
-        let on = st.asset.as_deref() == Some(Path::new(&item.rel));
-        let g = match (item.is_static(), item.link.is_some()) {
-            (_, true) => icon::LINK_SIMPLE,
-            (Some(true), _) => Kind::Pose.glyph(),
-            _ => Kind::Animation.glyph(),
-        };
-        let worn_here = worn_rel.as_deref() == Some(item.rel.as_str());
-        let kind_text = match item.is_static() {
-            Some(true) => "Static",
-            Some(false) => "Moving",
-            None => "Animation",
-        };
-        let text = TileText {
-            rel: &item.rel,
-            name: &item.name,
-            caption: if worn_here { "On the selection" } else { kind_text },
-            caption_color: worn_here.then_some(t.accent),
-        };
-        let thumb = Thumb::Glyph(g, Kind::Animation.color());
-        draw_tile(ui, k, st, cell, &resp, on, thumb, Kind::Animation.color(), text, asks);
-        resp.dnd_set_drag_payload(DragFile(item.rel.clone()));
-        if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
-            asks.select = Some(item.rel.clone());
-        }
-        if resp.double_clicked() {
-            asks.commands.push(Command::Animate(Some(item.reference())));
-        }
-        resp.context_menu(|ui| file_menu(ui, k, st, &item.rel, asks));
-        let from = item.meta.as_ref().map_or(String::new(), |m| {
-            if m.source.is_empty() {
-                String::new()
-            } else {
-                format!("\nFrom {}", m.source)
+    tile_grid(
+        ui,
+        k,
+        "animations",
+        inside.len() + keyed.len() + shown.len(),
+        |ui, n, cell| {
+            if let Some(rel) = inside.get(n) {
+                folder_tile(ui, k, st, cell, rel, asks);
+                return;
             }
-        });
-        resp.on_hover_text(format!(
-            "{}\n{}, {}\n{}{from}",
-            item.name,
-            item.category(),
-            item.kind_text(),
-            item.rel
-        ));
-    });
+            if let Some(rel) = keyed.get(n - inside.len()) {
+                keys_tile(ui, k, st, cell, rel, asks);
+                return;
+            }
+            let item = st.animations.items[shown[n - inside.len() - keyed.len()]].clone();
+            let resp = ui.interact(cell, ui.id().with(("animation", &item.rel)), Sense::click_and_drag());
+            let on = st.asset.as_deref() == Some(Path::new(&item.rel));
+            let g = match (item.is_static(), item.link.is_some()) {
+                (_, true) => icon::LINK_SIMPLE,
+                (Some(true), _) => Kind::Pose.glyph(),
+                _ => Kind::Animation.glyph(),
+            };
+            let worn_here = worn_rel.as_deref() == Some(item.rel.as_str());
+            let kind_text = match item.is_static() {
+                Some(true) => "Static",
+                Some(false) => "Moving",
+                None => "Animation",
+            };
+            let text = TileText {
+                rel: &item.rel,
+                name: &item.name,
+                caption: if worn_here { "On the selection" } else { kind_text },
+                caption_color: worn_here.then_some(t.accent),
+            };
+            let thumb = Thumb::Glyph(g, Kind::Animation.color());
+            draw_tile(ui, k, st, cell, &resp, on, thumb, Kind::Animation.color(), text, asks);
+            resp.dnd_set_drag_payload(DragFile(item.rel.clone()));
+            if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
+                asks.select = Some(item.rel.clone());
+            }
+            if resp.double_clicked() {
+                asks.commands.push(Command::Animate(Some(item.reference())));
+            }
+            resp.context_menu(|ui| file_menu(ui, k, st, &item.rel, asks));
+            let from = item.meta.as_ref().map_or(String::new(), |m| {
+                if m.source.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nFrom {}", m.source)
+                }
+            });
+            resp.on_hover_text(format!(
+                "{}\n{}, {}\n{}{from}",
+                item.name,
+                item.category(),
+                item.kind_text(),
+                item.rel
+            ));
+        },
+    );
 }
 
 /// The project's maps in the open folder, as tiles of their pictures. A
@@ -1271,6 +1315,40 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
         resp.context_menu(|ui| file_menu(ui, k, st, rel, asks));
         resp.on_hover_text(rel.as_str());
     });
+}
+
+/// A character's keys saved as an animation: a click selects it, a
+/// double click gives it to the selected character, and it drags onto a
+/// character in the Outliner.
+fn keys_tile(ui: &mut Ui, k: &Look, st: &mut State, cell: Rect, rel: &str, asks: &mut Asks) {
+    let resp = ui.interact(cell, ui.id().with(("keys", rel)), Sense::click_and_drag());
+    let on = st.asset.as_deref() == Some(Path::new(rel));
+    let text = TileText {
+        rel,
+        name: content::stem(rel),
+        caption: "Keys",
+        caption_color: None,
+    };
+    draw_tile(
+        ui,
+        k,
+        st,
+        cell,
+        &resp,
+        on,
+        Thumb::Glyph(icon::KEY, Kind::Animation.color()),
+        Kind::Animation.color(),
+        text,
+        asks,
+    );
+    resp.dnd_set_drag_payload(DragFile(rel.to_owned()));
+    if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
+        asks.select = Some(rel.to_owned());
+    }
+    if resp.double_clicked() && character_chosen(st) {
+        asks.commands.push(Command::LoadKeys(rel.to_owned()));
+    }
+    resp.context_menu(|ui| file_menu(ui, k, st, rel, asks));
 }
 
 fn is_pose(rel: &str) -> bool {

@@ -524,6 +524,9 @@ fn outliner(ui: &mut Ui, k: &Look, st: &mut State) {
                             } else if file.0.to_lowercase().ends_with(".rkpose") {
                                 acts.push(Act::Select(Some(id)));
                                 acts.push(Act::Run(Command::LoadPose(file.0.clone())));
+                            } else if crate::sequence::is_keys(&file.0) {
+                                acts.push(Act::Select(Some(id)));
+                                acts.push(Act::Run(Command::LoadKeys(file.0.clone())));
                             }
                         }
                     }

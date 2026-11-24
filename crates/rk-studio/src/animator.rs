@@ -19,6 +19,14 @@ use egui_phosphor::regular as icon;
 use rk_chara::keys::Ease;
 use rk_chara::pose::BoneEdit;
 
+/// What the Animator's bar asks for.
+enum BarAct {
+    Solo,
+    Save,
+    Load(String),
+    Clear,
+}
+
 /// What a menu of the Animator asks for.
 enum KeyAct {
     Copy(BoneEdit),
@@ -42,6 +50,24 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         st.doc.selection().map(|o| &o.content),
         Some(Content::Character { pose_layer: Some(l), .. }) if l.fk_on
     );
+    // What the bar asks for: playing her keys alone, and its menu.
+    let has_keys = character
+        .as_ref()
+        .and_then(|(id, _)| st.doc.scene().sequence.track(*id))
+        .is_some_and(|t| !t.keys.is_empty());
+    let solo_here = character.as_ref().is_some_and(|(id, _)| st.solo == Some(*id));
+    let saved_keys: Vec<String> = {
+        let mut files = Vec::new();
+        crate::project::files_below(&st.project.folder(crate::project::ANIMATIONS), &mut files);
+        let mut rels: Vec<String> = files
+            .iter()
+            .filter_map(|f| crate::project::relative_to(&st.project.root, f))
+            .filter(|r| crate::sequence::is_keys(r))
+            .collect();
+        rels.sort_by_key(|r| r.to_lowercase());
+        rels
+    };
+    let mut bar_act: Option<BarAct> = None;
     toolbar(ui, k, |ui| {
         if let Some((_, name)) = &character {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(140.0, k.field()), Sense::hover());
@@ -61,9 +87,71 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 t.text_bright,
             );
         }
+        if character.is_some() {
+            let (g, tip) = if solo_here {
+                (icon::PAUSE, "Pause")
+            } else {
+                (icon::PLAY, "Play this character alone")
+            };
+            let resp = ui
+                .add_enabled_ui(has_keys || solo_here, |ui| widgets::icon_button(ui, k, g, solo_here))
+                .inner
+                .on_hover_text(tip);
+            if resp.clicked() {
+                bar_act = Some(BarAct::Solo);
+            }
+            let more = widgets::icon_button(ui, k, icon::DOTS_THREE, false);
+            egui::Popup::menu(&more)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    if widgets::menu_item(ui, k, icon::FLOPPY_DISK, "Save as animation", "", has_keys) {
+                        bar_act = Some(BarAct::Save);
+                        ui.close();
+                    }
+                    widgets::menu_sub(ui, k, icon::FILM_REEL, "Load animation", |ui| {
+                        if saved_keys.is_empty() {
+                            widgets::menu_item(ui, k, icon::FILM_REEL, "No saved animations", "", false);
+                        }
+                        for rel in &saved_keys {
+                            if widgets::menu_item(ui, k, icon::FILM_REEL, crate::content::stem(rel), "", true) {
+                                bar_act = Some(BarAct::Load(rel.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if widgets::menu_item(ui, k, icon::TRASH, "Clear keys", "", has_keys) {
+                        bar_act = Some(BarAct::Clear);
+                        ui.close();
+                    }
+                });
+            crate::widgets::bar_divider(ui, k);
+        }
         let w = ui.available_width();
         widgets::search(ui, k, &mut st.animator_search, "Search", w);
     });
+    if let (Some(act), Some((id, _))) = (bar_act, &character) {
+        let id = *id;
+        match act {
+            BarAct::Solo => {
+                if solo_here {
+                    // Paused where she is, so that frame can be edited.
+                    let at = st.solo_time;
+                    st.solo = None;
+                    crate::timeline::go_to(st, at);
+                } else {
+                    st.solo = Some(id);
+                    st.solo_time = st.clock.clamp(0.0, st.doc.scene().sequence.length);
+                    if st.playback == crate::state::Playback::Playing {
+                        st.playback = crate::state::Playback::Paused;
+                    }
+                }
+            }
+            BarAct::Save => st.run(crate::state::Command::SaveKeys),
+            BarAct::Load(rel) => st.run(crate::state::Command::LoadKeys(rel)),
+            BarAct::Clear => crate::keying::clear_keys(st, id),
+        }
+    }
     let area = ui.available_rect_before_wrap();
     let say = |ui: &Ui, text: &str| {
         ui.painter()
@@ -93,7 +181,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // The time the keys lie in: the scene's sequence; the playhead at the
     // scene's time.
     let pass = st.doc.scene().sequence.length.max(0.1);
-    let now = st.clock.clamp(0.0, pass);
+    let now = if st.solo == Some(id) { st.solo_time } else { st.clock }.clamp(0.0, pass);
     let keys = st
         .doc
         .scene()
@@ -270,8 +358,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         st.pose_bone = Some(name);
         st.property_tab = 1;
     }
-    // Moving the playhead holds the scene there.
+    // Moving the playhead holds the scene there, and ends playing alone.
     if let Some(time) = go_to {
+        st.solo = None;
         crate::timeline::go_to(st, time);
     }
     // What the menus asked for, the keys at the playhead where they act
