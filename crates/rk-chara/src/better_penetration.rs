@@ -609,15 +609,21 @@ pub const PULL_STEP: f32 = 1.0 / 60.0;
 
 /// The partner's mouth following the shaft in and out, the only bone the
 /// plugin moves straight in Studio (`DanAgent.AdjustPullBones` and
-/// `CollisionAgent.PullOralBone`). Studio builds its options with the
-/// vaginal and anal pulls off and every update passes `twoDans`, so the
-/// pull never returns: it holds where the last stroke left it.
+/// `CollisionAgent.PullOralBone`). Studio passes `twoDans` on every update,
+/// so there the mouth never returns and holds where the last stroke left
+/// it. Renkatsu lets it return as the plugin does in the main game
+/// (`ReturnOralBones`, "how quickly the mouth returns to its original shape
+/// when there is no penetration"); a return rate of 0 holds it as Studio
+/// does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MouthPull {
     /// How far the mouth is pushed in (positive) or pulled out (negative).
     pub amount: f32,
     /// The shaft's root's distance to the entry at the last pulling frame.
     pub last_distance: f32,
+    /// The direction of the last pull, which a return follows back
+    /// (`currentOralDanDirection`).
+    pub direction: Vec3,
 }
 
 impl MouthPull {
@@ -626,6 +632,7 @@ impl MouthPull {
         Self {
             amount: 0.0,
             last_distance: base_length,
+            direction: unity::normalize(Vec3::Y + Vec3::NEG_Z),
         }
     }
 
@@ -652,7 +659,7 @@ impl MouthPull {
         // Past the shaft's length, the mouth is not in reach.
         if !oral || distance >= base_length {
             self.last_distance = base_length;
-            return None;
+            return self.release(s, dt);
         }
         let pulled = self.last_distance - distance;
         self.amount += pulled * s.pull_rate * dt;
@@ -663,7 +670,26 @@ impl MouthPull {
             self.amount = -s.max_pull;
         }
         self.last_distance = distance;
+        self.direction = direction;
         Some(self.amount * direction)
+    }
+
+    /// One frame with no stroke in the mouth: the pull returns towards
+    /// nothing at the return rate. Returns where the mouth bone goes when
+    /// this frame moves it.
+    pub fn release(&mut self, s: &Settings, dt: f32) -> Option<Vec3> {
+        if self.amount.abs() < 1e-6 || s.return_rate <= 0.0 {
+            return None;
+        }
+        let step = s.return_rate * dt;
+        self.amount = if self.amount > step {
+            self.amount - step
+        } else if self.amount < -step {
+            self.amount + step
+        } else {
+            0.0
+        };
+        Some(self.amount * self.direction)
     }
 }
 
@@ -977,7 +1003,11 @@ mod tests {
 
     #[test]
     fn strokes_pull_the_mouth_as_studio_does() {
-        let s = Settings::default();
+        // Studio's hold: no return.
+        let s = Settings {
+            return_rate: 0.0,
+            ..Settings::default()
+        };
         let base = 0.19;
         let mut pull = MouthPull::new(base);
         let start = Vec3::ZERO;
@@ -1009,6 +1039,25 @@ mod tests {
         // Coming back in starts from the base length again.
         pull.step(start, at(0.18), base, true, &s);
         assert!((pull.amount - (held + 0.01 * 1.8 / 60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn without_a_stroke_the_mouth_returns_at_its_rate() {
+        let s = Settings::default();
+        let base = 0.19;
+        let mut pull = MouthPull::new(base);
+        let at = |d: f32| Vec3::new(0.0, 0.0, d);
+        pull.step(Vec3::ZERO, at(0.05), base, true, &s);
+        assert_eq!(pull.amount, s.max_push);
+        // Out of reach: 0.03 m/s, so 0.0005 m a frame at 60 frames a second.
+        let moved = pull.step(Vec3::ZERO, at(0.25), base, true, &s).unwrap();
+        assert!((pull.amount - (0.002 - 0.03 / 60.0)).abs() < 1e-7, "{}", pull.amount);
+        assert!((moved - Vec3::new(0.0, 0.0, pull.amount)).length() < 1e-7, "along the last pull");
+        for _ in 0..10 {
+            pull.release(&s, PULL_STEP);
+        }
+        assert_eq!(pull.amount, 0.0);
+        assert_eq!(pull.release(&s, PULL_STEP), None, "at rest nothing moves");
     }
 
     #[test]

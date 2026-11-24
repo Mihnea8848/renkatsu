@@ -1696,8 +1696,8 @@ fn penetration_section(
     };
     // The plugin's sliders, by their ranges in Studio, each where it does
     // something: the squish while the shaft is aimed; the colliders'
-    // size always, since his own balls meet two of them; the pull only on
-    // a mouth, the one bone the plugin pulls in Studio.
+    // size always, since his own balls meet two of them; the pull and its
+    // return only on a mouth, the one bone the plugin pulls in Studio.
     let mut sliders: Vec<(&str, &mut f32, f32, f32)> = Vec::new();
     if aimed.is_some() {
         sliders.extend([
@@ -1715,6 +1715,9 @@ fn penetration_section(
             ("Max push", &mut s.max_push, 0.0, 0.3),
             ("Max pull", &mut s.max_pull, 0.0, 0.3),
             ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
+            // How fast the mouth returns with no stroke in it, as the
+            // plugin does in the main game; 0 holds it as Studio does.
+            ("Return rate", &mut s.return_rate, 0.0, 1.0),
         ]);
     }
     for (name, value, low, high) in sliders {

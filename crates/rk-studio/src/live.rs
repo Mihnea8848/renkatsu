@@ -83,7 +83,10 @@ struct Actor {
     /// Where a partner's shaft has pulled this character's mouth bone, in
     /// the bone's parent's space; and a new place from the last frame.
     mouth_at: Option<Vec3>,
-    mouth_next: Option<Vec3>,
+    /// The new place, with the rate the mouth returns at once no shaft
+    /// pulls it, from the partner's settings.
+    mouth_next: Option<(Vec3, f32)>,
+    mouth_return: f32,
     recipe: Recipe,
     chara: rk_chara::Character,
     /// Every node's local transform as loaded, which a stop goes back to.
@@ -482,10 +485,8 @@ impl Actor {
             shaft.aim(&mut self.chara.scene, job.entry, job.end, &job.settings, job.vaginal);
         }
         // A partner's shaft holds the mouth where it last pulled it.
-        if let Some(at) = self.mouth_at {
-            if let Some(node) = self.mouth_node() {
-                self.chara.scene.nodes[node].local.pos = at;
-            }
+        if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
+            self.chara.scene.nodes[node].local.pos = self.rest[node].pos + at;
         }
     }
 
@@ -559,10 +560,24 @@ impl Actor {
             }
         }
         // A partner's shaft that moved the mouth poses the face again.
-        if let Some(at) = self.mouth_next.take() {
+        // With none pulling it, the mouth returns while the scene plays,
+        // at the rate of the shaft that pulled it last.
+        let playing = clock.now == Playback::Playing;
+        if let Some((at, rate)) = self.mouth_next.take() {
+            self.mouth_return = rate;
             if self.mouth_at != Some(at) {
                 self.mouth_at = Some(at);
-                again = true;
+                again |= !playing;
+            }
+        } else if let (Some(at), true) = (self.mouth_at, playing) {
+            let left = at.length() - self.mouth_return * rk_chara::better_penetration::PULL_STEP;
+            if left > 1e-6 && self.mouth_return > 0.0 {
+                self.mouth_at = Some(at * (left / at.length()));
+            } else if self.mouth_return > 0.0 {
+                self.mouth_at = None;
+                if let Some(node) = self.mouth_node() {
+                    self.chara.scene.nodes[node].local.pos = self.rest[node].pos;
+                }
             }
         }
 
@@ -1980,7 +1995,8 @@ impl Live {
                 job.settings,
             ));
         }
-        let mut pulled: Vec<(ObjectId, Vec3)> = Vec::new();
+        let playing = clock.now == Playback::Playing;
+        let mut pulled: Vec<(ObjectId, Vec3, f32)> = Vec::new();
         for actor in &mut self.actors {
             let Some(&(_, partner, start, entry, base_length, oral, settings)) =
                 strokes.iter().find(|s| s.0 == actor.id)
@@ -1996,11 +2012,18 @@ impl Live {
                         .1
                 }
             };
+            // A stroke pulls whenever the shaft moves; a return takes time,
+            // so it runs while the scene plays.
+            let stroking = oral && start.distance(entry) < base_length;
+            if !stroking && !playing {
+                pull.last_distance = base_length;
+                continue;
+            }
             if let Some(world) = pull.step(start, entry, base_length, oral, &settings) {
-                pulled.push((partner, world));
+                pulled.push((partner, world, settings.return_rate));
             }
         }
-        for (partner, world) in pulled {
+        for (partner, world, rate) in pulled {
             let Some(her) = self.actors.iter_mut().find(|a| a.id == partner) else {
                 continue;
             };
@@ -2008,7 +2031,7 @@ impl Live {
                 continue;
             };
             let bone = her.chara.scene.world().0[node];
-            her.mouth_next = Some(rk_chara::better_penetration::mouth_local(&bone, world));
+            her.mouth_next = Some((rk_chara::better_penetration::mouth_local(&bone, world), rate));
         }
         for actor in &mut self.actors {
             actor.received = given
@@ -2713,6 +2736,7 @@ impl Live {
             mouth_pull: None,
             mouth_at: None,
             mouth_next: None,
+            mouth_return: 0.0,
             phase: None,
             fk,
             warm: false,
