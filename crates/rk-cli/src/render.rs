@@ -44,6 +44,12 @@ pub struct Args<'a> {
     pub pose: Option<&'a str>,
     /// Where in the animation, in passes.
     pub time: f32,
+    /// Frames of 1/60 s the animation plays on for before the picture,
+    /// and how often a picture is saved on the way (0 for never).
+    pub play: u32,
+    pub every: u32,
+    /// The animation that plays instead of `pose`, as a switch to it.
+    pub then: Option<&'a str>,
     /// Draw with the look of Renkatsu Studio's viewport.
     pub studio_look: bool,
     /// Smooth cut-out edges with alpha to coverage.
@@ -176,7 +182,9 @@ pub fn render(a: Args) -> Result<()> {
             println!("this body carries no liquid mask, so none of it shows");
         }
     }
-    if let Some(spec) = a.pose {
+    // Reads an animation of CharaStudio's list and binds it to the
+    // character.
+    let read = |spec: &str, chara: &rk_chara::Character| {
         use anyhow::Context;
         let numbers: Vec<i32> = spec.split('/').filter_map(|n| n.parse().ok()).collect();
         let [group, category, number] = numbers[..] else {
@@ -185,7 +193,8 @@ pub fn render(a: Args) -> Result<()> {
         let library = rk_chara::animations::Library::read(&game);
         let pose = library
             .find(group, category, number)
-            .with_context(|| format!("CharaStudio's list has no animation {spec}"))?;
+            .with_context(|| format!("CharaStudio's list has no animation {spec}"))?
+            .clone();
         let motion = rk_chara::motion::load(
             &game,
             &pose.bundle,
@@ -195,6 +204,22 @@ pub fn render(a: Args) -> Result<()> {
             &chara.parameters,
         )?;
         let bound = motion.bind(&rk_chara::motion::Skeleton::of(&chara.scene, chara.animator));
+        println!(
+            "{} ({}/{}): {} clips, {:.2} s, {} bone properties, {} curves without a bone",
+            pose.name,
+            pose.controller,
+            pose.state,
+            motion.clips.len(),
+            motion.duration(),
+            bound.tracks(),
+            bound.unbound
+        );
+        Ok((pose, motion, bound))
+    };
+    // What plays on after the picture's first pose, and from where.
+    let mut playing = None;
+    if let Some(spec) = a.pose {
+        let (pose, motion, bound) = read(spec, &chara)?;
         if let Some(heels) = &mut chara.heels {
             heels.animation(Some(&pose.controller), Some(&pose.state));
         }
@@ -207,16 +232,14 @@ pub fn render(a: Args) -> Result<()> {
         } else {
             chara.animate(&bound, phase, &states);
         }
-        println!(
-            "{} ({}/{}): {} clips, {:.2} s, {} bone properties, {} curves without a bone",
-            pose.name,
-            pose.controller,
-            pose.state,
-            motion.clips.len(),
-            motion.duration(),
-            bound.tracks(),
-            bound.unbound
-        );
+        playing = Some((motion, bound, a.time));
+    }
+    if let Some(spec) = a.then {
+        let (pose, motion, bound) = read(spec, &chara)?;
+        if let Some(heels) = &mut chara.heels {
+            heels.animation(Some(&pose.controller), Some(&pose.state));
+        }
+        playing = Some((motion, bound, 0.0));
     }
     for line in chara.physics.skirts(&chara.scene) {
         println!("skirt: {line}");
@@ -270,12 +293,37 @@ pub fn render(a: Args) -> Result<()> {
         alpha_to_coverage: a.alpha_to_coverage,
         ..Default::default()
     };
+    let meshes = draws.len();
+    drop(draws);
+    // The animation plays on, the physics moving with it frame by frame
+    // as it does in the studio.
+    if let Some((motion, bound, mut time)) = playing.filter(|_| a.play > 0) {
+        let dt = rk_chara::physics::FRAME_TIME;
+        for frame in 1..=a.play {
+            time += dt / motion.duration().max(1e-6);
+            let phase = motion.phase(time, false);
+            if !a.no_physics {
+                chara.physics.begin_frame(&mut chara.scene);
+            }
+            chara.animate(&bound, phase, &states);
+            if !a.no_physics {
+                chara.physics.end_frame(&mut chara.scene, dt);
+            }
+            if a.every > 0 && frame % a.every == 0 && frame != a.play {
+                let stem = a.out.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                let path = a.out.with_file_name(format!("{stem}-{frame:03}.png"));
+                let pixels = renderer.render(&chara.scene.pose(), &camera, &env, a.width, a.height, background)?;
+                save_png(&path, a.width, a.height, &pixels)?;
+            }
+        }
+    }
+    let draws = chara.scene.pose();
     let pixels = renderer.render(&draws, &camera, &env, a.width, a.height, background)?;
     save_png(a.out, a.width, a.height, &pixels)?;
     println!(
         "{}: {} meshes, {} nodes, built in {:.2}s, total {:.2}s -> {}",
         card.full_name(),
-        draws.len(),
+        meshes,
         chara.scene.nodes.len(),
         t_build.as_secs_f32(),
         t.elapsed().as_secs_f32(),

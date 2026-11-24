@@ -131,6 +131,18 @@ enum Cmd {
         /// Where in the animation, in passes: 0 the start, 0.5 half way.
         #[arg(long, default_value_t = 0.0)]
         time: f32,
+        /// Play the animation on for this many frames of 1/60 s from
+        /// there, the physics moving with it, before the picture.
+        #[arg(long, default_value_t = 0)]
+        play: u32,
+        /// While playing, also save a picture every this many frames,
+        /// numbered after the output's name.
+        #[arg(long, default_value_t = 0)]
+        every: u32,
+        /// Play this animation instead of `--pose`, which the character
+        /// starts settled in: a switch from one to the other.
+        #[arg(long)]
+        then: Option<String>,
         /// Draw as Renkatsu Studio's viewport does: CharaStudio's screen
         /// effects (occlusion, bloom, vignette) and its first colour filter.
         #[arg(long)]
@@ -617,6 +629,9 @@ fn main() -> Result<()> {
             dry_clothes,
             pose,
             time,
+            play,
+            every,
+            then,
             studio_look,
             background,
             alpha_to_coverage,
@@ -648,6 +663,9 @@ fn main() -> Result<()> {
             dry_clothes,
             pose: pose.as_deref(),
             time,
+            play,
+            every,
+            then: then.as_deref(),
             studio_look,
             background: background.as_deref(),
             alpha_to_coverage,

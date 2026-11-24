@@ -1990,6 +1990,14 @@ impl Physics {
         self.cloth_held = held;
     }
 
+    /// Has `solver` run the steps of the cloth nets in place of the CPU's
+    /// own solver; none goes back to that. Call after `fit_cloth`.
+    pub fn solve_cloth_with(&mut self, solver: Option<net::SharedSolver>) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.solve_with(solver);
+        }
+    }
+
     /// One line per skirt that Advanced Skirt Physics found, whether it
     /// runs or not: its chains, its net and the meshes on the net.
     pub fn skirts(&self, scene: &Scene) -> Vec<String> {

@@ -170,7 +170,7 @@ pub(super) struct Nearby {
     from: usize,
     lo: Vec3,
     hi: Vec3,
-    pub(super) surfaces: Surfaces,
+    pub(super) surfaces: Arc<Surfaces>,
 }
 
 impl Nearby {
@@ -192,7 +192,7 @@ impl Nearby {
                 from,
                 lo,
                 hi,
-                surfaces: Surfaces::new(triangles, lo, hi),
+                surfaces: Arc::new(Surfaces::new(triangles, lo, hi)),
             };
         }
     }
@@ -537,6 +537,13 @@ impl Cloth {
                 )
             })
             .collect()
+    }
+
+    /// Has `solver` run the nets' steps; none for the CPU's own.
+    pub(super) fn solve_with(&mut self, solver: Option<super::net::SharedSolver>) {
+        for net in &mut self.nets {
+            net.solve_with(solver.clone());
+        }
     }
 
     /// Whether any skirt has a cloth net.
