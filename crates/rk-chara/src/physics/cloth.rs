@@ -175,6 +175,35 @@ fn segment_meets(p: Vec3, q: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
     (0.0..=1.0).contains(&t).then_some(t)
 }
 
+/// The top of what lies under `p`, or over it by no more than `over`:
+/// the highest place straight below or above it on a surface that is
+/// nearer level than upright, as its height and the way out of it.
+pub(super) fn ground(p: Vec3, triangles: &[Triangle], over: f32) -> Option<(f32, Vec3)> {
+    let mut best: Option<(f32, Vec3)> = None;
+    for tri in triangles {
+        if p.x < tri.lo.x || p.x > tri.hi.x || p.z < tri.lo.z || p.z > tri.hi.z || tri.lo.y > p.y + over {
+            continue;
+        }
+        let [a, b, c] = tri.corners;
+        let n = (b - a).cross(c - a);
+        // Twice the triangle's area as seen from above.
+        if n.y.abs() < 1e-9 || n.y.abs() < 0.5 * n.length() {
+            continue;
+        }
+        let u = ((p.z - a.z) * (c.x - a.x) - (p.x - a.x) * (c.z - a.z)) / n.y;
+        let v = ((p.x - a.x) * (b.z - a.z) - (p.z - a.z) * (b.x - a.x)) / n.y;
+        if u < 0.0 || v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        let y = a.y + (b.y - a.y) * u + (c.y - a.y) * v;
+        if y <= p.y + over && best.is_none_or(|(h, _)| y > h) {
+            let n = n.normalize();
+            best = Some((y, if n.y < 0.0 { -n } else { n }));
+        }
+    }
+    best
+}
+
 /// Keeps each segment of a chain, from the root down, on the side of the
 /// surfaces its upper end is on: a lower end that went through a surface
 /// is put back onto it, a little off, where it went through.
@@ -822,6 +851,32 @@ fn fit_bone(scene: &Scene, verts: &[Vec3], from: usize, to: usize, stations: usi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ground_under_a_point_is_the_highest_level_surface_not_far_over_it() {
+        let level = |y: f32| {
+            Triangle::new([
+                Vec3::new(-1.0, y, -1.0),
+                Vec3::new(-1.0, y, 3.0),
+                Vec3::new(3.0, y, -1.0),
+            ])
+        };
+        let wall = Triangle::new([
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 2.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ]);
+        let all = [level(0.0), level(0.5), level(2.0), wall];
+        // Under the seat by 10 cm: the seat is the ground, not the floor
+        // and not the ceiling.
+        let (y, n) = ground(Vec3::new(0.2, 0.4, 0.2), &all, 0.3).expect("over the floor");
+        assert!((y - 0.5).abs() < 1e-6 && n.y > 0.99);
+        // Further under it: the floor.
+        let (y, _) = ground(Vec3::new(0.2, 0.1, 0.2), &all, 0.3).expect("over the floor");
+        assert!(y.abs() < 1e-6);
+        // Beside everything: nothing.
+        assert!(ground(Vec3::new(5.0, 0.4, 0.2), &all, 0.3).is_none());
+    }
+
     use super::*;
 
     fn cap() -> WorldCapsule {

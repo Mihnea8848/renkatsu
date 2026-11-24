@@ -2926,6 +2926,12 @@ impl Character {
             pose(self);
             let amount = (frame + 1) as f32 / (crate::physics::EASE_FRAMES + 1) as f32;
             self.physics.ease(&mut self.scene, &from, amount);
+            // The eased bones pass through poses no body takes (each
+            // turns on its own): the cloth nets start again once the
+            // pose is reached and move into it themselves.
+            if frame == crate::physics::EASE_FRAMES {
+                self.physics.restart_cloth();
+            }
             self.physics.end_frame(&mut self.scene, dt);
         }
     }

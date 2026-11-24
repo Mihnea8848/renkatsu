@@ -40,10 +40,16 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Columns between each two chains.
-pub const BETWEEN: usize = 3;
-/// Rows down the skirt, the waist and the hem included.
-pub const ROWS: usize = 12;
+/// How far apart the net's points are, down the skirt and round its
+/// hem: the rows and the columns between each two chains are as many as
+/// it takes. Every constant of the solver is a length, a time or a
+/// property of the cloth, so that the spacing changes how fine the folds
+/// are and not how the cloth behaves.
+const SPACING: f32 = 0.043;
+/// The fewest and the most rows, and the most columns between each two
+/// chains.
+const ROWS: (usize, usize) = (6, 64);
+const BETWEEN: usize = 12;
 /// Solver steps per frame.
 const SUBSTEPS: u32 = 8;
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -67,11 +73,11 @@ const REACH: f32 = 1.5;
 /// How far down from the waist the net is fixed to the body: the top of
 /// a skirt sits on the hips and only what hangs below them is cloth.
 const FIXED: f32 = 0.06;
-/// How much of the way back to its rest direction, as the waist carries
-/// it, each link down the skirt is turned per step: at the top of the
-/// free cloth and at the hem. This is the skirt's memory of its shape;
-/// gravity and the body do the rest.
-const RESTORE: (f32, f32) = (0.005, 0.001);
+/// The skirt's memory of its shape: each link down the skirt is turned
+/// back towards its rest direction, as the waist carries it, as hard as
+/// it takes to hold this length of cloth out level, at the top of the
+/// free cloth and at the hem. Gravity and the body do the rest.
+const RESTORE: (f32, f32) = (0.2, 0.04);
 /// How much heavier a point pressed on something is than a free one,
 /// less one: the cloth next to it does not pull it off the body.
 const HEAVY: f32 = 3.0;
@@ -82,11 +88,17 @@ const PINCH: f32 = 0.5;
 /// pulled apart.
 const STRETCH: f32 = 0.0;
 const SHEAR: f32 = 1e-6;
-/// Compliances of the lengths over one point, down and across, either
-/// way: how easily the net bends. Stiffer down the skirt than round it,
-/// so that it folds along its length.
-const BEND: f32 = 2e-4;
-const BEND_ACROSS: f32 = 2e-4;
+/// The cloth's bending length down the skirt and round it: a strip this
+/// long held out level by one end droops to a curve of about twice this
+/// radius (bending stiffness over weight per area = g times its cube).
+const BEND: f32 = 0.04;
+const BEND_ACROSS: f32 = 0.06;
+/// The tightest the cloth folds, as the radius of the fold.
+const FOLD: f32 = 0.012;
+/// The link length the compliances below were found with: a link of
+/// another length takes them by its square, as the weight of the cloth
+/// it carries and its own give go.
+const LINK: f32 = 0.043;
 /// Compliance of a length across or a diagonal pushed together: the net
 /// gives way round the skirt, where real cloth closes into folds smaller
 /// than a cell, and its bending keeps it smooth.
@@ -107,6 +119,9 @@ const FRICTION: f32 = 0.5;
 const FLOOR_FRICTION: f32 = 0.05;
 /// How fast the net's own motion dies away, per second.
 const DAMPING: f32 = 3.0;
+/// The fastest a point of the net goes, in metres per second: what a
+/// collision throws it out of does not send it flying.
+const FASTEST: f32 = 4.0;
 /// Rows whose reach is below this do not collide: near the waist the
 /// target wins over a rough fit of the hips.
 const TIGHT: f32 = 0.02;
@@ -141,11 +156,11 @@ pub(super) fn tune(name: &str, default: f32) -> f32 {
 /// the time each stands for.
 const WARM_UP: u32 = 40;
 const WARM_UP_STEP: f32 = 1.0 / 60.0;
-/// Steps a net is left to hang for when it is settled, and how easily it
-/// bends round the skirt meanwhile: far more easily than when it runs,
-/// so that the ring closes in as cloth falling into folds does.
+/// Steps a net is left to hang for when it is settled, and its bending
+/// length round the skirt meanwhile: far shorter than when it runs, so
+/// that the ring closes in as cloth falling into folds does.
 const SETTLE_STEPS: u32 = 180;
-const SETTLE_BEND: f32 = 0.01;
+const SETTLE_BEND: f32 = 0.02;
 /// How much a skirt stands out, from limp (0, it hangs as soft cloth) to
 /// full (1, it keeps the shape it was drawn in). To become a setting per
 /// garment.
@@ -167,8 +182,6 @@ const OPEN_POINT: u8 = 2;
 const DOWN: u8 = 0;
 const ACROSS: u8 = 1;
 const DIAGONAL: u8 = 2;
-const BEND_DOWN: u8 = 3;
-const BEND_ROUND: u8 = 4;
 
 /// The links of a ring grid: each pair of points whose distance is kept,
 /// with its kind.
@@ -185,13 +198,142 @@ fn links(cols: usize, rows: usize) -> Vec<(u32, u32, u8)> {
                 links.push((at(c, r), at(c + 1, r + 1), DIAGONAL));
                 links.push((at(c + 1, r), at(c, r + 1), DIAGONAL));
             }
-            if r + 2 < rows {
-                links.push((at(c, r), at(c, r + 2), BEND_DOWN));
-            }
-            links.push((at(c, r), at(c + 2, r), BEND_ROUND));
         }
     }
     links
+}
+
+/// A bend of the net at a point: the angle between the links to its two
+/// neighbours along a column (`round` false) or a row, measured round
+/// the line through two more points (`axis`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bend {
+    ends: [u32; 2],
+    at: u32,
+    axis: [u32; 2],
+    round: bool,
+}
+
+/// The bends of a ring grid: one down the skirt and one round it per
+/// point that has both neighbours that way. `open` cuts the ring where
+/// the garment has no cloth (see `Net::open`).
+fn bends(cols: usize, rows: usize, open: &[u8]) -> Vec<Bend> {
+    let at = |c: usize, r: usize| (r * cols + (c % cols)) as u32;
+    let joined = |i: u32, way: u8| open.get(i as usize).is_none_or(|o| o & way == 0);
+    let mut bends = Vec::new();
+    for r in 0..rows {
+        for c in 0..cols {
+            let (here, next, last) = (at(c, r), at(c + 1, r), at(c + cols - 1, r));
+            if !joined(here, OPEN_POINT) {
+                continue;
+            }
+            // Cloth to the next point round the skirt, and from the last.
+            let (on, back) = (joined(here, OPEN_ROUND), joined(last, OPEN_ROUND));
+            if r >= 1 && r + 1 < rows && joined(at(c, r - 1), OPEN_POINT) && joined(at(c, r + 1), OPEN_POINT) {
+                let axis = match (on, back) {
+                    (true, false) => [here, next],
+                    (false, true) => [last, here],
+                    _ => [last, next],
+                };
+                bends.push(Bend {
+                    ends: [at(c, r - 1), at(c, r + 1)],
+                    at: here,
+                    axis,
+                    round: false,
+                });
+            }
+            if on && back {
+                let (up, down) = (r.saturating_sub(1), (r + 1).min(rows - 1));
+                let down = if joined(at(c, down), OPEN_POINT) { down } else { r };
+                let up = if joined(at(c, up), OPEN_POINT) { up } else { r };
+                if up != down {
+                    bends.push(Bend {
+                        ends: [last, next],
+                        at: here,
+                        axis: [at(c, up), at(c, down)],
+                        round: true,
+                    });
+                }
+            }
+        }
+    }
+    bends
+}
+
+/// The angle a bend is at, with the line it is measured round and the
+/// two links as seen along that line. None where the net is too crumpled
+/// to tell.
+fn bend_angle(pos: &[Vec3], b: &Bend) -> Option<(f32, Vec3, [Vec3; 2], [Vec3; 2])> {
+    let here = pos[b.at as usize];
+    let (d1, d2) = (here - pos[b.ends[0] as usize], pos[b.ends[1] as usize] - here);
+    let along = d1 + d2;
+    let axis = pos[b.axis[1] as usize] - pos[b.axis[0] as usize];
+    let len = along.length_squared();
+    if len < 1e-12 {
+        return None;
+    }
+    let a = (axis - along * (axis.dot(along) / len)).normalize_or_zero();
+    if a == Vec3::ZERO {
+        return None;
+    }
+    let (e1, e2) = (d1 - a * d1.dot(a), d2 - a * d2.dot(a));
+    if e1.length_squared() < 1e-12 || e2.length_squared() < 1e-12 {
+        return None;
+    }
+    Some((e1.cross(e2).dot(a).atan2(e1.dot(e2)), a, [e1, e2], [d1, d2]))
+}
+
+/// One bend at rest: its angle, how easily it gives (XPBD compliance for
+/// points of weight one) and the most it may fold either way.
+#[derive(Debug, Clone, Copy)]
+struct BendRest {
+    angle: f32,
+    compliance: f32,
+    most: f32,
+}
+
+/// One pass over the bends: each is turned towards its rest angle by its
+/// stiffness, and back to the tightest fold when it is past it.
+fn bends_pass(bends: &[Bend], rest: &[Option<BendRest>], light: &[f32], pos: &mut [Vec3], h: f32) {
+    for (b, rest) in bends.iter().zip(rest) {
+        let Some(rest) = rest else { continue };
+        let (i0, i1, i2) = (b.ends[0] as usize, b.at as usize, b.ends[1] as usize);
+        let (w0, w1, w2) = (light[i0], light[i1], light[i2]);
+        if w0 + w1 + w2 == 0.0 {
+            continue;
+        }
+        for limit in [false, true] {
+            let Some((angle, a, [e1, e2], [d1, d2])) = bend_angle(pos, b) else {
+                break;
+            };
+            let (off, alpha) = if limit {
+                if angle.abs() <= rest.most {
+                    break;
+                }
+                (angle - rest.most.copysign(angle), 0.0)
+            } else {
+                (angle - rest.angle, rest.compliance / (h * h))
+            };
+            // The turn of each link per move of its end. By the whole
+            // link's length, not its length as seen along the line: a
+            // link that comes to lie along the line is then not flung.
+            let (g0, g2) = (a.cross(e1) / d1.length_squared(), a.cross(e2) / d2.length_squared());
+            let g1 = -(g0 + g2);
+            let sum = w0 * g0.length_squared() + w1 * g1.length_squared() + w2 * g2.length_squared();
+            // One pass per step gives as a spring of the points' own
+            // weight over the step squared would on top of the bend's
+            // own give: that much is taken off it, so that the cloth is
+            // as stiff as it is meant to be however fine the net.
+            let give = alpha.max(sum);
+            if give < 1e-12 {
+                break;
+            }
+            let lambda = -off / give;
+            pos[i0] += g0 * (lambda * w0);
+            pos[i1] += g1 * (lambda * w1);
+            pos[i2] += g2 * (lambda * w2);
+        }
+    }
 }
 
 /// One skirt's net.
@@ -212,6 +354,8 @@ pub struct Net {
     reach: Vec<f32>,
     /// Pairs of points whose distance is kept, with the kind of link.
     links: Vec<(u32, u32, u8)>,
+    /// The angles that are kept.
+    bends: Vec<Bend>,
     /// Every node of the skirt's chains, which vertices are bound by.
     pub(super) chain_nodes: Vec<usize>,
     /// The net as it was built, in the world.
@@ -253,6 +397,9 @@ pub struct Net {
     /// Per body shell: its middle at the step before, in the waist's
     /// space.
     shell_before: Vec<Vec3>,
+    /// Per body shell: its node's place in the world at the step before,
+    /// which the body is moved on from within a step.
+    shell_was: Vec<Mat4>,
     /// The target of the frame before, which the steps move from.
     before: Vec<Vec3>,
     /// Whether `pos` holds a net that ran; otherwise it starts on the
@@ -299,6 +446,53 @@ fn along(points: &[Vec3], share: f32) -> (usize, f32) {
         want -= l;
     }
     (0, 0.0)
+}
+
+/// The body a net moves among during one step.
+enum Body<'a> {
+    /// As it is.
+    Still(&'a [WorldShell]),
+    /// The shells with their nodes' places in the world at the start of
+    /// the step and at its end: the body is moved from one to the other
+    /// over the solver's steps, so that a fast limb pushes the cloth as
+    /// fast as it goes and not all at once.
+    Moving {
+        shells: &'a [Shell],
+        from: &'a [Mat4],
+        to: &'a [Mat4],
+    },
+}
+
+impl Body<'_> {
+    /// Where each shell's node is `k` of the way through the step; none
+    /// for a body that stays as it is.
+    fn places(&self, k: f32) -> Option<Vec<Mat4>> {
+        match self {
+            Body::Still(_) => None,
+            Body::Moving { from, to, .. } => Some(
+                from.iter()
+                    .zip(*to)
+                    .map(|(a, b)| if a == b { *b } else { between(a, b, k) })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The body with its shells' nodes at `places`.
+    fn at(&self, places: Option<&[Mat4]>) -> Cow<'_, [WorldShell]> {
+        match (self, places) {
+            (Body::Moving { shells, .. }, Some(places)) => {
+                Cow::Owned(shells.iter().zip(places).map(|(s, m)| s.in_world(m)).collect())
+            }
+            (Body::Still(bodies), _) => Cow::Borrowed(bodies),
+            (Body::Moving { .. }, None) => Cow::Owned(Vec::new()),
+        }
+    }
+
+    /// The body at the end of the step.
+    fn last(&self) -> Cow<'_, [WorldShell]> {
+        self.at(self.places(1.0).as_deref())
+    }
 }
 
 impl Net {
@@ -349,9 +543,40 @@ impl Net {
         };
         chains.sort_by(|a, b| angle(a).total_cmp(&angle(b)));
 
-        let between = tune("between", BETWEEN as f32) as usize;
+        // As many rows and columns as put the points `SPACING` apart
+        // down the skirt and round its hem.
+        let spacing = tune("spacing", SPACING).max(0.005);
+        let length = chains
+            .iter()
+            .map(|c| c.points.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f32>())
+            .sum::<f32>()
+            / n;
+        let round: f32 = (0..chains.len())
+            .map(|j| {
+                let hem = |c: &Chain| *c.points.last().expect("two or more");
+                (hem(&chains[j]) - hem(&chains[(j + 1) % chains.len()])).length()
+            })
+            .sum();
+        // The garment may hang past the ends of its chains: the net
+        // goes on straight below them as far as the cloth does.
+        chain_nodes.sort_unstable();
+        chain_nodes.dedup();
+        let ends: Vec<(Vec3, Vec3)> = chains
+            .iter()
+            .map(|c| {
+                let end = *c.points.last().expect("two or more");
+                (end, (end - c.points[c.points.len() - 2]).normalize_or_zero())
+            })
+            .collect();
+        let past = if tune("past", 1.0) != 0.0 {
+            past_the_ends(scene, &chain_nodes, &ends)
+        } else {
+            0.0
+        };
+        let (between, rows) = grid(length + past, round / n, spacing);
+        let between = tune("between", between as f32) as usize;
         let cols = chains.len() * (between + 1);
-        let rows = tune("rows", ROWS as f32) as usize;
+        let rows = tune("rows", rows as f32) as usize;
         let mut nodes: Vec<usize> = Vec::new();
         let mut node_index = |node: usize| -> u32 {
             match nodes.iter().position(|&n| n == node) {
@@ -368,8 +593,14 @@ impl Net {
             let share = r as f32 / (rows - 1) as f32;
             let places: Vec<(Vec3, usize)> = chains
                 .iter()
-                .map(|c| {
-                    let (seg, t) = along(&c.points, share);
+                .zip(&ends)
+                .map(|(c, &(end, on))| {
+                    let own: f32 = c.points.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+                    let down = share * (own + past);
+                    if down > own {
+                        return (end + on * (down - own), *c.nodes.last().expect("two or more"));
+                    }
+                    let (seg, t) = along(&c.points, down / own.max(1e-6));
                     (c.points[seg].lerp(c.points[seg + 1], t), c.nodes[seg])
                 })
                 .collect();
@@ -406,13 +637,12 @@ impl Net {
             }
         }
         let links = links(cols, rows);
-        chain_nodes.sort_unstable();
-        chain_nodes.dedup();
+        let bends = bends(cols, rows, &[]);
         if std::env::var("RK_NET_DEBUG").is_ok() {
             let row = |r: usize| (rest[r * cols] - rest[r * cols + 1]).length() * 100.0;
             let down = (rest[0] - rest[cols]).length() * 100.0;
             eprintln!(
-                "net build {cols}x{rows} chains {} cell cm: across top {:.1} hem {:.1} down {:.1} length {:.0}",
+                "net build {cols}x{rows} chains {} past {past:.3} cell cm: across top {:.1} hem {:.1} down {:.1} length {:.0}",
                 chains.len(),
                 row(0),
                 row(rows - 1),
@@ -438,6 +668,7 @@ impl Net {
             src,
             reach,
             links,
+            bends,
             chain_nodes,
             pos: rest.clone(),
             vel: vec![Vec3::ZERO; rest.len()],
@@ -450,6 +681,7 @@ impl Net {
             pressed: vec![0.0; rest.len()],
             shell_rest: Vec::new(),
             shell_before: Vec::new(),
+            shell_was: Vec::new(),
             before: rest.clone(),
             rest,
             ready: false,
@@ -483,8 +715,9 @@ impl Net {
         self.pressed.fill(0.0);
         let bodies: Vec<WorldShell> = shells.iter().map(|s| s.in_world(&world(scene, s.node))).collect();
         self.settling = true;
+        self.waist_before = waist;
         for _ in 0..tune("settle_steps", SETTLE_STEPS as f32) as u32 {
-            self.advance(&bodies, None, None, WARM_UP_STEP);
+            self.advance(&Body::Still(&bodies), &waist, None, None, WARM_UP_STEP);
         }
         self.settling = false;
         let back = waist.inverse();
@@ -508,6 +741,9 @@ impl Net {
             *v = moved.transform_vector3(*v);
         }
         self.waist_before = moved * self.waist_before;
+        for m in &mut self.shell_was {
+            *m = moved * *m;
+        }
     }
 
     /// Where the net rests now: its rest shape, carried by the waist.
@@ -566,22 +802,28 @@ impl Net {
                 .zip(&self.shell_before)
                 .any(|(p, b)| (*p - *b).length_squared() > JUMP * JUMP);
         self.shell_before = places;
+        let now: Vec<Mat4> = shells.iter().map(|s| world(scene, s.node)).collect();
         if !self.ready || jumped {
-            self.start(scene, &waist, shells, floor, obstacles);
+            self.start(scene, &waist, shells);
+            self.shell_was.clone_from(&now);
         }
         if dt > 0.0 {
-            // The net goes along with the waist: only the motion relative
-            // to it is simulated, so that a turn of the whole body does
-            // not leave the skirt behind.
-            let moved = waist * self.waist_before.inverse();
-            for p in self.pos.iter_mut().chain(&mut self.before) {
-                *p = moved.transform_point3(*p);
-            }
-            for v in &mut self.vel {
-                *v = moved.transform_vector3(*v);
-            }
-            self.advance(bodies, floor, obstacles, dt);
+            // The net goes along with the waist (in `advance`): only the
+            // motion relative to it is simulated, so that a turn of the
+            // whole body does not leave the skirt behind.
+            let was = self.shell_was.clone();
+            let body = if now.len() == bodies.len() && was.len() == now.len() && tune("moving", 1.0) != 0.0 {
+                Body::Moving {
+                    shells,
+                    from: &was,
+                    to: &now,
+                }
+            } else {
+                Body::Still(bodies)
+            };
+            self.advance(&body, &waist, floor, obstacles, dt);
         }
+        self.shell_was = now;
         self.waist_before = waist;
         self.before.clone_from(&self.target);
         if std::env::var("RK_NET_FREEZE").is_ok() {
@@ -623,14 +865,7 @@ impl Net {
     /// `WARM_UP` steps: the legs carry the cloth with them as they would
     /// have, so that it ends up on the right side of them whatever the
     /// pose, which a net put straight on its target does not.
-    fn start(
-        &mut self,
-        scene: &Scene,
-        waist: &Mat4,
-        shells: &[Shell],
-        floor: Option<(Vec3, Vec3)>,
-        obstacles: Option<&Arc<Obstacles>>,
-    ) {
+    fn start(&mut self, scene: &Scene, waist: &Mat4, shells: &[Shell]) {
         for (p, r) in self.pos.iter_mut().zip(&self.shape_on_waist) {
             *p = waist.transform_point3(*r);
         }
@@ -651,15 +886,22 @@ impl Net {
             .zip(&self.shell_rest)
             .map(|(s, rest)| (*rest, back * world(scene, s.node)))
             .collect();
+        let place = |f: f32| -> Vec<Mat4> { ends.iter().map(|(from, to)| *waist * between(from, to, f)).collect() };
+        let mut from = place(0.0);
         for k in 1..=steps {
-            let f = k as f32 / steps as f32;
-            let bodies: Vec<WorldShell> = shells
-                .iter()
-                .zip(&ends)
-                .map(|(s, (from, to))| s.in_world(&(*waist * between(from, to, f))))
-                .collect();
-            self.advance(&bodies, floor, obstacles, WARM_UP_STEP);
-            self.dump(&bodies, waist, "w");
+            let to = place(k as f32 / steps as f32);
+            let body = Body::Moving {
+                shells,
+                from: &from,
+                to: &to,
+            };
+            // The pose is taken in the air: the floor and the map are
+            // there from the first step after it. With them there all
+            // along, a body that lies down slides its legs off the cloth
+            // they lay on.
+            self.advance(&body, waist, None, None, WARM_UP_STEP);
+            self.dump(&body.last(), waist, "w");
+            from = to;
         }
     }
 
@@ -697,10 +939,13 @@ impl Net {
         }
     }
 
-    /// Moves the net on by `dt` seconds towards its target among `bodies`.
+    /// Moves the net on by `dt` seconds towards its target among the
+    /// `body`, while the waist goes from where it was (`waist_before`) to
+    /// `waist` and carries the net along.
     fn advance(
         &mut self,
-        bodies: &[WorldShell],
+        body: &Body,
+        waist: &Mat4,
         floor: Option<(Vec3, Vec3)>,
         obstacles: Option<&Arc<Obstacles>>,
         dt: f32,
@@ -719,7 +964,6 @@ impl Net {
                 let full = (self.full[a] - self.full[b]).length();
                 match kind {
                     DOWN => full,
-                    BEND_DOWN | BEND_ROUND => (self.target[a] - self.target[b]).length(),
                     _ => full.min((self.rest[a] - self.rest[b]).length() * slack),
                 }
             })
@@ -740,7 +984,8 @@ impl Net {
             // settles, up to as stiff as when it runs: it then stands
             // out as it was drawn.
             let fluff = tune("fluff", FLUFF).clamp(0.0, 1.0);
-            tune("settle_bend", SETTLE_BEND) * (tune("bend_across", BEND_ACROSS) / SETTLE_BEND).powf(fluff * fluff)
+            let limp = tune("settle_bend", SETTLE_BEND);
+            limp * (tune("bend_across", BEND_ACROSS) / limp).powf(fluff * fluff)
         } else {
             tune("bend_across", BEND_ACROSS)
         };
@@ -749,9 +994,29 @@ impl Net {
             (STRETCH, squeeze_down, least_down),
             (STRETCH, squeeze, least),
             (SHEAR, squeeze, least),
-            (bend, bend, 0.0),
-            (bend_across, bend_across, 0.0),
         ];
+        // The angles the net keeps are those of the shape it remembers.
+        // A bend gives by the square of its links' length over the
+        // cube of the cloth's bending length, which makes a strip of it
+        // droop the same however many points it is made of.
+        let fold = tune("fold", FOLD);
+        let bend_rest: Vec<Option<BendRest>> = self
+            .bends
+            .iter()
+            .map(|b| {
+                let (angle, ..) = bend_angle(&self.target, b)?;
+                let here = self.target[b.at as usize];
+                let len = ((here - self.target[b.ends[0] as usize]).length()
+                    + (here - self.target[b.ends[1] as usize]).length())
+                    * 0.5;
+                let length = if b.round { bend_across } else { bend };
+                Some(BendRest {
+                    angle,
+                    compliance: len * len / (GRAVITY.length() * length.powi(3)),
+                    most: (len / fold).min(2.6).max(angle.abs() + 0.3),
+                })
+            })
+            .collect();
         let friction = tune("friction", FRICTION);
         let floor_friction = tune("floor_friction", FLOOR_FRICTION);
         let gravity = GRAVITY * tune("gravity", 1.0);
@@ -767,17 +1032,45 @@ impl Net {
         let reach = self.reach.iter().copied().fold(0.0, f32::max);
         let (lo, hi) = (lo - Vec3::splat(reach + 0.1), hi + Vec3::splat(reach + 0.1));
         let nocaps = std::env::var("RK_NET_NOCAPS").is_ok();
+        let with_arms = tune("arms", 1.0) != 0.0;
         let near = |s: &&WorldShell| {
             let (slo, shi) = s.bounds();
             !nocaps && slo.cmple(hi).all() && shi.cmpge(lo).all()
         };
-        let body: Vec<&WorldShell> = bodies.iter().filter(|s| !s.outside).filter(near).collect();
-        let arms: Vec<&WorldShell> = bodies
-            .iter()
-            .filter(|s| s.outside && tune("arms", 1.0) != 0.0)
-            .filter(near)
-            .collect();
         self.nearby.refresh(obstacles, lo, hi);
+        if std::env::var("RK_NET_GROUND").is_ok() && !self.nearby.triangles.is_empty() {
+            let depth = |p: Vec3| super::cloth::ground(p, &self.nearby.triangles, 0.4).map(|(y, _)| p.y - y);
+            let rows_d: Vec<String> = [0, self.fixed, rows / 2, rows - 1]
+                .iter()
+                .map(|&r| {
+                    let d: Vec<f32> = (0..cols).filter_map(|c| depth(self.target[r * cols + c])).collect();
+                    let min = d.iter().copied().fold(f32::MAX, f32::min);
+                    let under = d.iter().filter(|&&x| x < 0.0).count();
+                    format!("row {r}: {under}/{} under, lowest {:.3}", d.len(), min)
+                })
+                .collect();
+            let b = body.last();
+            let shells_d: Vec<String> = b
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let low = s.surface().into_iter().filter_map(depth).fold(f32::MAX, f32::min);
+                    (low < 0.0).then(|| format!("{i}:{low:.3}"))
+                })
+                .collect();
+            eprintln!(
+                "ground target {} | shells under: {}",
+                rows_d.join("; "),
+                shells_d.join(" ")
+            );
+        }
+        // The waist's way over this step, which the net is carried along
+        // bit by bit: all at once it would be thrown into the floor or
+        // a seat and bounce off it.
+        let waist_from = self.waist_before;
+        let carried = waist_from != *waist;
+        let mut waist_at = waist_from;
+        let mut places_before = body.places(0.0);
 
         // The skirt's memory of its shape: how far each link down it is
         // turned back to its rest direction per step, from the top of
@@ -788,6 +1081,7 @@ impl Net {
             (tune("restore_top", RESTORE.0), tune("restore_hem", RESTORE.1))
         };
         let fixed = self.fixed * cols;
+        let h = dt / substeps as f32;
         // Points the garment has no cloth at stay on the target, out of
         // everything's way.
         let none: Vec<bool> = (0..cols * rows)
@@ -800,7 +1094,12 @@ impl Net {
             *k = if i < fixed {
                 1.0
             } else {
-                restore.0 + (restore.1 - restore.0) * (tether[i] / hem)
+                // Per step a link is turned by the share that holds
+                // that length of cloth: g times the length times the
+                // step squared, over its own length squared.
+                let held = restore.0 + (restore.1 - restore.0) * (tether[i] / hem);
+                let link = (tether[i] - tether[i - cols]).max(1e-4);
+                (GRAVITY.length() * held * h * h / (link * link)).min(0.5)
             };
         }
         self.hold = hold;
@@ -816,22 +1115,46 @@ impl Net {
             })
             .collect();
         let again = tune("again", 1.0) != 0.0;
+        let fastest = tune("fastest", FASTEST);
         let mut loose = light.clone();
-        let h = dt / substeps as f32;
         let damping = (-tune("damping", DAMPING) * h).exp();
         let mut column = vec![Vec3::ZERO; rows];
         let mut caught = vec![false; cols * rows];
-        let (cols_i, rows_i, outward) = (cols, rows, self.outward);
-        // The way out of the net's surface at a point.
-        let normal = move |pos: &[Vec3], i: usize| -> Vec3 {
-            let (c, r) = (i % cols_i, i / cols_i);
-            let at = |c: usize, r: usize| pos[r * cols_i + c];
-            let round = at((c + 1) % cols_i, r) - at((c + cols_i - 1) % cols_i, r);
-            let down = at(c, (r + 1).min(rows_i - 1)) - at(c, r.saturating_sub(1));
-            round.cross(down).normalize_or_zero() * outward
-        };
         for step in 0..substeps {
             let k = (step + 1) as f32 / substeps as f32;
+            if carried {
+                let next = if step + 1 == substeps {
+                    *waist
+                } else {
+                    between(&waist_from, waist, k)
+                };
+                let moved = next * waist_at.inverse();
+                for p in &mut self.pos {
+                    *p = moved.transform_point3(*p);
+                }
+                for v in &mut self.vel {
+                    *v = moved.transform_vector3(*v);
+                }
+                waist_at = next;
+            }
+            // The body now, and how each part of it moved over this
+            // step: what lies on a limb goes along with it.
+            let places = body.places(k);
+            let bodies = body.at(places.as_deref());
+            let moves: Vec<Mat4> = match (&places, &places_before) {
+                (Some(now), Some(before)) => now
+                    .iter()
+                    .zip(before)
+                    .map(|(n, b)| if n == b { Mat4::IDENTITY } else { *n * b.inverse() })
+                    .collect(),
+                _ => vec![Mat4::IDENTITY; bodies.len()],
+            };
+            places_before = places;
+            let body: Vec<(&WorldShell, &Mat4)> = bodies
+                .iter()
+                .zip(&moves)
+                .filter(|(s, _)| (!s.outside || with_arms) && near(s))
+                .collect();
             let aim: Vec<Vec3> = self
                 .before
                 .iter()
@@ -848,7 +1171,8 @@ impl Net {
                 *v = (*v + gravity * h) * damping;
                 *p += *v * h;
             }
-            lengths_pass(&self.links, &lengths, &kinds, &light, &mut self.pos, h, false);
+            lengths_pass(&self.links, &lengths, &kinds, &light, &mut self.pos, h);
+            bends_pass(&self.bends, &bend_rest, &light, &mut self.pos, h);
             loose.copy_from_slice(&light);
             caught.fill(false);
             for i in fixed..cols * rows {
@@ -874,42 +1198,25 @@ impl Net {
                 }
                 let gap = self.gap[i] + thickness;
                 // The deepest thing the point was pushed out of: its
-                // direction, how far it pushed and its friction.
-                let mut touch: Option<(Vec3, f32, f32)> = None;
+                // direction, how far it pushed, its friction and where
+                // the point would be now had it gone along with it.
+                let mut touch: Option<(Vec3, f32, f32, Vec3)> = None;
                 // Every push the point got, added up as moves and as
                 // lengths: where they cancel it is caught between two
-                // things.
+                // things. And where those things would have taken it,
+                // added up.
                 let (mut pushes, mut effort) = (Vec3::ZERO, 0.0f32);
-                // The arms and hands are outside the skirt: the cloth
-                // leaves them inwards, towards the body, and the body
-                // after them has the last word.
-                if !arms.is_empty() {
-                    let mut inwards = None;
-                    for s in &arms {
-                        if s.inside(self.pos[i], gap.max(0.0)).is_none() {
-                            continue;
-                        }
-                        let way = *inwards.get_or_insert_with(|| -normal(&self.pos, i));
-                        if way == Vec3::ZERO {
-                            continue;
-                        }
-                        let from = self.pos[i];
-                        if let Some((n, depth)) = s.push_along(&mut self.pos[i], gap.max(0.0), way) {
-                            pushes += self.pos[i] - from;
-                            effort += (self.pos[i] - from).length();
-                            if touch.is_none_or(|t| depth > t.1) {
-                                touch = Some((n, depth, friction));
-                            }
-                        }
-                    }
-                }
-                for s in &body {
+                let (mut taken, mut takers) = (Vec3::ZERO, 0.0f32);
+                for (s, moved) in &body {
                     let from = self.pos[i];
                     if let Some((n, depth)) = s.push_out(&mut self.pos[i], gap) {
+                        let with = moved.transform_point3(old[i]);
                         pushes += self.pos[i] - from;
                         effort += (self.pos[i] - from).length();
+                        taken += with;
+                        takers += 1.0;
                         if touch.is_none_or(|t| depth > t.1) {
-                            touch = Some((n, depth, friction));
+                            touch = Some((n, depth, friction, with));
                         }
                     }
                 }
@@ -919,14 +1226,13 @@ impl Net {
                         self.pos[i] -= up * height;
                         pushes -= up * height;
                         effort -= height;
+                        taken += old[i];
+                        takers += 1.0;
                         if touch.is_none_or(|t| -height > t.1) {
-                            touch = Some((up, -height, floor_friction));
+                            touch = Some((up, -height, floor_friction, old[i]));
                         }
                     }
                 }
-                // Friction: a touching point loses as much of its slide
-                // as the push holds (Coulomb), all of it when it barely
-                // slides.
                 if step + 1 == substeps {
                     let now: f32 = if touch.is_some() { 1.0 } else { 0.0 };
                     self.pressed[i] = now.max(self.pressed[i] * PRESSED_FADE);
@@ -934,14 +1240,14 @@ impl Net {
                 loose[i] = if touch.is_some() { 0.0 } else { light[i] };
                 // Cloth caught between two things that push against each
                 // other (the body and the floor under it, two thighs, a
-                // calf on a thigh) stays where it was caught: pushed out
-                // of one and then the other it would be walked along
-                // between them step after step, out from under a lying
-                // body and up to the waist. Only the floor still has its
-                // way.
+                // calf on a thigh, a hand on a lap) stays between them:
+                // pushed out of one and then the other it would be walked
+                // along between them step after step, out from under a
+                // lying body and up to the waist. It goes where they take
+                // it, half each. Only the floor still has its way.
                 caught[i] = effort > 1e-6 && pushes.length() < effort * tune("pinch", PINCH);
                 if caught[i] {
-                    self.pos[i] = old[i];
+                    self.pos[i] = taken / takers.max(1.0);
                     if let Some((origin, up)) = floor {
                         let height = (self.pos[i] - origin).dot(up) - gap.max(0.0);
                         if height < 0.0 {
@@ -950,8 +1256,11 @@ impl Net {
                     }
                     continue;
                 }
-                if let Some((n, depth, friction)) = touch {
-                    let slide = self.pos[i] - old[i];
+                // Friction: a touching point loses as much of its slide
+                // over what it touches as the push holds (Coulomb), all
+                // of it when it barely slides.
+                if let Some((n, depth, friction, with)) = touch {
+                    let slide = self.pos[i] - with;
                     let along = slide - n * slide.dot(n);
                     let len = along.length();
                     if len > 1e-9 {
@@ -974,7 +1283,7 @@ impl Net {
                     continue;
                 }
                 let gap = (self.gap[a] + self.gap[b]) * 0.5 + thickness;
-                for s in &body {
+                for (s, _) in &body {
                     let middle = (self.pos[a] + self.pos[b]) * 0.5;
                     if let Some((_, dir, dist, r)) = s.inside(middle, gap) {
                         let push = dir * ((r - dist) * 2.0 / (wa + wb));
@@ -1009,10 +1318,14 @@ impl Net {
             // What the body pushed stays where it was pushed to: the
             // cloth next to it comes to it.
             if again {
-                lengths_pass(&self.links, &lengths, &kinds, &loose, &mut self.pos, h, true);
+                lengths_pass(&self.links, &lengths, &kinds, &loose, &mut self.pos, h);
             }
             for (i, ((v, p), o)) in self.vel.iter_mut().zip(&self.pos).zip(&old).enumerate().skip(fixed) {
-                *v = if none[i] { Vec3::ZERO } else { (*p - *o) / h };
+                *v = if none[i] {
+                    Vec3::ZERO
+                } else {
+                    ((*p - *o) / h).clamp_length_max(fastest)
+                };
             }
         }
     }
@@ -1061,15 +1374,9 @@ impl Net {
         }
         let round = |i: u32| open[i as usize] & OPEN_ROUND == 0;
         let point = |i: u32| open[i as usize] & OPEN_POINT == 0;
-        let before = |i: u32| {
-            let i = i as usize;
-            (i / cols * cols + (i % cols + cols - 1) % cols) as u32
-        };
         self.links.retain(|&(a, b, kind)| match kind {
             ACROSS => round(a),
-            // From `a` to the one after the next: both steps.
-            BEND_ROUND => round(a) && round(before(b)),
-            DOWN | BEND_DOWN => point(a) && point(b),
+            DOWN => point(a) && point(b),
             // A diagonal lies in one cell: `a` is in its upper row, at
             // its first column or the one after.
             _ => {
@@ -1090,8 +1397,68 @@ impl Net {
                 cells.len()
             );
         }
+        self.bends = bends(cols, rows, &open);
         self.open = open;
     }
+}
+
+/// The most a garment is taken to hang past the ends of its chains.
+const PAST: f32 = 0.4;
+
+/// How far the cloth weighted to `chain_nodes` hangs past the ends of
+/// the chains: `ends` gives each chain's end and the way it points
+/// there. The furthest vertex counts, each measured from the end
+/// nearest to it.
+fn past_the_ends(scene: &Scene, chain_nodes: &[usize], ends: &[(Vec3, Vec3)]) -> f32 {
+    let (world, _) = scene.world();
+    let mut past = 0.0f32;
+    for r in &scene.renderers {
+        if !r.skinned || r.mesh.skin.is_empty() || r.mesh.positions.is_empty() {
+            continue;
+        }
+        let ours: Vec<bool> = r
+            .bones
+            .iter()
+            .map(|b| b.is_some_and(|n| chain_nodes.binary_search(&n).is_ok()))
+            .collect();
+        if !ours.iter().any(|&o| o) {
+            continue;
+        }
+        let positions = scene.draw_mesh(r, &world).positions();
+        for (sv, p) in r.mesh.skin.iter().zip(&positions) {
+            let share: f32 = (0..4)
+                .filter(|&k| ours.get(sv.bones[k] as usize).copied().unwrap_or(false))
+                .map(|k| sv.weights[k])
+                .sum();
+            if share <= 0.5 {
+                continue;
+            }
+            let p = Vec3::from(*p);
+            let Some(&(end, on)) = ends
+                .iter()
+                .min_by(|a, b| (a.0 - p).length_squared().total_cmp(&(b.0 - p).length_squared()))
+            else {
+                continue;
+            };
+            past = past.max(past_one(p, end, on));
+        }
+    }
+    past.min(PAST)
+}
+
+/// How far past a chain's `end` the point `p` is, along the way `on` the
+/// chain points there.
+fn past_one(p: Vec3, end: Vec3, on: Vec3) -> f32 {
+    (p - end).dot(on).max(0.0)
+}
+
+/// How many columns between each two chains and how many rows put the
+/// points of a net `spacing` apart: `length` is the skirt's length and
+/// `round` the distance between two chains at the hem.
+fn grid(length: f32, round: f32, spacing: f32) -> (usize, usize) {
+    let between = ((round / spacing).round() as usize).clamp(1, BETWEEN + 1) - 1;
+    let rows = ((length / spacing).round() as usize + 1).clamp(ROWS.0, ROWS.1);
+    (between, rows)
 }
 
 /// The cells of a net (`cols` per row, `rows - 1` rows) that a triangle
@@ -1133,20 +1500,16 @@ fn fixed_rows(reach: &[f32], cols: usize, rows: usize) -> usize {
 }
 
 /// One pass over the links: each is brought to its length, by the
-/// lightness of its two ends. `lengths_only` leaves the bending out.
+/// lightness of its two ends.
 fn lengths_pass(
     links: &[(u32, u32, u8)],
     lengths: &[f32],
-    kinds: &[(f32, f32, f32); 5],
+    kinds: &[(f32, f32, f32); 3],
     light: &[f32],
     pos: &mut [Vec3],
     h: f32,
-    lengths_only: bool,
 ) {
     for (&(a, b, kind), &len) in links.iter().zip(lengths) {
-        if lengths_only && kind > DIAGONAL {
-            continue;
-        }
         let (a, b) = (a as usize, b as usize);
         let (pulled, pushed, least) = kinds[kind as usize];
         let (wa, wb) = (light[a], light[b]);
@@ -1164,7 +1527,7 @@ fn lengths_pass(
         } else {
             (pushed, len)
         };
-        let alpha = compliance / (h * h);
+        let alpha = compliance * (len / LINK).powi(2) / (h * h);
         let lambda = -(dist - len) / (wa + wb + alpha);
         let n = d / dist;
         pos[a] += n * (lambda * wa);
@@ -1747,6 +2110,7 @@ mod tests {
             src: rest.iter().map(|&p| [(0, p, 1.0), (0, p, 0.0)]).collect(),
             reach,
             links: links(cols, rows),
+            bends: bends(cols, rows, &[]),
             chain_nodes: vec![0],
             pos: rest.clone(),
             vel: vec![Vec3::ZERO; rest.len()],
@@ -1759,6 +2123,7 @@ mod tests {
             pressed: vec![0.0; rest.len()],
             shell_rest: Vec::new(),
             shell_before: Vec::new(),
+            shell_was: Vec::new(),
             before: rest.clone(),
             rest_on_waist: rest.clone(),
             shape_on_waist: rest.clone(),
@@ -1797,7 +2162,7 @@ mod tests {
 
     #[test]
     fn a_hanging_net_stays_on_its_target() {
-        let (scene, mut net) = cone(16, 8, 0.12, 0.2, 0.4);
+        let (scene, mut net) = cone(16, 8, 0.12, 0.16, 0.4);
         run(&scene, &mut net, &[], None, 120);
         for (p, t) in net.pos.iter().zip(&net.target) {
             assert!((*p - *t).length() < 0.03, "{p} is off {t}");
@@ -2082,14 +2447,87 @@ mod tests {
         assert!(f[7][2].y < 0.0, "the hem's way down is {}", f[7][2]);
     }
 
+    /// A strip of cloth `length` long held out level by one end, made
+    /// of points `spacing` apart, left to droop: how far its free end
+    /// comes down. Three columns, so that the bends have a line to be
+    /// measured round.
+    fn droop(length: f32, spacing: f32, bending: f32) -> f32 {
+        let rows = (length / spacing).round() as usize + 2;
+        let cols = 3;
+        let mut pos: Vec<Vec3> = (0..rows * cols)
+            .map(|i| Vec3::new((i / cols) as f32 * spacing, 1.0, (i % cols) as f32 * spacing))
+            .collect();
+        let rest = pos.clone();
+        // The ring's bends, less those round it: the strip is flat.
+        let bends: Vec<Bend> = bends(cols, rows, &[]).into_iter().filter(|b| !b.round).collect();
+        let bend_rest: Vec<Option<BendRest>> = bends
+            .iter()
+            .map(|_| {
+                Some(BendRest {
+                    angle: 0.0,
+                    compliance: spacing * spacing / (9.81 * bending.powi(3)),
+                    most: 3.0,
+                })
+            })
+            .collect();
+        let links = links(cols, rows);
+        let lengths: Vec<f32> = links
+            .iter()
+            .map(|&(a, b, _)| (rest[a as usize] - rest[b as usize]).length())
+            .collect();
+        let kinds = [(0.0, 0.0, 1.0); 3];
+        let light: Vec<f32> = (0..rows * cols).map(|i| if i < 2 * cols { 0.0 } else { 1.0 }).collect();
+        let mut vel = vec![Vec3::ZERO; pos.len()];
+        let h = 1.0 / 480.0;
+        for _ in 0..480 * 6 {
+            let old = pos.clone();
+            for i in 2 * cols..pos.len() {
+                vel[i] = (vel[i] + GRAVITY * h) * (-3.0 * h).exp();
+                pos[i] += vel[i] * h;
+            }
+            lengths_pass(&links, &lengths, &kinds, &light, &mut pos, h);
+            bends_pass(&bends, &bend_rest, &light, &mut pos, h);
+            for i in 0..pos.len() {
+                vel[i] = (pos[i] - old[i]) / h;
+            }
+        }
+        rest[pos.len() - 2].y - pos[pos.len() - 2].y
+    }
+
+    #[test]
+    fn a_strip_held_out_droops_by_its_bending_length_at_any_spacing() {
+        // A beam whose weight bends it a little: the end comes down by
+        // its length to the fourth over eight times the bending length
+        // cubed. Here 6 cm of cloth with a bending length of 6 cm. A
+        // strip of few points is heavier at its end and bends in full at
+        // the point it is held by, so it droops more than that, by about
+        // the same at 2 cm and at 1 cm.
+        let theory = 0.06f32.powi(4) / (8.0 * 0.06f32.powi(3));
+        let (coarse, fine) = (droop(0.06, 0.02, 0.06), droop(0.06, 0.01, 0.06));
+        assert!(coarse > theory && coarse < theory * 2.5, "{coarse} for {theory}");
+        assert!((fine - coarse).abs() < coarse * 0.15, "{fine} for {coarse}");
+        // Limp cloth hangs straight down from where it is held.
+        let limp = droop(0.2, 0.02, 0.02);
+        assert!(limp > 0.15, "{limp}");
+    }
+
     #[test]
     fn links_join_each_point_to_its_neighbours_round_the_ring() {
         let l = links(4, 3);
         assert!(l.contains(&(3, 0, ACROSS)));
         assert!(l.contains(&(0, 4, DOWN)));
-        assert!(l.contains(&(0, 8, BEND_DOWN)));
         assert!(!l.iter().any(|&(a, b, _)| a == b));
-        // Per column: 2 down, 3 across, 4 diagonals, 1 and 3 bends.
-        assert_eq!(l.len(), 4 * (2 + 3 + 4 + 1 + 3));
+        // Per column: 2 down, 3 across, 4 diagonals.
+        assert_eq!(l.len(), 4 * (2 + 3 + 4));
+        // One bend down per column, at the middle row, and one round
+        // per point.
+        let b = bends(4, 3, &[]);
+        assert_eq!(b.len(), 4 + 12);
+        assert!(b.contains(&Bend {
+            ends: [0, 8],
+            at: 4,
+            axis: [7, 5],
+            round: false
+        }));
     }
 }

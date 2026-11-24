@@ -2075,6 +2075,15 @@ impl Physics {
         }
     }
 
+    /// Starts the cloth nets again in the pose the body is in at the next
+    /// step: they then take the body from their rest shape into that pose
+    /// at their own pace (`Net::start`), whatever way the bones came by.
+    pub fn restart_cloth(&mut self) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.reset_nets();
+        }
+    }
+
     /// Moves every particle with the character when it is placed somewhere
     /// else while nothing runs, so that hair and skirts keep the shape they
     /// settled in. `ResetParticlesPosition` would put them back on bones
