@@ -770,7 +770,7 @@ fn play_group(ui: &mut Ui, k: &Look, st: &mut State, center: Pos2) {
     }
 }
 
-pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
+pub fn status_bar(ui: &mut Ui, k: &Look, st: &mut State) {
     let t = &k.t;
     let rect = ui.max_rect();
     let p = ui.painter();
@@ -796,15 +796,27 @@ pub fn status_bar(ui: &mut Ui, k: &Look, st: &State) {
     crate::jobs::status_line(ui, k, &st.jobs, rect);
 
     let mut x = rect.right() - 12.0;
-    // A newer Renkatsu, as the check at start found: a click opens its page.
+    // A newer Renkatsu, as the check at start found: a click installs it,
+    // and once it is installed restarts into it.
     if let Some(release) = &st.update {
-        let text = format!("Renkatsu {} is out", release.version);
-        let r = small(x, Align2::RIGHT_CENTER, &text, t.accent);
-        let resp = ui.interact(r.expand(4.0), ui.id().with("update"), egui::Sense::click());
-        if resp.clicked() {
-            crate::settings::open_url(&release.url);
+        let (text, color, busy) = match &st.updating {
+            None => (format!("Renkatsu {} is out", release.version), t.accent, false),
+            Some(u) if u.failed.is_some() => (u.text(), t.stop, false),
+            Some(u) => (u.text(), if u.busy() { t.text_dim } else { t.accent }, u.busy()),
+        };
+        let r = small(x, Align2::RIGHT_CENTER, &text, color);
+        let mut resp = ui.interact(r.expand(4.0), ui.id().with("update"), egui::Sense::click());
+        if !busy && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        resp.on_hover_text("Open the release page");
+        resp = match st.updating.as_ref().and_then(|u| u.failed.clone()) {
+            Some(why) => resp.on_hover_text(why),
+            None if st.updating.is_none() => resp.on_hover_text("Install Update"),
+            None => resp,
+        };
+        if resp.clicked() && !busy {
+            st.update_clicked(ui.ctx());
+        }
         x = r.left() - 12.0;
         hair_v(p, x, rect.top() + 6.0, rect.bottom() - 5.0, t.border);
         x -= 12.0;

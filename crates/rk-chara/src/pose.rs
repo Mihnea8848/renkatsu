@@ -33,6 +33,21 @@ pub struct Layer {
     /// Edited bones by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fk: BTreeMap<String, BoneEdit>,
+    /// Whether IK moves the body to its targets, over the animation and
+    /// FK.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ik_on: bool,
+    /// The IK groups switched on, as CharaStudio's.
+    #[serde(default = "all_ik_groups", skip_serializing_if = "is_all_ik_groups")]
+    pub ik_groups: Vec<IkGroup>,
+    /// The 13 targets in the order of CharaStudio's `IKTargetEN`, in the
+    /// character's own space; empty until IK is first switched on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ik: Vec<IkTarget>,
+    /// KKPE's Optimize IK, on by default for every character: the spine's
+    /// stiffness and the body's vertical pull are 0.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub optimize_ik: bool,
 }
 
 impl Default for Layer {
@@ -41,8 +56,140 @@ impl Default for Layer {
             fk_on: false,
             fk_parts: start_parts(),
             fk: BTreeMap::new(),
+            ik_on: false,
+            ik_groups: all_ik_groups(),
+            ik: Vec::new(),
+            optimize_ik: true,
         }
     }
+}
+
+/// CharaStudio's IK groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IkGroup {
+    Body,
+    LeftArm,
+    RightArm,
+    LeftLeg,
+    RightLeg,
+}
+
+impl IkGroup {
+    pub const ALL: [IkGroup; 5] = [
+        IkGroup::Body,
+        IkGroup::RightArm,
+        IkGroup::LeftArm,
+        IkGroup::RightLeg,
+        IkGroup::LeftLeg,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IkGroup::Body => "Body",
+            IkGroup::LeftArm => "Left arm",
+            IkGroup::RightArm => "Right arm",
+            IkGroup::LeftLeg => "Left leg",
+            IkGroup::RightLeg => "Right leg",
+        }
+    }
+
+    /// The group of a target, by its place in `Layer::ik`.
+    pub fn of_target(target: usize) -> IkGroup {
+        match target {
+            0 => IkGroup::Body,
+            1..=3 => IkGroup::LeftArm,
+            4..=6 => IkGroup::RightArm,
+            7..=9 => IkGroup::LeftLeg,
+            _ => IkGroup::RightLeg,
+        }
+    }
+}
+
+/// How many IK targets a character has.
+pub const IK_TARGETS: usize = 13;
+
+/// The targets' names, as CharaStudio's `IKTargetEN`.
+pub const IK_TARGET_NAMES: [&str; IK_TARGETS] = [
+    "Body",
+    "LeftShoulder",
+    "LeftArmChain",
+    "LeftHand",
+    "RightShoulder",
+    "RightArmChain",
+    "RightHand",
+    "LeftThigh",
+    "LeftLegChain",
+    "LeftFoot",
+    "RightThigh",
+    "RightLegChain",
+    "RightFoot",
+];
+
+/// An IK target, in the character's own space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IkTarget {
+    pub pos: Vec3,
+    #[serde(default = "no_turn", skip_serializing_if = "is_no_turn")]
+    pub rot: Quat,
+}
+
+/// The prefix of an IK target's name among a character's keys, beside
+/// her bones': `ik/LeftHand`.
+pub const IK_KEY: &str = "ik/";
+
+/// The name an IK target's keys go by.
+pub fn ik_key(target: usize) -> String {
+    format!("{IK_KEY}{}", IK_TARGET_NAMES[target])
+}
+
+/// The target a key name is of, when it is an IK target's.
+pub fn ik_key_target(name: &str) -> Option<usize> {
+    let target = name.strip_prefix(IK_KEY)?;
+    IK_TARGET_NAMES.iter().position(|n| *n == target)
+}
+
+/// An IK target as people call it.
+pub fn ik_label(target: usize) -> &'static str {
+    [
+        "Body (IK)",
+        "Left shoulder (IK)",
+        "Left elbow (IK)",
+        "Left hand (IK)",
+        "Right shoulder (IK)",
+        "Right elbow (IK)",
+        "Right hand (IK)",
+        "Left thigh (IK)",
+        "Left knee (IK)",
+        "Left foot (IK)",
+        "Right thigh (IK)",
+        "Right knee (IK)",
+        "Right foot (IK)",
+    ][target]
+}
+
+/// Whether a target has a turn of its own, as the hands and feet do;
+/// the others are points (CharaStudio's `usedRot`).
+pub fn ik_target_turns(target: usize) -> bool {
+    matches!(target, 3 | 6 | 9 | 12)
+}
+
+fn all_ik_groups() -> Vec<IkGroup> {
+    IkGroup::ALL.to_vec()
+}
+
+// serde's `skip_serializing_if` hands it the field as it is.
+#[allow(clippy::ptr_arg)]
+fn is_all_ik_groups(groups: &Vec<IkGroup>) -> bool {
+    IkGroup::ALL.iter().all(|g| groups.contains(g)) && groups.len() == IkGroup::ALL.len()
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 fn start_parts() -> Vec<Part> {
@@ -59,11 +206,57 @@ fn is_start_parts(parts: &Vec<Part>) -> bool {
     sorted == start
 }
 
+impl IkTarget {
+    /// As the edit its keys hold: a place and a turn.
+    pub fn as_edit(self) -> BoneEdit {
+        BoneEdit {
+            pos: self.pos,
+            rot: self.rot,
+            ..BoneEdit::default()
+        }
+    }
+
+    pub fn of_edit(edit: BoneEdit) -> IkTarget {
+        IkTarget {
+            pos: edit.pos,
+            rot: edit.rot,
+        }
+    }
+}
+
 impl Layer {
+    /// Lays keyed edits over the layer: bones' over FK, IK targets' over
+    /// the targets.
+    pub fn with_keys(&mut self, keyed: BTreeMap<String, BoneEdit>) {
+        for (name, edit) in keyed {
+            match ik_key_target(&name) {
+                Some(target) => {
+                    if let Some(t) = self.ik.get_mut(target) {
+                        *t = IkTarget::of_edit(edit);
+                    }
+                }
+                None => {
+                    self.fk.insert(name, edit);
+                }
+            }
+        }
+    }
+
     /// Whether the layer holds nothing: FK off, its parts as they start and
     /// no edits kept.
     pub fn is_empty(&self) -> bool {
-        !self.fk_on && is_start_parts(&self.fk_parts) && self.fk.values().all(BoneEdit::is_identity)
+        !self.fk_on
+            && is_start_parts(&self.fk_parts)
+            && self.fk.values().all(BoneEdit::is_identity)
+            && !self.ik_on
+            && self.ik.is_empty()
+            && is_all_ik_groups(&self.ik_groups)
+            && self.optimize_ik
+    }
+
+    /// Whether an IK target's group is on.
+    pub fn ik_group_on(&self, target: usize) -> bool {
+        self.ik_groups.contains(&IkGroup::of_target(target))
     }
 
     /// Whether a bone of the FK table, in `parts`, takes its edit: one of
@@ -434,6 +627,30 @@ mod tests {
             ..base
         };
         assert!(BoneEdit::baked(base, crumbs).is_identity());
+    }
+
+    #[test]
+    fn keys_lay_over_the_bones_and_the_ik_targets() {
+        let mut layer = Layer {
+            ik: vec![
+                IkTarget {
+                    pos: Vec3::ZERO,
+                    rot: Quat::IDENTITY,
+                };
+                IK_TARGETS
+            ],
+            ..Layer::default()
+        };
+        let lift = BoneEdit {
+            pos: Vec3::Y,
+            ..BoneEdit::default()
+        };
+        layer.with_keys(BTreeMap::from([(ik_key(9), lift), ("cf_j_neck".to_owned(), lift)]));
+        assert_eq!(layer.ik[9].pos, Vec3::Y);
+        assert_eq!(layer.fk["cf_j_neck"], lift);
+        assert!(!layer.fk.contains_key(&ik_key(9)));
+        assert_eq!(ik_key_target("ik/LeftFoot"), Some(9));
+        assert_eq!(ik_key_target("cf_j_neck"), None);
     }
 
     #[test]

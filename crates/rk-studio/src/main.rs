@@ -27,6 +27,7 @@ mod gizmo_pass;
 mod grid_pass;
 mod jobs;
 mod keycaps;
+mod keying;
 mod keymap;
 mod kinds;
 mod landing;
@@ -50,12 +51,14 @@ mod properties;
 mod scene;
 mod selector;
 mod self_update;
+mod sequence;
 mod settings;
 mod shortcuts;
 mod sources;
 mod state;
 mod surface;
 mod theme;
+mod timeline;
 mod viewport;
 mod widgets;
 
@@ -136,6 +139,10 @@ struct Cli {
     /// Show a newer Renkatsu as found, to picture the notice.
     #[arg(long, hide = true)]
     pretend_update: Option<String>,
+    /// Start installing the newer Renkatsu found at the start, as a click
+    /// on it does, to try the update.
+    #[arg(long, hide = true)]
+    install_update: bool,
     /// Start with the Packages window open, to picture it.
     #[arg(long, hide = true)]
     packages: bool,
@@ -168,6 +175,15 @@ struct Cli {
     /// built, to picture it.
     #[arg(long, hide = true)]
     bake_pose: bool,
+    /// Switch IK on for the selected character once she is built, with
+    /// this target (a name of CharaStudio's IKTargetEN) moved by X,Y,Z in
+    /// her own space, as `LeftHand:0,0.15,0.1`, to picture IK.
+    #[arg(long, hide = true)]
+    ik_move: Vec<String>,
+    /// Start with this IK target (a name of CharaStudio's IKTargetEN)
+    /// chosen for the gizmo, to picture it.
+    #[arg(long, hide = true)]
+    pose_ik: Option<String>,
     /// Save the selected character's pose once she is built (after a
     /// bake or a mirror asked for), to picture it.
     #[arg(long, hide = true)]
@@ -622,6 +638,9 @@ impl Studio {
                 url: "https://github.com/Mihnea8848/renkatsu/releases".to_owned(),
             });
         }
+        if cli.install_update {
+            state.update_clicked(&cc.egui_ctx);
+        }
         let selecting = state.project.is_none();
         if selecting {
             state.show_selector();
@@ -727,6 +746,25 @@ impl Studio {
         state.sun_preview = cli.sun_preview;
         state.mirror_pending = cli.mirror_pose;
         state.bake_pending = cli.bake_pose;
+        if let Some(name) = &cli.pose_ik {
+            state.pose_ik = Some(
+                rk_chara::pose::IK_TARGET_NAMES
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+                    .with_context(|| format!("no IK target {name}"))?,
+            );
+        }
+        state.ik_wanted = !cli.ik_move.is_empty();
+        for spec in &cli.ik_move {
+            let (name, by) = spec.split_once(':').context("--ik-move is Target:x,y,z")?;
+            let target = rk_chara::pose::IK_TARGET_NAMES
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))
+                .with_context(|| format!("no IK target {name}"))?;
+            let p: Vec<f32> = by.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            anyhow::ensure!(p.len() == 3, "--ik-move is Target:x,y,z");
+            state.ik_pending.push((target, glam::Vec3::new(p[0], p[1], p[2])));
+        }
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
@@ -996,6 +1034,13 @@ impl eframe::App for Studio {
                 eprintln!("The layout could not be kept: {e:#}");
             }
         }
+        // Restarting into an update, on the project that was open.
+        if let Some(program) = self.state.restart_into.take() {
+            let project = (!self.state.project.is_none()).then(|| self.state.project.root.clone());
+            if let Err(e) = self_update::start(&program, project.as_deref()) {
+                eprintln!("The updated Renkatsu did not start: {e}");
+            }
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1118,16 +1163,28 @@ impl eframe::App for Studio {
         // A mirror asked for at the start, once the character is built.
         if self.state.mirror_pending {
             let id = self.state.doc.selected;
-            let ready = id.is_some_and(|id| {
-                self.state
-                    .live
-                    .as_ref()
-                    .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
-            });
+            // After any IK asked for has reached the live character.
+            let ik_ready = self.state.ik_pending.is_empty()
+                && (!self.state.ik_wanted
+                    || id.is_some_and(|id| self.state.live.as_ref().is_some_and(|l| l.ik_handles(id).is_some())));
+            let ready = ik_ready
+                && id.is_some_and(|id| {
+                    self.state
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.mirror_edits(id, None).is_some_and(|m| !m.is_empty()))
+                });
             if ready {
                 viewport::mirror(&mut self.state, false);
                 self.state.mirror_pending = false;
             }
+        }
+
+        // An update at work: with no project open it restarts into the new
+        // Renkatsu at once, with one it waits to be restarted.
+        let no_project = self.state.project.is_none();
+        if let Some(updating) = &mut self.state.updating {
+            updating.poll(ctx, no_project);
         }
 
         // A bake asked for at the start, once the animation poses her.
@@ -1143,6 +1200,29 @@ impl eframe::App for Studio {
             if ready {
                 viewport::bake_animation(&mut self.state);
                 self.state.bake_pending = false;
+            }
+        }
+
+        // IK asked for at the start, once the character is built and any
+        // bake is done: the targets on her bones, then moved.
+        if !self.state.ik_pending.is_empty() && !self.state.bake_pending {
+            let on_bones = self
+                .state
+                .doc
+                .selected
+                .and_then(|id| self.state.live.as_ref()?.ik_targets_on_bones(id));
+            if let (Some(id), Some(mut targets)) = (self.state.doc.selected, on_bones) {
+                for (target, by) in std::mem::take(&mut self.state.ik_pending) {
+                    targets[target].pos += by;
+                }
+                if let Some(mut object) = self.state.doc.scene().get(id).cloned() {
+                    if let scene::Content::Character { pose_layer, .. } = &mut object.content {
+                        let layer = pose_layer.get_or_insert_with(Default::default);
+                        layer.ik_on = true;
+                        layer.ik = targets;
+                    }
+                    self.state.doc.edit(object, false);
+                }
             }
         }
 
@@ -1233,7 +1313,7 @@ impl Studio {
             self.dock = panels::default_layout(self.bottom);
             self.state.maximised = false;
         }
-        bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &self.state));
+        bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &mut self.state));
         chrome::window_edges(ui.ctx(), &k);
         if k.d.overlays == Overlays::Header && !self.state.overlays_hidden {
             egui::Panel::left("rail")

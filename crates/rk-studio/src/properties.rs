@@ -1280,8 +1280,8 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             .clone()
             .filter(|n| joints.as_ref().is_some_and(|j| j.iter().any(|(_, b)| b == n)));
         let edit = name
-            .as_ref()
-            .and_then(|n| pose_layer.as_ref()?.fk.get(n).copied())
+            .as_deref()
+            .map(|n| crate::keying::shown(st, id, n))
             .unwrap_or_default();
         let off = waiting.or(name.is_none().then_some("No bone chosen"));
         row(ui, k, "Bone", off, |ui, rect| {
@@ -1339,11 +1339,15 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 rk_chara::scene::euler_deg(angles[0], angles[1], angles[2])
             };
             let edit = rk_chara::pose::BoneEdit { rot, ..edit };
-            let layer = pose_layer.get_or_insert_with(Default::default);
-            if edit.is_identity() {
-                layer.fk.remove(&name);
+            if crate::keying::keyed(st, id, &name) {
+                crate::keying::write(st, id, &name, edit, false);
             } else {
-                layer.fk.insert(name, edit);
+                let layer = pose_layer.get_or_insert_with(Default::default);
+                if edit.is_identity() {
+                    layer.fk.remove(&name);
+                } else {
+                    layer.fk.insert(name, edit);
+                }
             }
         }
         section_end(ui, k);

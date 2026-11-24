@@ -265,8 +265,11 @@ impl Shelf {
     }
 
     fn take(&mut self, (items, table): Read, pictures: &mut Pictures) {
-        if let Some(table) = table {
-            pictures.table.get_or_insert(table);
+        // The maps as read now say where the pictures are: a package
+        // installed since the last read brings pictures of its own.
+        if table.is_some() && table != pictures.table {
+            pictures.forget_game();
+            pictures.table = table;
         }
         self.rows = source_rows(&items);
         self.items = items;
@@ -379,6 +382,13 @@ pub struct Pictures {
 }
 
 impl Pictures {
+    /// Forgets what was found in the game, which changed: where its
+    /// pictures are, and the pictures, found or not.
+    pub fn forget_game(&mut self) {
+        self.table = None;
+        self.textures.clear();
+    }
+
     /// What the sidecar at `path` says, read once.
     pub fn sidecar(&mut self, path: &Path) -> Option<crate::maps::MapFile> {
         self.sidecars
@@ -826,6 +836,39 @@ fn accept(st: &mut State, shelf: &Shelf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_read_again_bring_their_own_pictures() {
+        let mut shelf = Shelf {
+            items: Vec::new(),
+            incoming: None,
+            game: None,
+            rows: Vec::new(),
+            source: 0,
+            place: None,
+            search: String::new(),
+            chosen: None,
+            to_scene: false,
+        };
+        let mut pictures = Pictures::default();
+        // Before Starter Content: Maps, the game listed no pictures, and a
+        // map was found to have none.
+        shelf.take((Vec::new(), Some(HashMap::new())), &mut pictures);
+        pictures
+            .textures
+            .insert(("map/school.unity3d".into(), MapTime::Day), None);
+        // With it, the maps are read again and say where pictures are.
+        let listed = HashMap::from([(
+            "map/school.unity3d".to_owned(),
+            ("map/thumbnail/00.unity3d".to_owned(), "thumb_00".to_owned()),
+        )]);
+        shelf.take((Vec::new(), Some(listed.clone())), &mut pictures);
+        assert_eq!(pictures.table, Some(listed));
+        assert!(
+            pictures.textures.is_empty(),
+            "the picture found missing is looked for again"
+        );
+    }
 
     #[test]
     fn maps_stand_in_their_places() {

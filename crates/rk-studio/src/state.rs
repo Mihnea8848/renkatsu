@@ -149,6 +149,11 @@ pub enum Command {
     LoadPose(String),
     /// Save the selected character's pose in the project's Poses folder.
     SavePose,
+    /// Save the selected character's keys as an animation of the project.
+    SaveKeys,
+    /// Give the selected character the keys saved in this file of the
+    /// project, in place of her own.
+    LoadKeys(String),
     /// Choose animations of the installed packages, of Koikatsu and of
     /// mods, and copy them into the project.
     ImportAnimations,
@@ -322,11 +327,18 @@ pub struct State {
     pub bake_pending: bool,
     /// `--save-pose`: save the pose once the character is built.
     pub save_pose_pending: bool,
+    /// `--ik-move`: targets to move once the character is built.
+    pub ik_pending: Vec<(usize, glam::Vec3)>,
+    pub ik_wanted: bool,
     /// The bone the Pose page shows, by name.
     pub pose_bone: Option<String>,
     /// Whether Forward kinematics is open in the Pose palette, showing its
     /// parts.
     pub fk_open: bool,
+    /// The Pose palette's Inverse kinematics category is open.
+    pub ik_open: bool,
+    /// The IK target chosen for the gizmo, by its place in the layer.
+    pub pose_ik: Option<usize>,
     /// What the Animator panel's skeleton is searched by.
     pub animator_search: String,
     /// The project that is open; `Project::none()` while the project
@@ -377,6 +389,15 @@ pub struct State {
     pub update: Option<rk_packages::update::Release>,
     /// Install Update at work, or stopped with why.
     pub updating: Option<crate::self_update::Updating>,
+    /// The updated program to start once Renkatsu has quit.
+    pub restart_into: Option<PathBuf>,
+    /// A key copied, to paste on a bone.
+    pub key_clipboard: Option<rk_chara::pose::BoneEdit>,
+    /// Playing a sequence with keys starts over at its end.
+    pub loop_sequence: bool,
+    /// The character whose keys play alone, and where they are.
+    pub solo: Option<ObjectId>,
+    pub solo_time: f32,
     /// The window may close.
     pub quit: bool,
     /// Folders whose content is folded away in the Outliner.
@@ -843,8 +864,12 @@ impl State {
             mirror_pending: false,
             bake_pending: false,
             save_pose_pending: false,
+            ik_pending: Vec::new(),
+            ik_wanted: false,
             pose_bone: None,
             fk_open: false,
+            ik_open: false,
+            pose_ik: None,
             animator_search: String::new(),
             library: Library::new(&project),
             project,
@@ -869,6 +894,11 @@ impl State {
             scripted: false,
             update: None,
             updating: None,
+            restart_into: None,
+            key_clipboard: None,
+            loop_sequence: true,
+            solo: None,
+            solo_time: 0.0,
             quit: false,
             folded: HashSet::new(),
             scene_folded: false,
@@ -1118,6 +1148,8 @@ impl State {
             }
             Command::LoadPose(rel) => self.load_pose(&rel),
             Command::SavePose => self.save_pose(),
+            Command::SaveKeys => self.save_keys(),
+            Command::LoadKeys(rel) => self.load_keys(&rel),
             Command::Save => {
                 self.save();
             }
@@ -1479,12 +1511,30 @@ impl State {
         self.doc.selected = selected;
     }
 
+    /// A click on the update: installs it, again after it failed, and once
+    /// it is installed restarts into it by quitting, which asks to save.
+    pub fn update_clicked(&mut self, ctx: &egui::Context) {
+        match &self.updating {
+            Some(u) if u.busy() => {}
+            Some(u) if u.ready().is_some() => {
+                self.restart_into = u.ready().map(Path::to_owned);
+                self.ask(Command::Quit, ctx);
+            }
+            _ => {
+                if let Some(release) = self.update.clone() {
+                    self.updating = Some(crate::self_update::Updating::start(release, ctx));
+                }
+            }
+        }
+    }
+
     /// What characters are built from changed: the Koikatsu folder was
     /// chosen, or a package was installed or removed. The content is
     /// opened again at its next use, and the characters that could not be
     /// built get another try.
     pub fn content_changed(&mut self) {
         self.games.reset();
+        self.map_pictures.forget_game();
         self.content_failed = None;
         self.animations.refresh(&self.project);
         if let Some(importer) = &mut self.importer {
@@ -1762,18 +1812,41 @@ impl State {
                 return;
             }
         };
-        let Some(mut object) = self.doc.selection().cloned() else {
-            return;
-        };
-        let Content::Character {
-            animation, pose_layer, ..
-        } = &mut object.content
+        let Some(id) = self
+            .doc
+            .selection()
+            .filter(|o| matches!(o.content, Content::Character { .. }))
+            .map(|o| o.id)
         else {
             return;
         };
-        *animation = pose.base.map(Box::new);
-        *pose_layer = Some(Box::new(pose.layer)).filter(|l| !l.is_empty());
-        self.doc.edit(object, false);
+        // A bone or target with keys keys the pose's value at the playhead,
+        // so that the pose shows there.
+        let keyed: Vec<(String, rk_chara::pose::BoneEdit)> = self
+            .doc
+            .scene()
+            .sequence
+            .track(id)
+            .map(|t| t.keys.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| {
+                let edit = match rk_chara::pose::ik_key_target(&name) {
+                    Some(target) => pose.layer.ik.get(target).map(|t| t.as_edit()).unwrap_or_default(),
+                    None => pose.layer.fk.get(&name).copied().unwrap_or_default(),
+                };
+                (name, edit)
+            })
+            .collect();
+        crate::keying::write_many(self, id, keyed, |content| {
+            if let Content::Character {
+                animation, pose_layer, ..
+            } = content
+            {
+                *animation = pose.base.map(Box::new);
+                *pose_layer = Some(Box::new(pose.layer)).filter(|l| !l.is_empty());
+            }
+        });
     }
 
     /// Saves the selected character's pose in the Poses folder, named
@@ -1824,6 +1897,90 @@ impl State {
         self.asset = Some(PathBuf::from(&rel));
         self.content_renaming = Some((rel.clone(), content::stem(&rel).to_owned()));
         self.show_content = true;
+    }
+
+    /// Saves the selected character's keys in the Animations folder, named
+    /// after her, with the sequence's length and frames; the file is shown
+    /// in the Content panel, ready to be renamed.
+    fn save_keys(&mut self) {
+        if self.project.is_none() {
+            return;
+        }
+        let Some(object) = self.doc.selection() else {
+            return;
+        };
+        let sequence = &self.doc.scene().sequence;
+        let Some(track) = sequence.track(object.id).filter(|t| !t.keys.is_empty()) else {
+            return;
+        };
+        let file = crate::sequence::KeysFile {
+            format: crate::sequence::FORMAT,
+            length: sequence.length,
+            fps: sequence.fps,
+            keys: track.keys.clone(),
+        };
+        let stem: String = object
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_'()".contains(c) {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let stem = format!("{} keys", stem.trim());
+        let dir = self.project.folder(project::ANIMATIONS);
+        let name = content::free_name(&dir, stem.trim(), Some(crate::sequence::KEYS_EXTENSION));
+        let written = std::fs::create_dir_all(&dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| file.write(&dir.join(&name)));
+        if let Err(e) = written {
+            self.log.error(format!("The keys could not be saved: {e:#}"));
+            return;
+        }
+        let rel = format!("{}/{name}", project::ANIMATIONS);
+        self.open_folder(project::ANIMATIONS);
+        self.asset = Some(PathBuf::from(&rel));
+        self.content_renaming = Some((rel.clone(), content::stem(&rel).to_owned()));
+        self.show_content = true;
+    }
+
+    /// Gives the selected character the keys of a file, in place of her
+    /// own, as one step; the sequence grows to hold them.
+    fn load_keys(&mut self, rel: &str) {
+        let file = match crate::sequence::KeysFile::read(&self.project.root.join(rel)) {
+            Ok(f) => f,
+            Err(e) => {
+                self.log.error(format!("The keys could not be read: {e:#}"));
+                return;
+            }
+        };
+        let Some(object) = self
+            .doc
+            .selection()
+            .filter(|o| matches!(o.content, Content::Character { .. }))
+        else {
+            return;
+        };
+        let (id, name) = (object.id, object.name.clone());
+        // Keys pose a character while FK is on: switched on in the same
+        // step as the keys come.
+        let mut object = object.clone();
+        if let Content::Character { pose_layer, .. } = &mut object.content {
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            if !layer.fk_on {
+                layer.fk_on = true;
+                self.doc.edit(object, true);
+            }
+        }
+        let mut sequence = self.doc.scene().sequence.clone();
+        sequence.length = sequence.length.max(file.length);
+        sequence.track_mut(id, &name).keys = file.keys;
+        sequence.tidy();
+        self.doc.edit_sequence(sequence, false);
+        self.doc.end_gesture();
     }
 
     pub fn open_folder(&mut self, rel: &str) {
@@ -2392,6 +2549,42 @@ fn clear_side(orbit: crate::camera::Orbit, surface: &dyn crate::surface::Surface
 mod tests {
     use super::*;
     use crate::scene::Place;
+
+    #[test]
+    fn keys_saved_as_an_animation_go_on_another_character() {
+        let home = scratch("keys");
+        let root = home.join("P");
+        let project = Project::create(&root, "P").unwrap();
+        let mut st = State::new(project, Scene::new());
+        let anna = st.doc.add_character("Anna", "Characters/anna.png".into());
+        let bea = st.doc.add_character("Bea", "Characters/bea.png".into());
+        st.doc.selected = Some(anna);
+        st.clock = 1.0;
+        let neck = rk_chara::pose::BoneEdit {
+            rot: glam::Quat::from_rotation_y(0.4),
+            ..Default::default()
+        };
+        crate::keying::paste_key(&mut st, anna, "cf_j_neck", neck);
+        st.run(Command::SaveKeys);
+        let rel = "Animations/Anna keys.rkkeys".to_owned();
+        assert!(root.join(&rel).is_file());
+        st.doc.selected = Some(bea);
+        st.run(Command::LoadKeys(rel));
+        let keys = |st: &State, id| st.doc.scene().sequence.track(id).map(|t| t.keys.clone());
+        assert_eq!(keys(&st, bea), keys(&st, anna));
+        assert!(matches!(
+            &st.doc.scene().get(bea).unwrap().content,
+            Content::Character { pose_layer: Some(l), .. } if l.fk_on
+        ));
+        // One step: an undo takes the keys and FK away again.
+        st.doc.undo();
+        assert_eq!(keys(&st, bea), None);
+        assert!(!matches!(
+            &st.doc.scene().get(bea).unwrap().content,
+            Content::Character { pose_layer: Some(l), .. } if l.fk_on
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("renkatsu-state-{name}-{}", std::process::id()));

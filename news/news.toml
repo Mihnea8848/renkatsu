@@ -4,6 +4,7 @@
 [[post]]
 date = 2026-11-24
 title = "Posing by hand works"
+author = "Mihnea8848"
 summary = "Turn any bone, mirror a pose, start from any frame of an animation and keep your poses in the project. It comes with the next version."
 body = """
 Posing by hand works in my builds now, and it comes with the next version.
@@ -29,6 +30,7 @@ pictures = [
 [[post]]
 date = 2026-11-19
 title = "Posing comes next"
+author = "Mihnea8848"
 summary = "I am working on FK and IK posing now. Baked characters come after that."
 body = """
 Characters in Renkatsu can already play the game's animations. With a Koikatsu folder there are 5728 of them, from standing and sitting to dancing, fighting and the H scenes, and Starter Content: Animations & Poses brings 3860 of them without the game. What is missing is the part of CharaStudio most people spend their time in: posing a character by hand. That is what I am working on now.
@@ -54,6 +56,7 @@ pictures = [
 [[post]]
 date = 2026-11-18
 title = "Starter Content is available"
+author = "Mihnea8848"
 summary = "You can use Renkatsu without Koikatsu now. Get Starter Content from the Packages window and you have characters, clothing, animations and maps to work with."
 url = "https://github.com/Mihnea8848/renkatsu/releases"
 body = """

@@ -96,7 +96,17 @@ pub fn read(game: &Game, missing: bool) -> Vec<Entry> {
                         continue;
                     }
                     if let Ok(sheet) = file.sf.read(info) {
-                        add(entries(&sheet_rows(&sheet), &listed));
+                        // A package's map comes from the package that has
+                        // its scene: the lists are in more than one.
+                        let mut found = entries(&sheet_rows(&sheet), &listed);
+                        if matches!(listed, Source::Package(_)) {
+                            for entry in &mut found {
+                                if let Some(own @ Source::Package(_)) = source_of(&game.assets.index, &entry.bundle) {
+                                    entry.source = own;
+                                }
+                            }
+                        }
+                        add(found);
                     }
                 }
             }

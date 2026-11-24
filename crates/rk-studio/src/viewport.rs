@@ -1045,11 +1045,16 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.fk_open && fk_layer(st).is_some() {
         rows += FK_PART_ROWS;
     }
+    if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
+        rows += IK_ROWS;
+    }
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
 /// The rows the FK parts take in the Pose palette, one each.
 const FK_PART_ROWS: usize = rk_chara::bone_info::Part::ALL.len();
+/// The rows of the IK category: its groups, and Optimize IK.
+const IK_ROWS: usize = rk_chara::pose::IkGroup::ALL.len() + 1;
 
 /// The pose layer of the selected character, when a character is selected.
 fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
@@ -1160,7 +1165,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     continue;
                 }
                 if *name == "Forward kinematics" {
-                    fk_category(ui, k, st, row, id, g, name);
+                    kinematics_category(ui, k, st, row, id, g, name, false);
                     y += palette_row(k);
                     index += 1;
                     if st.fk_open {
@@ -1177,6 +1182,24 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     }
                     continue;
                 }
+                if *name == "Inverse kinematics" {
+                    kinematics_category(ui, k, st, row, id, g, name, true);
+                    y += palette_row(k);
+                    index += 1;
+                    if st.ik_open {
+                        if let Some(layer) = fk_layer(st) {
+                            ik_rows(
+                                ui,
+                                k,
+                                st,
+                                Rect::from_min_max(Pos2::new(rect.left(), y), rect.max),
+                                &layer,
+                            );
+                            y += IK_ROWS as f32 * palette_row(k);
+                        }
+                    }
+                    continue;
+                }
                 if *name == "Mirror pose" || *name == "Copy to other side" {
                     // A copy takes the bone chosen and what hangs from it.
                     let copy = *name == "Copy to other side";
@@ -1184,6 +1207,23 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                     let resp = widgets::tool_row(ui, k, row, id, g, name, false);
                     if resp.clicked() && ready {
                         mirror(st, copy);
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
+                if *name == "Set key" || *name == "Delete key" {
+                    // The chosen bone, or every bone the pose has an edit
+                    // or a key for, at the playhead.
+                    let who = fk_layer(st).filter(|l| l.fk_on).and(st.doc.selected);
+                    let bones = who.map(|w| crate::keying::bones_to_key(st, w)).unwrap_or_default();
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if let (true, Some(who), false) = (resp.clicked(), who, bones.is_empty()) {
+                        if *name == "Set key" {
+                            crate::keying::set_keys(st, who, &bones);
+                        } else {
+                            crate::keying::delete_keys(st, who, &bones);
+                        }
                     }
                     y += palette_row(k);
                     index += 1;
@@ -1201,7 +1241,7 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                         if bake {
                             bake_animation(st);
                         } else {
-                            edit_fk_layer(st, |l| l.fk.clear());
+                            reset_bones(st, None);
                         }
                     }
                     y += palette_row(k);
@@ -1256,20 +1296,18 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
 /// A category of the Pose palette that is switched on and opened: an
 /// arrow that opens or closes it, its name, and a box that switches it for
 /// the selected character. Switching it on opens it, off closes it.
-fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str) {
+#[allow(clippy::too_many_arguments)]
+fn kinematics_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g: &str, name: &str, ik: bool) {
     let layer = fk_layer(st);
-    let on = layer.as_ref().is_some_and(|l| l.fk_on);
+    let on = layer.as_ref().is_some_and(|l| if ik { l.ik_on } else { l.fk_on });
+    let open = if ik { st.ik_open } else { st.fk_open };
     let resp = ui.interact(row, id, Sense::click());
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(row, 2.0, k.t.control);
     }
     let y = row.center().y;
-    let arrow = if st.fk_open {
-        icon::CARET_DOWN
-    } else {
-        icon::CARET_RIGHT
-    };
+    let arrow = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
     glyph(p, k, Pos2::new(row.left() + 9.0, y), arrow, 10.0, k.t.text_dim);
     let tint = if on { k.t.text_bright } else { k.t.text };
     glyph(p, k, Pos2::new(row.left() + 24.0, y), g, 16.0, tint);
@@ -1283,12 +1321,68 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
     if layer.is_some() {
         widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
     }
-    if ticked != on {
+    if ticked != on && ik {
+        // The targets start on the bones, as Studio's copy puts them.
+        let on_bones = st.doc.selected.and_then(|id| st.live.as_ref()?.ik_targets_on_bones(id));
+        edit_fk_layer(st, |l| {
+            l.ik_on = ticked;
+            if ticked && l.ik.is_empty() {
+                l.ik = on_bones.unwrap_or_default();
+            }
+        });
+        st.ik_open = ticked;
+    } else if ticked != on {
         edit_fk_layer(st, |l| l.fk_on = ticked);
         st.fk_open = ticked;
         st.show_animator |= ticked;
+    } else if resp.clicked() && ik {
+        st.ik_open = !st.ik_open;
     } else if resp.clicked() {
         st.fk_open = !st.fk_open;
+    }
+}
+
+/// The IK groups as boxes to tick, one to a row, and Optimize IK, under
+/// the category's name.
+fn ik_rows(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara::pose::Layer) {
+    let cell = |i: usize| {
+        Rect::from_min_size(
+            Pos2::new(area.left() + 38.0, area.top() + i as f32 * palette_row(k)),
+            Vec2::new(area.width() - 50.0, palette_row(k)),
+        )
+    };
+    for (i, group) in rk_chara::pose::IkGroup::ALL.into_iter().enumerate() {
+        let mut on = layer.ik_groups.contains(&group);
+        let was = on;
+        widgets::checkbox(
+            ui,
+            k,
+            cell(i),
+            ui.id().with(("ik group", group.label())),
+            &mut on,
+            group.label(),
+        );
+        if on != was {
+            edit_fk_layer(st, |l| {
+                if on {
+                    l.ik_groups.push(group);
+                } else {
+                    l.ik_groups.retain(|g| *g != group);
+                }
+            });
+        }
+    }
+    let mut optimize = layer.optimize_ik;
+    widgets::checkbox(
+        ui,
+        k,
+        cell(rk_chara::pose::IkGroup::ALL.len()),
+        ui.id().with("optimize ik"),
+        &mut optimize,
+        "Optimize IK",
+    );
+    if optimize != layer.optimize_ik {
+        edit_fk_layer(st, |l| l.optimize_ik = optimize);
     }
 }
 
@@ -1297,23 +1391,32 @@ fn fk_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egui::Id, g
 /// of the history.
 pub fn mirror(st: &mut State, copy: bool) {
     let Some(id) = st.doc.selected else { return };
-    let bone = st.pose_bone.clone().filter(|_| copy);
-    let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) else {
-        return;
+    let mut edits: Vec<(String, rk_chara::pose::BoneEdit)> = Vec::new();
+    // A chosen IK target copies onto its twin; the whole pose mirrors its
+    // targets with its bones.
+    let targets: Vec<usize> = match (copy, st.pose_ik) {
+        (true, Some(target)) => vec![target],
+        (true, None) => Vec::new(),
+        (false, _) => (0..rk_chara::pose::IK_TARGETS).collect(),
     };
-    edit_fk_layer(st, |l| {
-        for (name, rot) in found {
-            let edit = rk_chara::pose::BoneEdit {
-                rot,
-                ..l.fk.get(&name).copied().unwrap_or_default()
-            };
-            if edit.is_identity() {
-                l.fk.remove(&name);
-            } else {
-                l.fk.insert(name, edit);
+    if let Some(found) = st.live.as_ref().and_then(|l| l.ik_mirror(id, &targets)) {
+        edits.extend(found.into_iter().map(|(i, t)| (rk_chara::pose::ik_key(i), t.as_edit())));
+    }
+    if !(copy && st.pose_ik.is_some()) {
+        let bone = st.pose_bone.clone().filter(|_| copy);
+        if let Some(found) = st.live.as_ref().and_then(|l| l.mirror_edits(id, bone.as_deref())) {
+            for (name, rot) in found {
+                let edit = rk_chara::pose::BoneEdit {
+                    rot,
+                    ..crate::keying::shown(st, id, &name)
+                };
+                edits.push((name, edit));
             }
         }
-    });
+    }
+    if !edits.is_empty() {
+        crate::keying::write_many(st, id, edits, |_| {});
+    }
 }
 
 /// The project's poses, to give the selected character one.
@@ -1349,31 +1452,41 @@ pub fn bake_animation(st: &mut State) {
     let Some((found, parts)) = st.live.as_mut().and_then(|l| l.baked_edits(id)) else {
         return;
     };
-    let Some(mut object) = st.doc.selection().cloned() else {
-        return;
-    };
-    let crate::scene::Content::Character {
-        animation, pose_layer, ..
-    } = &mut object.content
-    else {
-        return;
-    };
-    *animation = None;
-    let layer = pose_layer.get_or_insert_with(Default::default);
-    layer.fk_on = true;
-    for part in parts {
-        if !layer.fk_parts.contains(&part) {
-            layer.fk_parts.push(part);
+    // The animation goes and FK comes on with the parts the pose turns; the
+    // edits go where each bone's go, its keys or the pose layer.
+    crate::keying::write_many(st, id, found, |content| {
+        if let crate::scene::Content::Character {
+            animation, pose_layer, ..
+        } = content
+        {
+            *animation = None;
+            let layer = pose_layer.get_or_insert_with(Default::default);
+            layer.fk_on = true;
+            for part in parts {
+                if !layer.fk_parts.contains(&part) {
+                    layer.fk_parts.push(part);
+                }
+            }
         }
-    }
-    for (name, edit) in found {
-        if edit.is_identity() {
-            layer.fk.remove(&name);
-        } else {
-            layer.fk.insert(name, edit);
-        }
-    }
-    st.doc.edit(object, false);
+    });
+}
+
+/// Puts the selected character's bones back as one step: those of
+/// `bones`, or all of them. A keyed bone takes a key of no turn at the
+/// playhead; the others lose their edit.
+fn reset_bones(st: &mut State, bones: Option<&[String]>) {
+    let Some(id) = st.doc.selected else { return };
+    let fits = |name: &String| bones.is_none_or(|b| b.contains(name));
+    let mut names: Vec<String> = fk_layer(st).map(|l| l.fk.keys().cloned().collect()).unwrap_or_default();
+    names.extend(crate::keying::keyed_bones(st, id));
+    names.retain(fits);
+    names.sort();
+    names.dedup();
+    let edits = names
+        .into_iter()
+        .map(|n| (n, rk_chara::pose::BoneEdit::default()))
+        .collect();
+    crate::keying::write_many(st, id, edits, |_| {});
 }
 
 /// The FK parts as boxes to tick, one to a row, under the category's
@@ -1430,25 +1543,22 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
             color,
         );
         if resp.clicked() {
-            edit_fk_layer(st, |l| l.fk.retain(|name, _| !bones.contains(name)));
+            reset_bones(st, Some(&bones));
         }
     }
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 20] = [
+const LATER_TOOLS: [&str; 17] = [
     "Replace",
     "Reload",
     "Accessories",
     "Expression",
     "Gaze",
-    "Inverse kinematics",
     "Hands",
     "Look at camera",
     "Depth of field",
-    "Set key",
     "Auto key",
-    "Delete key",
     "Bake physics",
     "New shot from view",
     "Shot list",
@@ -1960,6 +2070,21 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         crate::state::Playback::Paused => {}
         crate::state::Playback::Stopped => st.clock = 0.0,
     }
+    // A character playing alone loops her keys on a time of her own.
+    if st.solo.is_some() {
+        let length = st.doc.scene().sequence.length.max(0.01);
+        st.solo_time = (st.solo_time + dt).rem_euclid(length);
+    }
+    // A sequence with keys plays to its end, then starts over or holds.
+    let sequence = &st.doc.scene().sequence;
+    if st.playback == crate::state::Playback::Playing && !sequence.tracks.is_empty() && st.clock > sequence.length {
+        if st.loop_sequence {
+            st.clock = st.clock.rem_euclid(sequence.length.max(0.01));
+        } else {
+            st.clock = sequence.length;
+            st.playback = crate::state::Playback::Paused;
+        }
+    }
     live.follow(
         st.doc.scene(),
         &st.project,
@@ -1970,6 +2095,7 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
             now: st.playback,
             dt,
             time: st.clock,
+            solo: st.solo.map(|id| (id, st.solo_time)),
         },
         &mut st.log,
     );
