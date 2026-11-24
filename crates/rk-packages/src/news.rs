@@ -30,6 +30,7 @@ pub const FRESH: u64 = 15 * 60;
 const LINKS: &str = "https://github.com/Mihnea8848/";
 const TITLE_CHARS: usize = 80;
 const SUMMARY_CHARS: usize = 200;
+const AUTHOR_CHARS: usize = 40;
 const BODY_CHARS: usize = 16000;
 /// What starts a paragraph of a post's body that is a heading.
 pub const HEADING: &str = "## ";
@@ -200,6 +201,10 @@ pub struct Post {
     pub body: String,
     #[serde(default)]
     pub body_ja: Option<String>,
+    /// Who wrote it: a post's `author`, the account that published a
+    /// release.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 impl Post {
@@ -358,6 +363,7 @@ pub fn parse_posts(text: &str, running: &str, today: &str) -> Result<Vec<Post>> 
             body_ja: text("body_ja")
                 .map(|t| with_pictures(&place_pictures(&paragraphs(t, BODY_CHARS), entry.get("pictures"))))
                 .filter(|t| !t.is_empty()),
+            author: short("author", AUTHOR_CHARS),
         });
     }
     Ok(posts)
@@ -436,6 +442,10 @@ pub fn parse_releases(json: &str) -> Result<(Vec<Post>, Option<Release>)> {
             summary_ja: None,
             body,
             body_ja: None,
+            author: release["author"]["login"]
+                .as_str()
+                .map(|a| plain(a, AUTHOR_CHARS))
+                .filter(|a| !a.is_empty()),
         });
     }
     Ok((posts, latest))
@@ -862,6 +872,7 @@ mod tests {
             summary_ja: None,
             body: String::new(),
             body_ja: None,
+            author: None,
         };
         assert_eq!(post("2026-11-06").day("2026-11-19"), "6 Nov");
         assert_eq!(post("2025-12-31").day("2026-01-02"), "31 Dec 2025");
@@ -967,5 +978,18 @@ mod tests {
             "After one"
         );
         assert_eq!(posts[1].body, format!("Short.\n\n![]({PICTURES}images/s.png)"));
+    }
+
+    #[test]
+    fn a_post_says_who_wrote_it() {
+        let posts = parse_posts(
+            "[[post]]\ndate = 2026-11-24\ntitle = \"T\"\nauthor = \"Mihnea8848\"\n",
+            "1.0.0",
+            "2026-11-24",
+        )
+        .unwrap();
+        assert_eq!(posts[0].author.as_deref(), Some("Mihnea8848"));
+        let json = r#"[{"tag_name": "v0.3.0", "published_at": "2026-11-30T10:00:00Z", "author": {"login": "Mihnea8848"}, "body": "x"}]"#;
+        assert_eq!(parse_releases(json).unwrap().0[0].author.as_deref(), Some("Mihnea8848"));
     }
 }

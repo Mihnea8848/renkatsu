@@ -19,17 +19,26 @@ pub const SCROLL_START: &str = "news scroll start";
 const PAD: f32 = 32.0;
 /// The widest a post's text runs, for lines that read well.
 const MEASURE: f32 = 760.0;
+/// Seconds a post takes to rise over the banner, and to go back down.
+const OPENING: f32 = 0.32;
+
+/// Where the column of news starts in a page `width` wide: in its middle,
+/// or `PAD` from its left where it is narrow.
+fn column_left(width: f32) -> f32 {
+    ((width - MEASURE) / 2.0).max(PAD).round()
+}
 
 /// The banner: the art, darkened towards the bottom, with the welcome on
 /// it.
 fn banner(ui: &Ui, k: &Look, rect: Rect) {
+    let left = rect.left() + column_left(rect.width());
     let t = &k.t;
     brand::art(ui, k, rect, Art::Banner);
     let p = ui.painter();
     let shade = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 120.0), rect.max);
     brand::shade(p, shade, 200);
     p.text(
-        Pos2::new(rect.left() + PAD, rect.bottom() - 40.0),
+        Pos2::new(left, rect.bottom() - 40.0),
         Align2::LEFT_CENTER,
         "Welcome to Renkatsu!",
         k.bold(34.0),
@@ -104,13 +113,24 @@ fn post_ui(
     let (line, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
     let p = ui.painter();
     glyph(p, k, Pos2::new(line.left() + 8.0, line.center().y), mark, 14.0, tint);
-    p.text(
+    let date = p.text(
         Pos2::new(line.left() + 24.0, line.center().y),
         Align2::LEFT_CENTER,
         post.day(today),
         k.small(),
         t.text_dim,
     );
+    if let Some(author) = &post.author {
+        let dot = Pos2::new(date.right() + 8.0, line.center().y);
+        p.circle_filled(dot, 1.5, t.text_dim);
+        p.text(
+            Pos2::new(dot.x + 8.0, line.center().y),
+            Align2::LEFT_CENTER,
+            author,
+            k.small(),
+            t.text,
+        );
+    }
     ui.add_space(6.0);
     let title = ui
         .painter()
@@ -325,10 +345,31 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str, pict
     if posts.is_empty() {
         return None;
     }
-    // The post shown whole, by its place in the list.
+    // The post shown whole, by its place in the list, and whether it is
+    // going back down to the list: it shows until it is down.
     let open_id = egui::Id::new("news post shown whole");
+    let leaving_id = egui::Id::new("news post going back");
     let mut open = ui.data(|d| d.get_temp::<usize>(open_id)).filter(|&n| n < posts.len());
-    let area = Rect::from_min_max(Pos2::new(main.left(), top.bottom()), main.max);
+    let mut leaving = open.is_some() && ui.data(|d| d.get_temp::<bool>(leaving_id)).unwrap_or(false);
+    // An open post rises over the banner until it has the whole page.
+    let risen = ui.ctx().animate_bool_with_time_and_easing(
+        egui::Id::new("news post over the banner"),
+        open.is_some() && !leaving,
+        OPENING,
+        egui::emath::easing::cubic_in_out,
+    );
+    if leaving && risen <= 0.0 {
+        (open, leaving) = (None, false);
+    }
+    let area = Rect::from_min_max(
+        Pos2::new(main.left(), (top.bottom() - BANNER * risen).round()),
+        main.max,
+    );
+    if risen > 0.0 {
+        let p = ui.painter();
+        p.rect_filled(area, 0.0, k.t.panel);
+        hair_h(p, area.left(), area.right(), area.top(), k.t.divider);
+    }
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(area));
     let mut scroll = egui::ScrollArea::vertical().auto_shrink(false).id_salt(("news", open));
     if open.is_some() {
@@ -339,12 +380,12 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str, pict
     scroll.show(&mut column, |ui| {
         ui.add_space(if open.is_some() { 16.0 } else { 28.0 });
         ui.horizontal(|ui| {
-            ui.add_space(PAD);
+            ui.add_space(column_left(area.width()));
             ui.vertical(|ui| {
                 ui.set_max_width((area.width() - 2.0 * PAD).min(MEASURE));
                 if let Some(n) = open {
-                    if back(ui, k) {
-                        open = None;
+                    if back(ui, k) && !leaving {
+                        leaving = true;
                     }
                     ui.add_space(14.0);
                     if let Some(Click::Page) = post_ui(ui, k, &posts[n], today, n, true, pictures) {
@@ -360,7 +401,7 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str, pict
                             ui.add_space(22.0);
                         }
                         if post_ui(ui, k, post, today, n, false, pictures).is_some() {
-                            open = Some(n);
+                            (open, leaving) = (Some(n), false);
                         }
                     }
                 }
@@ -374,6 +415,7 @@ pub fn home(ui: &mut Ui, k: &Look, main: Rect, posts: &[Post], today: &str, pict
         } else {
             d.remove::<usize>(open_id);
         }
+        d.insert_temp(leaving_id, leaving);
     });
     act
 }

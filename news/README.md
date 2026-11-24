@@ -23,6 +23,7 @@ Only `date` and `title` are needed. The other keys:
 |---|---|
 | `summary` | One or two lines, shown where there is no `body`. |
 | `body` | The text of the post, under the title. Leave an empty line between paragraphs; the lines of one paragraph are joined. Write it as a TOML multi-line string (`"""`). |
+| `author` | Who wrote the post, shown beside its date. |
 | `url` | The page a click opens. It must be on `https://github.com/Mihnea8848/`; any other link is dropped and the post shows without one. |
 | `title_ja`, `summary_ja`, `body_ja` | The Japanese version. English shows where they are missing. |
 | `since` | The post shows only from this version of Renkatsu on, for example `"0.2.0"`. |
