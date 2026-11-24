@@ -77,6 +77,9 @@ struct Actor {
     guests_next: Option<rk_chara::physics::Guests>,
     /// The ones a partner's shaft gave last frame.
     received: rk_chara::physics::Guests,
+    /// The H position this character plays, as its male controller and
+    /// state, when it plays one the game lists.
+    h_position: Option<(String, String)>,
     /// The pull this character's shaft has on a partner's mouth, with the
     /// partner it is for.
     mouth_pull: Option<(ObjectId, rk_chara::better_penetration::MouthPull)>,
@@ -900,7 +903,7 @@ impl Live {
         }
     }
 
-    fn aim_of(&self, at: usize, scene: &Scene) -> Option<(Aim, AimJob)> {
+    fn aim_of(&self, at: usize, scene: &Scene, held: Option<Aim>) -> Option<(Aim, AimJob)> {
         use rk_chara::better_penetration as bp;
         let actor = &self.actors[at];
         let shaft = actor.chara.shaft.as_ref()?;
@@ -919,9 +922,16 @@ impl Live {
         if !settings.enabled {
             return None;
         }
-        let (partner, mode) = match penetration_target {
-            Some(t) => (Some(t.partner), t.mode),
-            None => (None, bp::Mode::of_auto(settings.auto_target)?),
+        // The partner chosen by hand, the plugin's auto-target, or
+        // Renkatsu's own link.
+        let (partner, mode) = match (penetration_target, bp::Mode::of_auto(settings.auto_target)) {
+            (Some(t), _) => (Some(t.partner), t.mode),
+            (None, Some(mode)) => (None, mode),
+            (None, None) if settings.auto_link => {
+                let (partner, mode) = self.auto_link(at, shaft, held)?;
+                (Some(partner), mode)
+            }
+            (None, None) => return None,
         };
         let posed = |a: &Actor| (a.chara.scene.world().0, bp::bones_by_name(&a.chara.scene, a.chara.top));
         let partner = match partner {
@@ -959,9 +969,93 @@ impl Live {
         ))
     }
 
+    /// Renkatsu's own link for the shaft of the actor at `at`: where the
+    /// game's H position he plays aims it in its present state, on the
+    /// nearest character in reach; none when that state has him out of
+    /// her; and for an animation the game does not know, the nearest of
+    /// the three places in reach. The link of the last frame holds while
+    /// its place stays in reach. A shaft hidden by the Son switch does not
+    /// link on its own.
+    fn auto_link(
+        &self,
+        at: usize,
+        shaft: &rk_chara::better_penetration::Shaft,
+        held: Option<Aim>,
+    ) -> Option<(ObjectId, rk_chara::better_penetration::Mode)> {
+        use rk_chara::better_penetration as bp;
+        let actor = &self.actors[at];
+        // Only a shaft that is shown links on its own: a body may carry
+        // the bones with CharaStudio's Son switch off.
+        if !actor.chara.clothes.son.switched_on {
+            return None;
+        }
+        let wanted = actor
+            .h_position
+            .as_ref()
+            .and_then(|(controller, state)| self.dan_aims.as_ref()?.aim(controller, state));
+        let modes: Vec<bp::Mode> = match wanted {
+            Some(None) => return None,
+            Some(Some(mode)) => vec![mode],
+            None => bp::Mode::ALL.to_vec(),
+        };
+        let mut places = Vec::new();
+        for (i, other) in self.actors.iter().enumerate() {
+            if i == at {
+                continue;
+            }
+            let world = other.chara.scene.world().0;
+            let names = bp::bones_by_name(&other.chara.scene, other.chara.top);
+            for &mode in &modes {
+                if let Some(&bone) = names.get(mode.entry_bone()) {
+                    places.push((other.id, mode, world[bone].w_axis.truncate()));
+                }
+            }
+        }
+        let tip = shaft.tip(&actor.chara.scene.world().0);
+        bp::nearest_place(tip, shaft.base_length, held.map(|h| (h.partner, h.mode)), &places)
+    }
+
+    /// The H position an animation is of, as the male's controller and
+    /// the state: named in the scene for one played from the game, or
+    /// found in CharaStudio's list by the group, category and state its
+    /// file was taken from.
+    fn h_position_of(&mut self, project: &Project, a: &crate::scene::Animation) -> Option<(String, String)> {
+        if !a.override_controller.is_empty() {
+            return Some((a.override_controller.clone(), a.state.clone()));
+        }
+        let file = own_file(project, a)?;
+        if let Some(known) = self.h_positions.get(&file) {
+            return known.clone();
+        }
+        let found = (|| {
+            let meta = rk_chara::animation_file::read_meta(&file).ok()?;
+            let library = self.h_library.as_ref()?;
+            if !meta.h {
+                return None;
+            }
+            library
+                .entries
+                .iter()
+                .find(|e| {
+                    e.h && e.state == meta.state
+                        && e.controller == meta.controller
+                        && library.group_name(e.group) == meta.group
+                        && {
+                            // The list names a category after its group.
+                            let category = library.category_name(e.group, e.category);
+                            category == meta.category || category == format!("{}: {}", meta.group, meta.category)
+                        }
+                })
+                .map(|e| (e.override_controller.clone(), e.state.clone()))
+        })();
+        // Not cached before the list is read, so that it is tried again.
+        if self.h_library.is_some() {
+            self.h_positions.insert(file, found.clone());
+        }
+        found
+    }
+
     /// Where a character's shaft is aimed this frame, if anywhere.
-    // Read by the Properties' BetterPenetration rows, which come later.
-    #[allow(dead_code)]
     pub fn aim(&self, id: ObjectId) -> Option<Aim> {
         self.aims.iter().find(|(who, _)| *who == id).map(|(_, aim)| *aim)
     }
@@ -1253,6 +1347,12 @@ pub struct Live {
     actors: Vec<Actor>,
     /// Each shaft's aim this frame, by character.
     aims: Vec<(ObjectId, Aim)>,
+    /// Where the game's H positions aim a shaft, once read, and
+    /// CharaStudio's list, which tells the position an animation file was
+    /// taken from; the position of each file, once found.
+    dan_aims: Option<std::sync::Arc<rk_chara::dan_look::Aims>>,
+    h_library: Option<std::sync::Arc<rk_chara::animations::Library>>,
+    h_positions: std::collections::HashMap<std::path::PathBuf, Option<(String, String)>>,
     /// The map as the characters' skirts rest on it, and what it was made
     /// from, so that it is made again only when the map moves.
     obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
@@ -1337,6 +1437,9 @@ impl Live {
         let empty = Camera::frame(Vec3::new(-0.4, 0.0, -0.2), Vec3::new(0.4, 1.5, 0.2), 16.0 / 9.0, 0.0);
         Ok(Live {
             aims: Vec::new(),
+            dan_aims: None,
+            h_library: None,
+            h_positions: Default::default(),
             smooth_edges: true,
             renderer,
             render_state: render_state.clone(),
@@ -1866,10 +1969,28 @@ impl Live {
         // a partner is posed when it is aimed at her.
         order.sort_by_key(|i| (scene.depth(self.actors[*i].id), self.actors[*i].chara.shaft.is_some()));
         self.poses.clear();
-        self.aims.clear();
+        // Where the game's H positions aim, read once a shaft is here.
+        if self.dan_aims.is_none() && self.actors.iter().any(|a| a.chara.shaft.is_some()) {
+            if let Ok(game) = games.get(&mods) {
+                self.dan_aims = Some(std::sync::Arc::new(rk_chara::dan_look::Aims::read(game)));
+                self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
+            }
+        }
+        for i in 0..self.actors.len() {
+            if self.actors[i].chara.shaft.is_none() {
+                continue;
+            }
+            let position = match scene.get(self.actors[i].id).map(|o| &o.content) {
+                Some(Content::Character { animation: Some(a), .. }) => self.h_position_of(project, a),
+                _ => None,
+            };
+            self.actors[i].h_position = position;
+        }
+        let held = std::mem::take(&mut self.aims);
         let obstacles = self.obstacles();
         for at in order {
-            let aim = self.aim_of(at, scene);
+            let id = self.actors[at].id;
+            let aim = self.aim_of(at, scene, held.iter().find(|(who, _)| *who == id).map(|(_, a)| *a));
             if let Some((aim, _)) = aim {
                 self.aims.push((self.actors[at].id, aim));
             }
@@ -2761,6 +2882,7 @@ impl Live {
             aim_posed: None,
             guests_next: None,
             received: Vec::new(),
+            h_position: None,
             mouth_pull: None,
             mouth_at: None,
             mouth_next: None,

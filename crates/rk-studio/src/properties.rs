@@ -1686,18 +1686,35 @@ fn penetration_section(
             }
         });
     } else {
+        // Auto is Renkatsu's own link, by the game's H positions or the
+        // nearest place; the rest are the plugin's auto-target.
         row(ui, k, "Auto-target", off, |ui, rect| {
-            let options: Vec<(&str, bool)> = AutoTarget::ALL.iter().map(|a| (a.label(), true)).collect();
-            let chosen = AutoTarget::ALL.iter().position(|a| *a == s.auto_target);
-            if let Some(i) = choices(ui, k, rect, ui_id.with("auto"), chosen, &options) {
-                s.auto_target = AutoTarget::ALL[i];
-            }
+            let mut options: Vec<&str> = vec!["Auto"];
+            options.extend(AutoTarget::ALL.iter().map(|a| a.label()));
+            let mut chosen = if s.auto_target == AutoTarget::Off && s.auto_link {
+                0
+            } else {
+                AutoTarget::ALL
+                    .iter()
+                    .position(|a| *a == s.auto_target)
+                    .map_or(1, |i| i + 1)
+            };
+            widgets::combo(ui, k, rect, ui_id.with("auto"), &mut chosen, &options);
+            s.auto_link = chosen == 0;
+            s.auto_target = if chosen == 0 {
+                AutoTarget::Off
+            } else {
+                AutoTarget::ALL[chosen - 1]
+            };
         });
     }
     // Where the shaft goes, if anywhere: the partner's place, or the one
     // auto-target looks for.
     let aimed = match penetration_target {
         Some(t) => Some(t.mode),
+        None if s.auto_target == AutoTarget::Off && s.auto_link => {
+            st.live.as_ref().and_then(|l| l.aim(object.id)).map(|a| a.mode)
+        }
         None => Mode::of_auto(s.auto_target),
     };
     // The plugin's sliders, by their ranges in Studio, each where it does

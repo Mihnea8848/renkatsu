@@ -723,6 +723,32 @@ pub fn bulge(physics: &mut Physics, scene: &Scene, scale: f32) -> bool {
     changed
 }
 
+/// Renkatsu's link for a shaft no H position aims: the place on another
+/// character nearest its tip within the plugin's reach of twice its length
+/// (`CheckAutoTarget`), over all three places at once. The link it has
+/// holds while that place stays in reach, so a stroke does not flip it.
+pub fn nearest_place<T: Copy + PartialEq>(
+    tip: Vec3,
+    base_length: f32,
+    held: Option<(T, Mode)>,
+    places: &[(T, Mode, Vec3)],
+) -> Option<(T, Mode)> {
+    let reach = base_length * 2.0;
+    if let Some(held) = held {
+        if places
+            .iter()
+            .any(|&(w, m, at)| (w, m) == held && tip.distance(at) < reach)
+        {
+            return Some(held);
+        }
+    }
+    places
+        .iter()
+        .filter(|(_, _, at)| tip.distance(*at) < reach)
+        .min_by(|a, b| tip.distance(a.2).total_cmp(&tip.distance(b.2)))
+        .map(|&(w, m, _)| (w, m))
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -752,6 +778,15 @@ pub struct Settings {
     /// radius times `belly_bulge_scale`.
     pub belly_bulge: bool,
     pub belly_bulge_scale: f32,
+    /// Renkatsu's own, not the plugin's: with no partner chosen and no
+    /// auto-target, the shaft links where the game's H position aims it
+    /// (`crate::dan_look`), or else to the nearest place in reach.
+    #[serde(default = "yes")]
+    pub auto_link: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -771,6 +806,7 @@ impl Default for Settings {
             return_rate: 0.03,
             belly_bulge: false,
             belly_bulge_scale: 1.0,
+            auto_link: true,
         }
     }
 }
@@ -1157,6 +1193,28 @@ mod tests {
             moved(&two) * 1000.0
         );
         assert!(moved(&two) > moved(&one) + 1e-4, "a bigger bulge pushes further");
+    }
+
+    #[test]
+    fn the_nearest_place_in_reach_links_and_holds() {
+        let at = |z: f32| Vec3::new(0.0, 0.0, z);
+        let places = [
+            (1, Mode::Vaginal, at(0.10)),
+            (1, Mode::Anal, at(0.12)),
+            (2, Mode::Oral, at(0.5)),
+        ];
+        assert_eq!(nearest_place(Vec3::ZERO, 0.19, None, &places), Some((1, Mode::Vaginal)));
+        // Held while in reach, though another is nearer now.
+        assert_eq!(
+            nearest_place(Vec3::ZERO, 0.19, Some((1, Mode::Anal)), &places),
+            Some((1, Mode::Anal))
+        );
+        // Out of reach (0.38), a held link lets go.
+        assert_eq!(
+            nearest_place(Vec3::ZERO, 0.19, Some((2, Mode::Oral)), &places),
+            Some((1, Mode::Vaginal))
+        );
+        assert_eq!(nearest_place(at(2.0), 0.19, None, &places), None);
     }
 
     #[test]
