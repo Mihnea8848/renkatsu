@@ -161,6 +161,8 @@ pub struct Character {
     pub gaze: Option<crate::gaze::EyeLook>,
     /// The neck's look (`crate::neck`).
     pub neck: Option<crate::neck::NeckLook>,
+    /// The mouth's sliders put on their defaults for some mouths.
+    pub mouth_mask: Option<shape::MouthMask>,
     pub look_patterns: [i32; 2],
     /// The hand patterns loaded for the layer, left then right; one is
     /// played while the layer asks for its pattern.
@@ -201,6 +203,7 @@ struct Builder<'g> {
     /// The eyes' look scripts and the card's pupil sliders, for the face
     /// rig to place the irises for a gaze.
     iris_look: Option<([EyeLook; 2], eyelook::Pupil)>,
+    mouth_mask: Option<shape::MouthMask>,
     /// The outfit is unlocked by the Clothing Unlocker plugin.
     unlocked: bool,
     /// The face controllers, once the head is loaded.
@@ -2326,6 +2329,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         hair_gloss: None,
         physics_sources: Vec::new(),
         iris_look: None,
+        mouth_mask: None,
         body_copies: Vec::new(),
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
@@ -2591,12 +2595,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         for (i, v) in card.face.shape_value_face.iter().enumerate() {
                             set.set(i, *v);
                         }
-                        set.apply(
-                            &mut b.scene,
+                        let rules = Rules::parse(shape::HEAD_RULES)?;
+                        set.apply(&mut b.scene, head_bone.root, &rules, corrections.as_deref());
+                        b.mouth_mask = Some(shape::MouthMask::new(
+                            set,
+                            rules,
                             head_bone.root,
-                            &Rules::parse(shape::HEAD_RULES)?,
-                            corrections.as_deref(),
-                        );
+                            corrections.clone(),
+                            &card.face.shape_value_face,
+                            card.face.head_id,
+                        ));
                     }
                     Err(e) => b.loader.warn(format!("face sliders: {e:#}")),
                 }
@@ -3140,6 +3148,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     Ok(Character {
         gaze,
         neck,
+        mouth_mask: b.mouth_mask.take(),
         look_patterns,
         ik_rig,
         hands: [None, None],

@@ -570,6 +570,30 @@ impl Actor {
         Some(face)
     }
 
+    /// Puts the face's mouth sliders on the game's defaults while the
+    /// mouth shown has the tongue out or holds something, as the main game
+    /// does (Studio does not, and those mouths pull out of shape), and back
+    /// otherwise. The bones the sliders move are kept as loaded that way.
+    fn mask_mouth(&mut self, shown: Option<&rk_chara::face::Face>) {
+        let mouth = shown
+            .map(|f| f.mouth)
+            .or_else(|| self.chara.face.as_ref().map(|r| r.start.mouth));
+        let Some(mask) = self.chara.mouth_mask.as_mut() else {
+            return;
+        };
+        let scene = &mut self.chara.scene;
+        let before: Vec<Trs> = scene.nodes.iter().map(|n| n.local).collect();
+        if !mask.mask(scene, mouth.is_some_and(rk_chara::shape::masks_mouth)) {
+            return;
+        }
+        for ((node, was), rest) in scene.nodes.iter().zip(&before).zip(self.rest.iter_mut()) {
+            let now = node.local;
+            if now.pos != was.pos || now.rot != was.rot || now.scale != was.scale {
+                *rest = now;
+            }
+        }
+    }
+
     /// The bone of the mouth a shaft pulls.
     fn mouth_node(&self) -> Option<usize> {
         self.chara
@@ -850,6 +874,7 @@ impl Actor {
             if let Some(face) = &self.chara.face {
                 face.show(&mut self.chara.scene, shown.as_ref());
             }
+            self.mask_mouth(shown.as_ref());
             // Shown open and looking ahead: the blink and the gaze go on again.
             self.blink_rate = 1.0;
             self.gaze_shown = None;
@@ -865,6 +890,7 @@ impl Actor {
             if let Some(face) = &self.chara.face {
                 face.show(&mut self.chara.scene, shown.as_ref());
             }
+            self.mask_mouth(shown.as_ref());
             // Shown open and looking ahead: the blink and the gaze go on again.
             self.blink_rate = 1.0;
             self.gaze_shown = None;

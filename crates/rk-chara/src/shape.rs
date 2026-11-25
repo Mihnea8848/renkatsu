@@ -459,3 +459,75 @@ pub fn load_corrections(game: &Game) -> Result<Vec<Channels>> {
     }
     Ok(out)
 }
+
+/// The face sliders of the mouth (`ChaFileDefine.cf_MouthShapeMaskID`),
+/// which the game puts on their defaults while the mouth shows pattern 21
+/// or 22, the open mouths with the tongue out and holding something
+/// (`ChaControl.UpdateShapeFace`, set by `FaceListCtrl` in the main game).
+pub const MOUTH_MASK: [usize; 7] = [4, 41, 42, 43, 44, 45, 46];
+
+/// The mask's values (`cf_MouthShapeDefault`): for the usual heads, head
+/// 200 and head 201.
+const MOUTH_DEFAULTS: [[f32; 7]; 3] = [
+    [0.5, 0.5, 0.0, 0.5, 0.0, 0.0, 0.5],
+    [0.5, 0.5, 0.0, 0.5, 0.0, 0.0, 0.5],
+    [0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.5],
+];
+
+/// Whether a mouth pattern takes the mask.
+pub fn masks_mouth(pattern: i32) -> bool {
+    pattern == 21 || pattern == 22
+}
+
+/// The head's sliders, kept to put the mouth's on their defaults and back.
+pub struct MouthMask {
+    set: ShapeSet,
+    rules: Rules,
+    root: usize,
+    corrections: Option<Vec<Channels>>,
+    card: [f32; 7],
+    defaults: [f32; 7],
+    masked: bool,
+}
+
+impl MouthMask {
+    pub fn new(
+        set: ShapeSet,
+        rules: Rules,
+        root: usize,
+        corrections: Option<Vec<[f32; 9]>>,
+        card: &[f32],
+        head_id: i32,
+    ) -> MouthMask {
+        let row = match head_id {
+            200 => 1,
+            201 => 2,
+            _ => 0,
+        };
+        MouthMask {
+            set,
+            rules,
+            root,
+            corrections,
+            card: MOUTH_MASK.map(|i| card.get(i).copied().unwrap_or(0.5)),
+            defaults: MOUTH_DEFAULTS[row],
+            masked: false,
+        }
+    }
+
+    /// Puts the mouth's sliders on the game's defaults, or back on the
+    /// card's. Gives whether the bones changed.
+    pub fn mask(&mut self, scene: &mut Scene, on: bool) -> bool {
+        if on == self.masked {
+            return false;
+        }
+        let values = if on { self.defaults } else { self.card };
+        for (slider, value) in MOUTH_MASK.into_iter().zip(values) {
+            self.set.set(slider, value);
+        }
+        self.set
+            .apply(scene, self.root, &self.rules, self.corrections.as_deref());
+        self.masked = on;
+        true
+    }
+}
