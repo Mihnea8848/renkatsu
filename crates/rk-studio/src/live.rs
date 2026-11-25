@@ -87,6 +87,10 @@ struct Actor {
     /// Which way the shaft points as the animation holds it, from root
     /// to tip.
     shaft_line: Option<Vec3>,
+    /// How far her mouth reaches along a shaft for its depth, in the
+    /// world, this frame and as last posed.
+    reach_next: Option<Vec3>,
+    reach_at: Option<Vec3>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -531,6 +535,7 @@ impl Actor {
             }
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
+        let motion_on = motion.is_some();
         self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
         // The head turns after the animation, FK and IK, as the neck's
         // script does in LateUpdate, and before the shaft is aimed at it.
@@ -544,6 +549,9 @@ impl Actor {
                 let along = scene.world_of(tip).w_axis.truncate() - scene.world_of(root).w_axis.truncate();
                 self.shaft_line = along.try_normalize();
             }
+        }
+        if let Some(by) = self.reach_at {
+            self.reach_mouth(by, motion_on);
         }
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
@@ -585,6 +593,57 @@ impl Actor {
         }
         face.mouth_open = 1.0;
         Some(face)
+    }
+
+    /// Bends her upper body so her mouth goes `by` further, as a person
+    /// leans in: the lower and upper spine, the neck and the head each take
+    /// a share of the turn, the spine the most, so the head stays nearly
+    /// as it was held and her hips, knees and hands stay where they are.
+    /// Bones no animation writes start from how they were loaded, so the
+    /// reach is not added again each frame.
+    fn reach_mouth(&mut self, by: Vec3, animated: bool) {
+        const CHAIN: [(&str, f32); 4] = [
+            ("cf_j_head", 0.15),
+            ("cf_j_neck", 0.25),
+            ("cf_j_spine03", 0.3),
+            ("cf_j_spine02", 0.3),
+        ];
+        let Some(mouth) = self.mouth_node() else { return };
+        let top = self.chara.top;
+        let chain: Vec<(usize, f32)> = CHAIN
+            .iter()
+            .filter_map(|&(name, share)| Some((self.chara.scene.find(top, name)?, share)))
+            .collect();
+        if chain.len() != CHAIN.len() {
+            return;
+        }
+        let scene = &mut self.chara.scene;
+        if !animated {
+            for &(node, _) in &chain {
+                if !self.edits.iter().any(|(n, _)| *n == node) {
+                    scene.nodes[node].local.rot = self.rest[node].rot;
+                }
+            }
+        }
+        let goal = scene.world_of(mouth).w_axis.truncate() + by;
+        // A few passes, each bone turning its share of what is left.
+        for _ in 0..4 {
+            for &(node, share) in &chain {
+                let world = scene.world_of(node);
+                let pivot = world.w_axis.truncate();
+                let mouth_at = scene.world_of(mouth).w_axis.truncate();
+                let (Some(from), Some(to)) = ((mouth_at - pivot).try_normalize(), (goal - pivot).try_normalize())
+                else {
+                    continue;
+                };
+                let turn = Quat::IDENTITY.slerp(Quat::from_rotation_arc(from, to), share);
+                let rot = world.to_scale_rotation_translation().1;
+                let parent = scene.nodes[node]
+                    .parent
+                    .map_or(Quat::IDENTITY, |p| scene.world_of(p).to_scale_rotation_translation().1);
+                scene.nodes[node].local.rot = (parent.inverse() * turn * rot).normalize();
+            }
+        }
     }
 
     /// Puts the face's mouth sliders on the game's defaults while the
@@ -752,6 +811,16 @@ impl Actor {
                     again = true;
                 }
             }
+        }
+        // A shaft's depth that reaches her mouth further, or no longer.
+        let reach = self.reach_next.take();
+        let reach_moved = match (reach, self.reach_at) {
+            (Some(a), Some(b)) => a.distance(b) > STILL,
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if reach_moved {
+            self.reach_at = reach;
+            again |= clock.now != Playback::Playing;
         }
         // A partner's shaft that moved the mouth poses the face again.
         // With none pulling it, the mouth returns while the scene plays,
@@ -2444,6 +2513,7 @@ impl Live {
         // Who moves for a shaft's depth, and by how much, from the aims of
         // the frame before: the partner along the line of his shaft, or he
         // when she is what he is snapped to.
+        let mut reached: Vec<(ObjectId, Vec3)> = Vec::new();
         let moved: Vec<(ObjectId, Vec3)> = held
             .iter()
             .filter_map(|&(him, aim)| {
@@ -2457,9 +2527,17 @@ impl Live {
                     }
                     up = scene.get(id).and_then(|o| o.parent);
                 }
+                // A mouth reaches by her leaning in; the rest of her moves.
+                if aim.mode == rk_chara::better_penetration::Mode::Oral {
+                    reached.push((aim.partner, -line * depth));
+                    return None;
+                }
                 Some((aim.partner, -line * depth))
             })
             .collect();
+        for actor in &mut self.actors {
+            actor.reach_next = reached.iter().find(|(id, _)| *id == actor.id).map(|r| r.1);
+        }
         let obstacles = self.obstacles();
         for at in order {
             let id = self.actors[at].id;
@@ -3493,6 +3571,8 @@ impl Live {
             look_at: Vec3::ZERO,
             neck_done: false,
             shaft_line: None,
+            reach_next: None,
+            reach_at: None,
             aim_job: None,
             aim_posed: None,
             guests_next: None,
