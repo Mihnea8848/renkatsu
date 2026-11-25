@@ -1384,8 +1384,8 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             "Eyes look",
             waiting.or(card_look.is_none().then_some("No eye look")),
             |ui, rect| {
-                let patterns = [0, 1, 3];
-                let options = [("Front", true), ("Camera", true), ("Away", true)];
+                let patterns = [0, 1, 3, crate::live::EYES_ON_OBJECT];
+                let options = [("Front", true), ("Camera", true), ("Away", true), ("Object", true)];
                 let now = next.eyes_look.or(card_look).unwrap_or(0);
                 let chosen = patterns.iter().position(|&p| p == now);
                 if let Some(i) = choices(ui, k, rect, ui_id.with("eyes look"), chosen, &options) {
@@ -1393,6 +1393,30 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 }
             },
         );
+        // The object the eyes follow, while they follow one: any object of
+        // the scene but this character and the folders.
+        if next.eyes_look == Some(crate::live::EYES_ON_OBJECT) {
+            let scene = st.doc.scene();
+            let objects: Vec<(u64, &str)> = scene
+                .objects()
+                .iter()
+                .filter(|o| o.id != id && !matches!(o.content, Content::Folder))
+                .map(|o| (o.id.0, o.name.as_str()))
+                .collect();
+            let mut names: Vec<&str> = vec!["Camera"];
+            names.extend(objects.iter().map(|(_, n)| *n));
+            let at = next
+                .eyes_target
+                .and_then(|t| objects.iter().position(|(o, _)| *o == t))
+                .map_or(0, |i| i + 1);
+            let mut chosen = at;
+            row(ui, k, "Look at", waiting, |ui, rect| {
+                widgets::combo(ui, k, rect, ui_id.with("look at"), &mut chosen, &names);
+            });
+            if chosen != at {
+                next.eyes_target = chosen.checked_sub(1).map(|i| objects[i].0);
+            }
+        }
         // Studio's neck buttons (`MPCharCtrl.NeckInfo`): ahead, at the
         // camera, the animation's own turn, or held where it is.
         let card_neck = st.live.as_ref().and_then(|l| l.card_neck_look(id));
@@ -1550,6 +1574,7 @@ impl KeyedValues {
         let mut out = self.layer.clone();
         out.eyes_look = next.eyes_look;
         out.neck_look = next.neck_look;
+        out.eyes_target = next.eyes_target;
         for channel in Channel::all() {
             let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
             if was == now {

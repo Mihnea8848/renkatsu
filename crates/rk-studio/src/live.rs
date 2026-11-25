@@ -1091,6 +1091,12 @@ const STILL: f32 = 1e-4;
 /// stare out of every shot.
 const EYES_AHEAD: i32 = 0;
 
+/// The eye look pattern that follows an object of the scene rather than the
+/// camera: the head's "control" pattern, made for a target set from
+/// outside. (Studio's own guide-object button picks pattern 4, which is
+/// the H front pattern and looks ahead whatever the guide does.)
+pub const EYES_ON_OBJECT: i32 = 2;
+
 /// What BetterPenetration aims a shaft with in a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AimJob {
@@ -1376,8 +1382,17 @@ impl Live {
     /// Where each character's eyes look this frame: toward the view's
     /// camera, as Studio gives the eye look its camera for a target, by
     /// the pattern of the character's pose, or else ahead.
-    fn look(&mut self) {
+    fn look(&mut self, scene: &Scene) {
         let camera = self.cam.orbit.camera().eye;
+        // Where each character's head is, for eyes that look at one.
+        let heads: Vec<(ObjectId, Vec3)> = self
+            .actors
+            .iter()
+            .filter_map(|a| {
+                let head = a.chara.scene.find(a.chara.top, "cf_j_head")?;
+                Some((a.id, a.chara.scene.world_of(head).w_axis.truncate()))
+            })
+            .collect();
         for actor in &mut self.actors {
             let now = std::time::Instant::now();
             // The game skips a frame without time; a long pause counts as
@@ -1394,12 +1409,27 @@ impl Live {
                 .and_then(|l| l.eyes_look)
                 .unwrap_or(EYES_AHEAD)
                 .max(0) as usize;
+            // The object the eyes follow in Studio's object pattern: a
+            // character's head, or any other object where it stands. With
+            // none, or itself, the camera, as Studio's guide starts there.
+            let target = actor
+                .layer
+                .as_ref()
+                .and_then(|l| l.eyes_target)
+                .map(ObjectId)
+                .filter(|&id| pattern == EYES_ON_OBJECT as usize && id != actor.id);
+            let eyes_at = target
+                .and_then(|id| {
+                    let head = heads.iter().find(|(h, _)| *h == id).map(|(_, p)| *p);
+                    head.or_else(|| scene.get(id).map(|_| scene.world(id).w_axis.truncate()))
+                })
+                .unwrap_or(camera);
             let chara = &mut actor.chara;
             let Some(gaze) = chara.gaze.as_mut() else { continue };
             // The few bones the eyes read, not the whole skeleton's.
             let scene = &chara.scene;
             let parents = |n: usize| scene.nodes[n].parent;
-            let rates = gaze.update(&|n| scene.world_of(n), &parents, camera, pattern, dt);
+            let rates = gaze.update(&|n| scene.world_of(n), &parents, eyes_at, pattern, dt);
             let moved = actor.gaze_next.is_none_or(|(h, v)| {
                 (h[0] - rates.0[0]).abs() + (h[1] - rates.0[1]).abs() + (v - rates.1).abs() > 1e-4
             });
@@ -2360,7 +2390,7 @@ impl Live {
             }
         }
         self.pair_heights(scene, project, games, &mods);
-        self.look();
+        self.look(scene);
         for i in 0..self.actors.len() {
             if self.actors[i].chara.shaft.is_none() {
                 continue;

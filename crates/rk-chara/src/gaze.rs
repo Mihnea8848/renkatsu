@@ -452,6 +452,9 @@ mod tests {
         assert_eq!(gaze.states.len(), 8);
         assert_eq!(gaze.states[0].look_type, LookType::Forward);
         assert_eq!(gaze.states[1].look_type, LookType::Target);
+        // The pattern that follows a controlled target, as the object
+        // choice uses it.
+        assert_eq!(gaze.states[2].look_type, LookType::Control);
         let (world, _) = chara.scene.world();
         let parents = |n: usize| chara.scene.nodes[n].parent;
         // A camera off to her side and above: "this way" turns the eyes.
