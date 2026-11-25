@@ -137,9 +137,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // The Character section's button asked for another card.
     let mut load_card = false;
 
-    let page_name = pages[st.property_tab].name;
+    let page_shown = pages[st.property_tab];
+    // An object of one page has its icon in the header right above.
+    let page_glyph = (pages.len() > 1).then_some(page_shown.glyph);
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        page_title(ui, k, page_name);
+        page_title(ui, k, page_shown.name, page_glyph);
         // What the body shows in an H scene. The levels are the game's
         // `siru`: a page of its own, since none of it is of the card.
         let id = ui.id();
@@ -233,7 +235,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 let mut advanced = !game_skirts.contains(outfit);
                 row(ui, k, "Skirt physics", None, |ui, rect| {
                     let mut chosen = usize::from(advanced);
-                    let options = ["Game", "Advanced"];
+                    let options = ["Koikatsu", "Renkatsu"];
                     widgets::segmented(ui, k, rect, ui.id().with("advanced skirts"), &mut chosen, &options);
                     advanced = chosen == 1;
                 });
@@ -2835,15 +2837,22 @@ fn header(
     ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
 }
 
-/// The name of the open page, at the top of the page. A search shows
-/// rows of every page, so it has none then.
-fn page_title(ui: &mut Ui, k: &Look, name: &str) {
+/// The name of the open page, at the top of the page, after the page's
+/// icon when it has one. A search shows rows of every page, so it has
+/// none then.
+fn page_title(ui: &mut Ui, k: &Look, name: &str, glyph_: Option<&str>) {
     if !searched(ui).is_empty() {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 6.0), Sense::hover());
+    let y = rect.center().y + 2.0;
+    let mut x = rect.left() + FRAME_GAP + 4.0;
+    if let Some(g) = glyph_ {
+        glyph(ui.painter(), k, Pos2::new(x + 9.0, y), g, 18.0, k.t.text_bright);
+        x += 24.0;
+    }
     ui.painter().text(
-        Pos2::new(rect.left() + FRAME_GAP + 4.0, rect.center().y + 2.0),
+        Pos2::new(x, y),
         Align2::LEFT_CENTER,
         name,
         k.bold(k.d.text + 3.0),
