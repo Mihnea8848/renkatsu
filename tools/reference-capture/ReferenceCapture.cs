@@ -40,6 +40,7 @@
 //   fk=on                switch on FK with the animation copied into it
 //   fk=cf_j_neck:x,y,z   the same, with that bone's Euler angles in
 //                        Studio's FK fields raised by x,y,z
+//   face=2,25,24         eyebrow, eye and mouth patterns (Studio's numbers)
 //   body=bp.profundis_nt  give her this UncensorSelector body
 //   partner=Gallagher.png  a male (paths start at UserData/chara/male)
 //                        at her place, for BetterPenetration
@@ -378,6 +379,14 @@ namespace Renkatsu
                         }
                         // A blink in the middle of a picture would make runs differ.
                         chara.charInfo.ChangeEyesBlinkFlag(false);
+                        if (e.Face != null)
+                        {
+                            chara.charInfo.ChangeEyebrowPtn(e.Face[0], true);
+                            chara.charInfo.ChangeEyesPtn(e.Face[1], true);
+                            chara.charInfo.ChangeMouthPtn(e.Face[2], true);
+                            // The next case loads her again with the card's face.
+                            reload = true;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -696,6 +705,8 @@ namespace Renkatsu
             public List<KeyValuePair<int, Vector3[]>> IkMoves = new List<KeyValuePair<int, Vector3[]>>();
             public bool Fk;
             public List<KeyValuePair<string, Vector3>> FkTurns = new List<KeyValuePair<string, Vector3>>();
+            // Eyebrow, eye and mouth patterns, or null for the card's.
+            public int[] Face;
             // UncensorSelector body GUID, or null for the card's.
             public string Body;
             // A male partner's card, his animation, and BetterPenetration's
@@ -902,6 +913,10 @@ namespace Renkatsu
                     {
                         e.FkTurns.Add(new KeyValuePair<string, Vector3>(parts[0], Point(parts[1])));
                     }
+                    break;
+                case "face":
+                    string[] f = value.Split(',');
+                    e.Face = new[] { int.Parse(f[0]), int.Parse(f[1]), int.Parse(f[2]) };
                     break;
                 case "body":
                     e.Body = value;

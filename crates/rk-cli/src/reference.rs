@@ -566,6 +566,30 @@ pub fn run(
         let line = pose_as_captured(game, &mut chara, &cap.case, pose, &opts)?;
         say!("  {line}");
     }
+    // The face patterns the capture was taken with: the eye pattern brings
+    // the picture in the irises. Its blend shapes and the irises' places
+    // are then copied from the capture below.
+    if let (Some(rig), Some(status)) = (&chara.face, capture_value.get("status")) {
+        let pattern = |key: &str| status.get(key).and_then(Value::as_i64).map(|v| v as i32);
+        if let (Some(eyebrows), Some(eyes), Some(mouth)) = (
+            pattern("eyebrow_pattern"),
+            pattern("eyes_pattern"),
+            pattern("mouth_pattern"),
+        ) {
+            let face = rk_chara::face::Face {
+                eyebrows,
+                eyes,
+                mouth,
+                hide_highlight: status
+                    .get("hide_eye_highlight")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                ..rk_chara::face::Face::default()
+            };
+            rig.show(&mut chara.scene, Some(&face));
+            say!("  face: eyebrows {eyebrows}, eyes {eyes}, mouth {mouth}");
+        }
+    }
     // Clothing blend shapes are checked before the capture's shapes are
     // copied over for the face's expression.
     let clothing_shapes = crate::state::compare_clothing_shapes(&capture_value, &chara.scene);

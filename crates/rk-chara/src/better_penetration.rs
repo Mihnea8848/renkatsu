@@ -202,7 +202,16 @@ impl Shaft {
 
     /// Where its tip is (`DanPoints.GetDanEndPosition`).
     pub fn tip(&self, world: &[Mat4]) -> Vec3 {
-        world[*self.points.last().unwrap_or(&self.balls_top)].w_axis.truncate()
+        world[self.tip_node()].w_axis.truncate()
+    }
+
+    /// The same as `tip`, worked out for that node alone.
+    pub fn tip_in(&self, scene: &crate::scene::Scene) -> Vec3 {
+        scene.world_of(self.tip_node()).w_axis.truncate()
+    }
+
+    fn tip_node(&self) -> usize {
+        *self.points.last().unwrap_or(&self.balls_top)
     }
 }
 
@@ -262,6 +271,9 @@ pub fn solve(
     };
     let distance = unity::distance(start, entry);
     let (length, girth) = squish(base_length, distance, s);
+    // `GetMaxDanLength`, which Studio's plugin applies to every hole. The
+    // main game's applies it to the mouth only: its vagina and anus are
+    // limited by their surfaces instead, which Studio's aim does not use.
     let length = length.min(distance + unity::distance(entry, end));
     let mut v1 = unity::normalize(entry - start);
     let mut v2 = unity::normalize(end - entry);
@@ -273,6 +285,12 @@ pub fn solve(
     } else if vectors_equal(v1, v2, 0.001) || length <= distance {
         v2 = v1;
         straight = true;
+    } else if s.stiffness > 0.0 {
+        v2 = unity::normalize(v2.lerp(v1, s.stiffness.clamp(0.0, 1.0)));
+        if vectors_equal(v1, v2, 0.001) {
+            v2 = v1;
+            straight = true;
+        }
     }
     let turn = f64::from(unity::angle(v1, -v2)).to_radians();
     let segment = length / (starts.len() - 1) as f32;
@@ -285,6 +303,9 @@ pub fn solve(
         } else {
             points[i - 1] + v1 * segment
         };
+    }
+    if s.smooth_bend && !straight {
+        smooth_bend(&mut points, entry, v1, v2, distance, segment);
     }
     // The virtual points reach on at the unsquished length, one segment
     // and then two at a time.
@@ -314,12 +335,54 @@ pub fn solve(
     }
 }
 
+/// Lays the points along a path that turns smoothly at the entry instead
+/// of folding there: straight from the first point along `v1`, a
+/// quadratic curve around the entry over about one and a half segments
+/// each side, and straight on along `v2`. The points keep
+/// their spacing, so the shaft keeps its length.
+fn smooth_bend(points: &mut [Vec3], entry: Vec3, v1: Vec3, v2: Vec3, distance: f32, segment: f32) {
+    let length = segment * (points.len() - 1) as f32;
+    let r = (1.5 * segment).min(distance * 0.9).min((length - distance) * 0.9);
+    if r <= 1e-4 {
+        return;
+    }
+    let (a, b) = (entry - v1 * r, entry + v2 * r);
+    // The entry as the control point: the curve leaves along `v1` and
+    // comes out along `v2`, with no corner anywhere, and passes inside the
+    // corner by a few millimetres, well within the shaft's thickness.
+    let control = entry;
+    let mut path = vec![points[0], a];
+    const STEPS: usize = 24;
+    for k in 1..=STEPS {
+        let t = k as f32 / STEPS as f32;
+        let u = 1.0 - t;
+        path.push(a * (u * u) + control * (2.0 * u * t) + b * (t * t));
+    }
+    path.push(b + v2 * length);
+    let mut along = 0.0;
+    let mut at = 0;
+    for (i, point) in points.iter_mut().enumerate().skip(1) {
+        let want = segment * i as f32;
+        loop {
+            let piece = path[at].distance(path[at + 1]);
+            if along + piece >= want || at + 2 == path.len() {
+                let t = if piece > 0.0 { (want - along) / piece } else { 0.0 };
+                *point = path[at].lerp(path[at + 1], t);
+                break;
+            }
+            along += piece;
+            at += 1;
+        }
+    }
+}
+
 /// How far past the entry a segment of `side` ends that starts `left`
 /// before it, the shaft turning by `turn` there (`SolveSSATriangle`, in
 /// double precision).
 fn past_entry(side: f32, left: f32, turn: f64) -> f32 {
     let (a, b) = (f64::from(side), f64::from(left));
-    let zero = |v: f64| v.abs() < 1e-6;
+    // `MathHelpers.ApproximatelyZero`.
+    let zero = |v: f64| v.abs() < 1e-4;
     if zero(a) || zero(b) || zero(turn) {
         return 0.0;
     }
@@ -749,6 +812,183 @@ pub fn nearest_place<T: Copy + PartialEq>(
         .map(|&(w, m, _)| (w, m))
 }
 
+/// The finger bones whose colliders push a vagina's dynamic bones. The
+/// plugin lists the right hand's (`BoneNames.FingerColliders`) for the
+/// fingering positions of AI Shoujo and HoneySelect 2, which its Koikatsu
+/// build never sets up; Renkatsu gives both hands to every vagina.
+pub const FINGER_BONES: [&str; 12] = [
+    "cf_j_index02_R",
+    "cf_j_index03_R",
+    "cf_j_middle02_R",
+    "cf_j_middle03_R",
+    "cf_j_ring02_R",
+    "cf_j_ring03_R",
+    "cf_j_index02_L",
+    "cf_j_index03_L",
+    "cf_j_middle02_L",
+    "cf_j_middle03_L",
+    "cf_j_ring02_L",
+    "cf_j_ring03_L",
+];
+
+/// A finger collider's radius and length before the bone's scale
+/// (`InitializeFingerColliders(0.0055f, 0.018f)`).
+pub const FINGER_RADIUS: f32 = 0.0055;
+pub const FINGER_LENGTH: f32 = 0.018;
+
+/// The finger bones a character has.
+pub fn finger_nodes(scene: &Scene, top: usize) -> Vec<usize> {
+    let names = bones_by_name(scene, top);
+    FINGER_BONES.iter().filter_map(|n| names.get(*n).copied()).collect()
+}
+
+/// The fingers' colliders where the character is posed: a capsule along
+/// each bone's X axis, sized by its scale as `Tools.InitializeCollider`
+/// is given it.
+pub fn finger_shapes(scene: &Scene, fingers: &[usize]) -> Vec<crate::physics::Shape> {
+    let (world, _) = scene.world();
+    fingers
+        .iter()
+        .map(|&node| {
+            let (scale, _, _) = world[node].to_scale_rotation_translation();
+            let scale = scale.abs();
+            crate::physics::Collider {
+                node,
+                radius: FINGER_RADIUS * (scale.y + scale.z) / 2.0,
+                height: FINGER_LENGTH * scale.x,
+                direction: 0,
+                ..Default::default()
+            }
+            .scaled_shape(scene, 1.0, 1.0)
+        })
+        .collect()
+}
+
+/// A character's vagina dynamic bones (`m_kokanDynamicBones`), by their
+/// place in its physics.
+pub fn vagina_bones(physics: &Physics, scene: &Scene) -> Vec<usize> {
+    (0..physics.bones.len())
+        .filter(|&b| bone_name(physics, scene, b).is_some_and(|n| n.contains("cf_J_Vagina")))
+        .collect()
+}
+
+/// The bones a vaginal stroke pulls, each with its share
+/// (`BoneNames.KokanPullBones` and the first of `KokanPullWeights`, which
+/// lists more shares than bones).
+pub const VAGINA_PULL: [(&str, f32); 11] = [
+    ("cf_J_Vagina_L.011", 0.1),
+    ("cf_J_Vagina_R.011", 0.25),
+    ("cf_J_Vagina_L.012", 0.25),
+    ("cf_J_Vagina_R.012", 0.5),
+    ("cf_J_Vagina_L.013", 0.5),
+    ("cf_J_Vagina_R.013", 0.5),
+    ("cf_J_Vagina_L.014", 0.5),
+    ("cf_J_Vagina_L.015", 0.5),
+    ("cf_J_Vagina_R.014", 0.5),
+    ("cf_J_Vagina_R.015", 0.5),
+    ("cf_J_Vagina_B.010", 0.5),
+];
+
+/// The bones an anal stroke pulls (`AnaPullBones`, `AnaPullWeights`).
+pub const ANUS_PULL: [(&str, f32); 8] = [
+    ("cf_J_Ana_s_F", 1.0),
+    ("cf_J_Ana_s_B", 1.0),
+    ("cf_J_Ana_s_L", 1.0),
+    ("cf_J_Ana_s_R", 1.0),
+    ("cf_J_Ana_s_F_L", 1.0),
+    ("cf_J_Ana_s_F_R", 1.0),
+    ("cf_J_Ana_s_B_L", 1.0),
+    ("cf_J_Ana_s_B_R", 1.0),
+];
+
+/// The bone a stroke turns to the shaft inside her: `m_innerKokan` for
+/// the vagina, `m_bpAnaTarget` for the anus.
+pub fn inner_bone(mode: Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Vaginal => Some("cf_J_Vagina_Inner"),
+        Mode::Anal => Some("cf_J_Ana_Root"),
+        Mode::Oral => None,
+    }
+}
+
+/// The bones a stroke in `mode` pulls.
+pub fn pull_bones(mode: Mode) -> &'static [(&'static str, f32)] {
+    match mode {
+        Mode::Vaginal => &VAGINA_PULL,
+        Mode::Anal => &ANUS_PULL,
+        Mode::Oral => &[],
+    }
+}
+
+/// Whether a body has the bones a vaginal or anal pull moves.
+pub fn has_pull_bones(scene: &Scene, top: usize) -> bool {
+    let names = bones_by_name(scene, top);
+    VAGINA_PULL
+        .iter()
+        .chain(&ANUS_PULL)
+        .any(|(n, _)| names.contains_key(*n))
+}
+
+/// A vaginal or anal pull on her for one frame (`PullKokanBones`,
+/// `PullAnaBone` and their returns), in the world's directions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HolePull {
+    pub mode: Mode,
+    pub amount: f32,
+    /// The bones' direction: the average of the shaft's way in and its way
+    /// inside her (`TargetType.Average`, the default for `outer`).
+    pub direction: Vec3,
+    /// The inner bone's up: the way inside her (`TargetType.Inside`).
+    pub inside: Vec3,
+    /// No stroke is in her: the bones return along their own up, and the
+    /// inner bone turns back (`ReturnKokanBones`).
+    pub returning: bool,
+}
+
+/// The directions of a stroke: from the shaft's root to the entry and from
+/// the entry to the end (`AdjustPullBones`' `danDirection` and
+/// `insideDirection`), as the pull bones and the inner bone take them.
+pub fn hole_directions(start: Vec3, entry: Vec3, end: Vec3) -> (Vec3, Vec3) {
+    let outer = unity::normalize(entry - start);
+    let inside = unity::normalize(end - entry);
+    (unity::normalize(outer + inside), inside)
+}
+
+/// Places her pull bones and turns her inner bone for a pull. Bones she
+/// lacks are passed over.
+pub fn apply_hole_pull(scene: &mut Scene, top: usize, pull: &HolePull) {
+    let names = bones_by_name(scene, top);
+    let (world, _) = scene.world();
+    // The return writes only while there is a pull left, as the plugin does.
+    if !(pull.returning && pull.amount.abs() < 1e-4) {
+        for &(name, share) in pull_bones(pull.mode) {
+            let Some(&node) = names.get(name) else { continue };
+            let local = if pull.returning {
+                share * pull.amount * Vec3::Y
+            } else {
+                share * pull.amount * mouth_local(&world[node], pull.direction)
+            };
+            scene.nodes[node].local.pos = local;
+        }
+    }
+    let Some(&inner) = inner_bone(pull.mode).and_then(|n| names.get(n)) else {
+        return;
+    };
+    if pull.returning {
+        scene.nodes[inner].local.rot = Quat::IDENTITY;
+        return;
+    }
+    // `transform.rotation = LookRotation(transform.forward, up)`.
+    let (_, rotation, _) = world[inner].to_scale_rotation_translation();
+    let forward = unity::rotate(rotation, Vec3::Z);
+    let turned = unity::look_rotation(forward, pull.inside);
+    let parent = scene.nodes[inner]
+        .parent
+        .map(|p| world[p].to_scale_rotation_translation().1)
+        .unwrap_or(Quat::IDENTITY);
+    scene.nodes[inner].local.rot = unity::mul(unity::inverse(parent), turned);
+}
+
 /// One character's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -783,6 +1023,48 @@ pub struct Settings {
     /// (`crate::dan_look`), or else to the nearest place in reach.
     #[serde(default = "yes")]
     pub auto_link: bool,
+    /// Renkatsu's own: for her vagina or anus, the shaft goes straight in
+    /// and bends only where it would leave her body, as the plugin does in
+    /// the main game (`crate::body_collision`), rather than ending at her
+    /// waist as in Studio.
+    #[serde(default = "yes")]
+    pub body_collision: bool,
+    /// The vaginal and anal pulls (`enableKokanPush`, `enableAnaPush`),
+    /// which both builds of the plugin leave off; for bodies with the pull
+    /// bones. They take the same push, pull and rates as the mouth.
+    #[serde(default)]
+    pub pull_holes: bool,
+    /// Renkatsu's own: while the shaft is in her mouth, her mouth holds it
+    /// as the main game's H faces do (`crate::face::HOLDING_MOUTH`, fully
+    /// open); Studio leaves the mouth as it was set.
+    #[serde(default = "yes")]
+    pub oral_mouth: bool,
+    /// How far inside her skin her body keeps the shaft (the main game
+    /// plugin's "Clipping Depth"); none takes the plugin's setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipping_depth: Option<f32>,
+    /// How far down the shaft a mouth goes at the bottom of each stroke:
+    /// 0 as the animation has it, 1 to the shaft's base. The stroke
+    /// stretches from its shallowest point to reach it. Renkatsu's own.
+    #[serde(default)]
+    pub depth: f32,
+    /// How straight the shaft stays past the entry: 0 turns it to the end
+    /// as the plugin does, 1 keeps it on the line it came in on.
+    /// Renkatsu's own.
+    #[serde(default)]
+    pub stiffness: f32,
+    /// The shaft's length as a share of the body's own. Renkatsu's own.
+    #[serde(default = "full_length")]
+    pub length: f32,
+    /// The turn at the entry as a smooth arc over the segments around it,
+    /// rather than the plugin's fold at the one segment that crosses it.
+    /// Renkatsu's own.
+    #[serde(default = "yes")]
+    pub smooth_bend: bool,
+}
+
+fn full_length() -> f32 {
+    1.0
 }
 
 fn yes() -> bool {
@@ -790,8 +1072,24 @@ fn yes() -> bool {
 }
 
 impl Default for Settings {
-    /// The controller's defaults in `OnReload`.
+    /// For a card that stores no settings: Studio's controller's, with the
+    /// mouth's pull as the plugin sets it in the main game ("Oral
+    /// Push/Pull": pull rate 18, at most 6 mm out). Studio's rate of 1.8
+    /// moves the lips about a millimetre and a half a stroke, too little to
+    /// see.
     fn default() -> Self {
+        Settings {
+            max_pull: 0.006,
+            pull_rate: 18.0,
+            ..Settings::studio()
+        }
+    }
+}
+
+impl Settings {
+    /// The Studio controller's defaults in `OnReload`, which a card saved in
+    /// Studio starts from.
+    pub fn studio() -> Self {
         Settings {
             enabled: true,
             length_squish: 0.6,
@@ -807,14 +1105,24 @@ impl Default for Settings {
             belly_bulge: false,
             belly_bulge_scale: 1.0,
             auto_link: true,
+            body_collision: true,
+            pull_holes: false,
+            oral_mouth: true,
+            clipping_depth: None,
+            depth: 0.0,
+            stiffness: 0.0,
+            length: 1.0,
+            smooth_bend: true,
         }
     }
 }
 
 /// A card's settings, the defaults where it holds none.
 pub fn read(ext: &ExtData) -> Settings {
-    let mut s = Settings::default();
-    let Some(p) = ext.get(KEY) else { return s };
+    let Some(p) = ext.get(KEY) else {
+        return Settings::default();
+    };
+    let mut s = Settings::studio();
     let float = |key: &str, into: &mut f32| {
         if let Some(v) = p.data.get(key).and_then(Value::as_f64) {
             *into = v as f32;
@@ -846,6 +1154,67 @@ pub fn read(ext: &ExtData) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_smooth_bend_turns_over_several_segments_and_keeps_the_length() {
+        let starts: Vec<Vec3> = (0..10).map(|i| Vec3::new(0.0, 0.0, i as f32 * 0.015)).collect();
+        let (entry, end) = (Vec3::new(0.0, 0.0, 0.06), Vec3::new(0.0, 0.3, 0.2));
+        let shaft = |smooth_bend: bool| {
+            let s = Settings {
+                smooth_bend,
+                length_squish: 0.0,
+                ..Settings::studio()
+            };
+            solve(&starts, &[], entry, end, 0.135, &s, false).points
+        };
+        let sharpest = |p: &[Vec3]| {
+            p.windows(3)
+                .map(|w| (w[1] - w[0]).angle_between(w[2] - w[1]).to_degrees())
+                .fold(0.0f32, f32::max)
+        };
+        let (folded, smooth) = (shaft(false), shaft(true));
+        assert!(
+            sharpest(&smooth) < sharpest(&folded) * 0.6,
+            "{} vs {}",
+            sharpest(&smooth),
+            sharpest(&folded)
+        );
+        let length = |p: &[Vec3]| p.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+        assert!(
+            (length(&smooth) - length(&folded)).abs() < 0.002,
+            "{} {}",
+            length(&smooth),
+            length(&folded)
+        );
+        // Still in the mouth: the shaft passes within a few millimetres of
+        // the entry, far less than its thickness.
+        let near = smooth
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let t = ((entry - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                (a + (b - a) * t).distance(entry)
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(near < 0.008, "{near}");
+    }
+
+    #[test]
+    fn a_stiff_shaft_stays_on_its_line_past_the_entry() {
+        let starts: Vec<Vec3> = (0..10).map(|i| Vec3::new(0.0, 0.0, i as f32 * 0.015)).collect();
+        // The end turns away from the line at the entry.
+        let (entry, end) = (Vec3::new(0.0, 0.0, 0.05), Vec3::new(0.0, 0.2, 0.2));
+        let tip = |stiffness: f32| {
+            let s = Settings {
+                stiffness,
+                ..Settings::studio()
+            };
+            solve(&starts, &[], entry, end, 0.135, &s, false).points[9]
+        };
+        assert!(tip(0.0).y > 0.03, "bends to the end: {}", tip(0.0));
+        assert!(tip(1.0).y.abs() < 1e-4, "stays straight: {}", tip(1.0));
+        assert!(tip(0.5).y > 0.0 && tip(0.5).y < tip(0.0).y);
+    }
 
     #[test]
     fn a_card_without_the_data_has_the_defaults() {
@@ -916,6 +1285,7 @@ mod tests {
         let s = Settings {
             length_squish: 0.0,
             girth_squish: 0.0,
+            smooth_bend: false,
             ..Settings::default()
         };
         let starts = shaft(9, 0.19);
@@ -1064,7 +1434,7 @@ mod tests {
         // Studio's hold: no return.
         let s = Settings {
             return_rate: 0.0,
-            ..Settings::default()
+            ..Settings::studio()
         };
         let base = 0.19;
         let mut pull = MouthPull::new(base);
@@ -1215,6 +1585,73 @@ mod tests {
             Some((1, Mode::Vaginal))
         );
         assert_eq!(nearest_place(at(2.0), 0.19, None, &places), None);
+    }
+
+    #[test]
+    fn fingers_find_both_hands_and_a_bp_vagina_its_bones() {
+        let Ok(game) = rk_vfs::Game::open_user(&[]) else {
+            return;
+        };
+        let Some(dir) = rk_core::Config::load().ok().map(|c| c.game_dir) else {
+            return;
+        };
+        let Ok(card) = rk_card::Card::load(dir.join("UserData/chara/female/Simple.png")) else {
+            return;
+        };
+        let opts = crate::BuildOptions {
+            clothes: false,
+            accessories: false,
+            uncensor_body: Some("bp.profundis_nt".into()),
+            ..Default::default()
+        };
+        let Ok(her) = crate::build(&game, &card, &opts) else {
+            return;
+        };
+        let fingers = finger_nodes(&her.scene, her.top);
+        assert_eq!(fingers.len(), 12);
+        let shapes = finger_shapes(&her.scene, &fingers);
+        assert_eq!(shapes.len(), 12);
+        assert!(
+            !vagina_bones(&her.physics, &her.scene).is_empty(),
+            "BP Profundis has vagina bones"
+        );
+    }
+
+    #[test]
+    fn a_stroke_pulls_the_bones_by_their_shares_and_returns_along_up() {
+        let mut scene = Scene::default();
+        let top = scene.add_node("top", None, Trs::default());
+        let a = scene.add_node("cf_J_Vagina_L.011", Some(top), Trs::default());
+        let b = scene.add_node("cf_J_Vagina_R.012", Some(top), Trs::default());
+        let (direction, inside) = hole_directions(Vec3::ZERO, Vec3::Z * 0.1, Vec3::new(0.0, 0.1, 0.1));
+        assert!((direction - Vec3::new(0.0, 1.0, 1.0).normalize()).length() < 1e-6);
+        assert_eq!(inside, Vec3::Y);
+        let mut pull = HolePull {
+            mode: Mode::Vaginal,
+            amount: 0.002,
+            direction,
+            inside,
+            returning: false,
+        };
+        apply_hole_pull(&mut scene, top, &pull);
+        assert!((scene.nodes[a].local.pos - 0.1 * 0.002 * direction).length() < 1e-9);
+        assert!((scene.nodes[b].local.pos - 0.5 * 0.002 * direction).length() < 1e-9);
+        pull.returning = true;
+        pull.amount = 0.001;
+        apply_hole_pull(&mut scene, top, &pull);
+        assert!(
+            (scene.nodes[b].local.pos - Vec3::new(0.0, 0.0005, 0.0)).length() < 1e-9,
+            "the return goes along up"
+        );
+        assert_eq!(pull_bones(Mode::Oral).len(), 0);
+    }
+
+    #[test]
+    fn a_card_without_settings_pulls_the_mouth_as_the_main_game_does() {
+        let s = read(&ExtData::default());
+        assert_eq!((s.pull_rate, s.max_pull, s.max_push), (18.0, 0.006, 0.002));
+        let studio = Settings::studio();
+        assert_eq!((studio.pull_rate, studio.max_pull), (1.8, 0.01));
     }
 
     #[test]

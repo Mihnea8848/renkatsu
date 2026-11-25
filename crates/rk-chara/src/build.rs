@@ -14,6 +14,7 @@ use crate::shape::{self, Rules, ShapeSet};
 use anyhow::{Context, Result};
 use glam::Vec3;
 use rk_card::Card;
+use rk_unityfs::UValue;
 use rk_vfs::uncensor::ColorMatch;
 use rk_vfs::{cat, resolve_infos, Game, Item, Lookup, ResolveInfo};
 use std::collections::HashMap;
@@ -95,6 +96,9 @@ pub struct BuildOptions {
     /// Advanced Skirt Physics: Renkatsu's own pass that keeps legs, arms
     /// and the floor out of skirts. Off moves them exactly as the game.
     pub advanced_skirts: bool,
+    /// Have the cloth solver on the GPU (`physics::drape`) move the
+    /// skirts in place of Advanced Skirt Physics' net on the CPU.
+    pub skirts_on_gpu: bool,
     /// Run the Stiletto plugin: a worn shoe with a heel file lifts the body
     /// and turns the lower legs, feet and toes.
     pub stiletto: bool,
@@ -129,6 +133,7 @@ impl Default for BuildOptions {
             colliders: true,
             collider_switches: None,
             advanced_skirts: true,
+            skirts_on_gpu: false,
             stiletto: true,
         }
     }
@@ -151,6 +156,14 @@ pub struct Character {
     pub ik: Option<crate::fbbik::Settings>,
     /// Its solver, set up in the pose the character was built in.
     pub ik_rig: Option<crate::ik::Rig>,
+    /// The head's eye look (`EyeLookCalc`), and Studio's eye and neck look
+    /// patterns as the card saved them.
+    pub gaze: Option<crate::gaze::EyeLook>,
+    /// The neck's look (`crate::neck`).
+    pub neck: Option<crate::neck::NeckLook>,
+    /// The mouth's sliders put on their defaults for some mouths.
+    pub mouth_mask: Option<shape::MouthMask>,
+    pub look_patterns: [i32; 2],
     /// The hand patterns loaded for the layer, left then right; one is
     /// played while the layer asks for its pattern.
     pub hands: [Option<crate::hand_pattern::HandClip>; 2],
@@ -187,6 +200,10 @@ struct Builder<'g> {
     hair_gloss: Option<TexSlot>,
     /// Scripts of every loaded prefab, for the physics step.
     physics_sources: Vec<PhysicsSource>,
+    /// The eyes' look scripts and the card's pupil sliders, for the face
+    /// rig to place the irises for a gaze.
+    iris_look: Option<([EyeLook; 2], eyelook::Pupil)>,
+    mouth_mask: Option<shape::MouthMask>,
     /// The outfit is unlocked by the Clothing Unlocker plugin.
     unlocked: bool,
     /// The face controllers, once the head is loaded.
@@ -639,6 +656,113 @@ impl<'g> Builder<'g> {
         let p = script.read().ok()?.get("m_Script")?.as_pptr()?;
         let ms = self.game.assets.deref(&script.file, p)?.read().ok()?;
         ms.get("m_ClassName")?.as_str().map(str::to_string)
+    }
+
+    /// The head's eye look script (`EyeLookCalc`), set up at the pose the
+    /// character is built in.
+    fn read_gaze(&self) -> Option<crate::gaze::EyeLook> {
+        let assets = &self.game.assets;
+        for source in &self.physics_sources {
+            for (node, script) in &source.scripts {
+                if self.script_class(script).as_deref() != Some("EyeLookCalc") {
+                    continue;
+                }
+                let Ok(o) = script.read() else { continue };
+                let node_of =
+                    |p: rk_unityfs::PPtr| source.transforms.get(&assets.deref(&script.file, p)?.key()).copied();
+                let vec3 = |name: &str, default: Vec3| {
+                    o.get(name)
+                        .and_then(|v| {
+                            Some(Vec3::new(
+                                v.get("x")?.as_f32()?,
+                                v.get("y")?.as_f32()?,
+                                v.get("z")?.as_f32()?,
+                            ))
+                        })
+                        .unwrap_or(default)
+                };
+                let eyes: Vec<(usize, bool)> = o
+                    .array("eyeObjs")?
+                    .iter()
+                    .filter_map(|e| {
+                        Some((
+                            node_of(e.get("eyeTransform")?.as_pptr()?)?,
+                            e.get("eyeLR")?.as_i64()? == 1,
+                        ))
+                    })
+                    .collect();
+                let states = o
+                    .array("eyeTypeStates")?
+                    .iter()
+                    .filter_map(crate::gaze::EyeTypeState::read)
+                    .collect();
+                let (world, _) = self.scene.world();
+                let parents = |n: usize| self.scene.nodes[n].parent;
+                return crate::gaze::EyeLook::new(
+                    &world,
+                    &parents,
+                    o.pptr("rootNode").and_then(node_of).unwrap_or(*node),
+                    o.pptr("trfCenter").and_then(node_of),
+                    o.get("centerEyeLength").and_then(UValue::as_f32).unwrap_or(0.0),
+                    o.get("correct").and_then(UValue::as_i64).unwrap_or(1) != 0,
+                    o.get("sorasiRate").and_then(UValue::as_f32).unwrap_or(1.0),
+                    vec3("headLookVector", Vec3::Z),
+                    vec3("headUpVector", Vec3::Y),
+                    &eyes,
+                    states,
+                );
+            }
+        }
+        None
+    }
+
+    /// The neck's `NeckLookCalcVer2` on the body, as `crate::neck` turns
+    /// the neck and head with it.
+    fn read_neck(&self) -> Option<crate::neck::NeckLook> {
+        let assets = &self.game.assets;
+        for source in &self.physics_sources {
+            for script in source.scripts.iter().map(|(_, s)| s) {
+                if self.script_class(script).as_deref() != Some("NeckLookCalcVer2") {
+                    continue;
+                }
+                let Ok(o) = script.read() else { continue };
+                let node_of =
+                    |p: rk_unityfs::PPtr| source.transforms.get(&assets.deref(&script.file, p)?.key()).copied();
+                let bones: Vec<(usize, usize, glam::Quat)> = o
+                    .array("aBones")?
+                    .iter()
+                    .filter_map(|b| {
+                        let q = b.get("fixAngle")?;
+                        let fix = glam::Quat::from_xyzw(
+                            q.get("x")?.as_f32()?,
+                            q.get("y")?.as_f32()?,
+                            q.get("z")?.as_f32()?,
+                            q.get("w")?.as_f32()?,
+                        );
+                        Some((
+                            node_of(b.get("referenceCalc")?.as_pptr()?)?,
+                            node_of(b.get("neckBone")?.as_pptr()?)?,
+                            fix,
+                        ))
+                    })
+                    .collect();
+                let states = o
+                    .array("neckTypeStates")?
+                    .iter()
+                    .filter_map(crate::neck::NeckTypeState::read)
+                    .collect();
+                return crate::neck::NeckLook::new(
+                    o.pptr("transformAim").and_then(node_of)?,
+                    o.pptr("boneCalcAngle").and_then(node_of)?,
+                    &bones,
+                    states,
+                    o.get("changeTypeLeapTime").and_then(UValue::as_f32).unwrap_or(1.0),
+                    o.get("changeTypeLerpCurve").and_then(crate::neck::Curve::read),
+                    o.get("calcLerp").and_then(UValue::as_f32).unwrap_or(1.0),
+                );
+            }
+        }
+        None
     }
 
     /// Collects the DynamicBone components and colliders of everything
@@ -1137,6 +1261,8 @@ impl<'g> Builder<'g> {
                 )
             })
             .collect();
+        // The left eye first, as the eye look counts them.
+        rig.irises.sort_by_key(|&r| self.scene.renderers[r].name.clone());
         rig.show(&mut self.scene, None);
         rig
     }
@@ -1745,6 +1871,7 @@ impl<'g> Builder<'g> {
             width: face.pupil_width,
             height: face.pupil_height,
         };
+        self.iris_look = Some((looks, pupil_sliders));
 
         for (side, (iris_mesh, white_mesh)) in [("cf_Ohitomi_L02", "cf_Ohitomi_L"), ("cf_Ohitomi_R02", "cf_Ohitomi_R")]
             .into_iter()
@@ -2201,6 +2328,8 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         cloth_overlays: overlays::clothes(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
         hair_gloss: None,
         physics_sources: Vec::new(),
+        iris_look: None,
+        mouth_mask: None,
         body_copies: Vec::new(),
         unlocked: opts.clothing_unlocker
             && crate::clothing_unlocker::unlocked(&card.ext, opts.outfit.min(card.coordinates.len().saturating_sub(1))),
@@ -2466,12 +2595,16 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
                         for (i, v) in card.face.shape_value_face.iter().enumerate() {
                             set.set(i, *v);
                         }
-                        set.apply(
-                            &mut b.scene,
+                        let rules = Rules::parse(shape::HEAD_RULES)?;
+                        set.apply(&mut b.scene, head_bone.root, &rules, corrections.as_deref());
+                        b.mouth_mask = Some(shape::MouthMask::new(
+                            set,
+                            rules,
                             head_bone.root,
-                            &Rules::parse(shape::HEAD_RULES)?,
-                            corrections.as_deref(),
-                        );
+                            corrections.clone(),
+                            &card.face.shape_value_face,
+                            card.face.head_id,
+                        ));
                     }
                     Err(e) => b.loader.warn(format!("face sliders: {e:#}")),
                 }
@@ -2883,6 +3016,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     if let Some(face) = &mut b.face {
         face.tongues = tongues;
         face.keep_iris_places(&b.scene);
+        face.gaze_place = b.iris_look;
         face.show(&mut b.scene, None);
     } else {
         for &r in &tongues[1] {
@@ -2973,6 +3107,9 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         physics.start(&mut b.scene);
         // Advanced Skirt Physics is fitted to the body as built.
         physics.fit_cloth(&b.scene, &bones, opts.advanced_skirts);
+        if opts.skirts_on_gpu {
+            physics.solve_skirts_on_gpu(true);
+        }
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
     }
@@ -2999,7 +3136,20 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         }
         shaft
     };
+    let gaze = b.read_gaze();
+    let neck = b.read_neck();
+    // Studio's eye and neck look patterns as the card saved them.
+    let pattern = |key: &str| {
+        rk_card::map_get(&card.status, key)
+            .and_then(rk_card::Value::as_i64)
+            .unwrap_or(0) as i32
+    };
+    let look_patterns = [pattern("eyesLookPtn"), pattern("neckLookPtn")];
     Ok(Character {
+        gaze,
+        neck,
+        mouth_mask: b.mouth_mask.take(),
+        look_patterns,
         ik_rig,
         hands: [None, None],
         face: b.face.take(),

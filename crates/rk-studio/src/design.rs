@@ -11,15 +11,15 @@ use clap::ValueEnum;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Design {
     /// Docked bars: the mode rail and the selection bar sit on the
-    /// viewport's edges, Unreal 5 style tabs and Details rows.
+    /// viewport's edges, Unreal 5 style tabs.
     A,
     /// Floating overlays: compact blocks float over the viewport as in
-    /// Unity 6, with denser rows and an Inspector style Properties panel.
+    /// Unity 6, with denser rows.
     B,
     /// Clean viewport: the mode rail is part of the window, the selection
     /// bar lives in the viewport's header row, panel titles are underlined.
     C,
-    /// The three combined: the tabs and Details rows of A, the floating
+    /// The three combined: the tabs of A, the floating
     /// blocks of B, the Outliner of C, and the selection bar in the
     /// viewport's header row.
     D,
@@ -81,17 +81,6 @@ impl Overlays {
     }
 }
 
-/// How the Properties panel lays out its sections and rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Props {
-    /// Unreal's Details: header bars, a name and a value column, row lines.
-    Details,
-    /// Unity's Inspector: component headers, axis letters before fields.
-    Inspector,
-    /// Right aligned names and joined fields with the axis letter inside.
-    Joined,
-}
-
 /// How the Outliner draws the scene tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tree {
@@ -121,7 +110,6 @@ pub struct Spec {
     /// Panel tabs carry an icon before the title.
     pub tab_icons: bool,
     pub overlays: Overlays,
-    pub props: Props,
     pub tree: Tree,
 }
 
@@ -143,7 +131,6 @@ impl Design {
                 tabs: Tabs::Filled,
                 tab_icons: true,
                 overlays: Overlays::Docked,
-                props: Props::Details,
                 tree: Tree::Columns,
             },
             Design::B => Spec {
@@ -158,7 +145,6 @@ impl Design {
                 tabs: Tabs::TopLine,
                 tab_icons: false,
                 overlays: Overlays::Floating,
-                props: Props::Inspector,
                 tree: Tree::Plain,
             },
             Design::C => Spec {
@@ -173,7 +159,6 @@ impl Design {
                 tabs: Tabs::Underline,
                 tab_icons: false,
                 overlays: Overlays::Header,
-                props: Props::Joined,
                 tree: Tree::Guides,
             },
             Design::D => Spec {
@@ -188,7 +173,6 @@ impl Design {
                 tabs: Tabs::Filled,
                 tab_icons: true,
                 overlays: Overlays::Blocks,
-                props: Props::Details,
                 tree: Tree::Guides,
             },
         }

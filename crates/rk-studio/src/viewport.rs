@@ -441,6 +441,11 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         ui.add_space(5.0);
         bar_text(ui, label, k.font(), k.t.text_dim);
     }
+    // A character's actions are in its Properties, in the Character
+    // section.
+    if kind == crate::kinds::Kind::Character {
+        return;
+    }
     ui.add_space(4.0);
     bar_divider(ui, k);
     ui.add_space(2.0);
@@ -1363,12 +1368,15 @@ fn kinematics_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egu
         widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
     }
     if ticked != on && ik {
-        // The targets start on the bones, as Studio's copy puts them.
+        // The targets start on the bones as the character stands now, as
+        // Studio's copy puts them, every time IK goes on: Studio keeps the
+        // targets it had, which snaps the limbs back to an old pose, often
+        // the T-pose the character was added in.
         let on_bones = st.doc.selected.and_then(|id| st.live.as_ref()?.ik_targets_on_bones(id));
         edit_fk_layer(st, |l| {
             l.ik_on = ticked;
-            if ticked && l.ik.is_empty() {
-                l.ik = on_bones.unwrap_or_default();
+            if let (true, Some(targets)) = (ticked, on_bones) {
+                l.ik = targets;
             }
         });
         st.ik_open = ticked;

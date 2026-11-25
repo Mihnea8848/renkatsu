@@ -237,6 +237,11 @@ impl TabViewer for Viewer<'_> {
             .rect_filled(line, 0.0, color);
     }
 
+    /// Every panel but the viewport closes; the Window menu opens it again.
+    fn is_closeable(&self, tab: &Panel) -> bool {
+        *tab != Panel::Viewport
+    }
+
     fn scroll_bars(&self, _tab: &Panel) -> [bool; 2] {
         [false, false]
     }

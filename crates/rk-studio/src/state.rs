@@ -303,6 +303,10 @@ impl Opening {
     }
 }
 
+type Preset = rk_chara::expression_control::Preset;
+/// A plugin's expression presets under its name.
+pub type PresetGroup = (&'static str, Vec<Preset>);
+
 pub struct State {
     /// The window's title bar.
     pub title_bar: TitleBar,
@@ -468,12 +472,9 @@ pub struct State {
 
     /// Properties sections that are open.
     pub sections: [bool; 23],
-    /// Expression presets: Renkatsu's own, then ExpressionControl's from
-    /// the game folder; read when first shown.
-    pub expressions: Option<(
-        Vec<rk_chara::expression_control::Preset>,
-        Vec<rk_chara::expression_control::Preset>,
-    )>,
+    /// Expression presets: Renkatsu's own, then the plugins' from the game
+    /// folder under each plugin's name; read when first shown.
+    pub expressions: Option<(Vec<Preset>, Vec<PresetGroup>)>,
     /// The name a new expression preset is saved under.
     pub expression_name: String,
     /// The page of a character's Properties: the scene's settings, the

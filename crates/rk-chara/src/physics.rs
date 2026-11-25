@@ -168,6 +168,8 @@ impl Curve {
 }
 
 pub mod cloth;
+pub mod drape;
+pub mod kind;
 pub mod net;
 pub mod shell;
 
@@ -203,6 +205,37 @@ impl Default for Collider {
 
 /// Colliders lent to dynamic bones by their place in `Physics::bones`.
 pub type Guests = Vec<(usize, Vec<Shape>)>;
+
+/// Whether two sets of guests are the same but for places and sizes off by
+/// at most `tolerance` metres.
+pub fn guests_near(a: &[(usize, Vec<Shape>)], b: &[(usize, Vec<Shape>)], tolerance: f32) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|((ba, sa), (bb, sb))| {
+            ba == bb
+                && sa.len() == sb.len()
+                && sa.iter().zip(sb).all(|(x, y)| {
+                    x.capsule == y.capsule
+                        && x.inside == y.inside
+                        && x.p0.distance(y.p0) <= tolerance
+                        && x.p1.distance(y.p1) <= tolerance
+                        && (x.radius - y.radius).abs() <= tolerance
+                })
+        })
+}
+
+/// Guests with one list per bone, in the bones' order, as several givers
+/// may lend to the same bone.
+pub fn merged(guests: Guests) -> Guests {
+    let mut out: Guests = Vec::new();
+    for (bone, shapes) in guests {
+        match out.iter_mut().find(|(b, _)| *b == bone) {
+            Some((_, list)) => list.extend(shapes),
+            None => out.push((bone, shapes)),
+        }
+    }
+    out.sort_by_key(|(b, _)| *b);
+    out
+}
 
 /// A collider placed in the world for one update.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1981,7 +2014,7 @@ impl Physics {
     /// their own, placed in the world, by the bone's place in `bones`;
     /// they stay until set again.
     pub fn set_guests(&mut self, guests: Guests) {
-        self.guests = guests;
+        self.guests = merged(guests);
     }
 
     /// The guests set last.
@@ -2030,6 +2063,56 @@ impl Physics {
             Some(cloth) if self.advanced => cloth.draw(),
             _ => None,
         };
+        scene.drape = match &self.cloth {
+            Some(cloth) if self.advanced => cloth.drape(),
+            _ => None,
+        };
+    }
+
+    /// Has the GPU solver (`drape`, run by the renderer) move the skirts'
+    /// nets in place of the CPU's net solver. Advanced Skirt Physics
+    /// must be on for either.
+    pub fn solve_skirts_on_gpu(&mut self, on: bool) {
+        if let Some(cloth) = &mut self.cloth {
+            cloth.solve_on_gpu(on);
+        }
+    }
+
+    /// What is known of each skirt that has a cloth net, the one that
+    /// carries the most vertices first: what `kind::guess` tells the
+    /// kind of cloth from.
+    pub fn garments(&self, scene: &Scene) -> Vec<kind::Garment> {
+        self.cloth
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.garments(scene, &self.bones))
+    }
+
+    /// Makes the skirts' cloth of `kind` for the GPU solver, none for
+    /// the kind guessed from the clothing (`kind::guess`). Whether that
+    /// changed the cloth, which then starts again.
+    pub fn set_skirt_kind(&mut self, kind: Option<drape::Kind>) -> bool {
+        self.cloth.as_mut().is_some_and(|c| c.set_kind(kind))
+    }
+
+    /// The kind of cloth the skirts are guessed to be and the kind they
+    /// are made of; none without skirts that have cloth.
+    pub fn skirt_kinds(&self) -> Option<[drape::Kind; 2]> {
+        self.cloth.as_ref().filter(|c| c.has_nets()).map(cloth::Cloth::kinds)
+    }
+
+    /// The fastest a part of the body went in a frame since the GPU
+    /// solver started, as seen from the waist, in metres.
+    pub fn fastest_limb(&self) -> f32 {
+        self.cloth.as_ref().map_or(0.0, cloth::Cloth::fastest_limb)
+    }
+
+    /// One text per cloth net for the walking score (`rk render
+    /// --skirt-dump`); `gpu` is the GPU solver's state read back.
+    pub fn skirt_dump(&self, scene: &Scene, gpu: Option<drape::Readback<'_>>) -> Vec<String> {
+        match &self.cloth {
+            Some(cloth) if self.advanced => cloth.dump(scene, gpu),
+            _ => Vec::new(),
+        }
     }
 
     /// While `held`, `end_frame` moves everything but the cloth nets,
@@ -2070,6 +2153,7 @@ impl Physics {
     pub fn settle_cloth(&mut self, scene: &mut Scene, frames: u32, dt: f32) {
         let Some(cloth) = self.cloth.as_mut().filter(|_| self.advanced) else {
             scene.cloth = None;
+            scene.drape = None;
             scene.push_out = None;
             return;
         };
@@ -2077,6 +2161,7 @@ impl Physics {
             cloth.step_nets(scene, &self.ran, self.obstacles.as_ref(), dt);
         }
         scene.cloth = cloth.draw();
+        scene.drape = cloth.drape();
     }
 
     /// Fits Advanced Skirt Physics to the character as it is now, which
@@ -2481,6 +2566,24 @@ mod tests {
         physics.start(&mut scene);
         physics.fit_cloth(&scene, &std::collections::HashMap::new(), true);
         (scene, physics, waist)
+    }
+
+    #[test]
+    fn the_skirt_kind_is_the_guess_until_one_is_chosen() {
+        use drape::Kind;
+        let (scene, mut physics, _) = skirt();
+        let [guessed, made] = physics.skirt_kinds().expect("a skirt with cloth");
+        assert_eq!(guessed, made);
+        assert_eq!(guessed, kind::guess(&physics.garments(&scene)[0]).0);
+        // Choosing what it is already changes nothing; another kind
+        // does, and none goes back to the guess.
+        assert!(!physics.set_skirt_kind(Some(guessed)));
+        assert!(!physics.set_skirt_kind(None));
+        let other = Kind::ALL.into_iter().find(|k| *k != guessed).unwrap();
+        assert!(physics.set_skirt_kind(Some(other)));
+        assert_eq!(physics.skirt_kinds(), Some([guessed, other]));
+        assert!(physics.set_skirt_kind(None));
+        assert_eq!(physics.skirt_kinds(), Some([guessed, guessed]));
     }
 
     #[test]
@@ -2902,6 +3005,25 @@ mod tests {
         physics.settle(&mut scene, 300, FRAME_TIME);
         assert!(physics.speed() < 1e-6);
         assert!(position(&scene, b2).y < before.y - 0.005);
+    }
+
+    #[test]
+    fn guests_for_one_bone_from_several_givers_join() {
+        let shape = |r: f32| Shape {
+            p0: Vec3::ZERO,
+            p1: Vec3::ZERO,
+            radius: r,
+            capsule: false,
+            inside: false,
+        };
+        let joined = merged(vec![
+            (3, vec![shape(1.0)]),
+            (1, vec![shape(2.0)]),
+            (3, vec![shape(3.0)]),
+        ]);
+        assert_eq!(joined.len(), 2);
+        assert_eq!(joined[0].0, 1);
+        assert_eq!(joined[1].1.iter().map(|s| s.radius).collect::<Vec<_>>(), vec![1.0, 3.0]);
     }
 
     #[test]

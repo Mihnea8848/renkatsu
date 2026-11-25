@@ -164,6 +164,9 @@ struct Cli {
     /// Start on this page of Properties, by its place, to picture it.
     #[arg(long, hide = true)]
     property_tab: Option<usize>,
+    /// What the Properties search holds at start, for pictures of it.
+    #[arg(long, hide = true)]
+    property_search: Option<String>,
     /// Show the sun's dome as Ctrl+L shows it, to picture it.
     #[arg(long, hide = true)]
     sun_preview: bool,
@@ -232,6 +235,10 @@ struct Cli {
     /// X,Y points, to picture a view that left its starting framing.
     #[arg(long, value_parser = parse_point, allow_hyphen_values = true)]
     camera_turn: Option<egui::Pos2>,
+    /// Start with the camera here, as `EYE:TARGET`, each `x,y,z` in
+    /// metres, focused on nothing, to picture a close view.
+    #[arg(long, hide = true, value_parser = parse_camera, allow_hyphen_values = true)]
+    camera: Option<(glam::Vec3, glam::Vec3)>,
     /// Start with the camera focused on nothing.
     #[arg(long)]
     free_camera: bool,
@@ -416,6 +423,16 @@ fn parse_wheel(text: &str) -> Result<(egui::Pos2, f32), String> {
         parse_point(point)?,
         dy.trim().parse().map_err(|_| "the turn is a number".to_owned())?,
     ))
+}
+
+fn parse_camera(text: &str) -> Result<(glam::Vec3, glam::Vec3), String> {
+    let point = |t: &str| -> Option<glam::Vec3> {
+        let v: Vec<f32> = t.split(',').map(|n| n.trim().parse().ok()).collect::<Option<_>>()?;
+        (v.len() == 3).then(|| glam::Vec3::new(v[0], v[1], v[2]))
+    };
+    text.split_once(':')
+        .and_then(|(eye, target)| Some((point(eye)?, point(target)?)))
+        .ok_or_else(|| "a camera must look like 0,1.5,1:0,1.4,0".to_owned())
 }
 
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
@@ -803,6 +820,9 @@ impl Studio {
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
         }
+        if let Some(text) = &cli.property_search {
+            state.property_search = text.clone();
+        }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
                 .iter()
@@ -906,6 +926,15 @@ impl Studio {
         if let Some(live) = state.live.as_mut() {
             if let Some(drag) = cli.camera_turn {
                 live.cam.orbit_drag(drag.to_vec2());
+            }
+            if let Some((eye, target)) = cli.camera {
+                let fov_y_deg = live.cam.orbit.fov_y_deg;
+                live.place_camera(&rk_render::Camera {
+                    eye,
+                    target,
+                    fov_y_deg,
+                    up: glam::Vec3::Y,
+                });
             }
             if cli.free_camera {
                 live.cam.release();
@@ -1296,6 +1325,9 @@ impl eframe::App for Studio {
         }
         if self.state.settings.frame_rate.continuous() || self.state.live.as_ref().is_some_and(live::Live::settling) {
             ctx.request_repaint();
+        } else if let Some(wait) = self.state.live.as_ref().and_then(live::Live::next_blink) {
+            // Woken for the next blink.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(wait.max(0.001)));
         }
         let dt = ctx.input(|i| i.unstable_dt);
         let ft = &mut self.state.frame_time;
@@ -1383,7 +1415,9 @@ impl Studio {
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
-                    .show_close_buttons(false)
+                    // Panels close from their tab or their floating window,
+                    // and come back from the Window menu.
+                    .show_close_buttons(true)
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);

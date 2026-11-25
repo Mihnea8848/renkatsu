@@ -1,12 +1,13 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! The Properties panel: everything about the selection in sections of
-//! rows, with names and values aligned in two columns. The values are the
-//! selected object's own, from the scene model; what waits for a later
-//! feature is shown greyed, and says what it waits for.
+//! The Properties panel: everything about the selection in framed
+//! sections of rows, with names and values aligned in two columns, and a
+//! character's pages as icons beside its name. The values are the selected
+//! object's own, from the scene model. A row an object has no use for is
+//! left out; one that waits, for the character to be built or for a later
+//! feature, is shown greyed and says what it waits for.
 
-use crate::design::Props;
 use crate::kinds::Kind;
 use crate::profile::{self, Profile};
 use crate::scene::MapTime;
@@ -16,8 +17,6 @@ use crate::widgets::{self, glyph, hair_h, hair_v, icon_button, label, Marker};
 use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as icon;
 use std::path::Path;
-
-const AXES: [&str; 3] = ["X", "Y", "Z"];
 
 /// The character page that holds what an H scene leaves on a character:
 /// the liquid on the skin and the clothes now, and the rest of the game's
@@ -50,15 +49,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut object = before.clone();
     let kind = object.kind();
     let color = st.library.color_of(&object.content);
-    header(
-        ui,
-        k,
-        st,
-        object.content.glyph(),
-        object.content.label(),
-        color,
-        &object.name,
-    );
     // Who a character is: the card's profile, or the one the character
     // has in this scene. Its pages sit beside the scene's settings.
     let card_profile = match &object.content {
@@ -75,23 +65,27 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     });
     let shown_before = shown.clone();
     // A character's pages: the scene's own values, then what it plays,
-    // then who it is. A card whose profile could not be read still has
-    // the first two.
-    let pages: &[&str] = match &shown {
-        Some(_) => &["Scene", "Animation", "Profile", H_PAGE, RENKATSU_PAGE],
-        None if kind == Kind::Character => &["Scene", "Animation", H_PAGE, RENKATSU_PAGE],
-        None => &[],
-    };
-    // The page that holds what the body shows in an H scene, which is of
-    // the scene and not of the card, so every character has it.
-    let h_page = pages.iter().position(|&p| p == H_PAGE);
-    if pages.is_empty() {
-        st.property_tab = 0;
+    // then who it is.
+    let pages = pages_of(&object, shown.is_some());
+    st.property_tab = st.property_tab.min(pages.len() - 1);
+    header(
+        ui,
+        k,
+        st,
+        object.content.glyph(),
+        object.content.label(),
+        color,
+        &object.name,
+        &pages,
+    );
+    // What shows: the open page's parts, or every page's while a search
+    // looks for a row.
+    let parts: Vec<Part> = if !searched(ui).is_empty() {
+        pages.iter().flat_map(|p| p.parts.iter().copied()).collect()
     } else {
-        st.property_tab = st.property_tab.min(pages.len() - 1);
-        page_tabs(ui, k, &mut st.property_tab, pages);
-    }
-    let page = st.property_tab;
+        pages[st.property_tab].parts.to_vec()
+    };
+    let has = |part: Part| parts.contains(&part);
     let built = st.live.as_ref().and_then(|live| live.built(object.id));
     let mut show_animations = false;
     let mut show_cards = false;
@@ -140,21 +134,26 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut snap: Option<Option<crate::scene::ObjectId>> = None;
     let mut chosen_map: Option<String> = None;
     let mut show_maps = false;
+    // The Character section's button asked for another card.
+    let mut load_card = false;
 
+    let page_shown = pages[st.property_tab];
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        page_title(ui, k, page_shown.name, page_shown.glyph);
         // What the body shows in an H scene. The levels are the game's
         // `siru`: a page of its own, since none of it is of the card.
-        if Some(page) == h_page {
-            let Content::Character {
-                liquid,
-                liquid_clothes,
-                pose_layer,
-                ..
-            } = &mut object.content
-            else {
-                return;
-            };
-            if section(ui, k, st, 10, "Liquid") {
+        let id = ui.id();
+        if let Content::Character {
+            liquid,
+            liquid_clothes,
+            pose_layer,
+            ..
+        } = &mut object.content
+        {
+            // A body without a liquid mask, the game's male one, has no
+            // use for the levels, so they are left out.
+            let no_mask = built.as_ref().is_some_and(|b| !b.liquid_mask);
+            if has(Part::Liquid) && !no_mask && section(ui, k, st, 10, "Liquid") {
                 use rk_chara::siru;
                 let waiting = match built.as_ref() {
                     None => Some("The character is not built"),
@@ -162,12 +161,17 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     Some(b) if !b.liquid_mask => Some("This body carries no liquid mask"),
                     Some(_) => None,
                 };
-                let id = ui.id();
                 for (part, name) in siru::NAMES.iter().enumerate() {
                     row(ui, k, name, waiting, |ui, rect| {
-                        let options = [("None", true), ("Light", true), ("Heavy", true)];
                         let chosen = usize::from(liquid[part].min(siru::MAX));
-                        let clicked = choices(ui, k, rect, id.with(("liquid", part)), Some(chosen), &options);
+                        let clicked = widgets::steps(
+                            ui,
+                            k,
+                            rect,
+                            id.with(("liquid", part)),
+                            chosen,
+                            &["None", "Light", "Heavy"],
+                        );
                         if let Some(i) = clicked {
                             liquid[part] = i as u8;
                         }
@@ -180,27 +184,58 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 });
                 section_end(ui, k);
             }
-            let waiting = built.is_none().then_some("The character is not built");
-            skin_effects_section(ui, k, st, object.id, waiting, pose_layer);
-            if let Some(card) = built.as_ref().and_then(|b| b.better_penetration) {
-                penetration_section(ui, k, st, &mut object, card);
+            if has(Part::Skin) {
+                let waiting = built.is_none().then_some("The character is not built");
+                skin_effects_section(ui, k, st, object.id, waiting, pose_layer);
             }
-            return;
         }
-        let page_name = pages.get(page).copied().unwrap_or_default();
-        // Renkatsu's own improvements on the game.
-        if page_name == RENKATSU_PAGE {
-            let Content::Character {
-                outfit, game_skirts, ..
-            } = &mut object.content
-            else {
-                return;
-            };
-            if section(ui, k, st, 18, "Physics") {
+        if has(Part::Penetration) {
+            // Her own shaft while it is aimed; else the shaft aimed at her,
+            // whose settings the pair shares; else her own, if she has one.
+            let own = built.as_ref().and_then(|b| b.better_penetration);
+            let aimed = st.live.as_ref().and_then(|l| l.aim(object.id)).is_some();
+            let linked = st.live.as_ref().and_then(|l| l.shaft_on(object.id));
+            if let (Some(card), true) = (own, aimed || linked.is_none()) {
+                penetration_section(ui, k, st, &mut object, card, None);
+            } else if let Some(him) = linked {
+                // Her side of the pair: the same settings as his shaft's.
+                let card = st
+                    .live
+                    .as_ref()
+                    .and_then(|l| l.built(him))
+                    .and_then(|b| b.better_penetration);
+                if let (Some(mut his), Some(card)) = (st.doc.scene().get(him).cloned(), card) {
+                    let before = his.clone();
+                    let name = his.name.clone();
+                    penetration_section(ui, k, st, &mut his, card, Some(&name));
+                    if his != before {
+                        let held = ui.input(|i| i.pointer.any_down());
+                        st.doc.edit(his, held);
+                    }
+                }
+            }
+        }
+        // All of a character's physics in one section, Renkatsu's own
+        // improvements on the game among them.
+        if let Content::Character {
+            outfit,
+            simulate,
+            game_skirts,
+            skirt_kinds,
+            ..
+        } = &mut object.content
+        {
+            if has(Part::Physics) && section(ui, k, st, 18, "Physics") {
+                row(ui, k, "Simulation", None, |ui, rect| {
+                    widgets::checkbox(ui, k, rect, id.with("physics"), simulate, "On");
+                });
                 // Per outfit: the ones listed move as in CharaStudio.
                 let mut advanced = !game_skirts.contains(outfit);
-                row(ui, k, "Skirts", None, |ui, rect| {
-                    widgets::checkbox(ui, k, rect, ui.id().with("advanced skirts"), &mut advanced, "Advanced");
+                row(ui, k, "Skirt physics", None, |ui, rect| {
+                    let mut chosen = usize::from(advanced);
+                    let options = ["Koikatsu", "Renkatsu"];
+                    widgets::segmented(ui, k, rect, ui.id().with("advanced skirts"), &mut chosen, &options);
+                    advanced = chosen == 1;
                 });
                 if advanced {
                     game_skirts.retain(|o| o != outfit);
@@ -208,13 +243,27 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     game_skirts.push(*outfit);
                     game_skirts.sort_unstable();
                 }
+                // The kind of cloth, per outfit too: guessed from the
+                // clothing unless one is chosen.
+                let kinds = crate::scene::SkirtKind::ALL;
+                let was = crate::scene::skirt_kind(skirt_kinds, *outfit);
+                let mut chosen = was
+                    .and_then(|k| kinds.iter().position(|o| *o == k))
+                    .map_or(0, |i| i + 1);
+                row(ui, k, "Skirt cloth", None, |ui, rect| {
+                    let options = ["Auto", "Tight", "Pleated", "Flowing", "Fixed"];
+                    widgets::combo(ui, k, rect, ui.id().with("skirt kind"), &mut chosen, &options);
+                });
+                let now = chosen.checked_sub(1).map(|i| kinds[i]);
+                if now != was {
+                    crate::scene::choose_skirt_kind(skirt_kinds, *outfit, now);
+                }
                 section_end(ui, k);
             }
-            return;
         }
         // Who the character is, what she likes and what she is like in
         // bed, as sections of one page, and a way back to the card's.
-        if let (Some(p), "Profile") = (shown.as_mut(), page_name) {
+        if let (Some(p), true) = (shown.as_mut(), has(Part::Profile)) {
             if let Some(card) = &card_profile {
                 let parts = if p.male { 1 } else { 3 };
                 for n in 1..=parts {
@@ -222,18 +271,13 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 card_data(ui, k, st, p, card);
             }
-            return;
         }
-        let id = ui.id();
         // The Animation page: what the character plays, and the pair it
         // is snapped into.
-        if page == 1 {
-            let Content::Character { animation, .. } = &mut object.content else {
-                return;
-            };
-            if section(ui, k, st, 6, "Animation") {
+        if let Content::Character { animation, .. } = &mut object.content {
+            if has(Part::Animation) && section(ui, k, st, 6, "Animation") {
                 let playing = built.as_ref().and_then(|b| b.animation);
-                row(ui, k, "Animation", None, |ui, rect| {
+                row(ui, k, "Clip", None, |ui, rect| {
                     let side = rect.height();
                     let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
                     // A dropdown of the project's animations, by the
@@ -293,12 +337,12 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 if let Some(p) = animation.as_mut() {
                     let fixed = playing.is_some_and(|(fixed, ..)| fixed);
-                    row(ui, k, "Kind", None, |ui, rect| {
+                    row(ui, k, "Motion", None, |ui, rect| {
                         let text = match playing {
                             None => "Not read".to_owned(),
                             Some((true, ..)) => "Static".to_owned(),
-                            Some((_, true, seconds)) => format!("Moving: loops every {seconds:.1} s"),
-                            Some((_, false, seconds)) => format!("Moving: plays {seconds:.1} s once"),
+                            Some((_, true, seconds)) => format!("Loops every {seconds:.1} s"),
+                            Some((_, false, seconds)) => format!("Plays {seconds:.1} s once"),
                         };
                         label(
                             &ui.painter().with_clip_rect(rect),
@@ -309,83 +353,94 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         );
                     });
                     let still = fixed.then_some("A static animation does not move");
-                    row(ui, k, "Speed", still, |ui, rect| {
-                        widgets::number(
-                            ui,
-                            k,
-                            rect,
-                            id.with("animation speed"),
-                            &mut p.speed,
-                            Marker::None,
-                            true,
-                            FINE,
-                        );
-                        p.speed = p.speed.clamp(0.0, 4.0);
-                    });
-                    row(ui, k, "Start", still, |ui, rect| {
-                        widgets::number(
-                            ui,
-                            k,
-                            rect,
-                            id.with("animation start"),
-                            &mut p.start,
-                            Marker::None,
-                            true,
-                            FINE,
-                        );
-                        p.start = p.start.clamp(0.0, 1.0);
-                    });
+                    // What a static animation, or one that loops, has no
+                    // use for is left out.
+                    if !fixed {
+                        row(ui, k, "Speed", still, |ui, rect| {
+                            widgets::slider(
+                                ui,
+                                k,
+                                rect,
+                                id.with("animation speed"),
+                                &mut p.speed,
+                                (0.0, 4.0),
+                                FINE,
+                                2,
+                            );
+                        });
+                        row(ui, k, "Start offset", still, |ui, rect| {
+                            widgets::slider(
+                                ui,
+                                k,
+                                rect,
+                                id.with("animation start"),
+                                &mut p.start,
+                                (0.0, 1.0),
+                                FINE,
+                                2,
+                            );
+                        });
+                    }
                     let loops = playing.is_some_and(|(_, loops, _)| loops);
                     let why = still.or(loops.then_some("The animation loops by itself"));
-                    row(ui, k, "At the end", why, |ui, rect| {
-                        widgets::checkbox(ui, k, rect, id.with("animation loop"), &mut p.force_loop, "Start over");
-                    });
+                    if why.is_none() {
+                        row(ui, k, "At the end", why, |ui, rect| {
+                            widgets::checkbox(ui, k, rect, id.with("animation loop"), &mut p.force_loop, "Start over");
+                        });
+                    }
                 }
                 section_end(ui, k);
             }
-            if section(ui, k, st, 4, "Pair") {
+            // The H scenes' animations are blended by body; see below.
+            let h = animation
+                .as_deref()
+                .and_then(|a| st.animations.of(a))
+                .and_then(|item| item.meta.as_ref())
+                .is_some_and(|meta| meta.h);
+            // With nobody to snap onto and no blend to set, the section
+            // is left out.
+            let pair_rows = !partners.is_empty() || h;
+            if has(Part::Pair) && pair_rows && section(ui, k, st, 4, "Pair") {
                 let alone = partners.is_empty().then_some("The scene has one character");
-                row(ui, k, "Snap to", alone, |ui, rect| {
-                    let shown = snapped
-                        .and_then(|id| partners.iter().find(|(other, ..)| *other == id))
-                        .map_or("None", |(_, name, _)| name.as_str());
-                    let resp = drop_field(ui, k, rect, id.with("snap"), shown);
-                    egui::Popup::menu(&resp).show(|ui| {
-                        ui.set_min_width(rect.width() - 10.0);
-                        if widgets::check_item(ui, k, snapped.is_none(), "None", "").clicked() {
-                            snap = Some(None);
-                            ui.close();
-                        }
-                        for (other, name, pair) in &partners {
-                            let note = if *pair { "Same H animation" } else { "" };
-                            if widgets::check_item(ui, k, snapped == Some(*other), name, note).clicked() {
-                                snap = Some(Some(*other));
+                if alone.is_none() {
+                    row(ui, k, "Snap to", alone, |ui, rect| {
+                        let shown = snapped
+                            .and_then(|id| partners.iter().find(|(other, ..)| *other == id))
+                            .map_or("None", |(_, name, _)| name.as_str());
+                        let resp = drop_field(ui, k, rect, id.with("snap"), shown);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.set_min_width(rect.width() - 10.0);
+                            if widgets::check_item(ui, k, snapped.is_none(), "None", "").clicked() {
+                                snap = Some(None);
                                 ui.close();
                             }
-                        }
+                            for (other, name, pair) in &partners {
+                                let note = if *pair { "Same H animation" } else { "" };
+                                if widgets::check_item(ui, k, snapped == Some(*other), name, note).clicked() {
+                                    snap = Some(Some(*other));
+                                    ui.close();
+                                }
+                            }
+                        });
                     });
-                });
+                }
                 // The H scenes' animations are blended by body, and
                 // CharaStudio's two animation options
                 // (`Studio.OICharInfo.animeOptionParam`) set the blend the
                 // clips play at instead of the character's own. A snapped
                 // pair holding different ones drifts apart.
-                let h = animation
-                    .as_deref()
-                    .and_then(|a| st.animations.of(a))
-                    .and_then(|item| item.meta.as_ref())
-                    .is_some_and(|meta| meta.h);
                 let own = built
                     .as_ref()
                     .map_or([0.5; 2], |b| [b.parameters.height, b.parameters.breast]);
                 let flat = (!h).then_some("The animation is not one of the H scenes'");
                 let mut values = animation.as_ref().and_then(|a| a.options).unwrap_or(own);
-                for (i, name) in ["Height", "Breasts"].into_iter().enumerate() {
-                    row(ui, k, name, flat, |ui, rect| {
-                        let at = id.with(("animation option", i));
-                        widgets::number(ui, k, rect, at, &mut values[i], Marker::None, true, FINE);
-                        values[i] = values[i].clamp(0.0, 1.0);
-                    });
+                if flat.is_none() {
+                    for (i, name) in ["Height", "Breasts"].into_iter().enumerate() {
+                        row(ui, k, name, flat, |ui, rect| {
+                            let at = id.with(("animation option", i));
+                            widgets::slider(ui, k, rect, at, &mut values[i], (0.0, 1.0), FINE, 2);
+                        });
+                    }
                 }
                 if let Some(a) = animation.as_mut().filter(|_| h) {
                     if a.options.is_some() || values != own {
@@ -394,12 +449,16 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
                 section_end(ui, k);
             }
-            // The hands and the face over the animation.
-            face_sections(ui, k, st, object.id, &mut object.content);
-            // The pose made by hand over the animation, while she is posed
-            // by hand.
+        }
+        // The hands and the face over the animation.
+        if has(Part::Hands) || has(Part::Face) {
+            let show = [has(Part::Hands), has(Part::Face)];
+            face_sections(ui, k, st, object.id, &mut object.content, show);
+        }
+        // The pose made by hand over the animation, while she is posed
+        // by hand.
+        if has(Part::Bone) {
             pose_sections(ui, k, st, object.id, &mut object.content);
-            return;
         }
         // A character light is turned by its angles alone.
         let chara_light = matches!(
@@ -409,35 +468,13 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 ..
             }
         );
-        if !matches!(kind, Kind::Folder | Kind::Effect) && !chara_light && section(ui, k, st, 0, "Transform") {
-            // What each of position, rotation and scale waits for, when it
-            // does nothing yet for this kind of object.
-            let off: [Option<&str>; 3] = match &object.content {
-                Content::Character { .. } => [None; 3],
-                Content::Light {
-                    light: LightKind::Point | LightKind::Spot,
-                    ..
-                } => [None, None, Some("A light has no size")],
-                Content::Light {
-                    light: LightKind::Character,
-                    ..
-                } => [
-                    Some("A directional light has no position"),
-                    Some("Turned by its angles"),
-                    Some("A light has no size"),
-                ],
-                Content::Light { .. } => [
-                    Some("A directional light has no position"),
-                    None,
-                    Some("A light has no size"),
-                ],
-                Content::Camera { .. } => [None, None, Some("A camera has no size")],
-                Content::Item | Content::MapPiece { .. } => [None; 3],
-                Content::MapDoor { .. } => [Some("A door stays in its frame"); 3],
-                // CharaStudio moves and turns a map; it keeps its size.
-                Content::Map { .. } => [None, None, Some("A map keeps its size")],
-                _ => [Some("Not available yet"); 3],
-            };
+        // What each of position, rotation and scale waits for, when it
+        // does nothing for this kind of object. Those rows are left out,
+        // and the section with them when none is left.
+        let off = transform_rows(&object.content);
+        let placed = !matches!(kind, Kind::Folder | Kind::Effect) && !chara_light;
+        let any_row = off.iter().any(Option::is_none);
+        if has(Part::Transform) && placed && any_row && section(ui, k, st, 0, "Transform") {
             let transform = &mut object.transform;
             let values = [
                 ("Position", &mut transform.position, FINE),
@@ -445,6 +482,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 ("Scale", &mut transform.scale, FINE),
             ];
             for (i, (name, value, speed)) in values.into_iter().enumerate() {
+                if off[i].is_some() {
+                    continue;
+                }
                 row(ui, k, name, off[i], |ui, rect| {
                     vec3(ui, k, rect, id.with(("transform", i)), value, speed);
                 });
@@ -452,7 +492,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             section_end(ui, k);
         }
         // An effect has no place to follow; a map's own just belongs to it.
-        let shown_target = target.as_ref().filter(|_| kind != Kind::Effect);
+        let shown_target = target.as_ref().filter(|_| kind != Kind::Effect && has(Part::Attached));
         if let Some((to, name, target_kind)) = shown_target {
             if section(ui, k, st, 15, "Attached to") {
                 row(ui, k, "Object", None, |ui, rect| {
@@ -488,12 +528,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 card,
                 outfit,
                 outdoor_shoes,
-                simulate,
                 clothes,
                 light_group,
                 ..
             } => {
-                if section(ui, k, st, 1, "Character") {
+                if has(Part::Character) && section(ui, k, st, 1, "Character") {
                     row(ui, k, "Card", None, |ui, rect| {
                         let side = rect.height();
                         let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
@@ -568,9 +607,6 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         widgets::segmented(ui, k, rect, id.with("shoes"), &mut chosen, &["Indoor", "Outdoor"]);
                         *outdoor_shoes = chosen == 1;
                     });
-                    row(ui, k, "Physics", None, |ui, rect| {
-                        widgets::checkbox(ui, k, rect, id.with("physics"), simulate, "Simulate");
-                    });
                     if let Some(why) = &failure {
                         row(ui, k, "Problem", None, |ui, rect| {
                             ui.interact(rect, id.with("problem"), Sense::hover()).on_hover_text(why);
@@ -610,9 +646,28 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         names.push(st.doc.add_light_group());
                         *light_group = names.last().cloned();
                     }
+                    // Getting another card into the project, and the
+                    // character's modules.
+                    wide_row(ui, k, "Load card Modules", |ui, rect| {
+                        let half = ((rect.width() - 4.0) / 2.0).floor();
+                        let (left, right) = (
+                            rect.with_max_x(rect.left() + half),
+                            rect.with_min_x(rect.right() - half),
+                        );
+                        let load = icon::IDENTIFICATION_CARD;
+                        if widgets::action_button(ui, k, left, id.with("load card"), Some(load), "Load card", true)
+                            .on_hover_text("Import card")
+                            .clicked()
+                        {
+                            load_card = true;
+                        }
+                        let modules = icon::PUZZLE_PIECE;
+                        widgets::action_button(ui, k, right, id.with("modules"), Some(modules), "Modules", false)
+                            .on_hover_text("Not available yet");
+                    });
                     section_end(ui, k);
                 }
-                if section(ui, k, st, 5, "Clothing") {
+                if has(Part::Clothing) && section(ui, k, st, 5, "Clothing") {
                     use rk_chara::clothes_state as cs;
                     let worn = built.as_ref().map(|b| b.worn.clone());
                     let waiting = worn.is_none().then_some("The character is not built");
@@ -645,8 +700,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     // one line at the end.
                     let mut missing = Vec::new();
                     let half_2 = rows.iter().any(|&(kind, _)| kinds.has(kind, cs::HALF_2));
+                    let is_worn = |kind: usize| worn.is_none() || kinds.is_kind(kind);
                     for (kind, name) in rows {
-                        if worn.is_some() && !kinds.is_kind(kind) {
+                        if !is_worn(kind) {
                             missing.push(name);
                             continue;
                         }
@@ -689,16 +745,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                     section_end(ui, k);
                 }
-                if section(ui, k, st, 2, "Expression") {
-                    let later = Some("Not available yet");
-                    for name in ["Eyes", "Mouth"] {
-                        row(ui, k, name, later, |ui, rect| {
-                            widgets::combo(ui, k, rect, id.with(name), &mut 0, &["Default"]);
-                        });
-                    }
-                    section_end(ui, k);
-                }
-                if section(ui, k, st, 3, "Modules") {
+                if has(Part::Modules) && section(ui, k, st, 3, "Modules") {
                     let later = Some("Not available yet");
                     for name in ["MaterialEditor", "ABMX", "Stiletto", "Clothing Unlocker"] {
                         row(ui, k, name, later, |ui, rect| {
@@ -722,7 +769,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 groups,
                 with_map,
             } => {
-                if section(ui, k, st, 1, "Light") {
+                if has(Part::Own) && section(ui, k, st, 1, "Light") {
                     row(ui, k, "Type", None, |ui, rect| {
                         let mut chosen = LightKind::ALL.iter().position(|l| l == light).unwrap_or(0);
                         let names = LightKind::ALL.map(|l| l.label());
@@ -733,7 +780,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         widgets::color_field(ui, k, rect, id.with("colour"), color);
                     });
                     if *light == LightKind::Character {
-                        row(ui, k, "Follows", None, |ui, rect| {
+                        row(ui, k, "Relative to", None, |ui, rect| {
                             let mut chosen = usize::from(*from_camera);
                             let options = ["Scene", "Camera"];
                             widgets::segmented(ui, k, rect, id.with("direction"), &mut chosen, &options);
@@ -753,7 +800,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             }
                         });
                     } else {
-                        row(ui, k, "Lights", None, |ui, rect| {
+                        row(ui, k, "Affects", None, |ui, rect| {
                             let mut chosen = match (*on_map, *on_characters) {
                                 (true, false) => 1,
                                 (false, true) => 2,
@@ -765,8 +812,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         });
                     }
                     row(ui, k, "Intensity", None, |ui, rect| {
-                        widgets::number(ui, k, rect, id.with("intensity"), intensity, Marker::None, true, FINE);
-                        *intensity = intensity.clamp(0.0, 8.0);
+                        widgets::slider(ui, k, rect, id.with("intensity"), intensity, (0.0, 8.0), FINE, 2);
                     });
                     if *light == LightKind::Character {
                         row(ui, k, "Map light", None, |ui, rect| {
@@ -781,15 +827,14 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                     }
                     if *light == LightKind::Spot {
                         row(ui, k, "Spot angle", None, |ui, rect| {
-                            widgets::number(ui, k, rect, id.with("cone"), spot_angle, Marker::None, true, ANGLE);
-                            *spot_angle = spot_angle.clamp(1.0, 179.0);
+                            widgets::slider(ui, k, rect, id.with("cone"), spot_angle, (1.0, 179.0), ANGLE, 2);
                         });
                     }
                     if *light == LightKind::Character || *on_characters {
                         let names: Vec<String> = std::iter::once(crate::scene::EVERYONE.to_owned())
                             .chain(st.doc.scene().light_groups.iter().cloned())
                             .collect();
-                        row(ui, k, "Groups", None, |ui, rect| {
+                        row(ui, k, "Light groups", None, |ui, rect| {
                             let text = match groups {
                                 None => "All".to_owned(),
                                 Some(list) if list.is_empty() => "None".to_owned(),
@@ -823,11 +868,38 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
             Content::Effect { effect } => {
                 let title = effect.label();
-                if section(ui, k, st, 1, title) {
+                if has(Part::Own) && section(ui, k, st, 1, title) {
+                    // A value with a range: the design's slider, or the
+                    // plain number where the range is too long for one.
                     let number = |ui: &mut Ui, name: &str, value: &mut f32, lo: f32, hi: f32| {
                         row(ui, k, name, None, |ui, rect| {
-                            widgets::number(ui, k, rect, id.with(name), value, Marker::None, true, FINE);
-                            *value = value.clamp(lo, hi);
+                            if hi - lo > 100.0 {
+                                widgets::number(ui, k, rect, id.with(name), value, Marker::None, true, FINE);
+                                *value = value.clamp(lo, hi);
+                            } else {
+                                widgets::slider(ui, k, rect, id.with(name), value, (lo, hi), FINE, 2);
+                            }
+                        });
+                    };
+                    // A colour that is the map's own or the effect's: the
+                    // choice, and the effect's own colour beside it.
+                    let own_colour = |ui: &mut Ui, name: &str, color: &mut Option<[f32; 3]>, start: [f32; 3]| {
+                        row(ui, k, name, None, |ui, rect| {
+                            let field = match color {
+                                Some(_) => rect.with_max_x(rect.left() + (rect.width() * 0.45).round()),
+                                None => rect,
+                            };
+                            let mut chosen = usize::from(color.is_some());
+                            widgets::combo(ui, k, field, id.with(name), &mut chosen, &["Map's own", "Own"]);
+                            if chosen == 0 {
+                                *color = None;
+                            } else if color.is_none() {
+                                *color = Some(start);
+                            }
+                            if let Some(own) = color.as_mut() {
+                                let swatch = rect.with_min_x(field.right() + 4.0);
+                                widgets::color_field(ui, k, swatch, id.with((name, "own")), own);
+                            }
                         });
                     };
                     match effect {
@@ -893,24 +965,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                                     }
                                 }
                             });
-                            row(ui, k, "Colour", None, |ui, rect| {
-                                let mut chosen = usize::from(color.is_some());
-                                widgets::combo(ui, k, rect, id.with("fog colour"), &mut chosen, &["Map's own", "Own"]);
-                                if chosen == 0 {
-                                    *color = None;
-                                } else if color.is_none() {
-                                    *color = Some([137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]);
-                                }
-                            });
-                            if let Some(own) = color {
-                                row(ui, k, "", None, |ui, rect| {
-                                    widgets::color_field(ui, k, rect, id.with("fog own"), own);
-                                });
-                            }
+                            own_colour(ui, "Colour", color, [137.0 / 255.0, 193.0 / 255.0, 221.0 / 255.0]);
                             if visibility.is_none() && mist.is_none() {
                                 // CharaStudio's fog.
                                 number(ui, "Height", height, 0.0, 50.0);
-                                number(ui, "Start", start_distance, 0.0, 50.0);
+                                number(ui, "Start distance", start_distance, 0.0, 50.0);
                             } else {
                                 let mut see = visibility.unwrap_or(1000.0);
                                 number(ui, "Visibility", &mut see, 0.5, 1000.0);
@@ -940,20 +999,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             row(ui, k, "Sky brightness", None, |ui, rect| {
                                 widgets::color_field(ui, k, rect, id.with("threshold"), threshold);
                             });
-                            row(ui, k, "Ray colour", None, |ui, rect| {
-                                let mut chosen = usize::from(color.is_some());
-                                widgets::combo(ui, k, rect, id.with("ray colour"), &mut chosen, &["Map's own", "Own"]);
-                                if chosen == 0 {
-                                    *color = None;
-                                } else if color.is_none() {
-                                    *color = Some([1.0; 3]);
-                                }
-                            });
-                            if let Some(own) = color {
-                                row(ui, k, "", None, |ui, rect| {
-                                    widgets::color_field(ui, k, rect, id.with("rays own"), own);
-                                });
-                            }
+                            own_colour(ui, "Ray colour", color, [1.0; 3]);
                         }
                     }
                     section_end(ui, k);
@@ -964,7 +1010,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 near,
                 far,
             } => {
-                if section(ui, k, st, 1, "Lens") {
+                if has(Part::Own) && section(ui, k, st, 1, "Lens") {
                     let later = Some("Not available yet");
                     let values = [("Focal length", focal_length), ("Near", near), ("Far", far)];
                     for (i, (name, value)) in values.into_iter().enumerate() {
@@ -988,7 +1034,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 let sidecar = st.project.resolve(map);
                 let file = st.map_pictures.sidecar(&sidecar);
                 let times = file.as_ref().map_or_else(Vec::new, |f| f.times.clone());
-                if section(ui, k, st, 1, "Map") {
+                if has(Part::Own) && section(ui, k, st, 1, "Map") {
                     row(ui, k, "Map", None, |ui, rect| {
                         let side = rect.height();
                         let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
@@ -1034,9 +1080,11 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         .as_ref()
                         .is_some_and(|f| f.walls.is_empty())
                         .then_some("This map has no walls that hide");
-                    row(ui, k, "Hide walls", none, |ui, rect| {
-                        widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
-                    });
+                    if none.is_none() {
+                        row(ui, k, "Hide walls", none, |ui, rect| {
+                            widgets::checkbox(ui, k, rect, id.with("hide walls"), hide_walls, "");
+                        });
+                    }
                     let mut angles = sun.unwrap_or(own_sun);
                     let before = angles;
                     let mut reset = false;
@@ -1053,17 +1101,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                         *sun = Some(angles);
                     }
                     row(ui, k, "Light intensity", None, |ui, rect| {
-                        widgets::number(
-                            ui,
-                            k,
-                            rect,
-                            id.with("map light"),
-                            light_intensity,
-                            Marker::None,
-                            true,
-                            FINE,
-                        );
-                        *light_intensity = light_intensity.clamp(0.0, 1.0);
+                        widgets::slider(ui, k, rect, id.with("map light"), light_intensity, (0.0, 1.0), FINE, 2);
                     });
                     row(ui, k, "Filter decay", None, |ui, rect| {
                         // How far the colour filter has faded when the map
@@ -1076,7 +1114,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                             .min_by(|a, b| (a.1 - *filter_decay).abs().total_cmp(&(b.1 - *filter_decay).abs()))
                             .map_or(2, |(i, _)| i);
                         let was = chosen;
-                        widgets::combo(ui, k, rect, id.with("filter decay"), &mut chosen, &names);
+                        chosen = widgets::steps(ui, k, rect, id.with("filter decay"), chosen, &names).unwrap_or(chosen);
                         if chosen != was {
                             *filter_decay = STEPS[chosen];
                         }
@@ -1085,7 +1123,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
             }
             Content::MapPiece { rest, .. } => {
-                if section(ui, k, st, 1, "Map piece") {
+                if has(Part::Own) && section(ui, k, st, 1, "Map piece") {
                     row(ui, k, "Place", None, |ui, rect| {
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                         if widgets::flat_button(
@@ -1105,7 +1143,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
             }
             Content::MapDoor { open, .. } => {
-                if section(ui, k, st, 1, "Door") {
+                if has(Part::Own) && section(ui, k, st, 1, "Door") {
                     row(ui, k, "Open", None, |ui, rect| {
                         widgets::checkbox(ui, k, rect, id.with("door open"), open, "");
                     });
@@ -1113,7 +1151,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 }
             }
             Content::Folder | Content::Item => {
-                if section(ui, k, st, 1, "Object") {
+                if has(Part::Own) && section(ui, k, st, 1, "Object") {
                     row(ui, k, "Name", None, |ui, rect| {
                         widgets::value_box(ui, k, rect, &before.name)
                     });
@@ -1170,6 +1208,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     if let Some(file) = chosen_map {
         st.add_map(std::path::PathBuf::from(file));
     }
+    if load_card {
+        st.ask(crate::state::Command::ImportCard, ui.ctx());
+    }
 }
 
 /// What the project's file says about the animation a character plays;
@@ -1207,70 +1248,6 @@ fn drop_field(ui: &mut Ui, k: &Look, rect: Rect, id: Id, text: &str) -> egui::Re
     resp
 }
 
-/// The row of pages under a character's header, each a word with a line
-/// under the open one.
-fn page_tabs(ui: &mut Ui, k: &Look, chosen: &mut usize, pages: &[&str]) {
-    let t = &k.t;
-    let line_height = k.d.row + 4.0;
-    // Tabs that are a little too wide for one line close up first; the
-    // ones that still do not fit go on the next, rather than off the edge
-    // of the panel.
-    let room = ui.available_width() - 16.0;
-    let text: Vec<f32> = pages
-        .iter()
-        .map(|name| widgets::text_width(ui, name, k.font()).ceil())
-        .collect();
-    let gap = ((room - text.iter().sum::<f32>()) / pages.len().max(1) as f32).clamp(8.0, 18.0);
-    let widths: Vec<f32> = text.iter().map(|w| w + gap).collect();
-    // Where each tab goes: its line and its left edge.
-    let mut place = Vec::with_capacity(widths.len());
-    let (mut lines, mut used) = (1, 0.0);
-    for w in &widths {
-        if used + w > room && used > 0.0 {
-            lines += 1;
-            used = 0.0;
-        }
-        place.push((lines - 1, used));
-        used += w;
-    }
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), line_height * lines as f32),
-        Sense::hover(),
-    );
-    hair_h(ui.painter(), rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
-    for (i, name) in pages.iter().enumerate() {
-        let w = widths[i];
-        let (line, left) = place[i];
-        let (x, top) = (rect.left() + 8.0 + left, rect.top() + line_height * line as f32);
-        let tab = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + w, top + line_height));
-        let resp = ui.interact(tab, ui.id().with(("property page", i)), Sense::click());
-        if resp.clicked() {
-            *chosen = i;
-        }
-        let on = *chosen == i;
-        let color = match (on, resp.hovered()) {
-            (true, _) => t.text_bright,
-            (false, true) => t.text,
-            (false, false) => t.text_dim,
-        };
-        let p = ui.painter();
-        p.text(
-            tab.center() - Vec2::new(0.0, 1.0),
-            Align2::CENTER_CENTER,
-            name,
-            k.font(),
-            color,
-        );
-        if on {
-            let line = Rect::from_min_max(
-                Pos2::new(tab.left() + 4.0, tab.bottom() - 2.0),
-                Pos2::new(tab.right() - 4.0, tab.bottom()),
-            );
-            p.rect_filled(line, 0.0, t.select);
-        }
-    }
-}
-
 /// The Animation page's sections of the pose made by hand, while the
 /// character is posed by hand: the bone chosen (on its ball or in the
 /// Animator) with its turn over the animation and a way back.
@@ -1282,7 +1259,14 @@ pub const PENETRATION_SECTION: usize = 22;
 
 /// The hands' patterns and the face, as Studio's hand and face panels set
 /// them: each pattern a picture that opens a grid of the others.
-fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId, content: &mut Content) {
+fn face_sections(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    id: crate::scene::ObjectId,
+    content: &mut Content,
+    [hands, face_shown]: [bool; 2],
+) {
     use crate::live::Pictures;
     use rk_chara::channels::Channel;
     let Content::Character { pose_layer, .. } = content else {
@@ -1295,27 +1279,17 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
     let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
     let mut next = keyed.shown.clone();
     let mut toggled = Vec::new();
-    if section(ui, k, st, HANDS_SECTION, "Hands") {
+    if hands && section(ui, k, st, HANDS_SECTION, "Hands") {
+        key_column(ui, true);
         for (side, name) in ["Left", "Right"].into_iter().enumerate() {
-            let label_of = |n: i32| -> String {
-                if n == 0 {
-                    return "Animation".to_owned();
-                }
-                crate::live::hand_lists_read()
-                    .and_then(|l| l[side].get(&n))
-                    .map_or_else(|| format!("Pattern {n}"), |a| a.label())
-            };
             let mark = keyed.mark(Channel::Hand(side));
-            let picked = pattern_row(
+            let picked = hand_row(
                 ui,
                 k,
-                st,
-                id,
-                Pictures::Hand(side),
                 name,
                 waiting,
                 ui_id.with(("hand", side)),
-                &label_of,
+                side,
                 &mut next.hands[side],
                 mark,
             );
@@ -1323,9 +1297,11 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 toggled.push(Channel::Hand(side));
             }
         }
+        key_column(ui, false);
         section_end(ui, k);
     }
-    if section(ui, k, st, FACE_SECTION, "Expression") {
+    if face_shown && section(ui, k, st, FACE_SECTION, "Expression") {
+        key_column(ui, true);
         let mut face = next.face.unwrap_or(start);
         preset_row(ui, k, st, waiting, ui_id.with("preset"), &mut face);
         let eyebrow_name = |n: i32| rk_chara::face::eyebrow_label(n).map_or_else(|| n.to_string(), str::to_owned);
@@ -1359,37 +1335,106 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 toggled.push(channel);
             }
         }
-        let amount = |ui: &mut Ui, name: &str, value: &mut f32, channel: Channel, toggled: &mut Vec<Channel>| {
-            row(ui, k, name, waiting, |ui, rect| {
-                let (rect, click) = key_mark(ui, k, rect, ui_id.with((name, "key")), keyed.mark(channel));
-                widgets::number(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE);
-                if click {
-                    toggled.push(channel);
+        let amount =
+            |ui: &mut Ui, name: &str, value: &mut f32, high: f32, channel: Channel, toggled: &mut Vec<Channel>| {
+                row(ui, k, name, waiting, |ui, rect| {
+                    let (rect, click) = key_mark(ui, k, rect, ui_id.with((name, "key")), keyed.mark(channel));
+                    widgets::slider(ui, k, rect, ui_id.with(name), value, (0.0, high), FINE, 2);
+                    if click {
+                        toggled.push(channel);
+                    }
+                });
+            };
+        // The rows by what they are of: where she looks, her eyes, the
+        // rest of her face.
+        sub(ui, k, "Look");
+        // Studio's eye look patterns (`EyeLookCalc.eyeTypeStates`): ahead,
+        // at the camera, or away from it.
+        let card_look = st.live.as_ref().and_then(|l| l.card_eyes_look(id));
+        row(
+            ui,
+            k,
+            "Eyes look",
+            waiting.or(card_look.is_none().then_some("No eye look")),
+            |ui, rect| {
+                let patterns = [0, 1, 3, crate::live::EYES_ON_OBJECT];
+                let options = [("Front", true), ("Camera", true), ("Away", true), ("Object", true)];
+                let now = next.eyes_look.or(card_look).unwrap_or(0);
+                let chosen = patterns.iter().position(|&p| p == now);
+                if let Some(i) = choices(ui, k, rect, ui_id.with("eyes look"), chosen, &options) {
+                    next.eyes_look = Some(patterns[i]);
                 }
+            },
+        );
+        // The object the eyes follow, while they follow one: any object of
+        // the scene but this character and the folders.
+        if next.eyes_look == Some(crate::live::EYES_ON_OBJECT) {
+            let scene = st.doc.scene();
+            let objects: Vec<(u64, &str)> = scene
+                .objects()
+                .iter()
+                .filter(|o| o.id != id && !matches!(o.content, Content::Folder))
+                .map(|o| (o.id.0, o.name.as_str()))
+                .collect();
+            let mut names: Vec<&str> = vec!["Camera"];
+            names.extend(objects.iter().map(|(_, n)| *n));
+            let at = next
+                .eyes_target
+                .and_then(|t| objects.iter().position(|(o, _)| *o == t))
+                .map_or(0, |i| i + 1);
+            let mut chosen = at;
+            row(ui, k, "Look at", waiting, |ui, rect| {
+                widgets::combo(ui, k, rect, ui_id.with("look at"), &mut chosen, &names);
             });
-        };
-        amount(ui, "Eyes open", &mut face.eyes_open, Channel::EyesOpen, &mut toggled);
+            if chosen != at {
+                next.eyes_target = chosen.checked_sub(1).map(|i| objects[i].0);
+            }
+        }
+        // Studio's neck buttons (`MPCharCtrl.NeckInfo`): ahead, at the
+        // camera, the animation's own turn, or held where it is.
+        let card_neck = st.live.as_ref().and_then(|l| l.card_neck_look(id));
+        row(
+            ui,
+            k,
+            "Neck look",
+            waiting.or(card_neck.is_none().then_some("No neck look")),
+            |ui, rect| {
+                let patterns = [0, 1, 3, 4];
+                let options = [("Front", true), ("Camera", true), ("Anim", true), ("Fixed", true)];
+                let now = next.neck_look.or(card_neck).unwrap_or(0);
+                let chosen = patterns.iter().position(|&p| p == now);
+                if let Some(i) = choices(ui, k, rect, ui_id.with("neck look"), chosen, &options) {
+                    next.neck_look = Some(patterns[i]);
+                }
+            },
+        );
+        sub(ui, k, "Eyes");
+        amount(
+            ui,
+            "Eyes open",
+            &mut face.eyes_open,
+            1.0,
+            Channel::EyesOpen,
+            &mut toggled,
+        );
         row(ui, k, "Blink", waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with("blink key"), keyed.mark(Channel::Blink));
-            widgets::checkbox(ui, k, rect, ui_id.with("blink"), &mut face.blink, "Blink");
+            widgets::checkbox(ui, k, rect, ui_id.with("blink"), &mut face.blink, "On");
             if click {
                 toggled.push(Channel::Blink);
             }
         });
-        amount(ui, "Mouth open", &mut face.mouth_open, Channel::MouthOpen, &mut toggled);
-        row(ui, k, "Tears", waiting, |ui, rect| {
-            let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
-            let options = [("None", true), ("Small", true), ("Middle", true), ("Large", true)];
-            let chosen = usize::from(face.tears.min(3));
-            if let Some(i) = choices(ui, k, rect, ui_id.with("tears"), Some(chosen), &options) {
-                face.tears = i as u8;
-            }
-            if click {
-                toggled.push(Channel::Tears);
-            }
-        });
-        amount(ui, "Blush", &mut face.blush, Channel::Blush, &mut toggled);
-        row(ui, k, "Highlights", waiting, |ui, rect| {
+        // KK_ExpressionControl's eye roll and smaller irises.
+        amount(ui, "Eye roll", &mut face.eye_y, 0.5, Channel::EyeRoll, &mut toggled);
+        amount(
+            ui,
+            "Small irises",
+            &mut face.eye_small,
+            1.0,
+            Channel::SmallIrises,
+            &mut toggled,
+        );
+        row(ui, k, "Eye highlights", waiting, |ui, rect| {
             let (rect, click) = key_mark(
                 ui,
                 k,
@@ -1404,27 +1449,33 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 toggled.push(Channel::Highlights);
             }
         });
-        // KK_ExpressionControl's eye roll and smaller irises.
-        amount(ui, "Eye roll", &mut face.eye_y, Channel::EyeRoll, &mut toggled);
-        amount(
-            ui,
-            "Small irises",
-            &mut face.eye_small,
-            Channel::SmallIrises,
-            &mut toggled,
-        );
-        row(ui, k, "Shaking", waiting, |ui, rect| {
+        row(ui, k, "Highlight shake", waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with("shaking key"), keyed.mark(Channel::Shaking));
-            widgets::checkbox(
-                ui,
-                k,
-                rect,
-                ui_id.with("shaking"),
-                &mut face.shaking,
-                "Highlights shake",
-            );
+            let text = "On";
+            widgets::checkbox(ui, k, rect, ui_id.with("shaking"), &mut face.shaking, text);
             if click {
                 toggled.push(Channel::Shaking);
+            }
+        });
+        sub(ui, k, "Face");
+        amount(
+            ui,
+            "Mouth open",
+            &mut face.mouth_open,
+            1.0,
+            Channel::MouthOpen,
+            &mut toggled,
+        );
+        amount(ui, "Blush", &mut face.blush, 1.0, Channel::Blush, &mut toggled);
+        row(ui, k, "Tears", waiting, |ui, rect| {
+            let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
+            let chosen = usize::from(face.tears.min(3));
+            let names = ["None", "Small", "Middle", "Large"];
+            if let Some(i) = widgets::steps(ui, k, rect, ui_id.with("tears"), chosen, &names) {
+                face.tears = i as u8;
+            }
+            if click {
+                toggled.push(Channel::Tears);
             }
         });
         face.blush = face.blush.clamp(0.0, 1.0);
@@ -1435,6 +1486,7 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
         if face != next.face.unwrap_or(start) {
             next.face = Some(face);
         }
+        key_column(ui, false);
         section_end(ui, k);
     }
     let held = ui.input(|i| i.pointer.any_down());
@@ -1505,6 +1557,9 @@ impl KeyedValues {
     ) {
         use rk_chara::channels::Channel;
         let mut out = self.layer.clone();
+        out.eyes_look = next.eyes_look;
+        out.neck_look = next.neck_look;
+        out.eyes_target = next.eyes_target;
         for channel in Channel::all() {
             let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
             if was == now {
@@ -1533,8 +1588,13 @@ impl KeyedValues {
 /// half with keys elsewhere, full with one at the playhead. Gives the rest
 /// of the row and whether the diamond was clicked.
 fn key_mark(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, (any, here): (bool, bool)) -> (Rect, bool) {
+    // The mark stands outside the field's width, in the column its
+    // section leaves free.
     let side = 18.0;
-    let cell = Rect::from_min_max(Pos2::new(rect.right() - side, rect.top()), rect.max);
+    let cell = Rect::from_min_max(
+        Pos2::new(rect.right() + KEY_COLUMN - side, rect.top()),
+        Pos2::new(rect.right() + KEY_COLUMN, rect.top() + k.field()),
+    );
     let resp = ui
         .interact(cell, id, Sense::click())
         .on_hover_text(if here { "Delete key" } else { "Set key" });
@@ -1565,7 +1625,7 @@ fn key_mark(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, (any, here): (bool,
             ));
         }
     }
-    (rect.with_max_x(cell.left() - 4.0), resp.clicked())
+    (rect, resp.clicked())
 }
 
 /// KK_SkinEffects: a level for each of its effects, kept in the pose so
@@ -1592,16 +1652,15 @@ fn skin_effects_section(
     let keyed = KeyedValues::of(st, id, pose_layer.as_deref(), &start);
     let mut next = keyed.shown.clone();
     let mut toggled = Vec::new();
-    for (i, effect) in rk_chara::skin_effects::EFFECTS.iter().enumerate() {
+    key_column(ui, true);
+    let effects = rk_chara::skin_effects::EFFECTS;
+    for (i, effect) in effects.iter().enumerate() {
         row(ui, k, effect.name, waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with((i, "key")), keyed.mark(Channel::Skin(i)));
             let names = ["None", "1", "2", "3"];
-            let options: Vec<(&str, bool)> = names[..=usize::from(effect.levels)]
-                .iter()
-                .map(|n| (*n, true))
-                .collect();
             let chosen = usize::from(next.skin[i].min(effect.levels));
-            if let Some(level) = choices(ui, k, rect, ui_id.with(i), Some(chosen), &options) {
+            let names = &names[..=usize::from(effect.levels)];
+            if let Some(level) = widgets::steps(ui, k, rect, ui_id.with(i), chosen, names) {
                 next.skin[i] = level as u8;
             }
             if click {
@@ -1609,6 +1668,7 @@ fn skin_effects_section(
             }
         });
     }
+    key_column(ui, false);
     section_end(ui, k);
     keyed.commit(st, id, pose_layer, &next, &toggled, false);
 }
@@ -1623,6 +1683,7 @@ fn penetration_section(
     st: &mut State,
     object: &mut crate::scene::Object,
     card: rk_chara::better_penetration::Settings,
+    with: Option<&str>,
 ) {
     use rk_chara::better_penetration::{AutoTarget, Mode};
     let others: Vec<(crate::scene::ObjectId, String)> = st
@@ -1633,15 +1694,23 @@ fn penetration_section(
         .filter(|o| o.kind() == Kind::Character && o.id != object.id)
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    // The partners whose body has the bones a vaginal or anal pull moves.
+    let pullable: Vec<crate::scene::ObjectId> = others
+        .iter()
+        .filter(|(id, _)| {
+            st.live
+                .as_ref()
+                .and_then(|l| l.built(*id))
+                .is_some_and(|b| b.pull_bones)
+        })
+        .map(|(id, _)| *id)
+        .collect();
     // The partners whose body has belly bones a bulge can push.
     let bellies: Vec<crate::scene::ObjectId> = others
         .iter()
         .filter(|(id, _)| st.live.as_ref().and_then(|l| l.built(*id)).is_some_and(|b| b.belly))
         .map(|(id, _)| *id)
         .collect();
-    if !section(ui, k, st, PENETRATION_SECTION, "Penetration") {
-        return;
-    }
     let Content::Character {
         better_penetration,
         penetration_target,
@@ -1652,32 +1721,49 @@ fn penetration_section(
     };
     let ui_id = ui.id().with("penetration");
     let mut s = better_penetration.as_deref().copied().unwrap_or(card);
-    row(ui, k, "Enabled", None, |ui, rect| {
-        widgets::checkbox(ui, k, rect, ui_id.with("enabled"), &mut s.enabled, "On");
-    });
+    // The switch is in the section's header, and nothing shows under it
+    // while it is off.
+    if !section_switch(ui, k, st, PENETRATION_SECTION, "Penetration", &mut s.enabled) {
+        *better_penetration = (s != card).then(|| Box::new(s));
+        return;
+    }
     let off = (!s.enabled).then_some("BetterPenetration is off");
-    row(ui, k, "Partner", off, |ui, rect| {
-        let name = penetration_target
-            .and_then(|t| others.iter().find(|(id, _)| *id == t.partner))
-            .map_or("None", |(_, name)| name.as_str());
-        let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(rect.width());
-            if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
-                *penetration_target = None;
-                ui.close();
-            }
-            for (id, name) in &others {
-                let on = penetration_target.is_some_and(|t| t.partner == *id);
-                if widgets::check_item(ui, k, on, name, "").clicked() {
-                    let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
-                    *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+    // From her side the pair is shown by whose shaft it is; the partner
+    // and the hole are chosen on his.
+    if let Some(him) = with {
+        row(ui, k, "With", off, |ui, rect| {
+            label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), him, k.t.text);
+        });
+    }
+    let linked = st.live.as_ref().and_then(|l| l.aim(object.id)).map(|a| a.partner);
+    if with.is_none() {
+        row(ui, k, "Partner", off, |ui, rect| {
+            // The partner chosen, or the one the shaft links to on its own.
+            let name = penetration_target
+                .map(|t| t.partner)
+                .or(linked)
+                .and_then(|p| others.iter().find(|(id, _)| *id == p))
+                .map_or("None", |(_, name)| name.as_str());
+            let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(rect.width());
+                if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
+                    *penetration_target = None;
                     ui.close();
                 }
-            }
+                for (id, name) in &others {
+                    let on = penetration_target.is_some_and(|t| t.partner == *id);
+                    if widgets::check_item(ui, k, on, name, "").clicked() {
+                        let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
+                        *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+                        ui.close();
+                    }
+                }
+            });
         });
-    });
-    if let Some(target) = penetration_target.as_mut() {
+    }
+    if with.is_some() {
+    } else if let Some(target) = penetration_target.as_mut() {
         row(ui, k, "Target", off, |ui, rect| {
             let options: Vec<(&str, bool)> = Mode::ALL.iter().map(|m| (m.label(), true)).collect();
             let chosen = Mode::ALL.iter().position(|m| *m == target.mode);
@@ -1721,33 +1807,95 @@ fn penetration_section(
     // something: the squish while the shaft is aimed; the colliders'
     // size always, since his own balls meet two of them; the pull and its
     // return only on a mouth, the one bone the plugin pulls in Studio.
-    let mut sliders: Vec<(&str, &mut f32, f32, f32)> = Vec::new();
+    // Each with the group it shows in.
+    const SHAFT: u8 = 0;
+    const COLLIDERS: u8 = 1;
+    const PULL: u8 = 2;
+    let mut sliders: Vec<(u8, &str, &mut f32, f32, f32)> = vec![(SHAFT, "Length", &mut s.length, 0.5, 1.5)];
     if aimed.is_some() {
         sliders.extend([
-            ("Length squish", &mut s.length_squish, 0.0, 1.0),
-            ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
-            ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
+            (SHAFT, "Length squish", &mut s.length_squish, 0.0, 1.0),
+            (SHAFT, "Girth squish", &mut s.girth_squish, 0.0, 2.0),
+            (SHAFT, "Squish threshold", &mut s.squish_threshold, 0.0, 1.0),
+            (SHAFT, "Stiffness", &mut s.stiffness, 0.0, 1.0),
         ]);
+    }
+    if aimed == Some(Mode::Oral) {
+        sliders.push((SHAFT, "Depth", &mut s.depth, 0.0, 1.0));
     }
     sliders.extend([
-        ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
-        ("Hit length", &mut s.collider_length_scale, 0.5, 1.5),
+        (COLLIDERS, "Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
+        (COLLIDERS, "Hit length", &mut s.collider_length_scale, 0.5, 1.5),
     ]);
-    if aimed == Some(Mode::Oral) {
+    let pull_rows = match penetration_target {
+        Some(t) => pullable.contains(&t.partner),
+        None => !pullable.is_empty(),
+    } && matches!(aimed, Some(Mode::Vaginal | Mode::Anal));
+    let pull_row = |ui: &mut Ui, on: &mut bool| {
+        row(ui, k, "Pull", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("pull holes"), on, "On");
+        });
+    };
+    // Renkatsu's own: her mouth holds the shaft while it is in it.
+    let mouth_row = |ui: &mut Ui, on: &mut bool| {
+        row(ui, k, "Mouth", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("oral mouth"), on, "Hold");
+        });
+    };
+    let oral = aimed == Some(Mode::Oral);
+    if oral || (pull_rows && s.pull_holes) {
         sliders.extend([
-            ("Max push", &mut s.max_push, 0.0, 0.3),
-            ("Max pull", &mut s.max_pull, 0.0, 0.3),
-            ("Pull rate", &mut s.pull_rate, 0.0, 50.0),
+            (PULL, "Max push", &mut s.max_push, 0.0, 0.3),
+            (PULL, "Max pull", &mut s.max_pull, 0.0, 0.3),
+            (PULL, "Pull rate", &mut s.pull_rate, 0.0, 50.0),
             // How fast the mouth returns with no stroke in it, as the
             // plugin does in the main game; 0 holds it as Studio does.
-            ("Return rate", &mut s.return_rate, 0.0, 1.0),
+            (PULL, "Return rate", &mut s.return_rate, 0.0, 1.0),
         ]);
     }
-    for (name, value, low, high) in sliders {
+    let mut drawn = [0; 3];
+    for (group, name, value, low, high) in sliders {
+        // Each group under its name, the pull's after its switches.
+        if drawn[usize::from(group)] == 0 {
+            sub(ui, k, ["Shaft", "Colliders", "Pull"][usize::from(group)]);
+            if group == PULL {
+                if pull_rows {
+                    pull_row(ui, &mut s.pull_holes);
+                }
+                if oral {
+                    mouth_row(ui, &mut s.oral_mouth);
+                }
+            }
+        }
+        drawn[usize::from(group)] += 1;
         row(ui, k, name, off, |ui, rect| {
-            widgets::number_to(ui, k, rect, ui_id.with(name), value, Marker::None, true, FINE, 3);
-            *value = value.clamp(low, high);
+            widgets::slider(ui, k, rect, ui_id.with(name), value, (low, high), FINE, 3);
         });
+    }
+    // The pull's switch shows even while the pull is off and has no rows.
+    if drawn[usize::from(PULL)] == 0 && pull_rows {
+        sub(ui, k, "Pull");
+        pull_row(ui, &mut s.pull_holes);
+    }
+    // Renkatsu's own: the shaft follows her body inside, as the plugin does
+    // in the main game, rather than ending at her waist as in Studio.
+    if matches!(aimed, Some(Mode::Vaginal | Mode::Anal)) {
+        sub(ui, k, "Body");
+        row(ui, k, "Body", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("body"), &mut s.body_collision, "Follow");
+        });
+        // How far inside her skin her body keeps the shaft: the game's
+        // config gives it, a character may take its own.
+        if s.body_collision {
+            let config = st.live.as_ref().map_or(0.02, |l| l.clipping_depth());
+            let mut depth = s.clipping_depth.unwrap_or(config);
+            row(ui, k, "Clipping depth", off, |ui, rect| {
+                widgets::slider(ui, k, rect, ui_id.with("clipping"), &mut depth, (0.0, 0.2), FINE, 3);
+            });
+            if (depth - s.clipping_depth.unwrap_or(config)).abs() > f32::EPSILON {
+                s.clipping_depth = Some(depth);
+            }
+        }
     }
     // The plugin keeps this on the card without a control in Studio: the
     // shaft's deeper points push her belly's dynamic bone.
@@ -1762,18 +1910,8 @@ fn penetration_section(
         // The plugin has no range for it; Renkatsu offers up to three times.
         if s.belly_bulge {
             row(ui, k, "Bulge size", off, |ui, rect| {
-                widgets::number_to(
-                    ui,
-                    k,
-                    rect,
-                    ui_id.with("bulge size"),
-                    &mut s.belly_bulge_scale,
-                    Marker::None,
-                    true,
-                    FINE,
-                    3,
-                );
-                s.belly_bulge_scale = s.belly_bulge_scale.clamp(0.5, 3.0);
+                let value = &mut s.belly_bulge_scale;
+                widgets::slider(ui, k, rect, ui_id.with("bulge size"), value, (0.5, 3.0), FINE, 3);
             });
         }
     }
@@ -1805,7 +1943,15 @@ fn preset_row(
             .unwrap_or_default();
         let plugin = rk_core::Config::load()
             .ok()
-            .map(|c| ec::of_game(&c.game_dir))
+            .map(|c| {
+                [
+                    ("ExpressionControl", ec::of_game(&c.game_dir)),
+                    ("Ahegao", rk_chara::ahegao::of_game(&c.game_dir)),
+                ]
+                .into_iter()
+                .filter(|(_, presets)| !presets.is_empty())
+                .collect()
+            })
             .unwrap_or_default();
         st.expressions = Some((own, plugin));
     }
@@ -1819,7 +1965,7 @@ fn preset_row(
     };
     let shown = own
         .iter()
-        .chain(&plugin)
+        .chain(plugin.iter().flat_map(|(_, presets)| presets))
         .find(|p| same(&p.face, face))
         .map_or("Custom", |p| p.name.as_str())
         .to_owned();
@@ -1848,13 +1994,9 @@ fn preset_row(
                         }
                     });
                 }
-                if !plugin.is_empty() {
-                    ui.label(
-                        egui::RichText::new("ExpressionControl")
-                            .color(k.t.text_dim)
-                            .size(k.d.text - 1.0),
-                    );
-                    for preset in &plugin {
+                for (heading, presets) in &plugin {
+                    ui.label(egui::RichText::new(*heading).color(k.t.text_dim).size(k.d.text - 1.0));
+                    for preset in presets {
                         if widgets::check_item(ui, k, same(&preset.face, face), &preset.name, "").clicked() {
                             *face = rk_chara::face::Face {
                                 shaking: face.shaking,
@@ -1899,6 +2041,57 @@ fn preset_row(
     }
 }
 
+/// A hand's pattern as CharaStudio steps through them, arrows to either
+/// side (`PatternInfo`), with the patterns by name in a list between; 0
+/// is the animation's own hand. Returns whether the key mark was clicked.
+#[allow(clippy::too_many_arguments)]
+fn hand_row(
+    ui: &mut Ui,
+    k: &Look,
+    name: &str,
+    off: Option<&str>,
+    ui_id: egui::Id,
+    side: usize,
+    value: &mut i32,
+    key: (bool, bool),
+) -> bool {
+    let mut options: Vec<(i32, String)> = vec![(0, "Animation".to_owned())];
+    if let Some(lists) = crate::live::hand_lists_read() {
+        options.extend(lists[side].iter().map(|(n, a)| (*n, a.label())));
+    }
+    if !options.iter().any(|(n, _)| n == value) {
+        options.push((*value, format!("Pattern {value}")));
+    }
+    let mut clicked = false;
+    row(ui, k, name, off, |ui, rect| {
+        let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
+        clicked = click;
+        let side_w = rect.height();
+        let left = Rect::from_min_size(rect.min, Vec2::splat(side_w));
+        let right = Rect::from_min_size(Pos2::new(rect.right() - side_w, rect.top()), Vec2::splat(side_w));
+        let field = Rect::from_min_max(
+            Pos2::new(left.right() + 2.0, rect.top()),
+            Pos2::new(right.left() - 2.0, rect.bottom()),
+        );
+        let at = options.iter().position(|(n, _)| n == value).unwrap_or(0);
+        for (cell, step, glyph) in [(left, -1i32, icon::CARET_LEFT), (right, 1, icon::CARET_RIGHT)] {
+            let resp = ui.interact(cell, ui_id.with(("step", step)), Sense::click());
+            widgets::icon_cell(ui, k, cell, &resp, glyph, false);
+            if resp.clicked() {
+                let count = options.len() as i32;
+                *value = options[(at as i32 + step).rem_euclid(count) as usize].0;
+            }
+        }
+        let mut chosen = at;
+        let names: Vec<&str> = options.iter().map(|(_, s)| s.as_str()).collect();
+        widgets::combo(ui, k, field, ui_id.with("list"), &mut chosen, &names);
+        if chosen != at {
+            *value = options[chosen].0;
+        }
+    });
+    clicked
+}
+
 /// A pattern as its picture, which opens a grid of all the pictures to
 /// pick from. Without pictures yet the pattern's name stands in.
 #[allow(clippy::too_many_arguments)]
@@ -1922,8 +2115,10 @@ fn pattern_row(
         .and_then(|l| l.pictures(id, set))
         .map(<[_]>::to_vec)
         .unwrap_or_default();
+    // Drawn at twice the size they show in the row, sharper on any screen
+    // and larger in the grid.
     let [w, h] = set.size();
-    let (w, h) = (w as f32 * 0.5, h as f32 * 0.5);
+    let (w, h) = (w as f32 * 0.25, h as f32 * 0.25);
     sized_row(ui, k, name, off, (h + 4.0 - k.d.row).max(0.0), |ui, rect| {
         let (rect, click) = key_mark(ui, k, rect, ui_id.with("key"), key);
         clicked = click;
@@ -1969,7 +2164,7 @@ fn pattern_row(
                     .spacing(Vec2::splat(4.0))
                     .show(ui, |ui| {
                         for (i, (n, image)) in pictures.iter().enumerate() {
-                            let (cell, cell_resp) = ui.allocate_exact_size(Vec2::new(w * 1.5, h * 1.5), Sense::click());
+                            let (cell, cell_resp) = ui.allocate_exact_size(Vec2::new(w * 2.0, h * 2.0), Sense::click());
                             let texture = picture_texture(ui, image);
                             ui.painter().image(
                                 texture.id(),
@@ -2136,8 +2331,7 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, page: us
                     if exact.round() != p.pitch {
                         exact = p.pitch;
                     }
-                    widgets::number_to(ui, k, rect, pitch_id, &mut exact, Marker::None, true, 0.25, 0);
-                    exact = exact.clamp(0.0, 100.0);
+                    widgets::slider(ui, k, rect, pitch_id, &mut exact, (0.0, 100.0), 0.25, 0);
                     ui.data_mut(|d| d.insert_temp(pitch_id, exact));
                     p.pitch = exact.round();
                 });
@@ -2159,7 +2353,7 @@ fn profile_page(ui: &mut Ui, k: &Look, st: &mut State, p: &mut Profile, page: us
                 for (name, n) in stats.into_iter().zip(p.stats.iter_mut()) {
                     row(ui, k, name, None, |ui, rect| {
                         let mut at = (*n + 5).clamp(0, 10) as usize;
-                        widgets::combo(ui, k, rect, id.with(name), &mut at, &STEPS);
+                        at = widgets::steps(ui, k, rect, id.with(name), at, &STEPS).unwrap_or(at);
                         if at as i64 - 5 != (*n).clamp(-5, 5) {
                             *n = at as i64 - 5;
                         }
@@ -2294,7 +2488,17 @@ fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>,
     let t = &k.t;
     let (pad, h) = (14.0, k.d.row + 4.0);
     let width = ui.available_width();
-    let cells = grid.items.len() + custom.len() + usize::from(grid.hint.is_some());
+    // A search keeps the boxes whose names match, as it does with rows,
+    // and leaves out the field that adds one.
+    let query = searched(ui);
+    let found = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+    let hint = grid.hint.filter(|_| query.is_empty());
+    let cells = grid.items.iter().filter(|(_, name)| found(name)).count()
+        + custom.iter().filter(|item| found(&item.name)).count()
+        + usize::from(hint.is_some());
+    if cells == 0 {
+        return;
+    }
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, cells.div_ceil(2) as f32 * h + 16.0), Sense::hover());
     let column = ((width - 2.0 * pad) / 2.0).floor();
     let cell = |i: usize| {
@@ -2302,10 +2506,13 @@ fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>,
         let left = rect.left() + pad + (i % 2) as f32 * column;
         Rect::from_min_size(Pos2::new(left, top), Vec2::new(column - 8.0, k.field()))
     };
-    for (i, (key, name)) in grid.items.iter().enumerate() {
+    // The place of the next box that shows.
+    let mut at = 0;
+    for (key, name) in grid.items.iter().filter(|(_, name)| found(name)) {
         let mut on = keys.iter().any(|k| k == key);
         let was = on;
-        widgets::checkbox(ui, k, cell(i), id.with(key), &mut on, name);
+        widgets::checkbox(ui, k, cell(at), id.with(key), &mut on, name);
+        at += 1;
         if on != was {
             Profile::set(keys, key, on);
         }
@@ -2314,7 +2521,11 @@ fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>,
     let mark = 14.0 + 7.0;
     let mut gone = None;
     for (n, item) in custom.iter_mut().enumerate() {
-        let place = cell(grid.items.len() + n);
+        if !found(&item.name) {
+            continue;
+        }
+        let place = cell(at);
+        at += 1;
         let text = format!("{} *", item.name);
         let room = place.width() - mark - 24.0;
         let text_w = widgets::text_width(ui, &text, k.font()).ceil().min(room);
@@ -2342,8 +2553,8 @@ fn check_grid(ui: &mut Ui, k: &Look, id: Id, grid: Grid, keys: &mut Vec<String>,
         custom.remove(n);
     }
     // The field that adds one; what it adds starts ticked.
-    let Some(hint) = grid.hint else { return };
-    let field = cell(grid.items.len() + custom.len());
+    let Some(hint) = hint else { return };
+    let field = cell(at);
     let field_id = id.with("new");
     if let Some(name) = widgets::text_field(ui, k, field, field_id, "", hint) {
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -2367,12 +2578,23 @@ fn choices(
 ) -> Option<usize> {
     widgets::boxed(ui.painter(), rect, k.radius(), k.t.input, k.t.border);
     let w = (rect.width() - 2.0) / options.len() as f32;
+    // Buttons of one width, unless a name is too long for it: then each
+    // gets the room its name needs.
+    let text: Vec<f32> = options
+        .iter()
+        .map(|(name, _)| widgets::text_width(ui, name, k.font()))
+        .collect();
+    let spare = (rect.width() - 2.0 - text.iter().sum::<f32>()) / options.len() as f32;
+    let fitted = text.iter().any(|t| t + 6.0 > w);
+    let mut left = rect.left() + 1.0;
     let mut clicked = None;
     for (i, (name, offered)) in options.iter().enumerate() {
+        let w = if fitted { text[i] + spare } else { w };
         let cell = Rect::from_min_size(
-            Pos2::new((rect.left() + 1.0 + i as f32 * w).round(), rect.top() + 1.0),
+            Pos2::new(left.round(), rect.top() + 1.0),
             Vec2::new(w.round(), rect.height() - 2.0),
         );
+        left += w;
         let resp = ui.interact(cell, id.with(i), Sense::click());
         if resp.clicked() {
             clicked = Some(i);
@@ -2399,50 +2621,202 @@ fn choices(
     clicked
 }
 
-/// The selected object at the top of the panel, then the property search.
-fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str, color: Color32, name: &str) {
+/// A part of what Properties shows for an object: one section, or a few
+/// that always go together. The pages are made of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Transform,
+    Attached,
+    Character,
+    Clothing,
+    Modules,
+    /// All of a character's physics in one section.
+    Physics,
+    Animation,
+    Pair,
+    Hands,
+    Face,
+    Bone,
+    Profile,
+    Liquid,
+    Skin,
+    Penetration,
+    /// The sections of the object's own kind: a light's, a map's.
+    Own,
+}
+
+/// A page of an object's properties: its name, the icon it has in the
+/// header, and what it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Page {
+    name: &'static str,
+    glyph: &'static str,
+    parts: &'static [Part],
+}
+
+/// The pages of an object. A character has several: the scene's own
+/// values, what it plays, who it is, what an H scene leaves on it, and
+/// Renkatsu's own improvements. Every other kind has one.
+fn pages_of(object: &crate::scene::Object, profile: bool) -> Vec<Page> {
+    use Part::*;
+    let page = |name, glyph, parts| Page { name, glyph, parts };
+    if object.kind() != Kind::Character {
+        return vec![page(
+            object.content.label(),
+            object.content.glyph(),
+            &[Transform, Attached, Own],
+        )];
+    }
+    let mut pages = vec![
+        page("Scene", icon::CUBE, &[Transform, Attached, Character, Clothing]),
+        page(
+            "Animation",
+            icon::PERSON_SIMPLE_RUN,
+            &[Animation, Pair, Hands, Face, Bone],
+        ),
+        page("Profile", icon::IDENTIFICATION_CARD, &[Profile]),
+        page(H_PAGE, icon::DROP, &[Liquid, Skin, Penetration]),
+        page(RENKATSU_PAGE, icon::BANDAIDS, &[Physics, Modules]),
+    ];
+    // A card whose profile could not be read has no page for it.
+    if !profile {
+        pages.retain(|p| p.parts != [Profile]);
+    }
+    pages
+}
+
+/// What each of position, rotation and scale waits for, when it does
+/// nothing for this kind of object.
+fn transform_rows(content: &Content) -> [Option<&'static str>; 3] {
+    match content {
+        Content::Character { .. } => [None; 3],
+        Content::Light {
+            light: LightKind::Point | LightKind::Spot,
+            ..
+        } => [None, None, Some("A light has no size")],
+        Content::Light {
+            light: LightKind::Character,
+            ..
+        } => [
+            Some("A directional light has no position"),
+            Some("Turned by its angles"),
+            Some("A light has no size"),
+        ],
+        Content::Light { .. } => [
+            Some("A directional light has no position"),
+            None,
+            Some("A light has no size"),
+        ],
+        Content::Camera { .. } => [None, None, Some("A camera has no size")],
+        Content::Item | Content::MapPiece { .. } => [None; 3],
+        Content::MapDoor { .. } => [Some("A door stays in its frame"); 3],
+        // CharaStudio moves and turns a map; it keeps its size.
+        Content::Map { .. } => [None, None, Some("A map keeps its size")],
+        // A folder and an effect have no place at all.
+        _ => [Some("Has no place"); 3],
+    }
+}
+
+/// `text` as it fits into `room`: whole, or cut short with an ellipsis.
+fn elided(ui: &Ui, text: &str, font: egui::FontId, room: f32) -> String {
+    if widgets::text_width(ui, text, font.clone()) <= room {
+        return text.to_owned();
+    }
+    let mut kept: Vec<char> = text.chars().collect();
+    while kept.pop().is_some() {
+        let shorter: String = kept.iter().collect::<String>().trim_end().to_owned() + "…";
+        if widgets::text_width(ui, &shorter, font.clone()) <= room {
+            return shorter;
+        }
+    }
+    String::new()
+}
+
+/// The top of the panel on one line: the selected object's icon, name and
+/// type, then its pages as icons where it has more than one, the search
+/// and the options. The search icon opens the search field on a line of
+/// its own, which stays while it holds text.
+#[allow(clippy::too_many_arguments)]
+fn header(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    glyph_: &str,
+    kind_label: &str,
+    color: Color32,
+    name: &str,
+    pages: &[Page],
+) {
     // The type says nothing new under a name that is the type.
     let kind_label = if kind_label == name { "" } else { kind_label };
     let t = &k.t;
-    let h = k.d.row + 14.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 10.0), Sense::hover());
     let y = rect.center().y + 1.0;
-    let p = ui.painter();
-    match k.d.props {
-        Props::Inspector => {
-            // Unity's header: a field holding the name, the type beside it.
-            let kind_w = widgets::text_width(ui, kind_label, k.font()).ceil();
-            let field = Rect::from_min_max(
-                Pos2::new(rect.left() + 34.0, y - k.field() / 2.0),
-                Pos2::new(rect.right() - kind_w - 18.0, y + k.field() / 2.0),
-            );
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), glyph_, 17.0, color);
-            widgets::field_box(p, k, field, false, false);
-            p.text(
-                Pos2::new(field.left() + 7.0, y),
-                Align2::LEFT_CENTER,
-                name,
-                k.font(),
-                t.text_bright,
-            );
-            label(p, k, Pos2::new(field.right() + 8.0, y), kind_label, t.text_dim);
-        }
-        _ => {
-            glyph(p, k, Pos2::new(rect.left() + 19.0, y), glyph_, 18.0, color);
-            let x = p
-                .text(
-                    Pos2::new(rect.left() + 34.0, y),
-                    Align2::LEFT_CENTER,
-                    name,
-                    k.bold(k.d.text + 1.0),
-                    t.text_bright,
-                )
-                .right();
-            label(p, k, Pos2::new(x + 8.0, y), kind_label, t.text_dim);
+    let side = k.field();
+    let mut right = rect.right() - 8.0;
+    // The next cell of the header's right end, `w` wide.
+    let cell = |right: &mut f32, w: f32| {
+        let at = Rect::from_min_size(Pos2::new(*right - w, (y - side / 2.0).round()), Vec2::new(w, side));
+        *right -= w + 2.0;
+        at
+    };
+    let id = ui.id().with("properties header");
+    let open_id = Id::new("property search open");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) || !st.property_search.is_empty();
+    let mut opened = false;
+    options_button(ui, k, st, cell(&mut right, side), id.with("options"));
+    let at = cell(&mut right, side);
+    let resp = ui
+        .interact(at, id.with("search"), Sense::click())
+        .on_hover_text("Search");
+    widgets::icon_cell(ui, k, at, &resp, icon::MAGNIFYING_GLASS, open);
+    if resp.clicked() {
+        open = !open;
+        opened = open;
+        if !open {
+            st.property_search.clear();
         }
     }
-    if k.d.props != Props::Inspector {
-        let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 6.0), Sense::hover());
+    if pages.len() > 1 {
+        right -= 3.0;
+        hair_v(ui.painter(), right, y - 7.0, y + 7.0, t.border);
+        right -= 5.0;
+        for (i, page) in pages.iter().enumerate().rev() {
+            let at = cell(&mut right, side + 2.0);
+            let resp = ui
+                .interact(at, id.with(("page", i)), Sense::click())
+                .on_hover_text(page.name);
+            if resp.clicked() {
+                st.property_tab = i;
+            }
+            widgets::icon_cell(ui, k, at, &resp, page.glyph, st.property_tab == i);
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    // The name, cut short where the panel is too narrow for it, and the
+    // type where there is room left.
+    let p = ui.painter();
+    glyph(p, k, Pos2::new(rect.left() + 17.0, y), glyph_, 17.0, color);
+    let left = rect.left() + 32.0;
+    let font = k.bold(k.d.text + 1.0);
+    let shown = elided(ui, name, font.clone(), right - 6.0 - left);
+    let x = p
+        .text(Pos2::new(left, y), Align2::LEFT_CENTER, &shown, font, t.text_bright)
+        .right();
+    if shown != name {
+        ui.interact(
+            Rect::from_min_max(Pos2::new(left, rect.top()), Pos2::new(x, rect.bottom())),
+            id.with("name"),
+            Sense::hover(),
+        )
+        .on_hover_text(name);
+    }
+    let kind_w = widgets::text_width(ui, kind_label, k.font());
+    if shown == name && x + 8.0 + kind_w <= right - 6.0 {
+        label(p, k, Pos2::new(x + 8.0, y), kind_label, t.text_dim);
+    }
+    if open {
+        let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), side + 6.0), Sense::hover());
         let mut child = ui.new_child(
             UiBuilder::new()
                 .max_rect(Rect::from_min_max(
@@ -2451,24 +2825,51 @@ fn header(ui: &mut Ui, k: &Look, st: &mut State, glyph_: &str, kind_label: &str,
                 ))
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        child.spacing_mut().item_spacing.x = 4.0;
-        let w = child.available_width() - k.field() - 4.0;
-        widgets::search(&mut child, k, &mut st.property_search, "Search", w);
-        let query = st.property_search.trim().to_lowercase();
-        ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
-        let gear = icon_button(&mut child, k, icon::GEAR_SIX, false).on_hover_text("Options");
-        egui::Popup::menu(&gear).show(|ui| {
-            for (text, open) in [("Expand all", true), ("Collapse all", false)] {
-                if ui.button(text).clicked() {
-                    st.sections.iter_mut().for_each(|s| *s = open);
-                    ui.close();
-                }
-            }
-        });
+        let w = child.available_width();
+        let field = widgets::search(&mut child, k, &mut st.property_search, "Search", w);
+        if opened {
+            field.request_focus();
+        }
     }
+    let query = st.property_search.trim().to_lowercase();
+    ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
 }
 
-/// The header of a section; returns whether the section is open.
+/// The name of the open page, at the top of the page, after the page's
+/// icon in plain white. A search shows rows of every page, so it has
+/// none then.
+fn page_title(ui: &mut Ui, k: &Look, name: &str, glyph_: &str) {
+    if !searched(ui).is_empty() {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 6.0), Sense::hover());
+    let y = rect.center().y + 2.0;
+    let x = rect.left() + FRAME_GAP + 4.0;
+    glyph(ui.painter(), k, Pos2::new(x + 9.0, y), glyph_, 18.0, k.t.text_bright);
+    let x = x + 24.0;
+    ui.painter().text(
+        Pos2::new(x, y),
+        Align2::LEFT_CENTER,
+        name,
+        k.bold(k.d.text + 3.0),
+        k.t.text_bright,
+    );
+}
+
+/// The button that opens the panel's options: all sections open, or shut.
+fn options_button(ui: &mut Ui, k: &Look, st: &mut State, at: Rect, id: Id) {
+    let gear = ui.interact(at, id, Sense::click()).on_hover_text("Options");
+    widgets::icon_cell(ui, k, at, &gear, icon::GEAR_SIX, false);
+    egui::Popup::menu(&gear).show(|ui| {
+        for (text, open) in [("Expand all", true), ("Collapse all", false)] {
+            if ui.button(text).clicked() {
+                st.sections.iter_mut().for_each(|s| *s = open);
+                ui.close();
+            }
+        }
+    });
+}
+
 /// Where the rows find what the header's search box holds.
 const SEARCH: &str = "property search";
 
@@ -2477,74 +2878,146 @@ fn searched(ui: &Ui) -> String {
     ui.data(|d| d.get_temp::<String>(Id::new(SEARCH))).unwrap_or_default()
 }
 
+/// Where an open section's frame started, for `section_end` to close it.
+const FRAME: &str = "property section frame";
+/// How far a section's frame stands in from the panel's edges, and from
+/// the section before it.
+const FRAME_GAP: f32 = 6.0;
+/// Where the names of the rows start, from the panel's left edge.
+const NAME_LEFT: f32 = 16.0;
+
+/// The header of a section; returns whether the section is open.
 fn section(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> bool {
+    section_header(ui, k, st, index, title).0
+}
+
+/// A section's header, with the rectangle it was drawn in; none while a
+/// search shows the rows without their sections. A section is a flat
+/// frame around its title and its rows: a shut one is framed here, an
+/// open one by `section_end`, once its rows are known.
+fn section_header(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str) -> (bool, Option<Rect>) {
     // While searching, the matching rows stand alone, without sections.
     if !searched(ui).is_empty() {
-        return true;
+        return (true, None);
     }
     let t = &k.t;
-    let h = match k.d.props {
-        Props::Details => k.d.row + 2.0,
-        Props::Inspector => k.d.row + 4.0,
-        Props::Joined => k.d.row + 8.0,
-    };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
+    ui.add_space(FRAME_GAP);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 2.0), Sense::click());
     if resp.clicked() {
         st.sections[index] = !st.sections[index];
     }
     let open = st.sections[index];
     let p = ui.painter();
-    let mut y = rect.center().y;
-    match k.d.props {
-        Props::Details => {
-            let fill = if resp.hovered() { t.control } else { t.header };
-            p.rect_filled(rect, 0.0, fill);
-            hair_h(p, rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
-        }
-        Props::Inspector => {
-            hair_h(p, rect.left(), rect.right(), rect.top(), t.divider);
-            if resp.hovered() {
-                p.rect_filled(rect.with_min_y(rect.top() + 1.0), 0.0, t.row_hover);
-            }
-            y += 0.5;
-            glyph(
-                p,
-                k,
-                Pos2::new(rect.right() - 14.0, y),
-                icon::DOTS_THREE_VERTICAL,
-                15.0,
-                t.text_dim,
-            );
-        }
-        Props::Joined => {
-            hair_h(p, rect.left() + 10.0, rect.right() - 10.0, rect.top(), t.header);
-            y += 1.0;
-        }
+    let frame = rect.shrink2(Vec2::new(FRAME_GAP, 0.0));
+    if open {
+        ui.data_mut(|d| d.insert_temp(Id::new(FRAME), frame.top()));
+    } else {
+        p.rect_stroke(
+            frame,
+            k.radius(),
+            egui::Stroke::new(1.0, t.border),
+            egui::StrokeKind::Inside,
+        );
     }
+    let y = rect.center().y + 1.0;
     let arrow = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
     let color = if resp.hovered() { t.text_bright } else { t.text_dim };
-    glyph(p, k, Pos2::new(rect.left() + 14.0, y), arrow, 10.0, color);
+    glyph(p, k, Pos2::new(rect.left() + 18.0, y), arrow, 10.0, color);
     p.text(
-        Pos2::new(rect.left() + 26.0, y),
+        Pos2::new(rect.left() + 30.0, y),
         Align2::LEFT_CENTER,
         title,
         k.bold(k.d.text),
         t.text_bright,
     );
-    open
+    (open, Some(rect))
 }
 
-/// Space under the rows of an open section.
+/// A section whose header carries the switch of what it holds, as a
+/// component of Unity does: with the switch off the section stays shut.
+/// A search shows the switch as a row named as the section. Returns
+/// whether the rows show.
+fn section_switch(ui: &mut Ui, k: &Look, st: &mut State, index: usize, title: &str, on: &mut bool) -> bool {
+    let id = ui.id().with(("section switch", index));
+    let (open, header) = section_header(ui, k, st, index, title);
+    let Some(header) = header else {
+        row(ui, k, title, None, |ui, rect| {
+            widgets::checkbox(ui, k, rect, id, on, "On");
+        });
+        return *on;
+    };
+    let (_, to) = value_span(header.width());
+    let side = 14.0;
+    let at = Rect::from_min_size(
+        Pos2::new(header.left() + to - side, header.center().y - k.field() / 2.0 + 1.0),
+        Vec2::new(side, k.field()),
+    );
+    widgets::checkbox(ui, k, at, id, on, "");
+    ui.interact(at, id.with("tip"), Sense::hover())
+        .on_hover_text(if *on { "Enabled" } else { "Disabled" });
+    if open && !*on {
+        // Nothing follows the title: the frame closes around it.
+        section_end(ui, k);
+    }
+    open && *on
+}
+
+/// The end of an open section: space under its rows, and the frame
+/// around all of it.
 fn section_end(ui: &mut Ui, k: &Look) {
     if !searched(ui).is_empty() {
         return;
     }
-    let gap = match k.d.props {
-        Props::Details => 0.0,
-        Props::Inspector => 5.0,
-        Props::Joined => 8.0,
-    };
-    ui.add_space(gap);
+    ui.add_space(5.0);
+    if let Some(top) = ui.data_mut(|d| d.remove_temp::<f32>(Id::new(FRAME))) {
+        let width = ui.available_width();
+        let left = ui.cursor().left();
+        let frame = Rect::from_min_max(
+            Pos2::new(left + FRAME_GAP, top),
+            Pos2::new(left + width - FRAME_GAP, ui.cursor().top()),
+        );
+        ui.painter().rect_stroke(
+            frame,
+            k.radius(),
+            egui::Stroke::new(1.0, k.t.border),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// A small name over a few rows of a long section that belong together,
+/// with a line to the section's right end. Not while a search shows the
+/// rows alone.
+fn sub(ui: &mut Ui, k: &Look, name: &str) {
+    if !searched(ui).is_empty() {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+    let y = rect.center().y + 2.0;
+    let p = ui.painter();
+    let right = p
+        .text(
+            Pos2::new(rect.left() + NAME_LEFT, y),
+            Align2::LEFT_CENTER,
+            name,
+            k.small(),
+            k.t.text_dim,
+        )
+        .right();
+    let (_, to) = value_span(rect.width());
+    hair_h(p, right + 8.0, rect.left() + to, y, k.t.header);
+}
+
+/// Where the rows learn that the section holds values that take keys.
+const KEYS: &str = "property key column";
+/// Width of the column the key marks stand in, at the rows' right end.
+const KEY_COLUMN: f32 = 20.0;
+
+/// Says that the rows that follow are of a section whose values take
+/// keys, or no longer. Every row of such a section leaves a column free
+/// for the key marks, so that its fields line up.
+fn key_column(ui: &mut Ui, on: bool) {
+    ui.data_mut(|d| d.insert_temp(Id::new(KEYS), on));
 }
 
 /// A map's times of day as their pictures side by side, under each its
@@ -2561,7 +3034,7 @@ fn time_pictures(
     const GAP: f32 = 4.0;
     let width = ui.available_width();
     // The pictures take the value column; their height follows its width.
-    let (split, right) = value_span(k, width);
+    let (split, right) = value_span(width);
     let w = ((right - split - 2.0 * GAP) / 3.0).floor();
     let h = (w * 9.0 / 16.0).round();
     let extra = h + 28.0 - k.field();
@@ -2617,13 +3090,8 @@ fn time_pictures(
 
 /// Where the value column of a row as wide as `width` starts and ends,
 /// measured from the row's left.
-fn value_span(k: &Look, width: f32) -> (f32, f32) {
-    let (share, least, from, to) = match k.d.props {
-        Props::Details => (0.38, 108.0, 9.0, 10.0),
-        Props::Inspector => (0.34, 100.0, 0.0, 8.0),
-        Props::Joined => (0.33, 100.0, 0.0, 12.0),
-    };
-    ((width * share).max(least).round() + from, width - to)
+fn value_span(width: f32) -> (f32, f32) {
+    ((width * 0.36).max(104.0).round(), width - FRAME_GAP - 8.0)
 }
 
 /// One property: its name in the left column, and `add` drawing the value
@@ -2642,45 +3110,53 @@ fn sized_row(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, a
     }
 }
 
+/// A line of a section across both columns, for its buttons. `name` is
+/// what a search finds it by.
+fn wide_row(ui: &mut Ui, k: &Look, name: &str, add: impl FnOnce(&mut Ui, Rect)) {
+    let query = searched(ui);
+    if !query.is_empty() && !name.to_lowercase().contains(&query) {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 3.0), Sense::hover());
+    let (_, to) = value_span(rect.width());
+    let line = Rect::from_min_max(
+        Pos2::new(rect.left() + NAME_LEFT, rect.center().y - k.field() / 2.0),
+        Pos2::new(rect.left() + to, rect.center().y + k.field() / 2.0),
+    );
+    add(ui, line);
+}
+
 fn sized_row_shown(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: f32, add: impl FnOnce(&mut Ui, Rect)) {
     let t = &k.t;
     let name_color = if off.is_some() { t.text_dim } else { t.text };
-    let (h, share, least) = match k.d.props {
-        Props::Details => (k.d.row + 2.0, 0.38, 108.0),
-        Props::Inspector => (k.d.row + 2.0, 0.34, 100.0),
-        Props::Joined => (k.d.row + 4.0, 0.33, 100.0),
-    };
+    let h = k.d.row + 1.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h + extra), Sense::hover());
-    let split = (rect.left() + (rect.width() * share).max(least)).round();
+    let (from, to) = value_span(rect.width());
+    let (from, mut to) = (rect.left() + from, rect.left() + to);
     // The name stands on the first line, as in a row of one line.
     let y = rect.top() + h / 2.0;
-    let p = ui.painter();
-    let names = p.with_clip_rect(Rect::from_min_max(rect.min, Pos2::new(split - 6.0, rect.bottom())));
-    let (from, to) = match k.d.props {
-        Props::Details => {
-            if ui.rect_contains_pointer(rect) {
-                p.rect_filled(rect, 0.0, t.row_hover);
-            }
-            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, name_color);
-            hair_v(p, split, rect.top(), rect.bottom(), t.line);
-            hair_h(p, rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
-            (split + 9.0, rect.right() - 10.0)
-        }
-        Props::Inspector => {
-            label(&names, k, Pos2::new(rect.left() + 26.0, y), name, name_color);
-            (split, rect.right() - 8.0)
-        }
-        Props::Joined => {
-            names.text(
-                Pos2::new(split - 10.0, y),
-                Align2::RIGHT_CENTER,
-                name,
-                k.font(),
-                t.text_dim,
-            );
-            (split, rect.right() - 12.0)
-        }
-    };
+    // A name too long for its column is cut short, and the pointer is
+    // told the whole of it.
+    let room = from - 6.0 - (rect.left() + NAME_LEFT);
+    let shown = elided(ui, name, k.font(), room);
+    let end = label(
+        ui.painter(),
+        k,
+        Pos2::new(rect.left() + NAME_LEFT, y),
+        &shown,
+        name_color,
+    );
+    if shown != name {
+        let at = Rect::from_min_max(
+            Pos2::new(rect.left() + NAME_LEFT, rect.top()),
+            Pos2::new(end, rect.top() + h),
+        );
+        ui.interact(at, ui.id().with(("name", name)), Sense::hover())
+            .on_hover_text(name);
+    }
+    if ui.data(|d| d.get_temp::<bool>(Id::new(KEYS))).unwrap_or(false) {
+        to -= KEY_COLUMN;
+    }
     let half = k.field() / 2.0;
     let value = Rect::from_min_max(
         Pos2::new(from, (y - half).round()),
@@ -2698,71 +3174,16 @@ fn sized_row_shown(ui: &mut Ui, k: &Look, name: &str, off: Option<&str>, extra: 
     }
 }
 
-/// Three numbers for the X, Y and Z axes, marked in the axis colours.
+/// Three numbers for the X, Y and Z axes, each marked with a bar in its
+/// axis colour, as in Unreal.
 fn vec3(ui: &mut Ui, k: &Look, rect: Rect, id: Id, values: &mut [f32; 3], speed: f32) {
-    let t = &k.t;
-    match k.d.props {
-        Props::Details => {
-            let gap = 4.0;
-            let w = ((rect.width() - 2.0 * gap) / 3.0).floor();
-            for (i, value) in values.iter_mut().enumerate() {
-                let cell = Rect::from_min_size(
-                    Pos2::new(rect.left() + i as f32 * (w + gap), rect.top()),
-                    Vec2::new(w, rect.height()),
-                );
-                widgets::number(ui, k, cell, id.with(i), value, Marker::Bar(t.axis[i]), true, speed);
-            }
-        }
-        Props::Inspector => {
-            let gap = 6.0;
-            let letter = 13.0;
-            let w = ((rect.width() - 2.0 * gap) / 3.0).floor();
-            for (i, value) in values.iter_mut().enumerate() {
-                let left = rect.left() + i as f32 * (w + gap);
-                ui.painter().text(
-                    Pos2::new(left + 4.0, rect.center().y),
-                    Align2::CENTER_CENTER,
-                    AXES[i],
-                    k.bold(k.d.small),
-                    t.axis[i],
-                );
-                let cell = Rect::from_min_max(Pos2::new(left + letter, rect.top()), Pos2::new(left + w, rect.bottom()));
-                widgets::number(ui, k, cell, id.with(i), value, Marker::None, true, speed);
-            }
-        }
-        Props::Joined => {
-            widgets::field_box(ui.painter(), k, rect, false, false);
-            let w = (rect.width() / 3.0).floor();
-            for (i, value) in values.iter_mut().enumerate() {
-                let right = if i == 2 {
-                    rect.right()
-                } else {
-                    rect.left() + (i + 1) as f32 * w
-                };
-                let cell = Rect::from_min_max(
-                    Pos2::new(rect.left() + i as f32 * w, rect.top()),
-                    Pos2::new(right, rect.bottom()),
-                );
-                if i > 0 {
-                    hair_v(
-                        ui.painter(),
-                        cell.left(),
-                        cell.top() + 1.0,
-                        cell.bottom() - 1.0,
-                        t.border,
-                    );
-                }
-                widgets::number(
-                    ui,
-                    k,
-                    cell.with_min_x(cell.left() + if i > 0 { 1.0 } else { 0.0 }),
-                    id.with(i),
-                    value,
-                    Marker::Letter(t.axis[i], AXES[i]),
-                    false,
-                    speed,
-                );
-            }
-        }
+    let gap = 4.0;
+    let w = ((rect.width() - 2.0 * gap) / 3.0).floor();
+    for (i, value) in values.iter_mut().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(rect.left() + i as f32 * (w + gap), rect.top()),
+            Vec2::new(w, rect.height()),
+        );
+        widgets::number(ui, k, cell, id.with(i), value, Marker::Bar(k.t.axis[i]), true, speed);
     }
 }

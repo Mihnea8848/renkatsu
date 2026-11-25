@@ -131,6 +131,11 @@ impl Surfaces {
         out
     }
 
+    /// The corners of every triangle.
+    pub(super) fn corners(&self) -> Vec<[Vec3; 3]> {
+        self.triangles.iter().map(|t| t.corners).collect()
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.triangles.is_empty()
     }
@@ -382,6 +387,15 @@ pub struct Cloth {
     /// as it is in the world at the last step.
     pub shells: Vec<super::shell::Shell>,
     world_shells: Arc<Vec<super::shell::WorldShell>>,
+    /// The nets as the GPU solver runs them (`drape`), and whether it
+    /// does: the nets above then stand by.
+    drape: Option<super::drape::Drape>,
+    on_gpu: bool,
+    /// The kind of cloth the skirts are guessed to be (`kind::guess` of
+    /// the skirt that carries the most vertices) and the kind they are
+    /// made of now.
+    guessed: super::drape::Kind,
+    kind: super::drape::Kind,
 }
 
 /// The chain number in `cf_j_sk_03_00` or `cf_d_sk_03_00`.
@@ -466,7 +480,9 @@ impl Cloth {
         for net in &mut nets {
             net.fitted(scene, &shells);
         }
-        Self {
+        let mut cloth = Self {
+            drape: None,
+            on_gpu: false,
             capsules,
             shells,
             world_shells: Arc::default(),
@@ -478,7 +494,24 @@ impl Cloth {
             nets,
             net_rings,
             bindings,
+            guessed: Default::default(),
+            kind: Default::default(),
+        };
+        // The kind of the skirt that carries the most vertices, for all
+        // of them: a jacket's hem on a net of its own is made of the
+        // skirt's cloth too.
+        if let Some(largest) = cloth.garments(scene, bones).first() {
+            cloth.guessed = super::kind::guess(largest).0;
         }
+        cloth.kind = cloth.guessed;
+        cloth.drape = super::drape::Drape::build(
+            scene,
+            &cloth.nets,
+            &cloth.shells,
+            &cloth.bindings,
+            super::drape::Material::of(cloth.kind),
+        );
+        cloth
     }
 
     /// Moves the cloth nets on by `dt` seconds after the chains moved;
@@ -494,10 +527,129 @@ impl Cloth {
             let m = world(scene, n);
             (m.w_axis.truncate(), m.y_axis.truncate().normalize_or_zero())
         });
+        if let Some(drape) = self.drape.as_mut().filter(|_| self.on_gpu) {
+            let active = self
+                .net_rings
+                .iter()
+                .all(|&ring| self.rings[ring].iter().all(|&b| live.get(b).copied().unwrap_or(false)));
+            drape.step(scene, active, floor, obstacles, dt);
+            return;
+        }
         for (net, &ring) in self.nets.iter_mut().zip(&self.net_rings) {
             let active = self.rings[ring].iter().all(|&b| live.get(b).copied().unwrap_or(false));
             net.step(scene, active, &self.shells, &self.world_shells, floor, obstacles, dt);
         }
+    }
+
+    /// Has the GPU solver run the nets (`drape`), or the CPU's own.
+    pub(super) fn solve_on_gpu(&mut self, on: bool) {
+        if self.on_gpu != on {
+            self.on_gpu = on;
+            self.reset_nets();
+        }
+    }
+
+    /// Makes the skirts' cloth for the GPU solver of `kind`, none for
+    /// the guess. Whether that changed it: the cloth then starts again.
+    pub(super) fn set_kind(&mut self, kind: Option<super::drape::Kind>) -> bool {
+        let kind = kind.unwrap_or(self.guessed);
+        if kind == self.kind {
+            return false;
+        }
+        self.kind = kind;
+        if let Some(drape) = &mut self.drape {
+            drape.set_material(super::drape::Material::of(kind));
+        }
+        self.drape.is_some()
+    }
+
+    /// The kind of cloth the skirts are guessed to be, and the kind they
+    /// are made of.
+    pub(super) fn kinds(&self) -> [super::drape::Kind; 2] {
+        [self.guessed, self.kind]
+    }
+
+    /// The cloth for the GPU solver, once it has a frame to run.
+    pub(super) fn drape(&self) -> Option<Arc<super::drape::Live>> {
+        self.drape
+            .as_ref()
+            .filter(|d| self.on_gpu && d.ready())
+            .map(|d| d.live.clone())
+    }
+
+    /// The fastest a part of the body went in a frame as the GPU solver
+    /// saw it, in metres.
+    pub(super) fn fastest_limb(&self) -> f32 {
+        self.drape.as_ref().map_or(0.0, |d| d.fastest)
+    }
+
+    /// One text per net for `rk render --skirt-dump`: the net's points,
+    /// its rest shape on the waist, speeds, pressed and open flags and
+    /// the body's shells, as the walking score reads them. `gpu` is the
+    /// GPU solver's state read back (places with pressed, speeds).
+    pub(super) fn dump(&self, scene: &Scene, gpu: Option<super::drape::Readback<'_>>) -> Vec<String> {
+        use std::fmt::Write as _;
+        let bodies: Vec<_> = self.shells.iter().map(|s| s.in_world(&world(scene, s.node))).collect();
+        let mut body = String::new();
+        for (s, b) in self.shells.iter().zip(&bodies) {
+            let points = b.surface();
+            let m = world(scene, s.node);
+            let (a, e) = (m.transform_point3(s.a), m.transform_point3(s.b));
+            let _ = writeln!(
+                body,
+                "s {} {} {} {} {} {} {} {} {} {}",
+                s.node,
+                s.outside as u8,
+                s.stations,
+                points.len(),
+                a.x,
+                a.y,
+                a.z,
+                e.x,
+                e.y,
+                e.z
+            );
+            for p in points {
+                let _ = writeln!(body, "{} {} {}", p.x, p.y, p.z);
+            }
+        }
+        let mut out = Vec::new();
+        for (k, net) in self.nets.iter().enumerate() {
+            let part = net.part();
+            let waist = world(scene, part.waist);
+            let count = part.cols * part.rows;
+            let rest: Vec<Vec3> = part.rest_on_waist.iter().map(|r| waist.transform_point3(*r)).collect();
+            let (pos, vel, pressed): (Vec<Vec3>, Vec<Vec3>, Vec<f32>) = match (gpu, &self.drape) {
+                (Some((places, speeds)), Some(drape)) if self.on_gpu => {
+                    let first = drape.live.setup.nets[k].first;
+                    let cut = |all: &[[f32; 4]]| -> Vec<Vec3> {
+                        all[first..first + count]
+                            .iter()
+                            .map(|p| Vec3::new(p[0], p[1], p[2]))
+                            .collect()
+                    };
+                    (
+                        cut(places),
+                        cut(speeds),
+                        places[first..first + count].iter().map(|p| p[3]).collect(),
+                    )
+                }
+                _ => net.state(),
+            };
+            let mut text = String::new();
+            let _ = writeln!(text, "{} {} {} {}", part.cols, part.rows, part.fixed, bodies.len());
+            for set in [&pos, &rest, &vel] {
+                for p in set.iter() {
+                    let _ = writeln!(text, "{} {} {}", p.x, p.y, p.z);
+                }
+            }
+            for (i, p) in pressed.iter().enumerate() {
+                let _ = writeln!(text, "{} {}", p, part.open.get(i).copied().unwrap_or(0));
+            }
+            text.push_str(&body);
+            out.push(text);
+        }
+        out
     }
 
     /// One line per skirt: its chains, its net and the meshes bound to
@@ -539,6 +691,64 @@ impl Cloth {
             .collect()
     }
 
+    /// What is known of each skirt that has a net, the one that carries
+    /// the most vertices first.
+    pub(super) fn garments(&self, scene: &Scene, bones: &[Bone]) -> Vec<super::kind::Garment> {
+        let mut out: Vec<_> = self
+            .nets
+            .iter()
+            .enumerate()
+            .map(|(k, net)| {
+                let part = net.part();
+                let (cols, rows) = (part.cols, part.rows);
+                let row = |r: usize| &part.rest[r * cols..(r + 1) * cols];
+                let middle = |r: usize| row(r).iter().sum::<Vec3>() / cols as f32;
+                let axis = (middle(rows - 1) - middle(0)).normalize_or_zero();
+                let wide = |r: usize| {
+                    let m = middle(r);
+                    row(r).iter().map(|p| (*p - m).reject_from(axis).length()).sum::<f32>() / cols as f32
+                };
+                let length = (0..cols)
+                    .map(|c| {
+                        (1..rows)
+                            .map(|r| (part.rest[r * cols + c] - part.rest[(r - 1) * cols + c]).length())
+                            .sum::<f32>()
+                    })
+                    .sum::<f32>()
+                    / cols as f32;
+                let chains: Vec<&[Particle]> = self.rings[self.net_rings[k]]
+                    .iter()
+                    .filter_map(|&b| particles(&bones[b]))
+                    .collect();
+                let ends: Vec<&Particle> = chains.iter().filter_map(|ps| ps.last()).collect();
+                let mean =
+                    |of: fn(&Particle) -> f32| ends.iter().map(|p| of(p)).sum::<f32>() / ends.len().max(1) as f32;
+                super::kind::Garment {
+                    meshes: self
+                        .bindings
+                        .iter()
+                        .filter_map(|b| {
+                            let count = b.vertices.iter().filter(|v| v.net as usize == k).count();
+                            (count > 0).then(|| (scene.renderers[b.renderer].name.clone(), count))
+                        })
+                        .collect(),
+                    chains: chains.len(),
+                    particles: chains.iter().map(|ps| ps.len()).max().unwrap_or(0),
+                    cols,
+                    rows,
+                    length,
+                    top: wide(0),
+                    hem: wide(rows - 1),
+                    stiffness: mean(|p| p.stiffness),
+                    elasticity: mean(|p| p.elasticity),
+                    damping: mean(|p| p.damping),
+                }
+            })
+            .collect();
+        out.sort_by_key(|g| std::cmp::Reverse(g.meshes.iter().map(|m| m.1).sum::<usize>()));
+        out
+    }
+
     /// Has `solver` run the nets' steps; none for the CPU's own.
     pub(super) fn solve_with(&mut self, solver: Option<super::net::SharedSolver>) {
         for net in &mut self.nets {
@@ -553,19 +763,25 @@ impl Cloth {
 
     /// The nets for drawing, when there are any.
     pub(super) fn draw(&self) -> Option<super::net::ClothDraw> {
-        (!self.nets.is_empty())
+        (!self.nets.is_empty() && !self.on_gpu)
             .then(|| super::net::ClothDraw::from_nets(&self.nets, &self.bindings, &self.world_shells))
     }
 
     /// Starts the nets again on their targets.
     pub(super) fn reset_nets(&mut self) {
         self.nets.iter_mut().for_each(super::net::Net::reset);
+        if let Some(drape) = &mut self.drape {
+            drape.reset();
+        }
     }
 
     /// Moves the nets with the character.
     pub(super) fn carry(&mut self, moved: Mat4) {
         for net in &mut self.nets {
             net.carry(moved);
+        }
+        if let Some(drape) = &mut self.drape {
+            drape.carry(moved);
         }
     }
 

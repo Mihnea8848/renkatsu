@@ -421,6 +421,9 @@ pub struct Scene {
     /// Advanced Skirt Physics' cloth nets, which the skirts' vertices are
     /// put on after skinning. Set by the physics.
     pub cloth: Option<crate::physics::net::ClothDraw>,
+    /// The same nets when the GPU solver runs them: the renderer moves
+    /// them and puts the vertices on them. Set by the physics.
+    pub drape: Option<std::sync::Arc<crate::physics::drape::Live>>,
 }
 
 /// Most capsules a skinned mesh is pushed out of; the shader holds a
@@ -588,6 +591,21 @@ impl Scene {
         }
         (mats, active)
     }
+
+    /// World matrix of one node, the same as `world()` gives for it but
+    /// without working out every other node's.
+    pub fn world_of(&self, node: usize) -> Mat4 {
+        let mut chain = Vec::new();
+        let mut at = Some(node);
+        while let Some(i) = at {
+            chain.push(i);
+            at = self.nodes[i].parent;
+        }
+        chain
+            .iter()
+            .rev()
+            .fold(Mat4::IDENTITY, |m, &i| m * self.nodes[i].local.matrix())
+    }
 }
 
 /// A mesh posed in world space, ready to draw: its vertices after blend
@@ -609,6 +627,8 @@ pub struct DrawMesh<'a> {
     /// Tangents of vertices already in the world, for a mesh posed on the
     /// CPU (a skirt on a cloth net); `None` takes the mesh's own.
     pub base_tangents: Option<Vec<[f32; 4]>>,
+    /// The mesh's place on the GPU solver's cloth, for a skirt on it.
+    pub drape: Option<crate::physics::drape::Dress>,
 }
 
 /// How a posed mesh's vertices reach the world.
@@ -740,6 +760,19 @@ impl Scene {
             if let Some(cloth) = &self.cloth {
                 cloth.dress(ri, &mut d);
             }
+            if let Some(live) = &self.drape {
+                let mesh = std::sync::Arc::as_ptr(&d.renderer.mesh) as *const u8 as usize;
+                d.drape = live
+                    .setup
+                    .bindings
+                    .iter()
+                    .position(|b| b.renderer == ri && b.mesh == mesh)
+                    .filter(|_| matches!(d.skinning, Skinning::Bones { .. }))
+                    .map(|binding| crate::physics::drape::Dress {
+                        live: live.clone(),
+                        binding,
+                    });
+            }
             out.push(d);
         }
         out
@@ -828,7 +861,43 @@ impl Scene {
                 bounds,
                 push,
                 base_tangents: None,
+                drape: None,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod world_tests {
+    use super::*;
+
+    #[test]
+    fn one_node_is_where_the_whole_world_puts_it() {
+        // A root with two branches, turned, moved and scaled at each step.
+        let parents = [None, Some(0), Some(1), Some(2), Some(1), Some(4), None, Some(6)];
+        let mut scene = Scene::default();
+        for (i, parent) in parents.iter().enumerate() {
+            let f = i as f32;
+            scene.nodes.push(Node {
+                name: format!("n{i}"),
+                parent: *parent,
+                children: Vec::new(),
+                local: Trs {
+                    pos: Vec3::new(0.1 * f, 0.3 - 0.07 * f, 0.02 * f * f),
+                    rot: Quat::from_euler(glam::EulerRot::YXZ, 0.4 * f, -0.3 + 0.1 * f, 0.05 * f),
+                    scale: Vec3::splat(1.0 + 0.03 * f),
+                },
+                active: true,
+            });
+        }
+        for (i, parent) in parents.iter().enumerate() {
+            if let Some(p) = parent {
+                scene.nodes[*p].children.push(i);
+            }
+        }
+        let (all, _) = scene.world();
+        for (i, m) in all.iter().enumerate() {
+            assert_eq!(scene.world_of(i).to_cols_array(), m.to_cols_array(), "node {i}");
         }
     }
 }

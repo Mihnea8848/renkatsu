@@ -33,6 +33,29 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The kinds of cloth `rk render --skirt-kind` takes.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SkirtKind {
+    Tight,
+    Pleated,
+    Flowing,
+    Fixed,
+}
+
+impl SkirtKind {
+    fn kind(self) -> rk_chara::physics::drape::Kind {
+        use rk_chara::physics::drape::Kind;
+        match self {
+            SkirtKind::Tight => Kind::Tight,
+            SkirtKind::Pleated => Kind::Pleated,
+            SkirtKind::Flowing => Kind::Flowing,
+            SkirtKind::Fixed => Kind::Fixed,
+        }
+    }
+}
+
+// Parsed once at start, so the size of its largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Inspect character cards.
@@ -101,6 +124,23 @@ enum Cmd {
         /// Physics.
         #[arg(long)]
         game_skirts: bool,
+        /// Move the skirts' cloth with the solver that runs on the GPU,
+        /// in place of Advanced Skirt Physics' net on the CPU.
+        #[arg(long, conflicts_with = "game_skirts")]
+        gpu_skirts: bool,
+        /// The kind of cloth the GPU solver makes the skirts of: tight,
+        /// pleated, flowing or fixed. Without this it is guessed from
+        /// the clothing.
+        #[arg(long, requires = "gpu_skirts")]
+        skirt_kind: Option<SkirtKind>,
+        /// A folder to write the skirts' cloth to after every frame
+        /// played, one text per frame, for the walking score.
+        #[arg(long)]
+        skirt_dump: Option<PathBuf>,
+        /// Measure what a frame of the GPU solver costs, with this many
+        /// substeps (0 for as many as it takes itself).
+        #[arg(long)]
+        skirt_time: Option<u32>,
         /// Where the character stands in the map, as `x,y,z` in metres.
         #[arg(long, allow_hyphen_values = true)]
         at: Option<String>,
@@ -133,7 +173,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         time: f32,
         /// Play the animation on for this many frames of 1/60 s from
-        /// there, the physics moving with it, before the picture.
+        /// there, the physics moving with it, before the picture. Without
+        /// an animation only the physics moves on.
         #[arg(long, default_value_t = 0)]
         play: u32,
         /// While playing, also save a picture every this many frames,
@@ -265,6 +306,13 @@ enum Cmd {
         /// Compare with the pictures taken with Studio's screen effects on.
         #[arg(long)]
         studio: bool,
+        /// Move skirts exactly as the game does, without Advanced Skirt
+        /// Physics, to compare the rest with the game.
+        #[arg(long)]
+        game_skirts: bool,
+        /// Move the skirts' cloth with the solver that runs on the GPU.
+        #[arg(long, conflicts_with = "game_skirts")]
+        gpu_skirts: bool,
     },
     /// Compare every case of a capture batch (the plugin's `out/batch`
     /// folder) with our render of it: one line per case, with the camera,
@@ -612,7 +660,9 @@ fn main() -> Result<()> {
             out,
             show,
             studio,
-        } => bench::bench(&list, &captures, &out, &show, studio),
+            game_skirts,
+            gpu_skirts,
+        } => bench::bench(&list, &captures, &out, &show, studio, game_skirts, gpu_skirts),
         Cmd::BpCheck { dir, only, bones } => bp_check::check(&dir, &only, bones),
         Cmd::CaptureCheck {
             dir,
@@ -645,6 +695,10 @@ fn main() -> Result<()> {
             no_physics,
             colliders,
             game_skirts,
+            gpu_skirts,
+            skirt_kind,
+            skirt_dump,
+            skirt_time,
             at,
             turn,
             list,
@@ -681,6 +735,10 @@ fn main() -> Result<()> {
             no_physics,
             colliders: colliders.as_deref(),
             game_skirts,
+            gpu_skirts,
+            skirt_kind: skirt_kind.map(SkirtKind::kind),
+            skirt_dump: skirt_dump.as_deref(),
+            skirt_time,
             at: at.as_deref(),
             turn,
             list,

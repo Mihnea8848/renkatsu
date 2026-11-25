@@ -67,6 +67,38 @@ struct Actor {
     /// When the eyes' highlights began to shake, which they do on the real
     /// clock whether the scene plays or not, as in Studio.
     shake_since: std::time::Instant,
+    /// The eyes' blinking, on the real clock from when the character was
+    /// built, whether the scene plays or not, as in Studio; and the open
+    /// rate the face was last shown with.
+    blink: rk_chara::face::Blink,
+    blink_rate: f32,
+    awake: std::time::Instant,
+    /// Where the eyes look this frame (`rk_chara::gaze`), as each eye's
+    /// sideways rate and the upward rate; the gaze the face was last shown
+    /// with; whether the eyes are still turning; and when they last moved.
+    gaze_next: Option<([f32; 2], f32)>,
+    gaze_shown: Option<([f32; 2], f32)>,
+    gazing: bool,
+    gaze_clock: std::time::Instant,
+    /// Where the head looks (`rk_chara::neck`): the view's camera, and
+    /// whether this frame's pose turned it already.
+    look_at: Vec3,
+    neck_done: bool,
+    /// Which way the shaft points as the animation holds it, from root
+    /// to tip.
+    shaft_line: Option<Vec3>,
+    /// The share of its built length the shaft has now.
+    shaft_length: f32,
+    /// How far her mouth reaches along a shaft for its depth, in the
+    /// world, this frame and as last posed.
+    reach_next: Option<Vec3>,
+    reach_at: Option<Vec3>,
+    /// How deep her mouth is on a shaft through his animation's loop,
+    /// without her lean: whose shaft and which animation, and the depth at
+    /// each of the loop's slots (NaN where it was not yet seen).
+    strokes: Option<(ObjectId, u64, [f32; STROKE_SLOTS])>,
+    /// Where her mouth was last posed, before her lean.
+    bare_mouth: Option<Vec3>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -77,6 +109,30 @@ struct Actor {
     guests_next: Option<rk_chara::physics::Guests>,
     /// The ones a partner's shaft gave last frame.
     received: rk_chara::physics::Guests,
+    /// The vaginal or anal pull this character's shaft has on a partner,
+    /// with the partner and the place; the end the shaft was last aimed
+    /// at; and a pull on this character from a partner's shaft, the new
+    /// one from the last frame first.
+    hole_pull: Option<(
+        ObjectId,
+        rk_chara::better_penetration::Mode,
+        rk_chara::better_penetration::MouthPull,
+    )>,
+    aimed_end: Option<Vec3>,
+    hole_next: Option<rk_chara::better_penetration::HolePull>,
+    hole_at: Option<rk_chara::better_penetration::HolePull>,
+    /// The body has the pull bones or the inner bones a stroke moves.
+    hole_bones: bool,
+    /// The card is a male's.
+    male: bool,
+    /// A partner's shaft is in this character's mouth, which then holds
+    /// it; as of this frame and the last one.
+    mouth_held: bool,
+    mouth_held_next: bool,
+    /// The finger bones whose colliders push vaginas, and this character's
+    /// vagina dynamic bones they push.
+    fingers: Vec<usize>,
+    vagina: Vec<usize>,
     /// The H position this character plays, as its male controller and
     /// state, when it plays one the game lists.
     h_position: Option<(String, String)>,
@@ -116,7 +172,11 @@ struct Actor {
     liquid: (rk_chara::siru::Levels, bool),
     /// The animation of the scene the actor last looked for, by its file
     /// in the project, bundle, controller and state.
-    pose: Option<[String; 5]>,
+    pose: Option<[String; 6]>,
+    /// The body height the animation plays at in place of the character's
+    /// own: the female's, while it plays the male's half of her H position,
+    /// as the main game's H scenes set it.
+    paired_height: Option<f32>,
     /// That animation, when it could be read.
     playing: Option<Playing>,
     /// Why it could not be read.
@@ -469,30 +529,177 @@ impl Actor {
     /// object.
     fn bone(&self, name: &str) -> Option<Mat4> {
         let node = self.chara.scene.find(self.chara.top, name)?;
-        let (world, _) = self.chara.scene.world();
-        Some(self.applied.unwrap_or_default().inverse() * world[node])
+        Some(self.applied.unwrap_or_default().inverse() * self.chara.scene.world_of(node))
     }
 
     /// Poses one frame: the animation at `phase` when there is one, and
     /// the edits made by hand on top. The edited bones start from how they
     /// were loaded, so that a bone the animation does not move takes its
     /// edit once, not once more every frame.
-    fn pose_frame(&mut self, phase: Option<f32>, states: &States) {
+    fn pose_frame(&mut self, phase: Option<f32>, states: &States, dt: f32) {
         for &(node, _) in &self.edits {
             if let (Some(n), Some(rest)) = (self.chara.scene.nodes.get_mut(node), self.rest.get(node)) {
                 n.local = *rest;
             }
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
+        let motion_on = motion.is_some();
         self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
+        // The head turns after the animation, FK and IK, as the neck's
+        // script does in LateUpdate, and before the shaft is aimed at it.
+        self.turn_neck(dt, true);
+        self.neck_done = true;
+        // The line the shaft lies along as the animation holds it, before
+        // it is aimed: where a partner moves for more or less depth.
+        if let Some(shaft) = self.chara.shaft.as_ref() {
+            if let (Some(&root), Some(&tip)) = (shaft.points.first(), shaft.points.last()) {
+                let scene = &self.chara.scene;
+                let along = scene.world_of(tip).w_axis.truncate() - scene.world_of(root).w_axis.truncate();
+                self.shaft_line = along.try_normalize();
+            }
+        }
+        // Where her mouth is as posed, before any lean, to measure the
+        // stroke by.
+        let mouth = rk_chara::better_penetration::Mode::Oral.entry_bone();
+        self.bare_mouth = self
+            .chara
+            .scene
+            .find(self.chara.top, mouth)
+            .map(|n| self.chara.scene.world_of(n).w_axis.truncate());
+        if let Some(by) = self.reach_at {
+            self.reach_mouth(by, motion_on);
+        }
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
-            shaft.aim(&mut self.chara.scene, job.entry, job.end, &job.settings, job.vaginal);
+            let end = match (&job.body, shaft.points.first()) {
+                (Some(body), Some(&root)) => {
+                    let start = self.chara.scene.world_of(root).w_axis.truncate();
+                    body.end(&job, start, shaft.base_length)
+                }
+                _ => job.end,
+            };
+            self.aimed_end = Some(end);
+            shaft.aim(&mut self.chara.scene, job.entry, end, &job.settings, job.vaginal);
         }
         // A partner's shaft holds the mouth where it last pulled it.
         if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
             self.chara.scene.nodes[node].local.pos = self.rest[node].pos + at;
+        }
+        // And her vagina or anus where its stroke pulls them.
+        if let Some(pull) = self.hole_at {
+            rk_chara::better_penetration::apply_hole_pull(&mut self.chara.scene, self.chara.top, &pull);
+        }
+    }
+
+    /// The face to show: the layer's, or with none the character's own, its
+    /// mouth holding a partner's shaft while one is in it (or its tongue
+    /// out on it, when that is the mouth chosen). None leaves the
+    /// face as it was loaded.
+    fn face_shown(&self) -> Option<rk_chara::face::Face> {
+        let own = self.layer.as_ref().and_then(|l| l.face);
+        if !self.mouth_held {
+            return own;
+        }
+        let mut face = own.or_else(|| self.chara.face.as_ref().map(|r| r.start))?;
+        // A tongue put out stays out, licking the shaft; any other mouth
+        // holds it.
+        if face.mouth != rk_chara::face::TONGUE_OUT {
+            face.mouth = rk_chara::face::HOLDING_MOUTH;
+        }
+        face.mouth_open = 1.0;
+        Some(face)
+    }
+
+    /// Bends her upper body so her mouth goes `by` further, as a person
+    /// leans in: the lower and upper spine, the neck and the head each take
+    /// a share of the turn, the spine the most, so the head stays nearly
+    /// as it was held and her hips, knees and hands stay where they are.
+    /// Bones no animation writes start from how they were loaded, so the
+    /// reach is not added again each frame.
+    fn reach_mouth(&mut self, by: Vec3, animated: bool) {
+        const CHAIN: [(&str, f32); 4] = [
+            ("cf_j_head", 0.15),
+            ("cf_j_neck", 0.25),
+            ("cf_j_spine03", 0.3),
+            ("cf_j_spine02", 0.3),
+        ];
+        let Some(mouth) = self.mouth_node() else { return };
+        let top = self.chara.top;
+        let chain: Vec<(usize, f32)> = CHAIN
+            .iter()
+            .filter_map(|&(name, share)| Some((self.chara.scene.find(top, name)?, share)))
+            .collect();
+        if chain.len() != CHAIN.len() {
+            return;
+        }
+        let scene = &mut self.chara.scene;
+        if !animated {
+            for &(node, _) in &chain {
+                if !self.edits.iter().any(|(n, _)| *n == node) {
+                    scene.nodes[node].local.rot = self.rest[node].rot;
+                }
+            }
+        }
+        // Each arm's bones, and where its hand and elbow are before the lean,
+        // so the hands stay where the animation put them.
+        let arms: Vec<([usize; 3], Mat4, Vec3)> = ["L", "R"]
+            .iter()
+            .filter_map(|side| {
+                let bone = |name: &str| scene.find(top, &format!("{name}_{side}"));
+                let nodes = [bone("cf_j_arm00")?, bone("cf_j_forearm01")?, bone("cf_j_hand")?];
+                Some((
+                    nodes,
+                    scene.world_of(nodes[2]),
+                    scene.world_of(nodes[1]).w_axis.truncate(),
+                ))
+            })
+            .collect();
+        let goal = scene.world_of(mouth).w_axis.truncate() + by;
+        // A few passes, each bone turning its share of what is left.
+        for _ in 0..10 {
+            for &(node, share) in &chain {
+                let world = scene.world_of(node);
+                let pivot = world.w_axis.truncate();
+                let mouth_at = scene.world_of(mouth).w_axis.truncate();
+                let (Some(from), Some(to)) = ((mouth_at - pivot).try_normalize(), (goal - pivot).try_normalize())
+                else {
+                    continue;
+                };
+                let turn = Quat::IDENTITY.slerp(Quat::from_rotation_arc(from, to), share);
+                let rot = world.to_scale_rotation_translation().1;
+                let parent = scene.nodes[node]
+                    .parent
+                    .map_or(Quat::IDENTITY, |p| scene.world_of(p).to_scale_rotation_translation().1);
+                scene.nodes[node].local.rot = (parent.inverse() * turn * rot).normalize();
+            }
+        }
+        for (nodes, hand, elbow) in arms {
+            keep_hand(scene, nodes, &hand, elbow);
+        }
+    }
+
+    /// Puts the face's mouth sliders on the game's defaults while the
+    /// mouth shown has the tongue out or holds something, as the main game
+    /// does (Studio does not, and those mouths pull out of shape), and back
+    /// otherwise. The bones the sliders move are kept as loaded that way.
+    fn mask_mouth(&mut self, shown: Option<&rk_chara::face::Face>) {
+        let mouth = shown
+            .map(|f| f.mouth)
+            .or_else(|| self.chara.face.as_ref().map(|r| r.start.mouth));
+        let Some(mask) = self.chara.mouth_mask.as_mut() else {
+            return;
+        };
+        let scene = &mut self.chara.scene;
+        let before: Vec<Trs> = scene.nodes.iter().map(|n| n.local).collect();
+        if !mask.mask(scene, mouth.is_some_and(rk_chara::shape::masks_mouth)) {
+            return;
+        }
+        for ((node, was), rest) in scene.nodes.iter().zip(&before).zip(self.rest.iter_mut()) {
+            let now = node.local;
+            if now.pos != was.pos || now.rot != was.rot || now.scale != was.scale {
+                *rest = now;
+            }
         }
     }
 
@@ -509,6 +716,46 @@ impl Actor {
             node.local = *rest;
         }
         self.applied = None;
+        if let Some(neck) = self.chara.neck.as_mut() {
+            neck.forget_pose();
+        }
+    }
+
+    /// The neck pattern of the character's pose, or else of its card.
+    fn neck_pattern(&self) -> usize {
+        self.layer
+            .as_ref()
+            .and_then(|l| l.neck_look)
+            .unwrap_or(self.chara.look_patterns[1])
+            .max(0) as usize
+    }
+
+    /// Turns the head toward the camera by its pattern, `dt` seconds after
+    /// the last turn: from the pose just made when `posed`, or else from
+    /// the one the last pose left. Bones posed by hand are left as they
+    /// are, as Studio holds the neck still under its FK. Gives whether a
+    /// bone moved.
+    fn turn_neck(&mut self, dt: f32, posed: bool) -> bool {
+        let pattern = self.neck_pattern();
+        let Some(neck) = self.chara.neck.as_mut() else {
+            return false;
+        };
+        let bones: Vec<usize> = neck.bones().collect();
+        if bones.iter().any(|b| self.edits.iter().any(|(n, _)| n == b)) {
+            return false;
+        }
+        let scene = &mut self.chara.scene;
+        let before: Vec<Quat> = bones.iter().map(|&b| scene.nodes[b].local.rot).collect();
+        if posed {
+            neck.posed(scene);
+        } else {
+            neck.back_to_pose(scene);
+        }
+        neck.update(scene, self.look_at, pattern, dt);
+        bones
+            .iter()
+            .zip(&before)
+            .any(|(&b, was)| scene.nodes[b].local.rot.angle_between(*was) > 1e-4)
     }
 
     /// Brings the character in line with its object for one frame: the
@@ -537,15 +784,36 @@ impl Actor {
             liquid,
             liquid_clothes,
             game_skirts,
+            skirt_kinds,
             animation: pose,
             pose_layer,
+            better_penetration,
             ..
         } = &object.content
         else {
             return false;
         };
+        // A shaft of another length: its bones along the chain and the
+        // length it is aimed by, both from how it was built.
+        let length = better_penetration
+            .as_deref()
+            .map_or(self.chara.better_penetration.length, |s| s.length)
+            .clamp(0.25, 2.0);
+        let mut resized = false;
+        if (length - self.shaft_length).abs() > 1e-4 {
+            if let Some(shaft) = self.chara.shaft.as_mut() {
+                let by = length / self.shaft_length;
+                shaft.base_length *= by;
+                for &node in shaft.points.iter().skip(1).chain(&shaft.virtual_points) {
+                    self.rest[node].pos *= by;
+                    self.chara.scene.nodes[node].local.pos *= by;
+                }
+                resized = true;
+            }
+            self.shaft_length = length;
+        }
         // What has to be posed again from the start.
-        let mut again = clock.was != Playback::Stopped && clock.now == Playback::Stopped;
+        let mut again = resized || (clock.was != Playback::Stopped && clock.now == Playback::Stopped);
         // A stop lets the mouth go back too.
         if again {
             self.mouth_pull = None;
@@ -553,14 +821,15 @@ impl Actor {
             self.mouth_next = None;
         }
         // A new aim, or none where there was one, poses the shaft again.
-        if self.aim_job != self.aim_posed {
+        if !AimJob::near(self.aim_job.as_ref(), self.aim_posed.as_ref()) {
             self.aim_posed = self.aim_job;
             again = true;
         }
         // Another character's colliders, new or gone, settle the dynamic
         // bones again.
         if let Some(guests) = self.guests_next.take() {
-            if guests.as_slice() != self.chara.physics.guests() {
+            let guests = rk_chara::physics::merged(guests);
+            if !rk_chara::physics::guests_near(&guests, self.chara.physics.guests(), STILL) {
                 self.chara.physics.set_guests(guests);
                 again = true;
             }
@@ -571,13 +840,48 @@ impl Actor {
                 again = true;
             }
         }
+        // A partner's stroke that pulls her vagina or anus poses her again;
+        // with none, the bones go back to how they were loaded.
+        match self.hole_next.take() {
+            Some(pull) => {
+                if self.hole_at != Some(pull) {
+                    self.hole_at = Some(pull);
+                    again |= clock.now != Playback::Playing;
+                }
+            }
+            None => {
+                if let Some(pull) = self.hole_at.take() {
+                    let names = rk_chara::better_penetration::bones_by_name(&self.chara.scene, self.chara.top);
+                    let inner = rk_chara::better_penetration::inner_bone(pull.mode);
+                    let bones = rk_chara::better_penetration::pull_bones(pull.mode)
+                        .iter()
+                        .map(|(n, _)| *n);
+                    for name in bones.chain(inner) {
+                        if let Some(&node) = names.get(name) {
+                            self.chara.scene.nodes[node].local = self.rest[node];
+                        }
+                    }
+                    again = true;
+                }
+            }
+        }
+        // A shaft's depth that reaches her mouth further, or no longer.
+        let reach = self.reach_next.take();
+        let reach_moved = match (reach, self.reach_at) {
+            (Some(a), Some(b)) => a.distance(b) > STILL,
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if reach_moved {
+            self.reach_at = reach;
+            again |= clock.now != Playback::Playing;
+        }
         // A partner's shaft that moved the mouth poses the face again.
         // With none pulling it, the mouth returns while the scene plays,
         // at the rate of the shaft that pulled it last.
         let playing = clock.now == Playback::Playing;
         if let Some((at, rate)) = self.mouth_next.take() {
             self.mouth_return = rate;
-            if self.mouth_at != Some(at) {
+            if self.mouth_at.is_none_or(|was| was.distance(at) > STILL * 0.1) {
                 self.mouth_at = Some(at);
                 again |= !playing;
             }
@@ -607,6 +911,11 @@ impl Actor {
         if self.chara.physics.set_advanced(advanced) {
             again = true;
         }
+        // The kind of cloth too, guessed unless the scene chose one.
+        let kind = crate::scene::skirt_kind(skirt_kinds, self.recipe.outfit).map(crate::scene::SkirtKind::kind);
+        if self.chara.physics.set_skirt_kind(kind) {
+            again = true;
+        }
 
         // The liquid on the skin is material values only: the bones and
         // the pose are untouched by it.
@@ -624,6 +933,7 @@ impl Actor {
                 p.controller.clone(),
                 p.state.clone(),
                 p.options.map(|[a, b]| format!("{a} {b}")).unwrap_or_default(),
+                self.paired_height.map(|h| h.to_string()).unwrap_or_default(),
             ]
         });
         if key != self.pose {
@@ -699,21 +1009,55 @@ impl Actor {
             });
             self.back_to_rest();
             // The face is blend shapes, set once for the layer.
+            let shown = self.face_shown();
             if let Some(face) = &self.chara.face {
-                face.show(&mut self.chara.scene, self.layer.as_ref().and_then(|l| l.face.as_ref()));
+                face.show(&mut self.chara.scene, shown.as_ref());
             }
+            self.mask_mouth(shown.as_ref());
+            // Shown open and looking ahead: the blink and the gaze go on again.
+            self.blink_rate = 1.0;
+            self.gaze_shown = None;
             let skin = self.layer.as_ref().map(|l| l.skin).unwrap_or_default();
             self.chara.show_skin_effects(&skin);
             again = true;
         }
-        // Shaking highlights take a new size every step of the real clock.
-        if let (Some(rig), Some(face)) = (&self.chara.face, self.layer.as_ref().and_then(|l| l.face)) {
-            if face.shaking {
-                rig.show_at(
-                    &mut self.chara.scene,
-                    Some(&face),
-                    self.shake_since.elapsed().as_secs_f32(),
-                );
+        // A shaft come into the mouth or gone from it shows the face again.
+        let held = std::mem::take(&mut self.mouth_held_next);
+        if held != self.mouth_held {
+            self.mouth_held = held;
+            let shown = self.face_shown();
+            if let Some(face) = &self.chara.face {
+                face.show(&mut self.chara.scene, shown.as_ref());
+            }
+            self.mask_mouth(shown.as_ref());
+            // Shown open and looking ahead: the blink and the gaze go on again.
+            self.blink_rate = 1.0;
+            self.gaze_shown = None;
+            again |= clock.now != Playback::Playing;
+        }
+        // The eyes blink and shaking highlights take a new size on the real
+        // clock, whether the scene plays or not.
+        let shown = self.face_shown();
+        if let Some(start_blinks) = self.chara.face.as_ref().map(|r| r.start.blink) {
+            let rate = if shown.map_or(start_blinks, |f| f.blink) {
+                self.blink.rate(self.awake.elapsed().as_secs_f32())
+            } else {
+                1.0
+            };
+            let shaking = shown.is_some_and(|f| f.shaking);
+            let gaze = self.gaze_next;
+            if shaking || rate != self.blink_rate || gaze != self.gaze_shown {
+                self.blink_rate = rate;
+                self.gaze_shown = gaze;
+                if let Some(rig) = &self.chara.face {
+                    rig.show_gazing(
+                        &mut self.chara.scene,
+                        shown.as_ref(),
+                        self.shake_since.elapsed().as_secs_f32(),
+                        rate,
+                        gaze,
+                    );
+                }
             }
         }
         // A hand pattern not loaded yet is read once.
@@ -754,7 +1098,7 @@ impl Actor {
             if *simulate {
                 self.chara.physics.begin_frame(&mut self.chara.scene);
             }
-            self.pose_frame(phase, &states);
+            self.pose_frame(phase, &states, clock.dt);
             if *simulate {
                 self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
             }
@@ -802,14 +1146,14 @@ impl Actor {
         if motion || hands || !self.edits.is_empty() {
             // Hair and skirts settle from where they were, as CharaStudio
             // never puts them back on their rest shape for a new pose.
-            self.pose_frame(phase, &states);
+            self.pose_frame(phase, &states, 0.0);
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
                 self.chara.physics.hold_cloth(lazy);
                 for frame in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
-                    self.pose_frame(phase, &states);
+                    self.pose_frame(phase, &states, rk_chara::physics::FRAME_TIME);
                     let amount = (frame + 1) as f32 / (rk_chara::physics::EASE_FRAMES + 1) as f32;
                     self.chara.physics.ease(&mut self.chara.scene, &from, amount);
                     // The cloth nets start again once a new pose is
@@ -860,7 +1204,86 @@ impl Live {
     pub fn face_rig(&self, id: ObjectId) -> Option<&rk_chara::face::Rig> {
         self.actors.iter().find(|a| a.id == id)?.chara.face.as_ref()
     }
+
+    /// The eye look pattern a character has until its pose picks one, and
+    /// whether its eyes can look at all.
+    pub fn card_eyes_look(&self, id: ObjectId) -> Option<i32> {
+        let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
+        chara.gaze.as_ref().map(|_| EYES_AHEAD)
+    }
+
+    /// How far inside her skin her body keeps a shaft, as the game's
+    /// BetterPenetration config sets it.
+    pub fn clipping_depth(&self) -> f32 {
+        self.body_options.clipping_depth
+    }
+
+    /// The neck look pattern a character's card gives, and whether its
+    /// head can turn at all.
+    pub fn card_neck_look(&self, id: ObjectId) -> Option<i32> {
+        let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
+        chara.neck.as_ref().map(|_| chara.look_patterns[1])
+    }
 }
+
+/// How far a place may move, in metres, and still count as where it was:
+/// re-posing one character moves the others' bones by rounding dust, and
+/// reading that dust as a change would settle them again every frame.
+const STILL: f32 = 1e-4;
+
+/// Puts a hand back where it was (`hand`, its world matrix before), by
+/// turning the upper arm and the forearm, the elbow bending toward where
+/// it was (`elbow`): a two-bone IK.
+fn keep_hand(scene: &mut rk_chara::scene::Scene, [upper, lower, hand]: [usize; 3], was: &Mat4, elbow: Vec3) {
+    let rot_of = |scene: &rk_chara::scene::Scene, n: usize| scene.world_of(n).to_scale_rotation_translation().1;
+    let set_world_rot = |scene: &mut rk_chara::scene::Scene, n: usize, rot: Quat| {
+        let parent = scene.nodes[n].parent.map_or(Quat::IDENTITY, |p| rot_of(scene, p));
+        scene.nodes[n].local.rot = (parent.inverse() * rot).normalize();
+    };
+    let at = |scene: &rk_chara::scene::Scene, n: usize| scene.world_of(n).w_axis.truncate();
+    let (a, b, c) = (at(scene, upper), at(scene, lower), at(scene, hand));
+    let goal = was.w_axis.truncate();
+    let (l1, l2) = (a.distance(b), b.distance(c));
+    let Some(toward) = (goal - a).try_normalize() else {
+        return;
+    };
+    let reach = a.distance(goal).clamp((l1 - l2).abs() + 1e-4, l1 + l2 - 1e-4);
+    // Where the elbow goes: on the side it was, at the angle the two
+    // lengths make (law of cosines).
+    let cos = ((l1 * l1 + reach * reach - l2 * l2) / (2.0 * l1 * reach)).clamp(-1.0, 1.0);
+    let side = elbow - a;
+    let Some(bend) = (side - toward * side.dot(toward)).try_normalize() else {
+        return;
+    };
+    let new_elbow = a + toward * (l1 * cos) + bend * (l1 * (1.0 - cos * cos).sqrt());
+    if let (Some(from), Some(to)) = ((b - a).try_normalize(), (new_elbow - a).try_normalize()) {
+        let turned = Quat::from_rotation_arc(from, to) * rot_of(scene, upper);
+        set_world_rot(scene, upper, turned);
+    }
+    let (b, c) = (at(scene, lower), at(scene, hand));
+    if let (Some(from), Some(to)) = ((c - b).try_normalize(), (goal - b).try_normalize()) {
+        let turned = Quat::from_rotation_arc(from, to) * rot_of(scene, lower);
+        set_world_rot(scene, lower, turned);
+    }
+    set_world_rot(scene, hand, was.to_scale_rotation_translation().1);
+}
+
+/// How many places of an animation's loop a mouth's depth is kept for.
+const STROKE_SLOTS: usize = 32;
+
+/// The furthest a mouth leans past the animation's stroke, in metres.
+const MAX_REACH: f32 = 0.2;
+
+/// The eye look pattern of a pose that picks none: ahead. Cards often
+/// save the maker's "this way", but eyes that follow the camera unasked
+/// stare out of every shot.
+const EYES_AHEAD: i32 = 0;
+
+/// The eye look pattern that follows an object of the scene rather than the
+/// camera: the head's "control" pattern, made for a target set from
+/// outside. (Studio's own guide-object button picks pattern 4, which is
+/// the H front pattern and looks ahead whatever the guide does.)
+pub const EYES_ON_OBJECT: i32 = 2;
 
 /// What BetterPenetration aims a shaft with in a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -869,6 +1292,95 @@ struct AimJob {
     end: Vec3,
     settings: rk_chara::better_penetration::Settings,
     vaginal: bool,
+    /// Her body, when the shaft's end follows it rather than her waist.
+    body: Option<BodyAim>,
+}
+
+impl AimJob {
+    /// Whether two aims are the same but for rounding dust.
+    fn near(a: Option<&AimJob>, b: Option<&AimJob>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.settings == b.settings
+                    && a.vaginal == b.vaginal
+                    && a.entry.distance(b.entry) <= STILL
+                    && a.end.distance(b.end) <= STILL
+                    && a.body.is_some() == b.body.is_some()
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What of her body the main game's constraint reads: her front and back
+/// rows of collision points, the place's up, and her inner target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BodyAim {
+    front: [rk_chara::body_collision::CollisionPoint; 3],
+    back: [rk_chara::body_collision::CollisionPoint; 3],
+    up: Vec3,
+    inner: Vec3,
+    options: rk_chara::body_collision::BodyOptions,
+}
+
+impl BodyAim {
+    fn of(
+        mode: rk_chara::better_penetration::Mode,
+        world: &[Mat4],
+        names: &std::collections::HashMap<String, usize>,
+        options: rk_chara::body_collision::BodyOptions,
+    ) -> Option<BodyAim> {
+        use rk_chara::body_collision as bc;
+        let points = bc::CollisionPoints::find(world, |n| names.get(n).copied(), &options)?;
+        Some(BodyAim {
+            options,
+            front: points.front.try_into().ok()?,
+            back: points.back.try_into().ok()?,
+            up: world[*names.get(mode.entry_bone())?]
+                .y_axis
+                .truncate()
+                .normalize_or_zero(),
+            inner: world[*names.get(bc::INNER_TARGET)?].w_axis.truncate(),
+        })
+    }
+
+    /// The shaft's end as the main game constrains it to her body, its
+    /// root where it is posed now.
+    fn end(&self, job: &AimJob, start: Vec3, base_length: f32) -> Vec3 {
+        use rk_chara::better_penetration::Mode;
+        use rk_chara::body_collision as bc;
+        let points = bc::CollisionPoints {
+            front: self.front.to_vec(),
+            back: self.back.to_vec(),
+        };
+        let dan = bc::Dan {
+            start,
+            base_length,
+            // A link is made only while the shaft is in her.
+            penetration: true,
+            bp_points: true,
+            last_end: Vec3::ZERO,
+            last_end_vector: Vec3::ZERO,
+        };
+        let partner = bc::Partner {
+            reference_position: job.entry,
+            reference_up: self.up,
+            inner_position: self.inner,
+            points: &points,
+        };
+        let mode = if job.vaginal { Mode::Vaginal } else { Mode::Anal };
+        let options = &self.options;
+        bc::adjust_dan_to_target(
+            mode,
+            &dan,
+            &partner,
+            &job.settings,
+            options,
+            rk_chara::better_penetration::PULL_STEP,
+        )
+        .end
+    }
 }
 
 /// Where a character's shaft is aimed this frame: the partner, the place
@@ -928,7 +1440,7 @@ impl Live {
             (Some(t), _) => (Some(t.partner), t.mode),
             (None, Some(mode)) => (None, mode),
             (None, None) if settings.auto_link => {
-                let (partner, mode) = self.auto_link(at, shaft, held)?;
+                let (partner, mode) = self.auto_link(at, scene, shaft, held)?;
                 (Some(partner), mode)
             }
             (None, None) => return None,
@@ -937,15 +1449,16 @@ impl Live {
         let partner = match partner {
             Some(p) => p,
             None => {
-                let tip = shaft.tip(&actor.chara.scene.world().0);
+                let tip = shaft.tip_in(&actor.chara.scene);
                 let candidates = self
                     .actors
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != at)
                     .filter_map(|(_, a)| {
-                        let (world, names) = posed(a);
-                        Some((a.id, world[*names.get(mode.entry_bone())?].w_axis.truncate()))
+                        let names = bp::bones_by_name(&a.chara.scene, a.chara.top);
+                        let bone = *names.get(mode.entry_bone())?;
+                        Some((a.id, a.chara.scene.world_of(bone).w_axis.truncate()))
                     });
                 bp::nearest(tip, shaft.base_length, candidates)?
             }
@@ -965,6 +1478,15 @@ impl Live {
                 end,
                 settings,
                 vaginal: mode == bp::Mode::Vaginal,
+                body: (settings.body_collision && mode != bp::Mode::Oral)
+                    .then(|| {
+                        let mut options = self.body_options;
+                        if let Some(depth) = settings.clipping_depth {
+                            options.clipping_depth = depth;
+                        }
+                        BodyAim::of(mode, &world, &names, options)
+                    })
+                    .flatten(),
             },
         ))
     }
@@ -974,44 +1496,50 @@ impl Live {
     /// nearest character in reach; none when that state has him out of
     /// her; and for an animation the game does not know, the nearest of
     /// the three places in reach. The link of the last frame holds while
-    /// its place stays in reach. A shaft hidden by the Son switch does not
-    /// link on its own.
+    /// its place stays in reach. Only a male's shown shaft links on its own.
     fn auto_link(
         &self,
         at: usize,
+        scene: &Scene,
         shaft: &rk_chara::better_penetration::Shaft,
         held: Option<Aim>,
     ) -> Option<(ObjectId, rk_chara::better_penetration::Mode)> {
         use rk_chara::better_penetration as bp;
         let actor = &self.actors[at];
-        // Only a shaft that is shown links on its own: a body may carry
-        // the bones with CharaStudio's Son switch off.
-        if !actor.chara.clothes.son.switched_on {
+        // Only a male's shown shaft links on its own: a body may carry the
+        // bones with CharaStudio's Son switch off, and a female's card says
+        // on where Studio starts her off. A female's links by hand.
+        if !actor.male || !actor.chara.clothes.son.switched_on {
             return None;
         }
         let wanted = actor
             .h_position
             .as_ref()
             .and_then(|(controller, state)| self.dan_aims.as_ref()?.aim(controller, state));
+        // Without an H position he plays, only a partner snapped with him
+        // is linked, and only while he plays an animation: a shaft at rest
+        // reaches for no one.
         let modes: Vec<bp::Mode> = match wanted {
             Some(None) => return None,
             Some(Some(mode)) => vec![mode],
-            None => bp::Mode::ALL.to_vec(),
+            None if actor.playing.is_some() => bp::Mode::ALL.to_vec(),
+            None => return None,
         };
+        let parent = |id: ObjectId| scene.get(id).and_then(|o| o.parent);
+        let snapped = |a: ObjectId, b: ObjectId| parent(a) == Some(b) || parent(b) == Some(a);
         let mut places = Vec::new();
         for (i, other) in self.actors.iter().enumerate() {
-            if i == at {
+            if i == at || (wanted.is_none() && !snapped(actor.id, other.id)) {
                 continue;
             }
-            let world = other.chara.scene.world().0;
             let names = bp::bones_by_name(&other.chara.scene, other.chara.top);
             for &mode in &modes {
                 if let Some(&bone) = names.get(mode.entry_bone()) {
-                    places.push((other.id, mode, world[bone].w_axis.truncate()));
+                    places.push((other.id, mode, other.chara.scene.world_of(bone).w_axis.truncate()));
                 }
             }
         }
-        let tip = shaft.tip(&actor.chara.scene.world().0);
+        let tip = shaft.tip_in(&actor.chara.scene);
         bp::nearest_place(tip, shaft.base_length, held.map(|h| (h.partner, h.mode)), &places)
     }
 
@@ -1055,7 +1583,145 @@ impl Live {
         found
     }
 
+    /// Where each character's eyes look this frame: toward the view's
+    /// camera, as Studio gives the eye look its camera for a target, by
+    /// the pattern of the character's pose, or else ahead.
+    fn look(&mut self, scene: &Scene) {
+        let camera = self.cam.orbit.camera().eye;
+        // Where each character's head is, for eyes that look at one.
+        let heads: Vec<(ObjectId, Vec3)> = self
+            .actors
+            .iter()
+            .filter_map(|a| {
+                let head = a.chara.scene.find(a.chara.top, "cf_j_head")?;
+                Some((a.id, a.chara.scene.world_of(head).w_axis.truncate()))
+            })
+            .collect();
+        for actor in &mut self.actors {
+            let now = std::time::Instant::now();
+            // The game skips a frame without time; a long pause counts as
+            // a tenth of a second, as a frame cannot jump the eyes further.
+            let dt = (now - actor.gaze_clock).as_secs_f32().min(0.1);
+            actor.gaze_clock = now;
+            actor.look_at = camera;
+            // A frame that did not pose the character turns the head here,
+            // from the pose it holds; the eyes then look from the head.
+            let necking = !std::mem::take(&mut actor.neck_done) && actor.turn_neck(dt, false);
+            let pattern = actor
+                .layer
+                .as_ref()
+                .and_then(|l| l.eyes_look)
+                .unwrap_or(EYES_AHEAD)
+                .max(0) as usize;
+            // The object the eyes follow in Studio's object pattern: a
+            // character's head, or any other object where it stands. With
+            // none, or itself, the camera, as Studio's guide starts there.
+            let target = actor
+                .layer
+                .as_ref()
+                .and_then(|l| l.eyes_target)
+                .map(ObjectId)
+                .filter(|&id| pattern == EYES_ON_OBJECT as usize && id != actor.id);
+            let eyes_at = target
+                .and_then(|id| {
+                    let head = heads.iter().find(|(h, _)| *h == id).map(|(_, p)| *p);
+                    head.or_else(|| scene.get(id).map(|_| scene.world(id).w_axis.truncate()))
+                })
+                .unwrap_or(camera);
+            let chara = &mut actor.chara;
+            let Some(gaze) = chara.gaze.as_mut() else { continue };
+            // The few bones the eyes read, not the whole skeleton's.
+            let scene = &chara.scene;
+            let parents = |n: usize| scene.nodes[n].parent;
+            let rates = gaze.update(&|n| scene.world_of(n), &parents, eyes_at, pattern, dt);
+            let moved = actor.gaze_next.is_none_or(|(h, v)| {
+                (h[0] - rates.0[0]).abs() + (h[1] - rates.0[1]).abs() + (v - rates.1).abs() > 1e-4
+            });
+            actor.gazing = moved || necking;
+            if moved {
+                actor.gaze_next = Some(rates);
+            }
+        }
+    }
+
+    /// The heights H pairs play at: a character playing the male's half of
+    /// an H position plays it at the height of the one playing the female's
+    /// half of the same position, as `HActionBase` sets the male's `height`
+    /// to the female's body. CharaStudio leaves each at its own, so the two
+    /// halves of a pair of different heights miss each other.
+    fn pair_heights(&mut self, scene: &Scene, project: &Project, games: &mut Games, mods: &Path) {
+        let halves: Vec<Option<(bool, String)>> = (0..self.actors.len())
+            .map(|i| match scene.get(self.actors[i].id).map(|o| &o.content) {
+                Some(Content::Character { animation: Some(a), .. }) => self.h_half_of(project, a, games, mods),
+                _ => None,
+            })
+            .collect();
+        for i in 0..self.actors.len() {
+            let paired = match &halves[i] {
+                Some((false, position)) => halves
+                    .iter()
+                    .position(|h| h.as_ref().is_some_and(|(female, p)| *female && p == position))
+                    .map(|j| self.actors[j].chara.parameters.height),
+                _ => None,
+            };
+            self.actors[i].paired_height = paired;
+        }
+    }
+
+    /// Whether an animation is the female's half of an H position, and the
+    /// position by its category's name: named in CharaStudio's list for one
+    /// played from the game, or in its file.
+    fn h_half_of(
+        &mut self,
+        project: &Project,
+        a: &crate::scene::Animation,
+        games: &mut Games,
+        mods: &Path,
+    ) -> Option<(bool, String)> {
+        let file = own_file(project, a);
+        if let Some(known) = file.as_ref().and_then(|f| self.h_halves.get(f)) {
+            return known.clone();
+        }
+        if file.is_none() && a.override_controller.is_empty() {
+            return None;
+        }
+        if self.h_library.is_none() {
+            let game = games.get(mods).ok()?;
+            self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
+        }
+        let library = self.h_library.clone()?;
+        let half = |group: &str, category: &str| {
+            let category = category.rsplit(": ").next().unwrap_or(category).to_owned();
+            (group.starts_with("Female"), category)
+        };
+        let found = match &file {
+            Some(f) => rk_chara::animation_file::read_meta(f)
+                .ok()
+                .filter(|m| m.h)
+                .map(|m| half(&m.group, &m.category)),
+            None => library
+                .entries
+                .iter()
+                .find(|e| e.h && e.override_controller == a.override_controller && e.state == a.state)
+                .map(|e| {
+                    half(
+                        &library.group_name(e.group),
+                        &library.category_name(e.group, e.category),
+                    )
+                }),
+        };
+        if let Some(f) = file {
+            self.h_halves.insert(f, found.clone());
+        }
+        found
+    }
+
     /// Where a character's shaft is aimed this frame, if anywhere.
+    /// The character whose shaft is linked to `her` this frame.
+    pub fn shaft_on(&self, her: ObjectId) -> Option<ObjectId> {
+        self.aims.iter().find(|(_, a)| a.partner == her).map(|(him, _)| *him)
+    }
+
     pub fn aim(&self, id: ObjectId) -> Option<Aim> {
         self.aims.iter().find(|(who, _)| *who == id).map(|(_, aim)| *aim)
     }
@@ -1067,17 +1733,13 @@ pub enum Pictures {
     Eyebrows,
     Eyes,
     Mouth,
-    /// A hand's patterns, 0 left and 1 right.
-    Hand(usize),
 }
 
 impl Pictures {
     /// The picture's size in pixels.
     pub fn size(self) -> [u32; 2] {
-        match self {
-            Pictures::Hand(_) => [64, 64],
-            _ => [96, 48],
-        }
+        let _ = self;
+        [192, 96]
     }
 }
 
@@ -1097,125 +1759,97 @@ impl Live {
 
     /// Makes the pictures asked for: the character with each pattern in
     /// turn, seen up close, then as she was.
-    fn make_pictures(&mut self, scene: &Scene, games: &mut Games, mods: &Path) {
+    fn make_pictures(&mut self) {
         for at in 0..self.actors.len() {
             let Some(set) = self.actors[at].pictures_wanted.pop() else {
                 continue;
             };
-            let mut env = self.environment(scene, PICTURE_BACKGROUND);
             let size = set.size();
             let actor = &mut self.actors[at];
             let mut made = Vec::new();
-            match set {
-                Pictures::Hand(side) => {
-                    let (Ok(game), Some(camera)) = (games.get(mods), hand_camera(&actor.chara, side)) else {
-                        actor.pictures.insert(set, Vec::new());
-                        continue;
-                    };
-                    let lists = hand_lists(game);
-                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
-                    let was: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
-                    // The animation's own fingers first, as the list's 0.
-                    let mut patterns: Vec<i32> = vec![0];
-                    patterns.extend(lists[side].keys().copied());
-                    for pattern in patterns {
-                        if let Some(anime) = lists[side].get(&pattern) {
-                            let chara = &actor.chara;
-                            let clip =
-                                rk_chara::hand_pattern::HandClip::load(game, anime, &chara.scene, chara.top, side);
-                            match clip {
-                                Ok(clip) => clip.apply(&mut actor.chara.scene, 0.0),
-                                Err(_) => continue,
-                            }
-                        }
-                        let draws = actor.chara.scene.pose();
-                        if let Ok(rgba) =
-                            self.renderer
-                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
-                        {
-                            made.push((pattern, picture(size, &rgba)));
-                        }
-                        drop(draws);
-                        for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&was) {
-                            node.local = *local;
-                        }
+            let face_set = set;
+            // The pictures show the face as loaded, whatever the scene's
+            // pose: the bones go back to their loaded places for them.
+            let posed: Vec<Trs> = actor.chara.scene.nodes.iter().map(|n| n.local).collect();
+            for (node, rest) in actor.chara.scene.nodes.iter_mut().zip(&actor.rest) {
+                node.local = *rest;
+            }
+            let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set)) else {
+                for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&posed) {
+                    node.local = *local;
+                }
+                actor.pictures.insert(set, Vec::new());
+                continue;
+            };
+            let env = picture_light(&actor.chara, &camera);
+            // Without hair and accessories, which hide the brows and eyes
+            // in many cards; the face alone, as on a mannequin.
+            let shown: Vec<bool> = actor.chara.scene.renderers.iter().map(|r| r.enabled).collect();
+            for r in &mut actor.chara.scene.renderers {
+                if matches!(
+                    r.part,
+                    rk_chara::scene::Part::Hair(_) | rk_chara::scene::Part::Accessory(_)
+                ) {
+                    r.enabled = false;
+                }
+            }
+            let now = actor.layer.as_ref().and_then(|l| l.face);
+            let base = now.unwrap_or(rig.start);
+            let (eyebrows, mouths) = rig.counts();
+            let patterns: Vec<i32> = match face_set {
+                Pictures::Eyebrows => (0..eyebrows as i32).collect(),
+                Pictures::Eyes => rig.eye_choices(),
+                _ => (0..mouths as i32).collect(),
+            };
+            for pattern in patterns {
+                let mut face = base;
+                match face_set {
+                    Pictures::Eyebrows => face.eyebrows = pattern,
+                    Pictures::Eyes => {
+                        face.eyes = pattern;
+                        face.blink = true;
+                    }
+                    _ => {
+                        face.mouth = pattern;
+                        // Open enough for the pattern's shape to show.
+                        face.mouth_open = face.mouth_open.max(0.5);
                     }
                 }
-                face_set => {
-                    let (Some(rig), Some(camera)) = (actor.chara.face.clone(), face_camera(&actor.chara, face_set))
-                    else {
-                        actor.pictures.insert(set, Vec::new());
-                        continue;
-                    };
-                    lift_light(&mut self.renderer, &actor.chara, &camera, &mut env, size);
-                    let now = actor.layer.as_ref().and_then(|l| l.face);
-                    let base = now.unwrap_or(rig.start);
-                    let (eyebrows, mouths) = rig.counts();
-                    let patterns: Vec<i32> = match face_set {
-                        Pictures::Eyebrows => (0..eyebrows as i32).collect(),
-                        Pictures::Eyes => rig.eye_choices(),
-                        _ => (0..mouths as i32).collect(),
-                    };
-                    for pattern in patterns {
-                        let mut face = base;
-                        match face_set {
-                            Pictures::Eyebrows => face.eyebrows = pattern,
-                            Pictures::Eyes => {
-                                face.eyes = pattern;
-                                face.blink = true;
-                            }
-                            _ => {
-                                face.mouth = pattern;
-                                // Open enough for the pattern's shape to show.
-                                face.mouth_open = face.mouth_open.max(0.5);
-                            }
-                        }
-                        rig.show(&mut actor.chara.scene, Some(&face));
-                        let draws = actor.chara.scene.pose();
-                        if let Ok(rgba) =
-                            self.renderer
-                                .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
-                        {
-                            made.push((pattern, picture(size, &rgba)));
-                        }
-                    }
-                    rig.show(&mut actor.chara.scene, now.as_ref());
+                rig.show(&mut actor.chara.scene, Some(&face));
+                let draws = actor.chara.scene.pose();
+                if let Ok(rgba) = self
+                    .renderer
+                    .render(&draws, &camera, &env, size[0], size[1], PICTURE_BACKGROUND)
+                {
+                    made.push((pattern, picture(size, &rgba)));
                 }
+            }
+            rig.show(&mut actor.chara.scene, now.as_ref());
+            for (node, local) in actor.chara.scene.nodes.iter_mut().zip(&posed) {
+                node.local = *local;
+            }
+            for (r, on) in actor.chara.scene.renderers.iter_mut().zip(shown) {
+                r.enabled = on;
             }
             actor.pictures.insert(set, made);
         }
     }
 }
 
-/// How bright a pattern picture should at least be, as the mean of its
-/// pixels' lightness from 0 to 1.
-const PICTURE_LIGHTNESS: f32 = 0.42;
-
-/// Lights the pictures as the scene does, unless that leaves them too dark
-/// to tell the patterns apart: then the light and the ambient go up until
-/// a picture of the character as she is reaches `PICTURE_LIGHTNESS`, four
-/// times at most.
-fn lift_light(
-    renderer: &mut Renderer,
-    chara: &rk_chara::Character,
-    camera: &Camera,
-    env: &mut Environment,
-    size: [u32; 2],
-) {
-    let draws = chara.scene.pose();
-    let Ok(rgba) = renderer.render(&draws, camera, env, size[0], size[1], PICTURE_BACKGROUND) else {
-        return;
+/// The light the pattern pictures are taken in, the same for every scene:
+/// the character's own shading, one light from in front of the face and a
+/// little above, no shadows and none of the scene's effects.
+fn picture_light(chara: &rk_chara::Character, camera: &Camera) -> Environment {
+    let toward = (camera.eye - camera.target).normalize_or_zero();
+    let light = (toward + camera.up.normalize_or_zero() * 0.4).normalize_or_zero();
+    let mut env = Environment {
+        ramp: chara.ramp.clone(),
+        light_dir: Some(light.to_array()),
+        effects: None,
+        ..Environment::default()
     };
-    let lightness = rgba
-        .chunks_exact(4)
-        .map(|p| (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 255.0)
-        .sum::<f32>()
-        / (rgba.len() / 4).max(1) as f32;
-    if lightness < PICTURE_LIGHTNESS {
-        let more = (PICTURE_LIGHTNESS / lightness.max(0.05)).min(4.0);
-        env.light_intensity *= more;
-        env.ambient *= more;
-    }
+    env.shadows.enabled = false;
+    env
 }
 
 /// RGBA bytes as an image for the interface.
@@ -1236,43 +1870,24 @@ fn face_camera(chara: &rk_chara::Character, set: Pictures) -> Option<Camera> {
     let forward = face.z_axis.truncate().normalize_or_zero();
     let up = face.y_axis.truncate().normalize_or_zero();
     let target = match set {
-        Pictures::Eyebrows => eyes + up * 0.018,
+        Pictures::Eyebrows => eyes + up * 0.03,
         Pictures::Mouth => eye("cf_J_MouthMove")?,
         _ => eyes,
     };
-    // Both eyes across the picture; the mouth closer.
-    let fov_y_deg = if set == Pictures::Mouth { 9.0 } else { 15.0 };
-    // Seen in the face's own space, so that no pose or turn of the
-    // character tips the picture over, with the same slight tilt in all.
-    let tilted = Quat::from_axis_angle(forward, PICTURE_TILT.to_radians()) * up;
+    // Both eyes, or both eyebrows, filling the width; the mouth with a
+    // little of the cheeks and chin around it.
+    let fov_y_deg = match set {
+        Pictures::Mouth => 7.0,
+        _ => 12.5,
+    };
+    // Straight at the face, in its own space.
     Some(Camera {
         eye: target + forward * 0.3,
         target,
         fov_y_deg,
-        up: tilted,
-    })
-}
-
-/// A camera on a hand, from in front of the character and a little above.
-fn hand_camera(chara: &rk_chara::Character, side: usize) -> Option<Camera> {
-    let (world, _) = chara.scene.world();
-    let hand = world[chara.scene.find(chara.top, rk_chara::hand_pattern::HAND_NODES[side])?]
-        .w_axis
-        .truncate();
-    let body = world[chara.top];
-    let forward = body.z_axis.truncate().normalize_or_zero();
-    let up = body.y_axis.truncate().normalize_or_zero();
-    // In the body's own space, whatever way the character is turned.
-    Some(Camera {
-        eye: hand + (forward + up * 0.4).normalize_or_zero() * 0.4,
-        target: hand,
-        fov_y_deg: 17.0,
         up,
     })
 }
-
-/// How far the face pictures lean, in degrees.
-const PICTURE_TILT: f32 = 8.0;
 
 /// What an actor asks to have read from the game.
 #[derive(Debug, Clone, Copy)]
@@ -1337,6 +1952,8 @@ pub struct Built {
     pub better_penetration: Option<rk_chara::better_penetration::Settings>,
     /// The body has belly bones a BetterPenetration bulge pushes.
     pub belly: bool,
+    /// The body has the bones a vaginal or anal pull moves.
+    pub pull_bones: bool,
 }
 
 pub struct Live {
@@ -1351,8 +1968,14 @@ pub struct Live {
     /// CharaStudio's list, which tells the position an animation file was
     /// taken from; the position of each file, once found.
     dan_aims: Option<std::sync::Arc<rk_chara::dan_look::Aims>>,
+    /// The main game BetterPenetration's settings for her body, from its
+    /// config in the game folder, read with the H positions.
+    body_options: rk_chara::body_collision::BodyOptions,
     h_library: Option<std::sync::Arc<rk_chara::animations::Library>>,
     h_positions: std::collections::HashMap<std::path::PathBuf, Option<(String, String)>>,
+    /// The half and the position of each animation file an H pair plays,
+    /// once found.
+    h_halves: std::collections::HashMap<std::path::PathBuf, Option<(bool, String)>>,
     /// The map as the characters' skirts rest on it, and what it was made
     /// from, so that it is made again only when the map moves.
     obstacles: Option<(ObstaclesKey, std::sync::Arc<rk_chara::physics::cloth::Obstacles>)>,
@@ -1438,8 +2061,10 @@ impl Live {
         Ok(Live {
             aims: Vec::new(),
             dan_aims: None,
+            body_options: Default::default(),
             h_library: None,
             h_positions: Default::default(),
+            h_halves: Default::default(),
             smooth_edges: true,
             renderer,
             render_state: render_state.clone(),
@@ -1623,7 +2248,7 @@ impl Live {
     /// world of her top node.
     pub fn ik_space(&self, id: ObjectId) -> Option<Mat4> {
         let actor = self.actors.iter().find(|a| a.id == id)?;
-        Some(actor.chara.scene.world().0[actor.chara.top])
+        Some(actor.chara.scene.world_of(actor.chara.top))
     }
 
     /// A built character's IK targets in the world while IK is on: those of
@@ -1634,7 +2259,7 @@ impl Live {
             .layer
             .as_ref()
             .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
-        let own = actor.chara.scene.world().0[actor.chara.top];
+        let own = actor.chara.scene.world_of(actor.chara.top);
         let (_, turn, _) = own.to_scale_rotation_translation();
         Some(
             layer
@@ -1773,6 +2398,7 @@ impl Live {
             liquid_mask: a.chara.liquid_mask(),
             better_penetration: a.chara.shaft.as_ref().map(|_| a.chara.better_penetration),
             belly: rk_chara::better_penetration::has_belly(&a.chara.physics, &a.chara.scene),
+            pull_bones: rk_chara::better_penetration::has_pull_bones(&a.chara.scene, a.chara.top),
         })
     }
 
@@ -1973,9 +2599,14 @@ impl Live {
         if self.dan_aims.is_none() && self.actors.iter().any(|a| a.chara.shaft.is_some()) {
             if let Ok(game) = games.get(&mods) {
                 self.dan_aims = Some(std::sync::Arc::new(rk_chara::dan_look::Aims::read(game)));
+                if let Ok(config) = rk_core::Config::load() {
+                    self.body_options = rk_chara::body_collision::BodyOptions::of_game(&config.game_dir);
+                }
                 self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
             }
         }
+        self.pair_heights(scene, project, games, &mods);
+        self.look(scene);
         for i in 0..self.actors.len() {
             if self.actors[i].chara.shaft.is_none() {
                 continue;
@@ -1987,6 +2618,83 @@ impl Live {
             self.actors[i].h_position = position;
         }
         let held = std::mem::take(&mut self.aims);
+        // A mouth's strokes stretched by the shaft's depth: how deep her
+        // mouth is on the shaft, without the lean it was given, kept for each
+        // place of his animation's loop as it plays or is scrubbed through,
+        // measured from the loop's shallowest, and the more she leans in for
+        // it. Any oral animation makes its own strokes; a paused one keeps
+        // what its loop showed.
+        let mut reached: Vec<(ObjectId, Vec3)> = Vec::new();
+        for &(him, aim) in &held {
+            if aim.mode != rk_chara::better_penetration::Mode::Oral {
+                continue;
+            }
+            let (Some(at), Some(her)) = (
+                self.actors.iter().position(|a| a.id == him),
+                self.actors.iter().position(|a| a.id == aim.partner),
+            ) else {
+                continue;
+            };
+            let Some(depth) = self.settings_of(at, scene).map(|s| s.depth) else {
+                continue;
+            };
+            let he = &self.actors[at];
+            let (Some(line), Some(shaft)) = (he.shaft_line, he.chara.shaft.as_ref()) else {
+                continue;
+            };
+            let Some(&root) = shaft.points.first() else {
+                continue;
+            };
+            let root_at = he.chara.scene.world_of(root).w_axis.truncate();
+            let (Some(phase), Some(playing)) = (he.phase, he.playing.as_ref()) else {
+                continue;
+            };
+            let length = playing.motion.duration().max(1e-3);
+            // The phase goes from 0 to 1 through the loop.
+            let slot = (phase.rem_euclid(1.0) * STROKE_SLOTS as f32) as usize % STROKE_SLOTS;
+            let which = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                he.h_position.hash(&mut h);
+                length.to_bits().hash(&mut h);
+                h.finish()
+            };
+            let Some(mouth) = self.actors[her].bare_mouth else {
+                continue;
+            };
+            let base_length = shaft.base_length;
+            let deep = base_length - mouth.distance(root_at);
+            let strokes = &mut self.actors[her].strokes;
+            if strokes.as_ref().is_none_or(|(by, of, _)| *by != him || *of != which) {
+                *strokes = Some((him, which, [f32::NAN; STROKE_SLOTS]));
+            }
+            let Some((_, _, slots)) = strokes.as_mut() else {
+                continue;
+            };
+            slots[slot] = deep;
+            if depth <= 0.0 {
+                continue;
+            }
+            let seen = slots.iter().copied().filter(|d| !d.is_nan());
+            let (shallowest, deepest) =
+                seen.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), d| (lo.min(d), hi.max(d)));
+            // The bottom of the stroke goes that share of the way from where
+            // the animation has it to the shaft's base; the rest of the
+            // stroke stretches with it from its shallowest point.
+            let bottom = deepest + (base_length - deepest).max(0.0) * depth.min(1.0);
+            let stroke = deepest - shallowest;
+            if stroke < 1e-3 {
+                continue;
+            }
+            let more = ((deep - shallowest) / stroke * (bottom - deepest)).clamp(0.0, MAX_REACH);
+            reached.push((aim.partner, -line * more));
+        }
+        for actor in &mut self.actors {
+            if !held.iter().any(|(_, a)| a.partner == actor.id) {
+                actor.strokes = None;
+            }
+            actor.reach_next = reached.iter().find(|(id, _)| *id == actor.id).map(|r| r.1);
+        }
         let obstacles = self.obstacles();
         for at in order {
             let id = self.actors[at].id;
@@ -2018,7 +2726,10 @@ impl Live {
                 Content::Character { animation, .. } => animation.as_ref().and_then(|a| a.options),
                 _ => None,
             };
-            let parameters = actor.chara.parameters.with_options(options);
+            let mut parameters = actor.chara.parameters.with_options(options);
+            if let Some(height) = actor.paired_height {
+                parameters.height = height;
+            }
             let mut read = |what: Load| -> Result<Motion> {
                 if let Load::Hand(side, pattern) = what {
                     let game = games.get(&mods)?;
@@ -2116,7 +2827,7 @@ impl Live {
             let Some(&root) = shaft.points.first() else {
                 continue;
             };
-            let start = he.chara.scene.world().0[root].w_axis.truncate();
+            let start = he.chara.scene.world_of(root).w_axis.truncate();
             let oral = aim.mode == rk_chara::better_penetration::Mode::Oral;
             strokes.push((
                 him,
@@ -2146,6 +2857,7 @@ impl Live {
         }
         let playing = clock.now == Playback::Playing;
         let mut pulled: Vec<(ObjectId, Vec3, f32)> = Vec::new();
+        let mut holding: Vec<ObjectId> = Vec::new();
         for actor in &mut self.actors {
             let Some(&(_, partner, start, entry, base_length, oral, settings)) =
                 strokes.iter().find(|s| s.0 == actor.id)
@@ -2164,6 +2876,9 @@ impl Live {
             // A stroke pulls whenever the shaft moves; a return takes time,
             // so it runs while the scene plays.
             let stroking = oral && start.distance(entry) < base_length;
+            if stroking && settings.oral_mouth {
+                holding.push(partner);
+            }
             if !stroking && !playing {
                 pull.last_distance = base_length;
                 continue;
@@ -2172,6 +2887,74 @@ impl Live {
                 pulled.push((partner, world, settings.return_rate));
             }
         }
+        for actor in &mut self.actors {
+            actor.mouth_held_next = holding.contains(&actor.id);
+        }
+        // The vaginal and anal pulls, by the same rule as the mouth's; with
+        // them off, a vaginal stroke still turns her inner bone back each
+        // frame, as Studio's `ReturnKokanBones` does.
+        let mut holes: Vec<(ObjectId, rk_chara::better_penetration::HolePull)> = Vec::new();
+        for &(him, aim) in &self.aims {
+            use rk_chara::better_penetration as bp;
+            let pulled_body = self.actors.iter().any(|a| a.id == aim.partner && a.hole_bones);
+            if aim.mode == bp::Mode::Oral || !pulled_body {
+                continue;
+            }
+            let Some(he) = self.actors.iter_mut().find(|a| a.id == him) else {
+                continue;
+            };
+            let (Some(shaft), Some(job)) = (he.chara.shaft.as_ref(), he.aim_job) else {
+                continue;
+            };
+            let Some(&root) = shaft.points.first() else {
+                continue;
+            };
+            let start = he.chara.scene.world_of(root).w_axis.truncate();
+            let base_length = shaft.base_length;
+            let end = he.aimed_end.unwrap_or(job.end);
+            let (direction, inside) = bp::hole_directions(start, aim.entry, end);
+            let settings = job.settings;
+            if !settings.pull_holes {
+                he.hole_pull = None;
+                holes.push((
+                    aim.partner,
+                    bp::HolePull {
+                        mode: aim.mode,
+                        amount: 0.0,
+                        direction,
+                        inside,
+                        returning: true,
+                    },
+                ));
+                continue;
+            }
+            let pull = match &mut he.hole_pull {
+                Some((p, m, pull)) if *p == aim.partner && *m == aim.mode => pull,
+                slot => &mut slot.insert((aim.partner, aim.mode, bp::MouthPull::new(base_length))).2,
+            };
+            let stroking = start.distance(aim.entry) < base_length;
+            if stroking {
+                pull.step(start, aim.entry, base_length, true, &settings);
+            } else if playing {
+                pull.last_distance = base_length;
+                pull.release(&settings, bp::PULL_STEP);
+            } else {
+                pull.last_distance = base_length;
+            }
+            holes.push((
+                aim.partner,
+                bp::HolePull {
+                    mode: aim.mode,
+                    amount: pull.amount,
+                    direction,
+                    inside,
+                    returning: !stroking,
+                },
+            ));
+        }
+        for actor in &mut self.actors {
+            actor.hole_next = holes.iter().find(|(id, _)| *id == actor.id).map(|h| h.1);
+        }
         for (partner, world, rate) in pulled {
             let Some(her) = self.actors.iter_mut().find(|a| a.id == partner) else {
                 continue;
@@ -2179,17 +2962,26 @@ impl Live {
             let Some(node) = her.mouth_node() else {
                 continue;
             };
-            let bone = her.chara.scene.world().0[node];
+            let bone = her.chara.scene.world_of(node);
             her.mouth_next = Some((rk_chara::better_penetration::mouth_local(&bone, world), rate));
         }
+        // Every character's fingers for every vagina, as posed this frame.
+        let any_vagina = self.actors.iter().any(|a| !a.vagina.is_empty());
+        let fingers: Vec<rk_chara::physics::Shape> = self
+            .actors
+            .iter()
+            .filter(|a| any_vagina && !a.fingers.is_empty())
+            .flat_map(|a| rk_chara::better_penetration::finger_shapes(&a.chara.scene, &a.fingers))
+            .collect();
         for actor in &mut self.actors {
             actor.received = given
                 .iter()
                 .filter(|(id, _)| *id == actor.id)
                 .flat_map(|(_, g)| g.iter().cloned())
+                .chain(actor.vagina.iter().map(|&b| (b, fingers.clone())))
                 .collect();
         }
-        self.make_pictures(scene, games, &mods);
+        self.make_pictures();
         self.follow_map(scene, project, jobs, log);
         self.follow_map_filters(project, games, jobs);
         self.send_doors(scene, &clock);
@@ -2575,6 +3367,17 @@ impl Live {
         self.renderer.map_sun()
     }
 
+    /// Puts the camera at a view and makes it the one to go back to, at
+    /// once, focused on nothing.
+    pub fn place_camera(&mut self, camera: &Camera) {
+        let glide = std::mem::replace(&mut self.cam.glide_time, 0.0);
+        self.cam.rehome(Orbit::from_camera(camera), None);
+        self.cam.release();
+        self.cam.glide_time = glide;
+        self.framed = true;
+        self.view_checked = true;
+    }
+
     /// Puts the camera at CharaStudio's starting view, which a new map is
     /// first seen from, and makes it the view to go back to. A character
     /// built after leaves it there.
@@ -2812,9 +3615,22 @@ impl Live {
     /// Whether a character's cloth still settles while the scene stands,
     /// or her eyes' highlights shake, so that frames keep being drawn.
     pub fn settling(&self) -> bool {
+        self.actors.iter().any(|a| {
+            a.cloth_owed > 0
+                || a.blink.busy()
+                || a.gazing
+                || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking)
+        })
+    }
+
+    /// Seconds until the next blink starts, for the view to wake then
+    /// when nothing else draws it.
+    pub fn next_blink(&self) -> Option<f32> {
         self.actors
             .iter()
-            .any(|a| a.cloth_owed > 0 || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking))
+            .filter(|a| a.chara.face.is_some())
+            .map(|a| a.blink.until_next(a.awake.elapsed().as_secs_f32()))
+            .min_by(f32::total_cmp)
     }
 
     /// Whether a map is shown that things can be dropped on, so that the
@@ -2845,6 +3661,9 @@ impl Live {
         let options = rk_chara::BuildOptions {
             outfit: recipe.outfit.min(card.coordinates.len().saturating_sub(1)),
             outdoor_shoes: recipe.outdoor_shoes,
+            // The cloth solver on the GPU moves the skirts: the CPU's
+            // nets shake and throw points about while a scene plays.
+            skirts_on_gpu: true,
             ..Default::default()
         };
         let chara = rk_chara::build(game, &card, &options)?;
@@ -2854,7 +3673,24 @@ impl Live {
         let rest = chara.scene.nodes.iter().map(|n| n.local).collect();
         let (min, max) = bounds(&chara.scene.pose());
         let home = Camera::frame(min, max, 16.0 / 9.0, 0.0);
+        // Fingers push vaginas, this character's own and others'.
+        let fingers = rk_chara::better_penetration::finger_nodes(&chara.scene, chara.top);
+        let hole_bones = rk_chara::better_penetration::has_pull_bones(&chara.scene, chara.top)
+            || ["cf_J_Vagina_Inner", "cf_J_Ana_Root"]
+                .iter()
+                .any(|n| chara.scene.find(chara.top, n).is_some());
+        let vagina = rk_chara::better_penetration::vagina_bones(&chara.physics, &chara.scene);
         Ok(Actor {
+            male: card.sex() == 0,
+            mouth_held: false,
+            mouth_held_next: false,
+            hole_bones,
+            fingers,
+            vagina,
+            hole_pull: None,
+            aimed_end: None,
+            hole_next: None,
+            hole_at: None,
             id,
             recipe: recipe.clone(),
             chara,
@@ -2870,6 +3706,7 @@ impl Live {
             clothes: [cs::ON; cs::KINDS],
             liquid: ([0; rk_chara::siru::PARTS], true),
             pose: None,
+            paired_height: None,
             layer: None,
             edits: Vec::new(),
             playing: None,
@@ -2878,6 +3715,21 @@ impl Live {
             pictures: Default::default(),
             pictures_wanted: Vec::new(),
             shake_since: std::time::Instant::now(),
+            blink: rk_chara::face::Blink::new(id.0 as u32),
+            blink_rate: 1.0,
+            awake: std::time::Instant::now(),
+            gaze_next: None,
+            gaze_shown: None,
+            gazing: false,
+            gaze_clock: std::time::Instant::now(),
+            look_at: Vec3::ZERO,
+            neck_done: false,
+            shaft_line: None,
+            shaft_length: 1.0,
+            reach_next: None,
+            reach_at: None,
+            strokes: None,
+            bare_mouth: None,
             aim_job: None,
             aim_posed: None,
             guests_next: None,
