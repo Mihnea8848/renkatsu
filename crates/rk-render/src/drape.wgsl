@@ -351,12 +351,17 @@ fn cs_find(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= sub.points {
         return;
     }
-    var best: array<vec4<f32>, 4>;
-    var far: array<f32, 4>;
-    for (var k = 0u; k < MAP_PLANES; k++) {
-        best[k] = vec4<f32>(0.0);
-        far[k] = 3.4e38;
-    }
+    // The nearest four, kept in order in plain variables: FXC (Direct3D
+    // on Windows) cannot write a local array or vector at an index known
+    // only as the shader runs.
+    var b0 = vec4<f32>(0.0);
+    var b1 = vec4<f32>(0.0);
+    var b2 = vec4<f32>(0.0);
+    var b3 = vec4<f32>(0.0);
+    var f0 = 3.4e38;
+    var f1 = 3.4e38;
+    var f2 = 3.4e38;
+    var f3 = 3.4e38;
     if (sub.flags & 4u) != 0u && !fixed(i) {
         let p = pos[i].xyz;
         for (var t = 0u; t < sub.triangles; t++) {
@@ -388,26 +393,50 @@ fn cs_find(@builtin(global_invocation_id) id: vec3<u32>) {
                 continue;
             }
             dist = dot(p - q, n);
-            var k = MAP_PLANES;
-            while k > 0u && dist < far[k - 1u] {
-                k -= 1u;
-            }
-            if k < MAP_PLANES {
-                for (var j = MAP_PLANES - 1u; j > k; j--) {
-                    far[j] = far[j - 1u];
-                    best[j] = best[j - 1u];
+            // In after the nearer ones and those as near, the farthest out.
+            if dist < f3 {
+                f3 = dist;
+                b3 = vec4<f32>(n, dot(q, n));
+                if f3 < f2 {
+                    let f = f2;
+                    f2 = f3;
+                    f3 = f;
+                    let b = b2;
+                    b2 = b3;
+                    b3 = b;
+                    if f2 < f1 {
+                        let f = f1;
+                        f1 = f2;
+                        f2 = f;
+                        let b = b1;
+                        b1 = b2;
+                        b2 = b;
+                        if f1 < f0 {
+                            let f = f0;
+                            f0 = f1;
+                            f1 = f;
+                            let b = b0;
+                            b0 = b1;
+                            b1 = b;
+                        }
+                    }
                 }
-                far[k] = dist;
-                best[k] = vec4<f32>(n, dot(q, n));
             }
         }
     }
-    for (var k = 0u; k < MAP_PLANES; k++) {
-        planes[i * FOUND + k] = best[k];
-    }
+    planes[i * FOUND] = b0;
+    planes[i * FOUND + 1u] = b1;
+    planes[i * FOUND + 2u] = b2;
+    planes[i * FOUND + 3u] = b3;
     // Its own cloth near it.
-    var mine = vec4<f32>(-1.0);
-    var apart = vec4<f32>(3.4e38);
+    var m0 = -1.0;
+    var m1 = -1.0;
+    var m2 = -1.0;
+    var m3 = -1.0;
+    var a0 = 3.4e38;
+    var a1 = 3.4e38;
+    var a2 = 3.4e38;
+    var a3 = 3.4e38;
     if !fixed(i) {
         let p = pos[i].xyz;
         let g = points[i].grid;
@@ -426,22 +455,38 @@ fn cs_find(@builtin(global_invocation_id) id: vec3<u32>) {
                 if dist > sub.own_reach {
                     continue;
                 }
-                var k = OWN;
-                while k > 0u && dist < apart[k - 1u] {
-                    k -= 1u;
-                }
-                if k < OWN {
-                    for (var m = OWN - 1u; m > k; m--) {
-                        apart[m] = apart[m - 1u];
-                        mine[m] = mine[m - 1u];
+                if dist < a3 {
+                    a3 = dist;
+                    m3 = f32(id);
+                    if a3 < a2 {
+                        let a = a2;
+                        a2 = a3;
+                        a3 = a;
+                        let m = m2;
+                        m2 = m3;
+                        m3 = m;
+                        if a2 < a1 {
+                            let a = a1;
+                            a1 = a2;
+                            a2 = a;
+                            let m = m1;
+                            m1 = m2;
+                            m2 = m;
+                            if a1 < a0 {
+                                let a = a0;
+                                a0 = a1;
+                                a1 = a;
+                                let m = m0;
+                                m0 = m1;
+                                m1 = m;
+                            }
+                        }
                     }
-                    apart[k] = dist;
-                    mine[k] = f32(id);
                 }
             }
         }
     }
-    planes[i * FOUND + MAP_PLANES] = mine;
+    planes[i * FOUND + MAP_PLANES] = vec4<f32>(m0, m1, m2, m3);
 }
 
 @compute @workgroup_size(64)
