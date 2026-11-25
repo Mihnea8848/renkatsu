@@ -275,6 +275,12 @@ pub fn solve(
     // main game's applies it to the mouth only: its vagina and anus are
     // limited by their surfaces instead, which Studio's aim does not use.
     let length = length.min(distance + unity::distance(entry, end));
+    // The part past the entry by the character's depth.
+    let length = if length > distance {
+        distance + (length - distance) * s.depth.clamp(0.0, 1.0)
+    } else {
+        length
+    };
     let mut v1 = unity::normalize(entry - start);
     let mut v2 = unity::normalize(end - entry);
     let mut straight = false;
@@ -993,6 +999,14 @@ pub struct Settings {
     /// plugin's "Clipping Depth"); none takes the plugin's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clipping_depth: Option<f32>,
+    /// How much of the shaft goes past the entry, from none (1 is all the
+    /// plugin lets in); the rest squishes. Renkatsu's own.
+    #[serde(default = "full_depth")]
+    pub depth: f32,
+}
+
+fn full_depth() -> f32 {
+    1.0
 }
 
 fn yes() -> bool {
@@ -1037,6 +1051,7 @@ impl Settings {
             pull_holes: false,
             oral_mouth: true,
             clipping_depth: None,
+            depth: 1.0,
         }
     }
 }
@@ -1078,6 +1093,24 @@ pub fn read(ext: &ExtData) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_lets_part_of_the_shaft_past_the_entry() {
+        let starts: Vec<Vec3> = (0..10).map(|i| Vec3::new(0.0, 0.0, i as f32 * 0.015)).collect();
+        let (entry, end) = (Vec3::new(0.0, 0.0, 0.05), Vec3::new(0.0, 0.0, 0.4));
+        let tip = |depth: f32| {
+            let s = Settings {
+                length_squish: 0.0,
+                depth,
+                ..Settings::studio()
+            };
+            solve(&starts, &[], entry, end, 0.135, &s, false).points[9].z
+        };
+        assert!((tip(1.0) - 0.135).abs() < 1e-4, "{}", tip(1.0));
+        // Half of the 85 mm past the entry.
+        assert!((tip(0.5) - (0.05 + 0.0425)).abs() < 1e-4, "{}", tip(0.5));
+        assert!((tip(0.0) - 0.05).abs() < 1e-4, "{}", tip(0.0));
+    }
 
     #[test]
     fn a_card_without_the_data_has_the_defaults() {
