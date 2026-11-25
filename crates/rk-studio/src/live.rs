@@ -557,7 +557,8 @@ impl Actor {
     }
 
     /// The face to show: the layer's, or with none the character's own, its
-    /// mouth holding a partner's shaft while one is in it. None leaves the
+    /// mouth holding a partner's shaft while one is in it (or its tongue
+    /// out on it, when that is the mouth chosen). None leaves the
     /// face as it was loaded.
     fn face_shown(&self) -> Option<rk_chara::face::Face> {
         let own = self.layer.as_ref().and_then(|l| l.face);
@@ -565,7 +566,11 @@ impl Actor {
             return own;
         }
         let mut face = own.or_else(|| self.chara.face.as_ref().map(|r| r.start))?;
-        face.mouth = rk_chara::face::HOLDING_MOUTH;
+        // A tongue put out stays out, licking the shaft; any other mouth
+        // holds it.
+        if face.mouth != rk_chara::face::TONGUE_OUT {
+            face.mouth = rk_chara::face::HOLDING_MOUTH;
+        }
         face.mouth_open = 1.0;
         Some(face)
     }
