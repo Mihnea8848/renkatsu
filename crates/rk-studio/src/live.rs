@@ -1349,7 +1349,7 @@ impl Live {
 
     /// Where each character's eyes look this frame: toward the view's
     /// camera, as Studio gives the eye look its camera for a target, by
-    /// the pattern of the character's pose or else of its card.
+    /// the pattern of the character's pose, or else ahead.
     fn look(&mut self) {
         let camera = self.cam.orbit.camera().eye;
         for actor in &mut self.actors {
