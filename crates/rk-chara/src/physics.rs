@@ -1949,6 +1949,49 @@ impl Physics {
     /// What `ChaControl.LateUpdateForce` does once the body shape is set:
     /// the bust takes its rest pose from the shaped reference bones, then
     /// its softness and gravity from the card.
+    /// Renkatsu's own: the breasts meet instead of passing through each
+    /// other. The game gives its two bust components no colliders at all,
+    /// so in a pose that swings them together they cross. Each breast here
+    /// gets a sphere on the other's middle bone, its radius 85% of how far
+    /// apart the two middle bones stand at rest, which leaves the breasts'
+    /// own shape room and grows with their size.
+    pub fn breasts_meet(&mut self, scene: &Scene) {
+        let bust = |comment: &str| {
+            self.bones
+                .iter()
+                .position(|b| matches!(b, Bone::Ver02(v) if v.def.comment == comment))
+        };
+        let (Some(left), Some(right)) = (bust(BUST_COMMENTS[0]), bust(BUST_COMMENTS[1])) else {
+            return;
+        };
+        let middle = |i: usize| match &self.bones[i] {
+            Bone::Ver02(v) => v.def.bones.get(1).copied(),
+            _ => None,
+        };
+        let (Some(l), Some(r)) = (middle(left), middle(right)) else {
+            return;
+        };
+        let apart = scene
+            .world_of(l)
+            .w_axis
+            .truncate()
+            .distance(scene.world_of(r).w_axis.truncate());
+        if apart <= 0.0 {
+            return;
+        }
+        for (this, other) in [(left, r), (right, l)] {
+            self.colliders.push(Collider {
+                node: other,
+                radius: apart * 0.85,
+                ..Collider::default()
+            });
+            let added = self.colliders.len() - 1;
+            if let Bone::Ver02(v) = &mut self.bones[this] {
+                v.def.colliders.push(added);
+            }
+        }
+    }
+
     pub fn setup_bust(&mut self, scene: &mut Scene, softness: f32, weight: f32, size: f32) {
         let (damping, elasticity, stiffness) = bust_soft(softness, size);
         let gravity = bust_gravity(weight, softness, size);
