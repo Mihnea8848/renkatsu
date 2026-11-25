@@ -44,6 +44,7 @@ pub mod material_editor;
 pub mod more_accessories;
 pub mod more_outfits;
 pub mod motion;
+pub mod neck;
 pub mod overlays;
 pub mod physics;
 pub mod pose;

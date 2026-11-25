@@ -1384,14 +1384,30 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
             "Eyes look",
             waiting.or(card_look.is_none().then_some("No eye look")),
             |ui, rect| {
-                // Lined up with the keyed rows, as the pattern takes no keys.
-                let rect = Rect::from_min_max(rect.min, Pos2::new(rect.right() - 18.0, rect.bottom()));
                 let patterns = [0, 1, 3];
                 let options = [("Front", true), ("Camera", true), ("Away", true)];
                 let now = next.eyes_look.or(card_look).unwrap_or(0);
                 let chosen = patterns.iter().position(|&p| p == now);
                 if let Some(i) = choices(ui, k, rect, ui_id.with("eyes look"), chosen, &options) {
                     next.eyes_look = Some(patterns[i]);
+                }
+            },
+        );
+        // Studio's neck buttons (`MPCharCtrl.NeckInfo`): ahead, at the
+        // camera, the animation's own turn, or held where it is.
+        let card_neck = st.live.as_ref().and_then(|l| l.card_neck_look(id));
+        row(
+            ui,
+            k,
+            "Neck look",
+            waiting.or(card_neck.is_none().then_some("No neck look")),
+            |ui, rect| {
+                let patterns = [0, 1, 3, 4];
+                let options = [("Front", true), ("Camera", true), ("Anim", true), ("Fixed", true)];
+                let now = next.neck_look.or(card_neck).unwrap_or(0);
+                let chosen = patterns.iter().position(|&p| p == now);
+                if let Some(i) = choices(ui, k, rect, ui_id.with("neck look"), chosen, &options) {
+                    next.neck_look = Some(patterns[i]);
                 }
             },
         );
@@ -1533,6 +1549,7 @@ impl KeyedValues {
         use rk_chara::channels::Channel;
         let mut out = self.layer.clone();
         out.eyes_look = next.eyes_look;
+        out.neck_look = next.neck_look;
         for channel in Channel::all() {
             let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
             if was == now {

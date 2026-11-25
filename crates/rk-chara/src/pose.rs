@@ -62,6 +62,9 @@ pub struct Layer {
     /// Studio's eye look pattern (`crate::gaze`), over the card's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eyes_look: Option<i32>,
+    /// Studio's neck look pattern (`crate::neck`), over the card's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neck_look: Option<i32>,
 }
 
 fn no_skin_effects(levels: &crate::skin_effects::Levels) -> bool {
@@ -86,6 +89,7 @@ impl Default for Layer {
             face: None,
             skin: Default::default(),
             eyes_look: None,
+            neck_look: None,
         }
     }
 }
@@ -293,6 +297,7 @@ impl Layer {
             && self.face.is_none()
             && no_skin_effects(&self.skin)
             && self.eyes_look.is_none()
+            && self.neck_look.is_none()
     }
 
     /// Whether an IK target's group is on.

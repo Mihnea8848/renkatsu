@@ -159,6 +159,8 @@ pub struct Character {
     /// The head's eye look (`EyeLookCalc`), and Studio's eye and neck look
     /// patterns as the card saved them.
     pub gaze: Option<crate::gaze::EyeLook>,
+    /// The neck's look (`crate::neck`).
+    pub neck: Option<crate::neck::NeckLook>,
     pub look_patterns: [i32; 2],
     /// The hand patterns loaded for the layer, left then right; one is
     /// played while the layer asks for its pattern.
@@ -705,6 +707,55 @@ impl<'g> Builder<'g> {
                     vec3("headUpVector", Vec3::Y),
                     &eyes,
                     states,
+                );
+            }
+        }
+        None
+    }
+
+    /// The neck's `NeckLookCalcVer2` on the body, as `crate::neck` turns
+    /// the neck and head with it.
+    fn read_neck(&self) -> Option<crate::neck::NeckLook> {
+        let assets = &self.game.assets;
+        for source in &self.physics_sources {
+            for script in source.scripts.iter().map(|(_, s)| s) {
+                if self.script_class(script).as_deref() != Some("NeckLookCalcVer2") {
+                    continue;
+                }
+                let Ok(o) = script.read() else { continue };
+                let node_of =
+                    |p: rk_unityfs::PPtr| source.transforms.get(&assets.deref(&script.file, p)?.key()).copied();
+                let bones: Vec<(usize, usize, glam::Quat)> = o
+                    .array("aBones")?
+                    .iter()
+                    .filter_map(|b| {
+                        let q = b.get("fixAngle")?;
+                        let fix = glam::Quat::from_xyzw(
+                            q.get("x")?.as_f32()?,
+                            q.get("y")?.as_f32()?,
+                            q.get("z")?.as_f32()?,
+                            q.get("w")?.as_f32()?,
+                        );
+                        Some((
+                            node_of(b.get("referenceCalc")?.as_pptr()?)?,
+                            node_of(b.get("neckBone")?.as_pptr()?)?,
+                            fix,
+                        ))
+                    })
+                    .collect();
+                let states = o
+                    .array("neckTypeStates")?
+                    .iter()
+                    .filter_map(crate::neck::NeckTypeState::read)
+                    .collect();
+                return crate::neck::NeckLook::new(
+                    o.pptr("transformAim").and_then(node_of)?,
+                    o.pptr("boneCalcAngle").and_then(node_of)?,
+                    &bones,
+                    states,
+                    o.get("changeTypeLeapTime").and_then(UValue::as_f32).unwrap_or(1.0),
+                    o.get("changeTypeLerpCurve").and_then(crate::neck::Curve::read),
+                    o.get("calcLerp").and_then(UValue::as_f32).unwrap_or(1.0),
                 );
             }
         }
@@ -3078,6 +3129,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
         shaft
     };
     let gaze = b.read_gaze();
+    let neck = b.read_neck();
     // Studio's eye and neck look patterns as the card saved them.
     let pattern = |key: &str| {
         rk_card::map_get(&card.status, key)
@@ -3087,6 +3139,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
     let look_patterns = [pattern("eyesLookPtn"), pattern("neckLookPtn")];
     Ok(Character {
         gaze,
+        neck,
         look_patterns,
         ik_rig,
         hands: [None, None],

@@ -80,6 +80,10 @@ struct Actor {
     gaze_shown: Option<([f32; 2], f32)>,
     gazing: bool,
     gaze_clock: std::time::Instant,
+    /// Where the head looks (`rk_chara::neck`): the view's camera, and
+    /// whether this frame's pose turned it already.
+    look_at: Vec3,
+    neck_done: bool,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -517,7 +521,7 @@ impl Actor {
     /// the edits made by hand on top. The edited bones start from how they
     /// were loaded, so that a bone the animation does not move takes its
     /// edit once, not once more every frame.
-    fn pose_frame(&mut self, phase: Option<f32>, states: &States) {
+    fn pose_frame(&mut self, phase: Option<f32>, states: &States, dt: f32) {
         for &(node, _) in &self.edits {
             if let (Some(n), Some(rest)) = (self.chara.scene.nodes.get_mut(node), self.rest.get(node)) {
                 n.local = *rest;
@@ -525,6 +529,10 @@ impl Actor {
         }
         let motion = self.playing.as_ref().zip(phase).map(|(p, phase)| (&p.bound, phase));
         self.chara.pose_frame(motion, &self.edits, self.layer.as_ref(), states);
+        // The head turns after the animation, FK and IK, as the neck's
+        // script does in LateUpdate, and before the shaft is aimed at it.
+        self.turn_neck(dt, true);
+        self.neck_done = true;
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
@@ -575,6 +583,46 @@ impl Actor {
             node.local = *rest;
         }
         self.applied = None;
+        if let Some(neck) = self.chara.neck.as_mut() {
+            neck.forget_pose();
+        }
+    }
+
+    /// The neck pattern of the character's pose, or else of its card.
+    fn neck_pattern(&self) -> usize {
+        self.layer
+            .as_ref()
+            .and_then(|l| l.neck_look)
+            .unwrap_or(self.chara.look_patterns[1])
+            .max(0) as usize
+    }
+
+    /// Turns the head toward the camera by its pattern, `dt` seconds after
+    /// the last turn: from the pose just made when `posed`, or else from
+    /// the one the last pose left. Bones posed by hand are left as they
+    /// are, as Studio holds the neck still under its FK. Gives whether a
+    /// bone moved.
+    fn turn_neck(&mut self, dt: f32, posed: bool) -> bool {
+        let pattern = self.neck_pattern();
+        let Some(neck) = self.chara.neck.as_mut() else {
+            return false;
+        };
+        let bones: Vec<usize> = neck.bones().collect();
+        if bones.iter().any(|b| self.edits.iter().any(|(n, _)| n == b)) {
+            return false;
+        }
+        let scene = &mut self.chara.scene;
+        let before: Vec<Quat> = bones.iter().map(|&b| scene.nodes[b].local.rot).collect();
+        if posed {
+            neck.posed(scene);
+        } else {
+            neck.back_to_pose(scene);
+        }
+        neck.update(scene, self.look_at, pattern, dt);
+        bones
+            .iter()
+            .zip(&before)
+            .any(|(&b, was)| scene.nodes[b].local.rot.angle_between(*was) > 1e-4)
     }
 
     /// Brings the character in line with its object for one frame: the
@@ -885,7 +933,7 @@ impl Actor {
             if *simulate {
                 self.chara.physics.begin_frame(&mut self.chara.scene);
             }
-            self.pose_frame(phase, &states);
+            self.pose_frame(phase, &states, clock.dt);
             if *simulate {
                 self.chara.physics.end_frame(&mut self.chara.scene, clock.dt);
             }
@@ -933,14 +981,14 @@ impl Actor {
         if motion || hands || !self.edits.is_empty() {
             // Hair and skirts settle from where they were, as CharaStudio
             // never puts them back on their rest shape for a new pose.
-            self.pose_frame(phase, &states);
+            self.pose_frame(phase, &states, 0.0);
             if *simulate {
                 // Hair and skirts settle on the pose, as they settled on
                 // the character when it was built.
                 self.chara.physics.hold_cloth(lazy);
                 for frame in 0..rk_chara::physics::SETTLE_FRAMES {
                     self.chara.physics.begin_frame(&mut self.chara.scene);
-                    self.pose_frame(phase, &states);
+                    self.pose_frame(phase, &states, rk_chara::physics::FRAME_TIME);
                     let amount = (frame + 1) as f32 / (rk_chara::physics::EASE_FRAMES + 1) as f32;
                     self.chara.physics.ease(&mut self.chara.scene, &from, amount);
                     // The cloth nets start again once a new pose is
@@ -997,6 +1045,13 @@ impl Live {
     pub fn card_eyes_look(&self, id: ObjectId) -> Option<i32> {
         let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
         chara.gaze.as_ref().map(|_| chara.look_patterns[0])
+    }
+
+    /// The neck look pattern a character's card gives, and whether its
+    /// head can turn at all.
+    pub fn card_neck_look(&self, id: ObjectId) -> Option<i32> {
+        let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
+        chara.neck.as_ref().map(|_| chara.look_patterns[1])
     }
 }
 
@@ -1298,6 +1353,10 @@ impl Live {
             // a tenth of a second, as a frame cannot jump the eyes further.
             let dt = (now - actor.gaze_clock).as_secs_f32().min(0.1);
             actor.gaze_clock = now;
+            actor.look_at = camera;
+            // A frame that did not pose the character turns the head here,
+            // from the pose it holds; the eyes then look from the head.
+            let necking = !std::mem::take(&mut actor.neck_done) && actor.turn_neck(dt, false);
             let pattern = actor
                 .layer
                 .as_ref()
@@ -1313,7 +1372,7 @@ impl Live {
             let moved = actor.gaze_next.is_none_or(|(h, v)| {
                 (h[0] - rates.0[0]).abs() + (h[1] - rates.0[1]).abs() + (v - rates.1).abs() > 1e-4
             });
-            actor.gazing = moved;
+            actor.gazing = moved || necking;
             if moved {
                 actor.gaze_next = Some(rates);
             }
@@ -3309,6 +3368,8 @@ impl Live {
             gaze_shown: None,
             gazing: false,
             gaze_clock: std::time::Instant::now(),
+            look_at: Vec3::ZERO,
+            neck_done: false,
             aim_job: None,
             aim_posed: None,
             guests_next: None,

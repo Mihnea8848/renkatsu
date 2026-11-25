@@ -99,7 +99,7 @@ pub struct EyeLook {
     eyes: Vec<Eye>,
 }
 
-fn rotation(m: &Mat4) -> Quat {
+pub(crate) fn rotation(m: &Mat4) -> Quat {
     m.to_scale_rotation_translation().1
 }
 
@@ -113,7 +113,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 /// `Mathf.InverseLerp`.
-fn inverse_lerp(a: f32, b: f32, v: f32) -> f32 {
+pub(crate) fn inverse_lerp(a: f32, b: f32, v: f32) -> f32 {
     if a == b {
         0.0
     } else {
@@ -131,7 +131,7 @@ fn sign(v: f32) -> f32 {
 }
 
 /// `EyeLookCalc.AngleAroundAxis`.
-fn angle_around_axis(a: Vec3, b: Vec3, axis: Vec3) -> f32 {
+pub(crate) fn angle_around_axis(a: Vec3, b: Vec3, axis: Vec3) -> f32 {
     let a = a - unity::project(a, axis);
     let b = b - unity::project(b, axis);
     let angle = unity::angle(a, b);
