@@ -91,6 +91,9 @@ struct Actor {
     /// world, this frame and as last posed.
     reach_next: Option<Vec3>,
     reach_at: Option<Vec3>,
+    /// How deep her mouth was on a shaft over the last strokes, without
+    /// her lean, with when.
+    strokes: std::collections::VecDeque<(std::time::Instant, f32)>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -1177,6 +1180,13 @@ impl Live {
 /// re-posing one character moves the others' bones by rounding dust, and
 /// reading that dust as a change would settle them again every frame.
 const STILL: f32 = 1e-4;
+
+/// How long back a mouth's strokes are kept to find their shallowest
+/// point: longer than the slowest loop of the oral animations.
+const STROKE_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The furthest a mouth leans past the animation's stroke, in metres.
+const MAX_REACH: f32 = 0.08;
 
 /// The eye look pattern of a pose that picks none: ahead. Cards often
 /// save the maker's "this way", but eyes that follow the camera unasked
@@ -2510,32 +2520,51 @@ impl Live {
             self.actors[i].h_position = position;
         }
         let held = std::mem::take(&mut self.aims);
-        // Who moves for a shaft's depth, and by how much, from the aims of
-        // the frame before: the partner along the line of his shaft, or he
-        // when she is what he is snapped to.
+        // A mouth's strokes stretched by the shaft's depth: how deep her
+        // mouth is on the shaft each frame, without the lean it was given,
+        // measured from the shallowest point of the last strokes, and the
+        // more she leans in for it. Any oral animation makes its own strokes.
+        let now = std::time::Instant::now();
         let mut reached: Vec<(ObjectId, Vec3)> = Vec::new();
-        let moved: Vec<(ObjectId, Vec3)> = held
-            .iter()
-            .filter_map(|&(him, aim)| {
-                let at = self.actors.iter().position(|a| a.id == him)?;
-                let depth = self.settings_of(at, scene)?.depth_offset;
-                let line = self.actors[at].shaft_line.filter(|_| depth != 0.0)?;
-                let mut up = scene.get(him).and_then(|o| o.parent);
-                while let Some(id) = up {
-                    if id == aim.partner {
-                        return Some((him, line * depth));
-                    }
-                    up = scene.get(id).and_then(|o| o.parent);
-                }
-                // A mouth reaches by her leaning in; the rest of her moves.
-                if aim.mode == rk_chara::better_penetration::Mode::Oral {
-                    reached.push((aim.partner, -line * depth));
-                    return None;
-                }
-                Some((aim.partner, -line * depth))
-            })
-            .collect();
+        for &(him, aim) in &held {
+            if aim.mode != rk_chara::better_penetration::Mode::Oral {
+                continue;
+            }
+            let (Some(at), Some(her)) = (
+                self.actors.iter().position(|a| a.id == him),
+                self.actors.iter().position(|a| a.id == aim.partner),
+            ) else {
+                continue;
+            };
+            let Some(depth) = self.settings_of(at, scene).map(|s| s.depth) else {
+                continue;
+            };
+            let he = &self.actors[at];
+            let (Some(line), Some(shaft)) = (he.shaft_line, he.chara.shaft.as_ref()) else {
+                continue;
+            };
+            let Some(&root) = shaft.points.first() else {
+                continue;
+            };
+            let root_at = he.chara.scene.world_of(root).w_axis.truncate();
+            let leaned = self.actors[her].reach_at.map_or(0.0, |r| -r.dot(line));
+            let deep = shaft.base_length - aim.entry.distance(root_at) - leaned;
+            let strokes = &mut self.actors[her].strokes;
+            strokes.push_back((now, deep));
+            while strokes.front().is_some_and(|(t, _)| now - *t > STROKE_WINDOW) || strokes.len() > 1000 {
+                strokes.pop_front();
+            }
+            if (depth - 1.0).abs() < 1e-3 {
+                continue;
+            }
+            let shallowest = strokes.iter().map(|(_, d)| *d).fold(f32::INFINITY, f32::min);
+            let more = ((deep - shallowest) * (depth - 1.0)).clamp(-MAX_REACH, MAX_REACH);
+            reached.push((aim.partner, -line * more));
+        }
         for actor in &mut self.actors {
+            if !held.iter().any(|(_, a)| a.partner == actor.id) {
+                actor.strokes.clear();
+            }
             actor.reach_next = reached.iter().find(|(id, _)| *id == actor.id).map(|r| r.1);
         }
         let obstacles = self.obstacles();
@@ -2615,10 +2644,7 @@ impl Live {
                     &parameters,
                 )
             };
-            let mut world = scene.world_by(actor.id, &self.poses);
-            if let Some((_, by)) = moved.iter().find(|(id, _)| *id == actor.id) {
-                world = Mat4::from_translation(*by) * world;
-            }
+            let world = scene.world_by(actor.id, &self.poses);
             let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
             if actor.update(object, world, &mut read, &clock, keys, self.patient, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
@@ -3573,6 +3599,7 @@ impl Live {
             shaft_line: None,
             reach_next: None,
             reach_at: None,
+            strokes: Default::default(),
             aim_job: None,
             aim_posed: None,
             guests_next: None,

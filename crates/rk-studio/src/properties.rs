@@ -1808,8 +1808,10 @@ fn penetration_section(
             ("Length squish", &mut s.length_squish, 0.0, 1.0),
             ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
             ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
-            ("Depth", &mut s.depth_offset, -0.1, 0.1),
         ]);
+    }
+    if aimed == Some(Mode::Oral) {
+        sliders.push(("Depth", &mut s.depth, 0.5, 2.0));
     }
     sliders.extend([
         ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
