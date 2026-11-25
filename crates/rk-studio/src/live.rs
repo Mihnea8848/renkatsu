@@ -89,6 +89,9 @@ struct Actor {
     shaft_line: Option<Vec3>,
     /// The share of its built length the shaft has now.
     shaft_length: f32,
+    /// Where the shaft's end was after its last aim, and the way it
+    /// pointed, for the plugin's movement limit.
+    last_end: Option<(Vec3, Vec3)>,
     /// How far her mouth reaches along a shaft for its depth, in the
     /// world, this frame and as last posed.
     reach_next: Option<Vec3>,
@@ -572,15 +575,32 @@ impl Actor {
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
-            let end = match (&job.body, shaft.points.first()) {
+            let mut end = match (&job.body, shaft.points.first()) {
                 (Some(body), Some(&root)) => {
                     let start = self.chara.scene.world_of(root).w_axis.truncate();
                     body.end(&job, start, shaft.base_length)
                 }
                 _ => job.end,
             };
+            // The plugin's movement limit: the end goes no further from
+            // where it was than the limit allows in this frame's time,
+            // measured along the line it pointed in.
+            let limit = job.settings.limit.unwrap_or(0.0);
+            if let (Some((was, along)), true) = (self.last_end, limit > 0.0 && dt > 0.0) {
+                let cast = end + along * (was - end).dot(along) / along.length().max(1e-6);
+                let most = limit * dt;
+                if cast.distance(was) > most {
+                    end = was + (cast - was).normalize_or_zero() * most;
+                }
+            }
             self.aimed_end = Some(end);
             shaft.aim(&mut self.chara.scene, job.entry, end, &job.settings, job.vaginal);
+            self.last_end = shaft.end.map(|n| {
+                let m = self.chara.scene.world_of(n);
+                (m.w_axis.truncate(), m.z_axis.truncate().normalize_or_zero())
+            });
+        } else {
+            self.last_end = None;
         }
         // A partner's shaft holds the mouth where it last pulled it.
         if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
@@ -1212,6 +1232,11 @@ impl Live {
         chara.gaze.as_ref().map(|_| EYES_AHEAD)
     }
 
+    /// The main game BetterPenetration's settings, from its config.
+    pub fn body_options(&self) -> rk_chara::body_collision::BodyOptions {
+        self.body_options
+    }
+
     /// How far inside her skin her body keeps a shaft, as the game's
     /// BetterPenetration config sets it.
     pub fn clipping_depth(&self) -> f32 {
@@ -1476,7 +1501,20 @@ impl Live {
             AimJob {
                 entry,
                 end,
-                settings,
+                settings: {
+                    // What the character leaves to the plugin's config.
+                    let o = &self.body_options;
+                    let mut s = settings;
+                    s.balls_follow = Some(s.balls_follow.unwrap_or(o.rotate_balls));
+                    s.limit = Some(
+                        s.limit
+                            .unwrap_or(if o.limit_correction { o.max_correction } else { 0.0 }),
+                    );
+                    if mode == bp::Mode::Oral && !s.squish_in_mouth.unwrap_or(o.squish_oral_girth) {
+                        s.girth_squish = 0.0;
+                    }
+                    s
+                },
                 vaginal: mode == bp::Mode::Vaginal,
                 body: (settings.body_collision && mode != bp::Mode::Oral)
                     .then(|| {
@@ -3726,6 +3764,7 @@ impl Live {
             neck_done: false,
             shaft_line: None,
             shaft_length: 1.0,
+            last_end: None,
             reach_next: None,
             reach_at: None,
             strokes: None,

@@ -450,7 +450,8 @@ impl Shaft {
             h.set_position(end_bone, tip);
             h.set_rotation(end_bone, last);
         }
-        if let Some(&first) = self.points.first() {
+        // `AimDanTop`, which the main game does by its config.
+        if let (Some(&first), true) = (self.points.first(), s.balls_follow != Some(false)) {
             let turn = h.rotation(first);
             h.set_rotation(self.balls_top, turn);
         }
@@ -1061,6 +1062,19 @@ pub struct Settings {
     /// Renkatsu's own.
     #[serde(default = "yes")]
     pub smooth_bend: bool,
+    /// Whether the balls turn with the shaft ("Rotate Balls with Shaft");
+    /// none takes the main game plugin's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balls_follow: Option<bool>,
+    /// Whether the girth squishes in a mouth too ("Squish Oral Girth");
+    /// none takes the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squish_in_mouth: Option<bool>,
+    /// How far the shaft's end may move in a second, in metres ("Limit
+    /// Penis Movement" and its amount); 0 lets it move freely, none takes
+    /// the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f32>,
 }
 
 fn full_length() -> f32 {
@@ -1113,6 +1127,9 @@ impl Settings {
             stiffness: 0.0,
             length: 1.0,
             smooth_bend: true,
+            balls_follow: None,
+            squish_in_mouth: None,
+            limit: None,
         }
     }
 }

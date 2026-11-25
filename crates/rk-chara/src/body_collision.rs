@@ -68,6 +68,10 @@ pub struct BodyOptions {
     pub limit_correction: bool,
     /// "Limit Penis Amount".
     pub max_correction: f32,
+    /// "Rotate Balls with Shaft".
+    pub rotate_balls: bool,
+    /// "Penis: Squish Oral Girth".
+    pub squish_oral_girth: bool,
 }
 
 impl Default for BodyOptions {
@@ -88,6 +92,8 @@ impl Default for BodyOptions {
             simplify_oral: false,
             limit_correction: false,
             max_correction: 0.2,
+            rotate_balls: true,
+            squish_oral_girth: false,
         }
     }
 }
@@ -140,6 +146,8 @@ impl BodyOptions {
                 ("male", "Simplify Anal Calculation") => switch(&mut o.simplify_anal),
                 ("male", "Limit Penis Movement") => switch(&mut o.limit_correction),
                 ("male", "Limit Penis Amount") => set(&mut o.max_correction),
+                ("male", "Rotate Balls with Shaft") => switch(&mut o.rotate_balls),
+                ("male", "Penis: Squish Oral Girth") => switch(&mut o.squish_oral_girth),
                 ("female", key) => {
                     for (prefix, into) in [
                         ("Clipping Offset: Front Collision ", &mut o.front_offsets),
@@ -1143,7 +1151,7 @@ mod tests {
     #[test]
     fn the_plugins_config_file_sets_the_options() {
         let text = "[Female Options]\nClipping Depth = 0.03\nClipping Offset: Front Collision 1 = 0.08\n\
-                    Target Offset: Mouth Target = 0.01\n[Male 1 Options]\nLimit Penis Movement = true\n\
+                    Target Offset: Mouth Target = 0.01\n[Male 1 Options]\nLimit Penis Movement = true\nRotate Balls with Shaft = false\nPenis: Squish Oral Girth = true\n\
                     Limit Penis Amount = 0.3\n[Male 2 Options]\nLimit Penis Amount = 0.9\n";
         let o = BodyOptions::from_config(text);
         assert_eq!(o.clipping_depth, 0.03);
@@ -1152,5 +1160,6 @@ mod tests {
         assert!(o.limit_correction);
         assert_eq!(o.max_correction, 0.3, "the second male's is not the first's");
         assert_eq!(o.back_offsets, BodyOptions::default().back_offsets);
+        assert!(!o.rotate_balls && o.squish_oral_girth);
     }
 }
