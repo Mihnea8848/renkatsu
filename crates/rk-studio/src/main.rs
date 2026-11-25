@@ -180,6 +180,14 @@ struct Cli {
     /// her own space, as `LeftHand:0,0.15,0.1`, to picture IK.
     #[arg(long, hide = true)]
     ik_move: Vec<String>,
+    /// Give the selected character these hand patterns, as `LEFT,RIGHT`
+    /// numbers of CharaStudio's lists, to picture them.
+    #[arg(long, hide = true)]
+    hand_patterns: Option<String>,
+    /// Give the selected character this face, as
+    /// `EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN]]]`, to picture it.
+    #[arg(long, hide = true)]
+    face: Option<String>,
     /// Start with this IK target (a name of CharaStudio's IKTargetEN)
     /// chosen for the gizmo, to picture it.
     #[arg(long, hide = true)]
@@ -224,6 +232,10 @@ struct Cli {
     /// X,Y points, to picture a view that left its starting framing.
     #[arg(long, value_parser = parse_point, allow_hyphen_values = true)]
     camera_turn: Option<egui::Pos2>,
+    /// Start with the camera here, as `EYE:TARGET`, each `x,y,z` in
+    /// metres, focused on nothing, to picture a close view.
+    #[arg(long, hide = true, value_parser = parse_camera, allow_hyphen_values = true)]
+    camera: Option<(glam::Vec3, glam::Vec3)>,
     /// Start with the camera focused on nothing.
     #[arg(long)]
     free_camera: bool,
@@ -272,6 +284,11 @@ struct Cli {
     /// gizmo being dragged or a selection box.
     #[arg(long, hide = true, value_parser = parse_drag)]
     drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// Rest the pointer at X,Y after the clicks and turn the wheel by DY
+    /// points (down is negative), as X,Y,DY: to picture something
+    /// scrolled.
+    #[arg(long, hide = true, value_parser = parse_wheel)]
+    wheel: Option<(egui::Pos2, f32)>,
     /// Press these keys after the clicks, one a frame, each as the
     /// settings write a key: `ctrl+z`.
     #[arg(long, hide = true)]
@@ -395,6 +412,26 @@ fn parse_drag(text: &str) -> Result<(egui::Pos2, egui::Pos2), String> {
     Ok((parse_point(from)?, parse_point(to)?))
 }
 
+fn parse_wheel(text: &str) -> Result<(egui::Pos2, f32), String> {
+    let (point, dy) = text
+        .rsplit_once(',')
+        .ok_or_else(|| "a wheel turn must look like 120,48,-300".to_owned())?;
+    Ok((
+        parse_point(point)?,
+        dy.trim().parse().map_err(|_| "the turn is a number".to_owned())?,
+    ))
+}
+
+fn parse_camera(text: &str) -> Result<(glam::Vec3, glam::Vec3), String> {
+    let point = |t: &str| -> Option<glam::Vec3> {
+        let v: Vec<f32> = t.split(',').map(|n| n.trim().parse().ok()).collect::<Option<_>>()?;
+        (v.len() == 3).then(|| glam::Vec3::new(v[0], v[1], v[2]))
+    };
+    text.split_once(':')
+        .and_then(|(eye, target)| Some((point(eye)?, point(target)?)))
+        .ok_or_else(|| "a camera must look like 0,1.5,1:0,1.4,0".to_owned())
+}
+
 fn parse_point(text: &str) -> Result<egui::Pos2, String> {
     text.split_once(',')
         .and_then(|(x, y)| Some(egui::Pos2::new(x.trim().parse().ok()?, y.trim().parse().ok()?)))
@@ -416,6 +453,8 @@ struct Studio {
     type_after: Option<usize>,
     hover: Option<egui::Pos2>,
     drag: Option<(egui::Pos2, egui::Pos2)>,
+    /// The pointer's rest and a wheel turn once the clicks are done.
+    wheel: Option<(egui::Pos2, f32)>,
     /// Keys pressed once the clicks are done, one a frame.
     keys: Vec<keymap::Chord>,
     frames: u32,
@@ -765,6 +804,15 @@ impl Studio {
             anyhow::ensure!(p.len() == 3, "--ik-move is Target:x,y,z");
             state.ik_pending.push((target, glam::Vec3::new(p[0], p[1], p[2])));
         }
+        if let Some(spec) = &cli.hand_patterns {
+            let p: Vec<i32> = spec.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            anyhow::ensure!(p.len() == 2, "--hand-patterns is LEFT,RIGHT");
+            viewport::edit_fk_layer(&mut state, |l| l.hands = [p[0], p[1]]);
+        }
+        if let Some(spec) = &cli.face {
+            let face: rk_chara::face::Face = spec.parse()?;
+            viewport::edit_fk_layer(&mut state, |l| l.face = Some(face));
+        }
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
@@ -873,6 +921,15 @@ impl Studio {
             if let Some(drag) = cli.camera_turn {
                 live.cam.orbit_drag(drag.to_vec2());
             }
+            if let Some((eye, target)) = cli.camera {
+                let fov_y_deg = live.cam.orbit.fov_y_deg;
+                live.place_camera(&rk_render::Camera {
+                    eye,
+                    target,
+                    fov_y_deg,
+                    up: glam::Vec3::Y,
+                });
+            }
             if cli.free_camera {
                 live.cam.release();
             }
@@ -941,6 +998,7 @@ impl Studio {
             type_after: cli.type_after,
             hover: cli.hover,
             drag: cli.drag,
+            wheel: cli.wheel,
             keys: cli
                 .key
                 .iter()
@@ -1261,6 +1319,9 @@ impl eframe::App for Studio {
         }
         if self.state.settings.frame_rate.continuous() || self.state.live.as_ref().is_some_and(live::Live::settling) {
             ctx.request_repaint();
+        } else if let Some(wait) = self.state.live.as_ref().and_then(live::Live::next_blink) {
+            // Woken for the next blink.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(wait.max(0.001)));
         }
         let dt = ctx.input(|i| i.unstable_dt);
         let ft = &mut self.state.frame_time;
@@ -1502,6 +1563,19 @@ impl Studio {
                     }
                 }
                 return;
+            }
+        }
+        // The scripted wheel, once the clicks are done: the pointer rests
+        // there, and the wheel turns on the first of those frames.
+        if let (Some((at, dy)), true) = (self.wheel, index >= self.clicks.len() && self.frames >= 2) {
+            input.events.push(egui::Event::PointerMoved(at));
+            if step == self.clicks.len() as u32 * CLICK_FRAMES {
+                input.events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, dy),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                });
             }
         }
         // The scripted keys, once the clicks are done: one a frame.

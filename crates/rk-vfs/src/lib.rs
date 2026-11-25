@@ -4,6 +4,7 @@
 //! Virtual file system over the game's `abdata` folder and all zipmods,
 //! plus the item database and card ID resolution.
 
+pub mod animation_loader;
 pub mod assets;
 pub mod index;
 pub mod items;
@@ -16,6 +17,7 @@ pub use items::{resolve_infos, Item, ItemDb, Lookup, ResolveInfo};
 
 /// Item list categories (`ChaListDefine.CategoryNo` in the game).
 pub mod cat {
+    pub const CHA_EYESET: i32 = 2;
     pub const BODYPAINT_LAYOUT: i32 = 3;
     pub const BO_HEAD: i32 = 100;
     pub const BO_HAIR_B: i32 = 101;

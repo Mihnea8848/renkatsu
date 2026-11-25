@@ -248,6 +248,7 @@ fn face_camera((min, max): (Vec3, Vec3)) -> Camera {
         eye: target + Vec3::Z * distance,
         target,
         fov_y_deg,
+        up: glam::Vec3::Y,
     }
 }
 

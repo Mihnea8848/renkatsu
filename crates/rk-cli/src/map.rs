@@ -603,6 +603,7 @@ pub fn render(
                 eye,
                 target: eye + rotation * Vec3::Z,
                 fov_y_deg: num(&v["fov"]),
+                up: glam::Vec3::Y,
             })
         }
         None => None,
@@ -614,6 +615,7 @@ pub fn render(
                 eye: Vec3::from(eye),
                 target: Vec3::from(target),
                 fov_y_deg: 60.0,
+                up: glam::Vec3::Y,
             }
         }
         _ if recorded.is_some() => recorded.expect("checked"),
@@ -624,6 +626,7 @@ pub fn render(
                 eye,
                 target: Vec3::new(centre.x, floor + 1.2, hi.z),
                 fov_y_deg: 60.0,
+                up: glam::Vec3::Y,
             }
         }
         // From a high corner, with everything above head height cut away.
@@ -634,6 +637,7 @@ pub fn render(
                 eye: centre + Vec3::new(-0.45, 0.75, -0.45) * reach,
                 target: Vec3::new(centre.x, floor, centre.z),
                 fov_y_deg: 45.0,
+                up: glam::Vec3::Y,
             }
         }
         other => return Err(anyhow!("no view {other}: inside or above")),

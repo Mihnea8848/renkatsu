@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod audit;
 mod bench;
+mod bp_check;
 mod bundle;
 mod capture_check;
 mod card;
@@ -53,6 +54,8 @@ impl SkirtKind {
     }
 }
 
+// Parsed once at start, so the size of its largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Inspect character cards.
@@ -201,6 +204,16 @@ enum Cmd {
         /// by the animation.
         #[arg(long, default_value = "day")]
         map_time: String,
+        /// The face as Studio's face panel sets it:
+        /// `EYEBROWS,EYES,MOUTH[,EYES_OPEN[,BLINK[,MOUTH_OPEN]]]`.
+        #[arg(long)]
+        face: Option<String>,
+        /// KK_SkinEffects' levels: a digit for each effect in the plugin's
+        /// order (virgin blood, pussy juice, pussy and anal bukkake, wet
+        /// body and face, blush body and face, butt blush, tears, drool,
+        /// saliva, cum in nose).
+        #[arg(long)]
+        skin_effects: Option<String>,
     },
     /// CharaStudio's animations: list them, check them on a character, or
     /// write one as a Renkatsu animation file.
@@ -305,6 +318,19 @@ enum Cmd {
     /// folder) with our render of it: one line per case, with the camera,
     /// light, outfit, clothing states and pose the capture recorded. Cases
     /// taken in a map are listed with what they recorded.
+    /// BetterPenetration against CharaStudio captures with a partner: both
+    /// characters posed from the capture, then our targets, shaft aim,
+    /// colliders and mouth measured against the plugin's, in millimetres
+    BpCheck {
+        /// Folder with the cases' .json and .partner.json files.
+        dir: PathBuf,
+        /// Only the cases whose file name contains one of these texts.
+        #[arg(long)]
+        only: Vec<String>,
+        /// List the shaft's and her vagina's bones one by one.
+        #[arg(long)]
+        bones: bool,
+    },
     CaptureCheck {
         /// Folder with the batch's .json files and pictures.
         dir: PathBuf,
@@ -637,6 +663,7 @@ fn main() -> Result<()> {
             game_skirts,
             gpu_skirts,
         } => bench::bench(&list, &captures, &out, &show, studio, game_skirts, gpu_skirts),
+        Cmd::BpCheck { dir, only, bones } => bp_check::check(&dir, &only, bones),
         Cmd::CaptureCheck {
             dir,
             out,
@@ -689,6 +716,8 @@ fn main() -> Result<()> {
             alpha_to_coverage,
             map,
             map_time,
+            face,
+            skin_effects,
         } => render::render(render::Args {
             card: &card,
             out: &out,
@@ -727,6 +756,8 @@ fn main() -> Result<()> {
             alpha_to_coverage,
             map: map.as_deref(),
             map_time: &map_time,
+            face: face.as_deref(),
+            skin_effects: skin_effects.as_deref(),
         }),
         Cmd::Bones { card } => pose::bones(&card),
         Cmd::Ik {

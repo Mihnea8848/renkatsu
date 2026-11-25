@@ -183,6 +183,7 @@ pub fn mirrored_camera(camera: &Camera, plane: Vec4) -> Eye {
             eye: reflect.transform_point3(camera.eye),
             target: reflect.transform_point3(camera.target),
             fov_y_deg: camera.fov_y_deg,
+            up: glam::Vec3::Y,
         },
         up: reflect.transform_vector3(camera_up(camera)),
     }
@@ -637,6 +638,7 @@ mod tests {
             eye: Vec3::new(0.5, 1.4, 3.0),
             target: Vec3::new(1.0, 1.2, 0.0),
             fov_y_deg: 30.0,
+            up: glam::Vec3::Y,
         };
         let view = Eye::of(&camera).view();
         let plane = camera_space_plane(view, position, up, 0.25);
@@ -714,6 +716,7 @@ mod tests {
             eye: Vec3::new(0.4, 1.3, -1.0),
             target: Vec3::new(-2.0, 1.0, 0.9),
             fov_y_deg: 23.0,
+            up: glam::Vec3::Y,
         };
         // The game's: worldToCameraMatrix * reflectionMat.
         let game = Eye::of(&camera).view() * reflection_matrix(plane);
@@ -735,6 +738,7 @@ mod tests {
             eye: Vec3::new(-1.0, 1.5, 1.2),
             target: Vec3::new(-2.9, 1.5, 2.7),
             fov_y_deg: 35.0,
+            up: glam::Vec3::Y,
         };
         let (aspect, near, far) = (16.0 / 9.0, 0.05, 60.0);
         let view = mirror_view(0, &m, &camera, aspect, near, far).expect("in front");

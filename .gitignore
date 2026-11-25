@@ -4,6 +4,7 @@ renkatsu.toml
 *.png
 !docs/**/*.png
 !news/images/*.png
+!crates/rk-chara/data/skin_effects/*.png
 tools/reference-capture/bin/
 tools/reference-capture/obj/
 notes/

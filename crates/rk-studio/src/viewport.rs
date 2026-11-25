@@ -195,7 +195,7 @@ fn docked(ui: &mut Ui, k: &Look, st: &mut State, full: Rect) {
             Pos2::new(left, bar.bottom()),
             Vec2::new(
                 palette_width(st.mode, 184.0),
-                palette_height(k, st).min(rail_rect.height()),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - bar.bottom()),
             ),
         );
         drawer(ui, k, pal);
@@ -323,7 +323,10 @@ fn floating_blocks(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, selection:
     if st.palette_open {
         let pal = Rect::from_min_size(
             Pos2::new(rail_rect.right() + 4.0, rail_rect.top()),
-            Vec2::new(palette_width(st.mode, 188.0), palette_height(k, st)),
+            Vec2::new(
+                palette_width(st.mode, 188.0),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - rail_rect.top()),
+            ),
         );
         block(ui, k, pal);
         palette(ui, k, st, pal);
@@ -350,7 +353,7 @@ fn clean(ui: &mut Ui, k: &Look, st: &mut State, full: Rect, header: Option<Rect>
             Pos2::new(left, top),
             Vec2::new(
                 palette_width(st.mode, 196.0),
-                palette_height(k, st).min(full.bottom() - top),
+                palette_height(k, st).min(full.bottom() - chip_room(k) - top),
             ),
         );
         drawer(ui, k, pal);
@@ -1048,6 +1051,7 @@ fn palette_height(k: &Look, st: &State) -> f32 {
     if MODES[mode].name == "Pose" && st.ik_open && fk_layer(st).is_some() {
         rows += IK_ROWS;
     }
+
     34.0 + sections.len() as f32 * 24.0 + rows as f32 * palette_row(k) + 8.0
 }
 
@@ -1067,7 +1071,13 @@ fn fk_layer(st: &State) -> Option<rk_chara::pose::Layer> {
 }
 
 /// Changes the selected character's pose layer as one step of the history.
-fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+pub fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
+    edit_layer_held(st, false, change);
+}
+
+/// Edits the layer, as one step of the history for all of a drag while
+/// `held`.
+fn edit_layer_held(st: &mut State, held: bool, change: impl FnOnce(&mut rk_chara::pose::Layer)) {
     let Some(mut object) = st.doc.selection().cloned() else {
         return;
     };
@@ -1079,7 +1089,7 @@ fn edit_fk_layer(st: &mut State, change: impl FnOnce(&mut rk_chara::pose::Layer)
     if layer.is_empty() {
         *pose_layer = None;
     }
-    st.doc.edit(object, false);
+    st.doc.edit(object, held);
 }
 
 /// The active mode's tools in named sections, under a header that pins or
@@ -1133,7 +1143,21 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         crate::map_menu::panel(ui, k, st, body);
         return;
     }
-    let mut y = head.bottom();
+    // Rows that do not fit scroll under the header with the wheel; the
+    // ones out of sight take no clicks.
+    let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
+    let overflow = (palette_height(k, st) - rect.height()).max(0.0);
+    let scroll_id = ui.id().with(("palette scroll", st.mode));
+    let mut scroll: f32 = ui.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    if ui.rect_contains_pointer(body) {
+        scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    }
+    scroll = scroll.clamp(0.0, overflow);
+    ui.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body));
+    inner.set_clip_rect(body.intersect(ui.clip_rect()));
+    let ui = &mut inner;
+    let mut y = head.bottom() - scroll;
     let mut index = 0;
     for (section, tools) in mode.sections {
         ui.painter().text(
@@ -1198,6 +1222,23 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
                             y += IK_ROWS as f32 * palette_row(k);
                         }
                     }
+                    continue;
+                }
+                if *name == "Expression" || *name == "Hands" {
+                    // The values are the character's: they live in the
+                    // Animation tab of Properties, which this opens.
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, false);
+                    if resp.clicked() {
+                        st.property_tab = 1;
+                        let section = if *name == "Hands" {
+                            crate::properties::HANDS_SECTION
+                        } else {
+                            crate::properties::FACE_SECTION
+                        };
+                        st.sections[section] = true;
+                    }
+                    y += palette_row(k);
+                    index += 1;
                     continue;
                 }
                 if *name == "Mirror pose" || *name == "Copy to other side" {
@@ -1322,12 +1363,15 @@ fn kinematics_category(ui: &mut Ui, k: &Look, st: &mut State, row: Rect, id: egu
         widgets::checkbox(ui, k, box_rect, id.with("on"), &mut ticked, "");
     }
     if ticked != on && ik {
-        // The targets start on the bones, as Studio's copy puts them.
+        // The targets start on the bones as the character stands now, as
+        // Studio's copy puts them, every time IK goes on: Studio keeps the
+        // targets it had, which snaps the limbs back to an old pose, often
+        // the T-pose the character was added in.
         let on_bones = st.doc.selected.and_then(|id| st.live.as_ref()?.ik_targets_on_bones(id));
         edit_fk_layer(st, |l| {
             l.ik_on = ticked;
-            if ticked && l.ik.is_empty() {
-                l.ik = on_bones.unwrap_or_default();
+            if let (true, Some(targets)) = (ticked, on_bones) {
+                l.ik = targets;
             }
         });
         st.ik_open = ticked;
@@ -1414,8 +1458,21 @@ pub fn mirror(st: &mut State, copy: bool) {
             }
         }
     }
-    if !edits.is_empty() {
-        crate::keying::write_many(st, id, edits, |_| {});
+    // A mirrored pose swaps the hands' patterns too.
+    let hands = fk_layer(st).map_or([0, 0], |l| l.hands);
+    let swap = !copy && hands[0] != hands[1];
+    if !edits.is_empty() || swap {
+        crate::keying::write_many(st, id, edits, |content| {
+            if let crate::scene::Content::Character {
+                pose_layer: Some(layer),
+                ..
+            } = content
+            {
+                if swap {
+                    layer.hands = [hands[1], hands[0]];
+                }
+            }
+        });
     }
 }
 
@@ -1549,13 +1606,11 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 17] = [
+const LATER_TOOLS: [&str; 15] = [
     "Replace",
     "Reload",
     "Accessories",
-    "Expression",
     "Gaze",
-    "Hands",
     "Look at camera",
     "Depth of field",
     "Auto key",
@@ -1755,6 +1810,12 @@ fn enclose(all: &[Focus], fov_y_deg: f32) -> Option<Focus> {
 /// The camera's corner of the viewport, at the bottom left: what the
 /// camera is focused on, and, once the view has left its starting framing,
 /// the button that goes back to it. `corner` is the bottom left point.
+/// The height the camera's corner takes at the viewport's bottom, which
+/// the palette stays above; it scrolls when its rows do not fit.
+fn chip_room(k: &Look) -> f32 {
+    k.d.row + 6.0 + 16.0
+}
+
 fn camera_corner(ui: &mut Ui, k: &Look, st: &mut State, corner: Pos2) {
     let Some(live) = st.live.as_ref() else { return };
     let m = 8.0;

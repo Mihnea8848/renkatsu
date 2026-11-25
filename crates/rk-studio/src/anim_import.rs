@@ -753,6 +753,8 @@ fn preview_content(st: &State) -> Option<Content> {
             skirt_kinds: Vec::new(),
             animation: None,
             pose_layer: None,
+            better_penetration: None,
+            penetration_target: None,
             profile: None,
             light_group: None,
         }),

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rk_card::Card;
 use rk_chara::BuildOptions;
 use rk_render::shadow::ShadowSettings;
@@ -69,6 +69,10 @@ pub struct Args<'a> {
     pub map: Option<&'a str>,
     /// The map's time of day.
     pub map_time: &'a str,
+    /// A face as `rk_chara::face::Face` reads it.
+    pub face: Option<&'a str>,
+    /// KK_SkinEffects' levels, one digit an effect in its order.
+    pub skin_effects: Option<&'a str>,
 }
 
 /// The colour behind the character when none is asked for.
@@ -154,6 +158,17 @@ pub fn render(a: Args) -> Result<()> {
         ..Default::default()
     };
     let mut chara = rk_chara::build(&game, &card, &opts)?;
+    if let (Some(spec), Some(rig)) = (a.face, &chara.face) {
+        let face: rk_chara::face::Face = spec.parse()?;
+        rig.show(&mut chara.scene, Some(&face));
+    }
+    if let Some(spec) = a.skin_effects {
+        let mut levels = rk_chara::skin_effects::Levels::default();
+        for (level, digit) in levels.iter_mut().zip(spec.chars()) {
+            *level = digit.to_digit(10).context("skin effect levels are digits")? as u8;
+        }
+        chara.show_skin_effects(&levels);
+    }
     if a.gpu_skirts {
         chara.physics.solve_skirts_on_gpu(true);
     }

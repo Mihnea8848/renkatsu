@@ -18,7 +18,7 @@ rmpv.workspace = true
 rayon.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 roxmltree = "0.20"
+toml.workspace = true
 
 [dev-dependencies]
-toml.workspace = true
 rk-core.workspace = true

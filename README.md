@@ -428,6 +428,8 @@ Some files reimplement the behaviour of GPL-3.0 community plugins
 (BepisPlugins, ABMX, KK_Plugins and others). Those files say
 `GPL-3.0-or-later` in their header and stay under that license, whose text
 is in [LICENSES/GPL-3.0-or-later.txt](LICENSES/GPL-3.0-or-later.txt).
+The skin effect pictures in `crates/rk-chara/data/skin_effects` come from
+the KK_SkinEffects plugin and are under GPL-3.0 as well.
 
 The interface font, Open Sans, is under the SIL Open Font License 1.1, in
 [LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).

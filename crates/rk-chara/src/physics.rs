@@ -203,9 +203,43 @@ impl Default for Collider {
     }
 }
 
+/// Colliders lent to dynamic bones by their place in `Physics::bones`.
+pub type Guests = Vec<(usize, Vec<Shape>)>;
+
+/// Whether two sets of guests are the same but for places and sizes off by
+/// at most `tolerance` metres.
+pub fn guests_near(a: &[(usize, Vec<Shape>)], b: &[(usize, Vec<Shape>)], tolerance: f32) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|((ba, sa), (bb, sb))| {
+            ba == bb
+                && sa.len() == sb.len()
+                && sa.iter().zip(sb).all(|(x, y)| {
+                    x.capsule == y.capsule
+                        && x.inside == y.inside
+                        && x.p0.distance(y.p0) <= tolerance
+                        && x.p1.distance(y.p1) <= tolerance
+                        && (x.radius - y.radius).abs() <= tolerance
+                })
+        })
+}
+
+/// Guests with one list per bone, in the bones' order, as several givers
+/// may lend to the same bone.
+pub fn merged(guests: Guests) -> Guests {
+    let mut out: Guests = Vec::new();
+    for (bone, shapes) in guests {
+        match out.iter_mut().find(|(b, _)| *b == bone) {
+            Some((_, list)) => list.extend(shapes),
+            None => out.push((bone, shapes)),
+        }
+    }
+    out.sort_by_key(|(b, _)| *b);
+    out
+}
+
 /// A collider placed in the world for one update.
-#[derive(Debug, Clone, Copy)]
-struct Shape {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shape {
     p0: Vec3,
     p1: Vec3,
     radius: f32,
@@ -215,15 +249,22 @@ struct Shape {
 
 impl Collider {
     fn shape(&self, scene: &Scene) -> Shape {
+        self.scaled_shape(scene, 1.0, 1.0)
+    }
+
+    /// Where the collider is in the world, its radius and height times
+    /// these, for another character's dynamic bones to meet.
+    pub fn scaled_shape(&self, scene: &Scene, radius_scale: f32, height_scale: f32) -> Shape {
         let m = world(scene, self.node);
-        let radius = self.radius * lossy_scale_z(scene, self.node).abs();
-        let half = (self.height - self.radius) * 0.5;
+        let (radius, height) = (self.radius * radius_scale, self.height * height_scale);
+        let radius_world = radius * lossy_scale_z(scene, self.node).abs();
+        let half = (height - radius) * 0.5;
         if half <= 0.0 {
             let c = m.transform_point3(self.center);
             return Shape {
                 p0: c,
                 p1: c,
-                radius,
+                radius: radius_world,
                 capsule: false,
                 inside: self.inside,
             };
@@ -235,7 +276,7 @@ impl Collider {
         Shape {
             p0: m.transform_point3(c0),
             p1: m.transform_point3(c1),
-            radius,
+            radius: radius_world,
             capsule: true,
             inside: self.inside,
         }
@@ -522,6 +563,9 @@ pub struct DynamicBone {
     object_scale: f32,
     time: f32,
     weight: f32,
+    /// A scale on the particles' radius, which BetterPenetration's belly
+    /// bulge sets (`UpdateBellyBones`).
+    radius_scale: f32,
 }
 
 impl DynamicBone {
@@ -537,7 +581,25 @@ impl DynamicBone {
             object_scale: 1.0,
             time: 0.0,
             weight,
+            radius_scale: 1.0,
         }
+    }
+
+    /// Scales the particles' radius from what the bone gives them. The
+    /// game's DynamicBone reads `m_Radius` only when it sets up its
+    /// particles, so in Studio the plugin's later change is lost; here it
+    /// takes at once. Returns whether anything changed.
+    pub fn set_radius_scale(&mut self, scale: f32) -> bool {
+        let scale = scale.max(0.01);
+        if scale == self.radius_scale {
+            return false;
+        }
+        let ratio = scale / self.radius_scale;
+        for p in &mut self.particles {
+            p.radius *= ratio;
+        }
+        self.radius_scale = scale;
+        true
     }
 
     /// `SetupParticles`.
@@ -551,12 +613,13 @@ impl DynamicBone {
         self.bone_total_length = 0.0;
         self.append(scene, Some(root), None, 0.0);
         let d = &self.def;
+        let radius_scale = self.radius_scale;
         for p in &mut self.particles {
             p.damping = d.damping;
             p.elasticity = d.elasticity;
             p.stiffness = d.stiffness;
             p.inert = d.inert;
-            p.radius = d.radius;
+            p.radius = d.radius * radius_scale;
             if self.bone_total_length > 0.0 {
                 let t = p.bone_length / self.bone_total_length;
                 p.damping *= Curve::scale(&d.damping_distrib, t);
@@ -657,8 +720,9 @@ impl DynamicBone {
         }
     }
 
-    /// `UpdateDynamicBones`.
-    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], dt: f32) {
+    /// `UpdateDynamicBones`, `guests` met after the component's own
+    /// colliders.
+    fn late_update(&mut self, scene: &mut Scene, colliders: &[Collider], guests: &[Shape], dt: f32) {
         let Some(root) = self.def.root else { return };
         if self.particles.is_empty() {
             return;
@@ -670,7 +734,8 @@ impl DynamicBone {
         let n = loops(&mut self.time, self.def.update_rate, dt, 3);
         if n > 0 {
             let mats = rest_mats(scene, &self.particles);
-            let shapes = shapes(scene, colliders, &self.def.colliders, false);
+            let mut shapes = shapes(scene, colliders, &self.def.colliders, false);
+            shapes.extend_from_slice(guests);
             let root_rot = rotation(scene, root);
             for _ in 0..n {
                 self.update_particles1(&mats, root_rot);
@@ -1827,6 +1892,9 @@ pub struct Physics {
     cloth_held: bool,
     /// Which of `bones` ran in the last `end_frame`.
     ran: Vec<bool>,
+    /// Another character's colliders that dynamic bones meet too, by the
+    /// bone's place in `bones` (`set_guests`).
+    guests: Guests,
 }
 
 impl Physics {
@@ -1942,6 +2010,18 @@ impl Physics {
         self.still = still.to_vec();
     }
 
+    /// Colliders of another character that dynamic bones meet as well as
+    /// their own, placed in the world, by the bone's place in `bones`;
+    /// they stay until set again.
+    pub fn set_guests(&mut self, guests: Guests) {
+        self.guests = merged(guests);
+    }
+
+    /// The guests set last.
+    pub fn guests(&self) -> &[(usize, Vec<Shape>)] {
+        &self.guests
+    }
+
     /// The second half of a frame, the components' `LateUpdate`: the
     /// simulation moves on by `dt` seconds and poses the bones.
     pub fn end_frame(&mut self, scene: &mut Scene, dt: f32) {
@@ -1952,13 +2032,14 @@ impl Physics {
             cloth.begin(scene, &self.bones);
         }
         let mut live = vec![false; self.bones.len()];
-        for ((b, moves), live) in self.bones.iter_mut().zip(moving).zip(&mut live) {
+        for (i, ((b, moves), live)) in self.bones.iter_mut().zip(moving).zip(&mut live).enumerate() {
             if !moves {
                 continue;
             }
             match b {
                 Bone::Dynamic(d) if d.running() => {
-                    d.late_update(scene, &self.colliders, dt);
+                    let guests = self.guests.iter().find(|(b, _)| *b == i).map_or(&[][..], |(_, g)| g);
+                    d.late_update(scene, &self.colliders, guests, dt);
                     *live = true;
                 }
                 Bone::Ver01(d) if d.running() => d.late_update(scene, &self.colliders, dt),
@@ -2924,6 +3005,25 @@ mod tests {
         physics.settle(&mut scene, 300, FRAME_TIME);
         assert!(physics.speed() < 1e-6);
         assert!(position(&scene, b2).y < before.y - 0.005);
+    }
+
+    #[test]
+    fn guests_for_one_bone_from_several_givers_join() {
+        let shape = |r: f32| Shape {
+            p0: Vec3::ZERO,
+            p1: Vec3::ZERO,
+            radius: r,
+            capsule: false,
+            inside: false,
+        };
+        let joined = merged(vec![
+            (3, vec![shape(1.0)]),
+            (1, vec![shape(2.0)]),
+            (3, vec![shape(3.0)]),
+        ]);
+        assert_eq!(joined.len(), 2);
+        assert_eq!(joined[0].0, 1);
+        assert_eq!(joined[1].1.iter().map(|s| s.radius).collect::<Vec<_>>(), vec![1.0, 3.0]);
     }
 
     #[test]

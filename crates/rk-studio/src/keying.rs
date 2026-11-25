@@ -32,9 +32,24 @@ pub fn keyed(st: &State, id: ObjectId, bone: &str) -> bool {
 pub fn shown(st: &State, id: ObjectId, bone: &str) -> BoneEdit {
     if let Some(edit) = track(st, id)
         .and_then(|t| t.keys.get(bone))
-        .and_then(|list| keys::sample(list, st.clock))
+        .and_then(|list| keys::sample_named(bone, list, st.clock))
     {
         return edit;
+    }
+    if let Some(channel) = rk_chara::channels::Channel::of_key(bone) {
+        let start = st
+            .live
+            .as_ref()
+            .and_then(|l| l.face_rig(id))
+            .map(|r| r.start)
+            .unwrap_or_default();
+        let layer = match st.doc.scene().get(id).map(|o| &o.content) {
+            Some(Content::Character {
+                pose_layer: Some(l), ..
+            }) => (**l).clone(),
+            _ => Default::default(),
+        };
+        return rk_chara::channels::as_edit(channel.get(&layer, &start));
     }
     match st.doc.scene().get(id).map(|o| &o.content) {
         Some(Content::Character {
@@ -249,6 +264,18 @@ pub fn paste_key(st: &mut State, id: ObjectId, bone: &str, edit: BoneEdit) {
     let name = st.doc.scene().get(id).map(|o| o.name.clone()).unwrap_or_default();
     keys::set(&mut sequence.track_mut(id, &name).keys, bone, at, edit, near);
     st.doc.edit_sequence(sequence, false);
+}
+
+/// Sets a value's key (`rk_chara::channels`) at the playhead. With `held`
+/// it joins the step of a drag.
+pub fn write_value(st: &mut State, id: ObjectId, name: &str, value: f32, held: bool) {
+    let at = now(st);
+    let mut sequence = st.doc.scene().sequence.clone();
+    let near = sequence.near();
+    let object = st.doc.scene().get(id).map(|o| o.name.clone()).unwrap_or_default();
+    let edit = rk_chara::channels::as_edit(value);
+    keys::set(&mut sequence.track_mut(id, &object).keys, name, at, edit, near);
+    st.doc.edit_sequence(sequence, held);
 }
 
 /// The bones a palette's key buttons act on: the chosen IK target or
