@@ -41,7 +41,7 @@ struct Sub {
     thickness: f32,
     keep: f32,
     own_reach: f32,
-    pad: u32,
+    lift: f32,
 }
 
 const ARMS: u32 = 1;
@@ -66,6 +66,7 @@ struct Point {
     pad: u32,
     around: [u32; 4],
     grid: [u32; 4],
+    prop: [f32; 4],
 }
 
 /// A bound vertex, as `Bound` in `drape.wgsl`.
@@ -214,6 +215,7 @@ impl Gpu {
                 pad: 0,
                 around: p.around,
                 grid: [p.grid[0], p.grid[1], p.grid[2], 0],
+                prop: [p.prop.x, p.prop.y, p.prop.z, 0.0],
             })
             .collect();
         let mut topo: Vec<[u32; 4]> = Vec::with_capacity(n * (LINKS + HINGES * 2));
@@ -377,7 +379,7 @@ impl Gpu {
             thickness: material.thickness,
             keep: (-material.memory * h).exp(),
             own_reach: 2.0 * FASTEST * frame.dt + material.thickness,
-            pad: 0,
+            lift: frame.lift,
         };
         let mut bytes = vec![0u8; (subs as u64 * SUB_STRIDE) as usize];
         for s in 0..subs {
@@ -601,7 +603,11 @@ mod tests {
     /// 2.7 m/s over a floor and a table's corner, then stays: every rule
     /// of the solver has its turn.
     fn scene() -> (Setup, Vec<Frame>) {
-        let setup = sample::tube(24, 12, 0.1, 0.04, Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, -0.3, 0.0));
+        let mut setup = sample::tube(24, 12, 0.1, 0.04, Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, -0.3, 0.0));
+        // Propped outwards a little, and half of that kept.
+        for p in setup.points.iter_mut().filter(|p| !p.fixed) {
+            p.prop = Vec3::new(p.rest.x, -0.9, p.rest.z).normalize() * 9.0 + Vec3::Y * 9.81;
+        }
         let floor = Some((Vec3::new(0.0, -0.25, 0.0), Vec3::Y));
         let table = std::sync::Arc::new(vec![
             [
@@ -623,6 +629,7 @@ mod tests {
         }));
         for f in &mut frames {
             f.map = Some(table.clone());
+            f.lift = 0.5;
         }
         (setup, frames)
     }

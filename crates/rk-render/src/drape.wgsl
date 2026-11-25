@@ -30,7 +30,8 @@ struct Sub {
     keep: f32,
     // How far off a cell of its own cloth a point is given it.
     own_reach: f32,
-    pad: u32,
+    // How much of a point's `prop` is there.
+    lift: f32,
 }
 
 struct Point {
@@ -49,6 +50,8 @@ struct Point {
     around: vec4<u32>,
     // Its net's first point, columns and rows.
     grid: vec4<u32>,
+    // What the garment's make props it up by, in the waist's space.
+    prop: vec4<f32>,
 }
 
 struct Pose {
@@ -499,7 +502,9 @@ fn cs_predict(@builtin(global_invocation_id) id: vec3<u32>) {
     if fixed(i) {
         next[i * 2u] = vec4<f32>(point_of(poses[waist_at(1u, i)].m, points[i].rest), 0.0);
     } else {
-        let v = (vel[i].xyz + vec3<f32>(0.0, -GRAVITY, 0.0) * sub.h) * sub.damp;
+        let fall = vec3<f32>(0.0, -GRAVITY, 0.0);
+        let prop = vector_of(poses[waist_at(1u, i)].m, points[i].prop.xyz);
+        let v = (vel[i].xyz + (fall + prop * sub.lift) * sub.h) * sub.damp;
         next[i * 2u] = vec4<f32>(pos[i].xyz + v * sub.h, 0.0);
     }
 }

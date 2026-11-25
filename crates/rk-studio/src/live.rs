@@ -510,8 +510,7 @@ impl Actor {
     /// object.
     fn bone(&self, name: &str) -> Option<Mat4> {
         let node = self.chara.scene.find(self.chara.top, name)?;
-        let (world, _) = self.chara.scene.world();
-        Some(self.applied.unwrap_or_default().inverse() * world[node])
+        Some(self.applied.unwrap_or_default().inverse() * self.chara.scene.world_of(node))
     }
 
     /// Poses one frame: the animation at `phase` when there is one, and
@@ -531,7 +530,7 @@ impl Actor {
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
             let end = match (&job.body, shaft.points.first()) {
                 (Some(body), Some(&root)) => {
-                    let start = self.chara.scene.world().0[root].w_axis.truncate();
+                    let start = self.chara.scene.world_of(root).w_axis.truncate();
                     body.end(&job, start, shaft.base_length)
                 }
                 _ => job.end,
@@ -604,6 +603,7 @@ impl Actor {
             liquid,
             liquid_clothes,
             game_skirts,
+            skirt_kinds,
             animation: pose,
             pose_layer,
             ..
@@ -698,6 +698,11 @@ impl Actor {
         // skirts again.
         let advanced = !game_skirts.contains(&self.recipe.outfit);
         if self.chara.physics.set_advanced(advanced) {
+            again = true;
+        }
+        // The kind of cloth too, guessed unless the scene chose one.
+        let kind = crate::scene::skirt_kind(skirt_kinds, self.recipe.outfit).map(crate::scene::SkirtKind::kind);
+        if self.chara.physics.set_skirt_kind(kind) {
             again = true;
         }
 
@@ -1161,15 +1166,16 @@ impl Live {
         let partner = match partner {
             Some(p) => p,
             None => {
-                let tip = shaft.tip(&actor.chara.scene.world().0);
+                let tip = shaft.tip_in(&actor.chara.scene);
                 let candidates = self
                     .actors
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != at)
                     .filter_map(|(_, a)| {
-                        let (world, names) = posed(a);
-                        Some((a.id, world[*names.get(mode.entry_bone())?].w_axis.truncate()))
+                        let names = bp::bones_by_name(&a.chara.scene, a.chara.top);
+                        let bone = *names.get(mode.entry_bone())?;
+                        Some((a.id, a.chara.scene.world_of(bone).w_axis.truncate()))
                     });
                 bp::nearest(tip, shaft.base_length, candidates)?
             }
@@ -1230,15 +1236,14 @@ impl Live {
             if i == at {
                 continue;
             }
-            let world = other.chara.scene.world().0;
             let names = bp::bones_by_name(&other.chara.scene, other.chara.top);
             for &mode in &modes {
                 if let Some(&bone) = names.get(mode.entry_bone()) {
-                    places.push((other.id, mode, world[bone].w_axis.truncate()));
+                    places.push((other.id, mode, other.chara.scene.world_of(bone).w_axis.truncate()));
                 }
             }
         }
-        let tip = shaft.tip(&actor.chara.scene.world().0);
+        let tip = shaft.tip_in(&actor.chara.scene);
         bp::nearest_place(tip, shaft.base_length, held.map(|h| (h.partner, h.mode)), &places)
     }
 
@@ -1910,7 +1915,7 @@ impl Live {
     /// world of her top node.
     pub fn ik_space(&self, id: ObjectId) -> Option<Mat4> {
         let actor = self.actors.iter().find(|a| a.id == id)?;
-        Some(actor.chara.scene.world().0[actor.chara.top])
+        Some(actor.chara.scene.world_of(actor.chara.top))
     }
 
     /// A built character's IK targets in the world while IK is on: those of
@@ -1921,7 +1926,7 @@ impl Live {
             .layer
             .as_ref()
             .filter(|l| l.ik_on && l.ik.len() == rk_chara::pose::IK_TARGETS)?;
-        let own = actor.chara.scene.world().0[actor.chara.top];
+        let own = actor.chara.scene.world_of(actor.chara.top);
         let (_, turn, _) = own.to_scale_rotation_translation();
         Some(
             layer
@@ -2409,7 +2414,7 @@ impl Live {
             let Some(&root) = shaft.points.first() else {
                 continue;
             };
-            let start = he.chara.scene.world().0[root].w_axis.truncate();
+            let start = he.chara.scene.world_of(root).w_axis.truncate();
             let oral = aim.mode == rk_chara::better_penetration::Mode::Oral;
             strokes.push((
                 him,
@@ -2491,7 +2496,7 @@ impl Live {
             let Some(&root) = shaft.points.first() else {
                 continue;
             };
-            let start = he.chara.scene.world().0[root].w_axis.truncate();
+            let start = he.chara.scene.world_of(root).w_axis.truncate();
             let base_length = shaft.base_length;
             let end = he.aimed_end.unwrap_or(job.end);
             let (direction, inside) = bp::hole_directions(start, aim.entry, end);
@@ -2544,7 +2549,7 @@ impl Live {
             let Some(node) = her.mouth_node() else {
                 continue;
             };
-            let bone = her.chara.scene.world().0[node];
+            let bone = her.chara.scene.world_of(node);
             her.mouth_next = Some((rk_chara::better_penetration::mouth_local(&bone, world), rate));
         }
         // Every character's fingers for every vagina, as posed this frame.

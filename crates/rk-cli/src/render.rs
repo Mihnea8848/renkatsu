@@ -31,7 +31,8 @@ pub struct Args<'a> {
     pub game_skirts: bool,
     /// Move the skirts' cloth with the GPU solver.
     pub gpu_skirts: bool,
-    /// The kind of cloth the GPU solver makes the skirts of.
+    /// The kind of cloth the GPU solver makes the skirts of; none for
+    /// the guess.
     pub skirt_kind: Option<rk_chara::physics::drape::Kind>,
     /// Where the cloth is written after every frame played.
     pub skirt_dump: Option<&'a Path>,
@@ -171,9 +172,7 @@ pub fn render(a: Args) -> Result<()> {
     if a.gpu_skirts {
         chara.physics.solve_skirts_on_gpu(true);
     }
-    if let Some(kind) = a.skirt_kind {
-        chara.physics.set_skirt_kind(kind);
-    }
+    chara.physics.set_skirt_kind(a.skirt_kind);
     let t_build = t.elapsed();
     // Where she stands, with her hair and skirts carried along.
     if a.at.is_some() || a.turn != 0.0 {
@@ -272,6 +271,10 @@ pub fn render(a: Args) -> Result<()> {
     }
     for line in chara.physics.skirts(&chara.scene) {
         println!("skirt: {line}");
+    }
+    for g in chara.physics.garments(&chara.scene) {
+        let names: Vec<_> = g.meshes.iter().map(|(n, _)| n.as_str()).collect();
+        println!("skirt kind: {} [{}]", g.line(), names.join(" "));
     }
     let draws = chara.scene.pose();
     if a.list {

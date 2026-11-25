@@ -591,6 +591,21 @@ impl Scene {
         }
         (mats, active)
     }
+
+    /// World matrix of one node, the same as `world()` gives for it but
+    /// without working out every other node's.
+    pub fn world_of(&self, node: usize) -> Mat4 {
+        let mut chain = Vec::new();
+        let mut at = Some(node);
+        while let Some(i) = at {
+            chain.push(i);
+            at = self.nodes[i].parent;
+        }
+        chain
+            .iter()
+            .rev()
+            .fold(Mat4::IDENTITY, |m, &i| m * self.nodes[i].local.matrix())
+    }
 }
 
 /// A mesh posed in world space, ready to draw: its vertices after blend
@@ -848,6 +863,41 @@ impl Scene {
                 base_tangents: None,
                 drape: None,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod world_tests {
+    use super::*;
+
+    #[test]
+    fn one_node_is_where_the_whole_world_puts_it() {
+        // A root with two branches, turned, moved and scaled at each step.
+        let parents = [None, Some(0), Some(1), Some(2), Some(1), Some(4), None, Some(6)];
+        let mut scene = Scene::default();
+        for (i, parent) in parents.iter().enumerate() {
+            let f = i as f32;
+            scene.nodes.push(Node {
+                name: format!("n{i}"),
+                parent: *parent,
+                children: Vec::new(),
+                local: Trs {
+                    pos: Vec3::new(0.1 * f, 0.3 - 0.07 * f, 0.02 * f * f),
+                    rot: Quat::from_euler(glam::EulerRot::YXZ, 0.4 * f, -0.3 + 0.1 * f, 0.05 * f),
+                    scale: Vec3::splat(1.0 + 0.03 * f),
+                },
+                active: true,
+            });
+        }
+        for (i, parent) in parents.iter().enumerate() {
+            if let Some(p) = parent {
+                scene.nodes[*p].children.push(i);
+            }
+        }
+        let (all, _) = scene.world();
+        for (i, m) in all.iter().enumerate() {
+            assert_eq!(scene.world_of(i).to_cols_array(), m.to_cols_array(), "node {i}");
         }
     }
 }

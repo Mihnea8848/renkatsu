@@ -202,7 +202,16 @@ impl Shaft {
 
     /// Where its tip is (`DanPoints.GetDanEndPosition`).
     pub fn tip(&self, world: &[Mat4]) -> Vec3 {
-        world[*self.points.last().unwrap_or(&self.balls_top)].w_axis.truncate()
+        world[self.tip_node()].w_axis.truncate()
+    }
+
+    /// The same as `tip`, worked out for that node alone.
+    pub fn tip_in(&self, scene: &crate::scene::Scene) -> Vec3 {
+        scene.world_of(self.tip_node()).w_axis.truncate()
+    }
+
+    fn tip_node(&self) -> usize {
+        *self.points.last().unwrap_or(&self.balls_top)
     }
 }
 
