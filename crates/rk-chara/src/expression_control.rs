@@ -100,6 +100,7 @@ pub fn read_xml(text: &str) -> Result<Vec<Preset>> {
                 eye_small: float("eyeSmall", 0.0),
                 // The plugin's presets do not shake the eyes.
                 shaking: false,
+                tongue: 0.0,
             },
         });
     }

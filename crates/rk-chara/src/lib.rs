@@ -56,6 +56,7 @@ pub mod siru;
 pub mod skin_effects;
 pub mod slider_unlocker;
 pub mod stiletto;
+pub mod tongue;
 pub mod uncensor_selector;
 
 pub use build::{build, BuildOptions, Character};

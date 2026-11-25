@@ -1466,6 +1466,7 @@ fn face_sections(
             Channel::MouthOpen,
             &mut toggled,
         );
+        amount(ui, "Tongue", &mut face.tongue, 1.0, Channel::Tongue, &mut toggled);
         amount(ui, "Blush", &mut face.blush, 1.0, Channel::Blush, &mut toggled);
         row(ui, k, "Tears", waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
@@ -1483,6 +1484,7 @@ fn face_sections(
         face.eye_small = face.eye_small.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
+        face.tongue = face.tongue.clamp(0.0, 1.0);
         if face != next.face.unwrap_or(start) {
             next.face = Some(face);
         }

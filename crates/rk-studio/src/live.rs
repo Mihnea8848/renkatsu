@@ -102,6 +102,9 @@ struct Actor {
     strokes: Option<(ObjectId, u64, [f32; STROKE_SLOTS])>,
     /// Where her mouth was last posed, before her lean.
     bare_mouth: Option<Vec3>,
+    /// The tongue's bones, once looked for, and whether it is out.
+    tongue_chain: Option<Option<[usize; 5]>>,
+    tongue_out: bool,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -572,6 +575,7 @@ impl Actor {
         if let Some(by) = self.reach_at {
             self.reach_mouth(by, motion_on);
         }
+        self.pose_tongue(motion_on);
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
@@ -629,6 +633,29 @@ impl Actor {
         }
         face.mouth_open = 1.0;
         Some(face)
+    }
+
+    /// Puts the tongue out as far as the face shown asks, over the
+    /// animation's tongue, or the loaded one when no animation writes it.
+    fn pose_tongue(&mut self, animated: bool) {
+        let amount = self.face_shown().map_or(0.0, |f| f.tongue);
+        if amount <= 0.0 && !self.tongue_out {
+            return;
+        }
+        let top = self.chara.top;
+        let chain = *self
+            .tongue_chain
+            .get_or_insert_with(|| rk_chara::tongue::find(&self.chara.scene, top));
+        let Some(chain) = chain else { return };
+        let from = chain.map(|n| {
+            if animated {
+                self.chara.scene.nodes[n].local
+            } else {
+                self.rest[n]
+            }
+        });
+        rk_chara::tongue::put_out(&mut self.chara.scene, &chain, &from, amount);
+        self.tongue_out = amount > 0.0;
     }
 
     /// Bends her upper body so her mouth goes `by` further, as a person
@@ -3769,6 +3796,8 @@ impl Live {
             reach_at: None,
             strokes: None,
             bare_mouth: None,
+            tongue_chain: None,
+            tongue_out: false,
             aim_job: None,
             aim_posed: None,
             guests_next: None,
