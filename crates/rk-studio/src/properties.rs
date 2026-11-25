@@ -137,7 +137,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     // The Character section's button asked for another card.
     let mut load_card = false;
 
+    let page_name = pages[st.property_tab].name;
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        page_title(ui, k, page_name);
         // What the body shows in an H scene. The levels are the game's
         // `siru`: a page of its own, since none of it is of the card.
         let id = ui.id();
@@ -2831,6 +2833,22 @@ fn header(
     }
     let query = st.property_search.trim().to_lowercase();
     ui.data_mut(|d| d.insert_temp(Id::new(SEARCH), query));
+}
+
+/// The name of the open page, at the top of the page. A search shows
+/// rows of every page, so it has none then.
+fn page_title(ui: &mut Ui, k: &Look, name: &str) {
+    if !searched(ui).is_empty() {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 6.0), Sense::hover());
+    ui.painter().text(
+        Pos2::new(rect.left() + FRAME_GAP + 4.0, rect.center().y + 2.0),
+        Align2::LEFT_CENTER,
+        name,
+        k.bold(k.d.text + 3.0),
+        k.t.text_bright,
+    );
 }
 
 /// The button that opens the panel's options: all sections open, or shut.
