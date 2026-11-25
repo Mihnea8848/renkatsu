@@ -87,6 +87,8 @@ struct Actor {
     /// Which way the shaft points as the animation holds it, from root
     /// to tip.
     shaft_line: Option<Vec3>,
+    /// The share of its built length the shaft has now.
+    shaft_length: f32,
     /// How far her mouth reaches along a shaft for its depth, in the
     /// world, this frame and as last posed.
     reach_next: Option<Vec3>,
@@ -785,13 +787,33 @@ impl Actor {
             skirt_kinds,
             animation: pose,
             pose_layer,
+            better_penetration,
             ..
         } = &object.content
         else {
             return false;
         };
+        // A shaft of another length: its bones along the chain and the
+        // length it is aimed by, both from how it was built.
+        let length = better_penetration
+            .as_deref()
+            .map_or(self.chara.better_penetration.length, |s| s.length)
+            .clamp(0.25, 2.0);
+        let mut resized = false;
+        if (length - self.shaft_length).abs() > 1e-4 {
+            if let Some(shaft) = self.chara.shaft.as_mut() {
+                let by = length / self.shaft_length;
+                shaft.base_length *= by;
+                for &node in shaft.points.iter().skip(1).chain(&shaft.virtual_points) {
+                    self.rest[node].pos *= by;
+                    self.chara.scene.nodes[node].local.pos *= by;
+                }
+                resized = true;
+            }
+            self.shaft_length = length;
+        }
         // What has to be posed again from the start.
-        let mut again = clock.was != Playback::Stopped && clock.now == Playback::Stopped;
+        let mut again = resized || (clock.was != Playback::Stopped && clock.now == Playback::Stopped);
         // A stop lets the mouth go back too.
         if again {
             self.mouth_pull = None;
@@ -3703,6 +3725,7 @@ impl Live {
             look_at: Vec3::ZERO,
             neck_done: false,
             shaft_line: None,
+            shaft_length: 1.0,
             reach_next: None,
             reach_at: None,
             strokes: None,

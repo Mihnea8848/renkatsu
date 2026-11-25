@@ -1009,6 +1009,13 @@ pub struct Settings {
     /// Renkatsu's own.
     #[serde(default)]
     pub stiffness: f32,
+    /// The shaft's length as a share of the body's own. Renkatsu's own.
+    #[serde(default = "full_length")]
+    pub length: f32,
+}
+
+fn full_length() -> f32 {
+    1.0
 }
 
 fn yes() -> bool {
@@ -1055,6 +1062,7 @@ impl Settings {
             clipping_depth: None,
             depth: 0.0,
             stiffness: 0.0,
+            length: 1.0,
         }
     }
 }

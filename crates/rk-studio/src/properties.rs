@@ -1813,7 +1813,7 @@ fn penetration_section(
     const SHAFT: u8 = 0;
     const COLLIDERS: u8 = 1;
     const PULL: u8 = 2;
-    let mut sliders: Vec<(u8, &str, &mut f32, f32, f32)> = Vec::new();
+    let mut sliders: Vec<(u8, &str, &mut f32, f32, f32)> = vec![(SHAFT, "Length", &mut s.length, 0.5, 1.5)];
     if aimed.is_some() {
         sliders.extend([
             (SHAFT, "Length squish", &mut s.length_squish, 0.0, 1.0),
