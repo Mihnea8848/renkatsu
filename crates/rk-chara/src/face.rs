@@ -501,6 +501,9 @@ pub struct Rig {
     /// The irises' textures as the eye look places them, by renderer:
     /// `_MainTex`, `_overtex1` and `_overtex2`'s scale and offset.
     pub iris_places: Vec<(usize, [Option<[f32; 4]>; 3])>,
+    /// Each eye's look script and the card's pupil sliders, which place
+    /// the irises for a gaze (`crate::eyelook::placement`).
+    pub gaze_place: Option<([crate::eyelook::EyeLook; 2], crate::eyelook::Pupil)>,
     /// The face the character was built with.
     pub start: Face,
     /// The eyes' open rate it was built with: EyeControl turns blinking
@@ -524,6 +527,20 @@ impl Rig {
     /// `blink` is its open rate, 1 between blinks; it counts only while
     /// the face blinks.
     pub fn show_blinking(&self, scene: &mut Scene, face: Option<&Face>, seconds: f32, blink: f32) {
+        self.show_gazing(scene, face, seconds, blink, None);
+    }
+
+    /// As `show_blinking`, with the irises where a gaze puts them: each
+    /// eye's sideways rate and the upward rate (`crate::gaze`); none looks
+    /// straight ahead.
+    pub fn show_gazing(
+        &self,
+        scene: &mut Scene,
+        face: Option<&Face>,
+        seconds: f32,
+        blink: f32,
+        gaze: Option<([f32; 2], f32)>,
+    ) {
         let (face, eyes_rate) = match face {
             Some(f) => (f, if f.blink { blink } else { Rig::eyes_rate(f) }),
             None if self.start.blink => (&self.start, blink.min(self.start_rate)),
@@ -545,7 +562,7 @@ impl Rig {
             part.show(scene, pattern, lerp(c.open_min, limit, eyes_rate));
         }
         self.show_eye_row(scene, face.eyes);
-        self.show_irises(scene, face, seconds);
+        self.show_irises(scene, face, seconds, self.gaze_shift(gaze));
         if let Some(part) = &self.mouth {
             // Studio fixes the mouth at its slider (`FixedRate`).
             part.show(scene, face.mouth, face.mouth_open.clamp(0.0, 1.0));
@@ -599,7 +616,20 @@ impl Rig {
     /// (`ProcEyeY`, `ProcEyeSmall`): the scale grows by the size, the
     /// offset moves back by half of it, and up by the roll. The picture in
     /// the irises rolls along, as KK_Ahegao rolls it.
-    fn show_irises(&self, scene: &mut Scene, face: &Face, seconds: f32) {
+    /// How far a gaze moves each iris's textures from where looking
+    /// straight ahead puts them.
+    fn gaze_shift(&self, gaze: Option<([f32; 2], f32)>) -> [[f32; 2]; 2] {
+        let (Some((looks, pupil)), Some((h, v))) = (self.gaze_place, gaze) else {
+            return [[0.0; 2]; 2];
+        };
+        [0, 1].map(|side| {
+            let at = crate::eyelook::placement(&looks[side], side == 1, pupil, [h[side], v]);
+            let ahead = crate::eyelook::placement(&looks[side], side == 1, pupil, [0.0, 0.0]);
+            [at.offset[0] - ahead.offset[0], at.offset[1] - ahead.offset[1]]
+        })
+    }
+
+    fn show_irises(&self, scene: &mut Scene, face: &Face, seconds: f32, shift: [[f32; 2]; 2]) {
         let small = face.eye_small.clamp(0.0, 1.0);
         let roll = face.eye_y.clamp(0.0, 0.5);
         for (eye, (r, places)) in self.iris_places.iter().enumerate() {
@@ -616,7 +646,11 @@ impl Rig {
                     place = shaken(place, iris, r);
                 }
                 slot.scale = [place[0] + small, place[1] + small];
-                slot.offset = [place[2] - small / 2.0, place[3] - small / 2.0 - roll];
+                let moved = shift.get(eye).copied().unwrap_or_default();
+                slot.offset = [
+                    place[2] - small / 2.0 + moved[0],
+                    place[3] - small / 2.0 - roll + moved[1],
+                ];
             }
             // The picture in the irises rolls with them, as KK_Ahegao moves
             // it (`_expression` to the material's offset, up by twice the

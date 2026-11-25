@@ -73,6 +73,13 @@ struct Actor {
     blink: rk_chara::face::Blink,
     blink_rate: f32,
     awake: std::time::Instant,
+    /// Where the eyes look this frame (`rk_chara::gaze`), as each eye's
+    /// sideways rate and the upward rate; the gaze the face was last shown
+    /// with; whether the eyes are still turning; and when they last moved.
+    gaze_next: Option<([f32; 2], f32)>,
+    gaze_shown: Option<([f32; 2], f32)>,
+    gazing: bool,
+    gaze_clock: std::time::Instant,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -790,6 +797,9 @@ impl Actor {
             if let Some(face) = &self.chara.face {
                 face.show(&mut self.chara.scene, shown.as_ref());
             }
+            // Shown open and looking ahead: the blink and the gaze go on again.
+            self.blink_rate = 1.0;
+            self.gaze_shown = None;
             let skin = self.layer.as_ref().map(|l| l.skin).unwrap_or_default();
             self.chara.show_skin_effects(&skin);
             again = true;
@@ -802,6 +812,9 @@ impl Actor {
             if let Some(face) = &self.chara.face {
                 face.show(&mut self.chara.scene, shown.as_ref());
             }
+            // Shown open and looking ahead: the blink and the gaze go on again.
+            self.blink_rate = 1.0;
+            self.gaze_shown = None;
             again |= clock.now != Playback::Playing;
         }
         // The eyes blink and shaking highlights take a new size on the real
@@ -814,14 +827,17 @@ impl Actor {
                 1.0
             };
             let shaking = shown.is_some_and(|f| f.shaking);
-            if shaking || rate != self.blink_rate {
+            let gaze = self.gaze_next;
+            if shaking || rate != self.blink_rate || gaze != self.gaze_shown {
                 self.blink_rate = rate;
+                self.gaze_shown = gaze;
                 if let Some(rig) = &self.chara.face {
-                    rig.show_blinking(
+                    rig.show_gazing(
                         &mut self.chara.scene,
                         shown.as_ref(),
                         self.shake_since.elapsed().as_secs_f32(),
                         rate,
+                        gaze,
                     );
                 }
             }
@@ -969,6 +985,13 @@ impl Live {
     /// A character's face controllers.
     pub fn face_rig(&self, id: ObjectId) -> Option<&rk_chara::face::Rig> {
         self.actors.iter().find(|a| a.id == id)?.chara.face.as_ref()
+    }
+
+    /// The eye look pattern a character's card gives, and whether its
+    /// eyes can look at all.
+    pub fn card_eyes_look(&self, id: ObjectId) -> Option<i32> {
+        let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
+        chara.gaze.as_ref().map(|_| chara.look_patterns[0])
     }
 }
 
@@ -1257,6 +1280,39 @@ impl Live {
             self.h_positions.insert(file, found.clone());
         }
         found
+    }
+
+    /// Where each character's eyes look this frame: toward the view's
+    /// camera, as Studio gives the eye look its camera for a target, by
+    /// the pattern of the character's pose or else of its card.
+    fn look(&mut self) {
+        let camera = self.cam.orbit.camera().eye;
+        for actor in &mut self.actors {
+            let now = std::time::Instant::now();
+            // The game skips a frame without time; a long pause counts as
+            // a tenth of a second, as a frame cannot jump the eyes further.
+            let dt = (now - actor.gaze_clock).as_secs_f32().min(0.1);
+            actor.gaze_clock = now;
+            let pattern = actor
+                .layer
+                .as_ref()
+                .and_then(|l| l.eyes_look)
+                .unwrap_or(actor.chara.look_patterns[0])
+                .max(0) as usize;
+            let chara = &mut actor.chara;
+            let Some(gaze) = chara.gaze.as_mut() else { continue };
+            let (world, _) = chara.scene.world();
+            let scene_nodes = &chara.scene.nodes;
+            let parents = |n: usize| scene_nodes[n].parent;
+            let rates = gaze.update(&world, &parents, camera, pattern, dt);
+            let moved = actor.gaze_next.is_none_or(|(h, v)| {
+                (h[0] - rates.0[0]).abs() + (h[1] - rates.0[1]).abs() + (v - rates.1).abs() > 1e-4
+            });
+            actor.gazing = moved;
+            if moved {
+                actor.gaze_next = Some(rates);
+            }
+        }
     }
 
     /// The heights H pairs play at: a character playing the male's half of
@@ -2209,6 +2265,7 @@ impl Live {
             }
         }
         self.pair_heights(scene, project, games, &mods);
+        self.look();
         for i in 0..self.actors.len() {
             if self.actors[i].chara.shaft.is_none() {
                 continue;
@@ -3141,7 +3198,10 @@ impl Live {
     /// or her eyes' highlights shake, so that frames keep being drawn.
     pub fn settling(&self) -> bool {
         self.actors.iter().any(|a| {
-            a.cloth_owed > 0 || a.blink.busy() || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking)
+            a.cloth_owed > 0
+                || a.blink.busy()
+                || a.gazing
+                || a.layer.as_ref().and_then(|l| l.face).is_some_and(|f| f.shaking)
         })
     }
 
@@ -3240,6 +3300,10 @@ impl Live {
             blink: rk_chara::face::Blink::new(id.0 as u32),
             blink_rate: 1.0,
             awake: std::time::Instant::now(),
+            gaze_next: None,
+            gaze_shown: None,
+            gazing: false,
+            gaze_clock: std::time::Instant::now(),
             aim_job: None,
             aim_posed: None,
             guests_next: None,

@@ -32,6 +32,7 @@ pub mod eyelook;
 pub mod face;
 pub mod fbbik;
 pub mod foreground;
+pub mod gaze;
 pub mod hair_accessories;
 pub mod hand_pattern;
 pub mod hand_size;

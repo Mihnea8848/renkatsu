@@ -1357,6 +1357,26 @@ fn face_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 }
             });
         };
+        // Studio's eye look patterns (`EyeLookCalc.eyeTypeStates`): ahead,
+        // at the camera, or away from it.
+        let card_look = st.live.as_ref().and_then(|l| l.card_eyes_look(id));
+        row(
+            ui,
+            k,
+            "Eyes look",
+            waiting.or(card_look.is_none().then_some("No eye look")),
+            |ui, rect| {
+                // Lined up with the keyed rows, as the pattern takes no keys.
+                let rect = Rect::from_min_max(rect.min, Pos2::new(rect.right() - 18.0, rect.bottom()));
+                let patterns = [0, 1, 3];
+                let options = [("Front", true), ("Camera", true), ("Away", true)];
+                let now = next.eyes_look.or(card_look).unwrap_or(0);
+                let chosen = patterns.iter().position(|&p| p == now);
+                if let Some(i) = choices(ui, k, rect, ui_id.with("eyes look"), chosen, &options) {
+                    next.eyes_look = Some(patterns[i]);
+                }
+            },
+        );
         amount(ui, "Eyes open", &mut face.eyes_open, Channel::EyesOpen, &mut toggled);
         row(ui, k, "Blink", waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with("blink key"), keyed.mark(Channel::Blink));
@@ -1494,6 +1514,7 @@ impl KeyedValues {
     ) {
         use rk_chara::channels::Channel;
         let mut out = self.layer.clone();
+        out.eyes_look = next.eyes_look;
         for channel in Channel::all() {
             let (was, now) = (channel.get(&self.shown, &self.start), channel.get(next, &self.start));
             if was == now {
