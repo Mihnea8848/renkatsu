@@ -993,11 +993,15 @@ pub struct Settings {
     /// plugin's "Clipping Depth"); none takes the plugin's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clipping_depth: Option<f32>,
-    /// How far down the shaft a mouth goes at the bottom of each stroke:
-    /// 0 as the animation has it, 1 to the shaft's base. The stroke
-    /// stretches from its shallowest point to reach it. Renkatsu's own.
-    #[serde(default)]
+    /// How deep a mouth's strokes go, as a share of the animation's: the
+    /// stroke the animation makes on the shaft is stretched from its
+    /// shallowest point by this much, 1 leaving it as it is. Renkatsu's own.
+    #[serde(default = "same_depth")]
     pub depth: f32,
+}
+
+fn same_depth() -> f32 {
+    1.0
 }
 
 fn yes() -> bool {
@@ -1042,7 +1046,7 @@ impl Settings {
             pull_holes: false,
             oral_mouth: true,
             clipping_depth: None,
-            depth: 0.0,
+            depth: 1.0,
         }
     }
 }

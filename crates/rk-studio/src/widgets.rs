@@ -368,6 +368,121 @@ pub fn number_to(
     );
 }
 
+/// Width of the box beside a track that holds the number or the name.
+const TRACK_BOX: f32 = 52.0;
+
+/// The track of a slider in `rect` with its handle at `at` of 0 to
+/// 1, and a notch for each of `stops` when there are some. Gives where the
+/// pointer holds the handle, 0 to 1, while it is dragged or clicked.
+fn track(ui: &mut Ui, k: &Look, rect: Rect, id: Id, at: f32, stops: usize) -> Option<f32> {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let (left, right) = (rect.left() + 4.0, rect.right() - 4.0);
+    let y = rect.center().y.round();
+    let x = (left + at.clamp(0.0, 1.0) * (right - left)).round();
+    let p = ui.painter();
+    let groove = Rect::from_min_max(Pos2::new(rect.left(), y - 2.0), Pos2::new(rect.right(), y + 2.0));
+    boxed(p, groove, 1.0, k.t.input, k.t.border);
+    let lit = resp.hovered() || resp.dragged();
+    p.rect_filled(
+        Rect::from_min_max(Pos2::new(groove.left() + 1.0, y - 1.0), Pos2::new(x, y + 1.0)),
+        0.0,
+        if lit { k.t.text } else { k.t.text_dim },
+    );
+    for i in 0..stops {
+        let stop = (left + i as f32 / (stops - 1).max(1) as f32 * (right - left)).round();
+        hair_v(p, stop, y + 4.0, y + 7.0, k.t.hover);
+    }
+    let handle = Rect::from_center_size(Pos2::new(x, y), Vec2::new(8.0, 14.0));
+    p.rect_filled(handle, 2.0, if lit { k.t.text_bright } else { k.t.text });
+    resp.interact_pointer_pos()
+        .filter(|_| resp.dragged() || resp.is_pointer_button_down_on())
+        .map(|at| ((at.x - left) / (right - left).max(1.0)).clamp(0.0, 1.0))
+}
+
+/// A number between `low` and `high` as a slider, Unity's: a track whose
+/// handle follows the pointer, and beside it the number in a field, which
+/// is dragged by `speed` or typed after a click as [`number`].
+#[allow(clippy::too_many_arguments)]
+pub fn slider(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    id: Id,
+    value: &mut f32,
+    (low, high): (f32, f32),
+    speed: f32,
+    decimals: usize,
+) {
+    let span = (high - low).max(f32::EPSILON);
+    // What the track sets is kept to the places that show.
+    let places = 10f32.powi(decimals as i32);
+    let field = rect.with_min_x(rect.right() - TRACK_BOX.min(rect.width() * 0.45));
+    let at = (*value - low) / span;
+    if let Some(to) = track(ui, k, rect.with_max_x(field.left() - 8.0), id.with("track"), at, 0) {
+        *value = ((low + to * span) * places).round() / places;
+    }
+    number_to(ui, k, field, id, value, Marker::None, true, speed, decimals);
+    *value = value.clamp(low, high);
+}
+
+/// One of a few named levels in a row, such as none, light and heavy, as
+/// a slider with a stop for each and the level's name in the box beside
+/// it. Returns the level the pointer chose.
+pub fn steps(ui: &mut Ui, k: &Look, rect: Rect, id: Id, chosen: usize, names: &[&str]) -> Option<usize> {
+    let last = names.len().saturating_sub(1).max(1);
+    let at = chosen.min(last) as f32 / last as f32;
+    let field = rect.with_min_x(rect.right() - TRACK_BOX.min(rect.width() * 0.45));
+    value_box(ui, k, field, names.get(chosen).copied().unwrap_or(""));
+    let to = track(ui, k, rect.with_max_x(field.left() - 8.0), id, at, names.len());
+    to.map(|to| (to * last as f32).round() as usize)
+        .filter(|to| *to != chosen)
+}
+
+/// A boxed button with an icon before its name, for an action inside a
+/// panel. One that is not `enabled` is drawn dim and takes no click.
+pub fn action_button(
+    ui: &mut Ui,
+    k: &Look,
+    rect: Rect,
+    id: Id,
+    icon_glyph: Option<&str>,
+    text: &str,
+    enabled: bool,
+) -> Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let resp = ui.interact(rect, id, sense);
+    let hot = enabled && resp.hovered();
+    let p = ui.painter();
+    let fill = match (enabled, hot) {
+        (false, _) => k.t.header,
+        (true, true) => k.t.hover,
+        (true, false) => k.t.control,
+    };
+    p.rect_filled(rect, k.radius(), fill);
+    let color = match (enabled, hot) {
+        (false, _) => k.t.text_dim,
+        (true, true) => k.t.text_bright,
+        (true, false) => k.t.text,
+    };
+    let text_w = p.layout_no_wrap(text.to_owned(), k.font(), color).size().x;
+    let icon_w = if icon_glyph.is_some() { 20.0 } else { 0.0 };
+    let mut x = (rect.center().x - (text_w + icon_w) / 2.0)
+        .round()
+        .max(rect.left() + 4.0);
+    if let Some(g) = icon_glyph {
+        glyph(p, k, Pos2::new(x + 7.0, rect.center().y), g, 14.0, color);
+        x += icon_w;
+    }
+    p.with_clip_rect(rect.shrink(1.0)).text(
+        Pos2::new(x, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        k.font(),
+        color,
+    );
+    resp
+}
+
 /// A text field in a property's box. What is typed is kept aside while
 /// the field has the keyboard and returned once, when Enter or a click
 /// elsewhere ends the typing; Escape gives it up.

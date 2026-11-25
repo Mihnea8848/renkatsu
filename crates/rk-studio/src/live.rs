@@ -91,12 +91,9 @@ struct Actor {
     /// world, this frame and as last posed.
     reach_next: Option<Vec3>,
     reach_at: Option<Vec3>,
-    /// How deep her mouth is on a shaft through his animation's loop,
-    /// without her lean: whose shaft and which animation, and the depth at
-    /// each of the loop's slots (NaN where it was not yet seen).
-    strokes: Option<(ObjectId, u64, [f32; STROKE_SLOTS])>,
-    /// Where her mouth was last posed, before her lean.
-    bare_mouth: Option<Vec3>,
+    /// How deep her mouth was on a shaft over the last strokes, without
+    /// her lean, with when.
+    strokes: std::collections::VecDeque<(std::time::Instant, f32)>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -556,14 +553,6 @@ impl Actor {
                 self.shaft_line = along.try_normalize();
             }
         }
-        // Where her mouth is as posed, before any lean, to measure the
-        // stroke by.
-        let mouth = rk_chara::better_penetration::Mode::Oral.entry_bone();
-        self.bare_mouth = self
-            .chara
-            .scene
-            .find(self.chara.top, mouth)
-            .map(|n| self.chara.scene.world_of(n).w_axis.truncate());
         if let Some(by) = self.reach_at {
             self.reach_mouth(by, motion_on);
         }
@@ -641,7 +630,7 @@ impl Actor {
         }
         let goal = scene.world_of(mouth).w_axis.truncate() + by;
         // A few passes, each bone turning its share of what is left.
-        for _ in 0..10 {
+        for _ in 0..4 {
             for &(node, share) in &chain {
                 let world = scene.world_of(node);
                 let pivot = world.w_axis.truncate();
@@ -1192,11 +1181,12 @@ impl Live {
 /// reading that dust as a change would settle them again every frame.
 const STILL: f32 = 1e-4;
 
-/// How many places of an animation's loop a mouth's depth is kept for.
-const STROKE_SLOTS: usize = 32;
+/// How long back a mouth's strokes are kept to find their shallowest
+/// point: longer than the slowest loop of the oral animations.
+const STROKE_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The furthest a mouth leans past the animation's stroke, in metres.
-const MAX_REACH: f32 = 0.2;
+const MAX_REACH: f32 = 0.08;
 
 /// The eye look pattern of a pose that picks none: ahead. Cards often
 /// save the maker's "this way", but eyes that follow the camera unasked
@@ -2531,11 +2521,10 @@ impl Live {
         }
         let held = std::mem::take(&mut self.aims);
         // A mouth's strokes stretched by the shaft's depth: how deep her
-        // mouth is on the shaft, without the lean it was given, kept for each
-        // place of his animation's loop as it plays or is scrubbed through,
-        // measured from the loop's shallowest, and the more she leans in for
-        // it. Any oral animation makes its own strokes; a paused one keeps
-        // what its loop showed.
+        // mouth is on the shaft each frame, without the lean it was given,
+        // measured from the shallowest point of the last strokes, and the
+        // more she leans in for it. Any oral animation makes its own strokes.
+        let now = std::time::Instant::now();
         let mut reached: Vec<(ObjectId, Vec3)> = Vec::new();
         for &(him, aim) in &held {
             if aim.mode != rk_chara::better_penetration::Mode::Oral {
@@ -2558,52 +2547,23 @@ impl Live {
                 continue;
             };
             let root_at = he.chara.scene.world_of(root).w_axis.truncate();
-            let (Some(phase), Some(playing)) = (he.phase, he.playing.as_ref()) else {
-                continue;
-            };
-            let length = playing.motion.duration().max(1e-3);
-            // The phase goes from 0 to 1 through the loop.
-            let slot = (phase.rem_euclid(1.0) * STROKE_SLOTS as f32) as usize % STROKE_SLOTS;
-            let which = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                he.h_position.hash(&mut h);
-                length.to_bits().hash(&mut h);
-                h.finish()
-            };
-            let Some(mouth) = self.actors[her].bare_mouth else {
-                continue;
-            };
-            let base_length = shaft.base_length;
-            let deep = base_length - mouth.distance(root_at);
+            let leaned = self.actors[her].reach_at.map_or(0.0, |r| -r.dot(line));
+            let deep = shaft.base_length - aim.entry.distance(root_at) - leaned;
             let strokes = &mut self.actors[her].strokes;
-            if strokes.as_ref().is_none_or(|(by, of, _)| *by != him || *of != which) {
-                *strokes = Some((him, which, [f32::NAN; STROKE_SLOTS]));
+            strokes.push_back((now, deep));
+            while strokes.front().is_some_and(|(t, _)| now - *t > STROKE_WINDOW) || strokes.len() > 1000 {
+                strokes.pop_front();
             }
-            let Some((_, _, slots)) = strokes.as_mut() else {
-                continue;
-            };
-            slots[slot] = deep;
-            if depth <= 0.0 {
+            if (depth - 1.0).abs() < 1e-3 {
                 continue;
             }
-            let seen = slots.iter().copied().filter(|d| !d.is_nan());
-            let (shallowest, deepest) =
-                seen.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), d| (lo.min(d), hi.max(d)));
-            // The bottom of the stroke goes that share of the way from where
-            // the animation has it to the shaft's base; the rest of the
-            // stroke stretches with it from its shallowest point.
-            let bottom = deepest + (base_length - deepest).max(0.0) * depth.min(1.0);
-            let stroke = deepest - shallowest;
-            if stroke < 1e-3 {
-                continue;
-            }
-            let more = ((deep - shallowest) / stroke * (bottom - deepest)).clamp(0.0, MAX_REACH);
+            let shallowest = strokes.iter().map(|(_, d)| *d).fold(f32::INFINITY, f32::min);
+            let more = ((deep - shallowest) * (depth - 1.0)).clamp(-MAX_REACH, MAX_REACH);
             reached.push((aim.partner, -line * more));
         }
         for actor in &mut self.actors {
             if !held.iter().any(|(_, a)| a.partner == actor.id) {
-                actor.strokes = None;
+                actor.strokes.clear();
             }
             actor.reach_next = reached.iter().find(|(id, _)| *id == actor.id).map(|r| r.1);
         }
@@ -3639,8 +3599,7 @@ impl Live {
             shaft_line: None,
             reach_next: None,
             reach_at: None,
-            strokes: None,
-            bare_mouth: None,
+            strokes: Default::default(),
             aim_job: None,
             aim_posed: None,
             guests_next: None,

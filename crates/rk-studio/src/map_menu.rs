@@ -79,7 +79,7 @@ pub(crate) fn sun_heading(
 ) -> bool {
     let side = rect.height();
     let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
-    widgets::number_to(ui, k, field, id, &mut angles[0], widgets::Marker::None, true, 0.5, 0);
+    widgets::slider(ui, k, field, id, &mut angles[0], (0.0, 359.0), 0.5, 0);
     angles[0] = angles[0].rem_euclid(360.0);
     if !turned {
         return false;
@@ -105,8 +105,7 @@ pub(crate) fn sun_heading(
 pub(crate) fn sun_elevation(ui: &mut Ui, k: &Look, rect: Rect, id: egui::Id, angles: &mut [f32; 2]) {
     let side = rect.height();
     let field = Rect::from_min_max(rect.min, Pos2::new(rect.right() - side - 4.0, rect.bottom()));
-    widgets::number_to(ui, k, field, id, &mut angles[1], widgets::Marker::None, true, 0.5, 0);
-    angles[1] = angles[1].clamp(-90.0, 90.0);
+    widgets::slider(ui, k, field, id, &mut angles[1], (-90.0, 90.0), 0.5, 0);
 }
 
 /// Which of the fog's presets its settings are, if any.

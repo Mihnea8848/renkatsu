@@ -441,6 +441,11 @@ fn context_items(ui: &mut Ui, k: &Look, st: &mut State) {
         ui.add_space(5.0);
         bar_text(ui, label, k.font(), k.t.text_dim);
     }
+    // A character's actions are in its Properties, in the Character
+    // section.
+    if kind == crate::kinds::Kind::Character {
+        return;
+    }
     ui.add_space(4.0);
     bar_divider(ui, k);
     ui.add_space(2.0);

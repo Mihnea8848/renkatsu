@@ -164,6 +164,9 @@ struct Cli {
     /// Start on this page of Properties, by its place, to picture it.
     #[arg(long, hide = true)]
     property_tab: Option<usize>,
+    /// What the Properties search holds at start, for pictures of it.
+    #[arg(long, hide = true)]
+    property_search: Option<String>,
     /// Show the sun's dome as Ctrl+L shows it, to picture it.
     #[arg(long, hide = true)]
     sun_preview: bool,
@@ -816,6 +819,9 @@ impl Studio {
         state.save_pose_pending = cli.save_pose;
         if let Some(tab) = cli.property_tab {
             state.property_tab = tab;
+        }
+        if let Some(text) = &cli.property_search {
+            state.property_search = text.clone();
         }
         if let Some(name) = cli.tool.as_deref() {
             state.tool = modes::TOOLS
