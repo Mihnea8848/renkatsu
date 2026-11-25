@@ -497,6 +497,9 @@ pub struct State {
     pub folder: usize,
     /// The file selected in the Content panel, relative to the project.
     pub asset: Option<PathBuf>,
+    /// Everything selected in the Content panel, with Ctrl and Shift
+    /// clicks, relative to the project; `asset` is the last clicked.
+    pub assets: Vec<String>,
     /// Console levels shown: information, warnings, errors.
     pub levels: [bool; 3],
 
@@ -955,6 +958,7 @@ impl State {
             command_search: String::new(),
             folder: 0,
             asset: None,
+            assets: Vec::new(),
             levels: [true; 3],
             viewport_image: None,
             live: None,

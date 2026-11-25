@@ -49,6 +49,8 @@ struct Asks {
     open: Option<String>,
     /// A file to select.
     select: Option<String>,
+    /// The tiles in the order they are shown, for a Shift click's range.
+    order: Vec<String>,
     /// A file or folder to start renaming.
     rename: Option<String>,
     /// The renaming was asked for in the folder tree, so its field shows
@@ -143,8 +145,26 @@ fn folder_menu(ui: &mut Ui, k: &Look, st: &State, folder: &str, asks: &mut Asks)
     if content::changeable(folder) {
         ui.separator();
         if widgets::menu_item(ui, k, icon::TRASH, "Delete", "", true) {
-            asks.file(FileOp::Delete(folder.to_owned()));
+            for item in with_selection(st, folder) {
+                asks.file(FileOp::Delete(item));
+            }
         }
+    }
+}
+
+/// Whether a tile is selected, noting it in the order the tiles show.
+fn picked(st: &State, rel: &str, asks: &mut Asks) -> bool {
+    asks.order.push(rel.to_owned());
+    st.assets.iter().any(|a| a == rel) || st.asset.as_deref() == Some(Path::new(rel))
+}
+
+/// What an action on `rel` acts on: the whole selection when `rel` is
+/// part of one, else `rel` alone.
+fn with_selection(st: &State, rel: &str) -> Vec<String> {
+    if st.assets.len() > 1 && st.assets.iter().any(|a| a == rel) {
+        st.assets.clone()
+    } else {
+        vec![rel.to_owned()]
     }
 }
 
@@ -245,7 +265,9 @@ fn file_menu(ui: &mut Ui, k: &Look, st: &State, rel: &str, asks: &mut Asks) {
     }
     ui.separator();
     if widgets::menu_item(ui, k, icon::TRASH, "Delete", "", true) {
-        asks.file(FileOp::Delete(rel.to_owned()));
+        for item in with_selection(st, rel) {
+            asks.file(FileOp::Delete(item));
+        }
     }
 }
 
@@ -274,7 +296,7 @@ fn renaming(ui: &mut Ui, k: &Look, st: &mut State, rel: &str, rect: Rect, in_tre
 
 /// What is being dragged over `rect`, when it can be moved into `folder`:
 /// a file or a card of the same project folder.
-fn drop_into(ui: &Ui, k: &Look, rect: Rect, folder: &str, asks: &mut Asks) {
+fn drop_into(ui: &Ui, k: &Look, rect: Rect, folder: &str, selected: &[String], asks: &mut Asks) {
     let dragged = if crate::panels::dragged_over::<DragFile>(ui, rect) {
         egui::DragAndDrop::payload::<DragFile>(ui.ctx()).map(|f| f.0.clone())
     } else if crate::panels::dragged_over::<DragCard>(ui, rect) {
@@ -289,7 +311,22 @@ fn drop_into(ui: &Ui, k: &Look, rect: Rect, folder: &str, asks: &mut Asks) {
     ui.painter()
         .rect_stroke(rect, 0.0, Stroke::new(1.0, k.t.select_bright), StrokeKind::Inside);
     if ui.input(|i| i.pointer.any_released()) {
-        asks.file(FileOp::Move(rel, folder.to_owned()));
+        // A tile of several selected brings the others along, those that
+        // can go there: of the same project folder, not the folder itself
+        // or one it lies in.
+        let all: Vec<String> = if selected.contains(&rel) {
+            selected.to_vec()
+        } else {
+            vec![rel]
+        };
+        for item in all {
+            let fits = content::top(&item) == content::top(folder)
+                && content::parent(&item) != folder
+                && !in_open(folder, &item);
+            if fits {
+                asks.file(FileOp::Move(item, folder.to_owned()));
+            }
+        }
     }
 }
 
@@ -412,6 +449,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let ground = ui.interact(grid, ui.id().with("content ground"), Sense::click());
     if ground.clicked() {
         st.asset = None;
+        st.assets.clear();
     }
     ground.context_menu(|ui| folder_menu(ui, k, st, &open, &mut asks));
     let mut area = ui.new_child(UiBuilder::new().max_rect(grid));
@@ -440,9 +478,32 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     if let Some(folder) = asks.open.take() {
         st.go_to_folder(&folder);
         st.asset = None;
+        st.assets.clear();
     }
     if let Some(rel) = asks.select.take() {
-        st.asset = Some(PathBuf::from(rel));
+        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        let anchor = st.asset.as_deref().map(slashes);
+        let at = |r: &str| asks.order.iter().position(|o| o == r);
+        match (shift, anchor.as_deref().and_then(at), at(&rel)) {
+            // Shift: everything from the last click to this one.
+            (true, Some(a), Some(b)) => st.assets = asks.order[a.min(b)..=a.max(b)].to_vec(),
+            _ if ctrl => {
+                if st.assets.is_empty() {
+                    st.assets.extend(anchor);
+                }
+                if let Some(i) = st.assets.iter().position(|o| *o == rel) {
+                    st.assets.remove(i);
+                } else {
+                    st.assets.push(rel.clone());
+                }
+            }
+            // A right click on a tile already selected keeps the others.
+            _ if st.assets.contains(&rel) && ui.input(|i| i.pointer.secondary_released()) => {}
+            _ => st.assets = vec![rel.clone()],
+        }
+        if !shift {
+            st.asset = Some(PathBuf::from(rel));
+        }
     }
     if let Some(rel) = asks.rename.take() {
         st.content_renaming = Some((rel.clone(), content::stem(&rel).to_owned()));
@@ -633,7 +694,7 @@ fn folder_row(
         label(&clip, k, Pos2::new(x + 14.0, row.center().y), name, color);
     }
     if !project {
-        drop_into(ui, k, row, rel, asks);
+        drop_into(ui, k, row, rel, &st.assets.clone(), asks);
         let asked = asks.rename.is_some();
         resp.context_menu(|ui| folder_menu(ui, k, st, rel, asks));
         if !asked && asks.rename.is_some() {
@@ -896,15 +957,18 @@ fn draw_tile(
 /// A folder inside the open one, as a tile. A double click opens it, and
 /// files dropped on it go into it.
 fn folder_tile(ui: &mut Ui, k: &Look, st: &mut State, cell: Rect, rel: &str, asks: &mut Asks) {
-    let resp = ui.interact(cell, ui.id().with(("folder tile", rel)), Sense::click());
+    let resp = ui.interact(cell, ui.id().with(("folder tile", rel)), Sense::click_and_drag());
+    if content::changeable(rel) {
+        resp.dnd_set_drag_payload(DragFile(rel.to_owned()));
+    }
     if resp.clicked() || resp.secondary_clicked() {
         asks.select = Some(rel.to_owned());
     }
     if resp.double_clicked() {
         asks.open = Some(rel.to_owned());
     }
-    let on = st.asset.as_deref() == Some(Path::new(rel));
-    drop_into(ui, k, cell, rel, asks);
+    let on = picked(st, rel, asks);
+    drop_into(ui, k, cell, rel, &st.assets.clone(), asks);
     let text = TileText {
         rel,
         name: content::leaf(rel),
@@ -991,7 +1055,7 @@ fn cards(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, empty: &
         if resp.double_clicked() {
             asks.commands.push(Command::AddCard(card.file.clone()));
         }
-        let on = st.asset.as_ref() == Some(&card.file);
+        let on = picked(st, &rel, asks);
         let thumb = match st.library.thumb(ui.ctx(), &card.path) {
             Some(tex) => Thumb::Image(tex.id(), square_uv(tex.size())),
             None => Thumb::Glyph(kind.glyph(), k.t.hover),
@@ -1096,7 +1160,7 @@ fn animations(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, ask
             }
             let item = st.animations.items[shown[n - inside.len() - keyed.len()]].clone();
             let resp = ui.interact(cell, ui.id().with(("animation", &item.rel)), Sense::click_and_drag());
-            let on = st.asset.as_deref() == Some(Path::new(&item.rel));
+            let on = picked(st, &item.rel, asks);
             let g = match (item.is_static(), item.link.is_some()) {
                 (_, true) => icon::LINK_SIMPLE,
                 (Some(true), _) => Kind::Pose.glyph(),
@@ -1194,7 +1258,7 @@ fn maps(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, asks: &mu
         if resp.double_clicked() {
             asks.commands.push(Command::AddMap(PathBuf::from(&rel)));
         }
-        let on = st.asset.as_deref() == Some(Path::new(&rel));
+        let on = picked(st, &rel, asks);
         let picture = map
             .map
             .thumbnail
@@ -1266,7 +1330,7 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
         }
         let rel = &found[n - inside.len()];
         let resp = ui.interact(cell, ui.id().with(("file", rel)), Sense::click_and_drag());
-        let on = st.asset.as_deref() == Some(Path::new(rel));
+        let on = picked(st, rel, asks);
         let lower = rel.to_lowercase();
         let g = if lower.ends_with(".png") {
             icon::IMAGE
@@ -1322,7 +1386,7 @@ fn files(ui: &mut Ui, k: &Look, st: &mut State, grid: Rect, open: &str, kind: Ki
 /// character in the Outliner.
 fn keys_tile(ui: &mut Ui, k: &Look, st: &mut State, cell: Rect, rel: &str, asks: &mut Asks) {
     let resp = ui.interact(cell, ui.id().with(("keys", rel)), Sense::click_and_drag());
-    let on = st.asset.as_deref() == Some(Path::new(rel));
+    let on = picked(st, rel, asks);
     let text = TileText {
         rel,
         name: content::stem(rel),
