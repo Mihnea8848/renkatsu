@@ -1409,7 +1409,9 @@ impl Studio {
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
-                    .show_close_buttons(false)
+                    // Panels close from their tab or their floating window,
+                    // and come back from the Window menu.
+                    .show_close_buttons(true)
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);
