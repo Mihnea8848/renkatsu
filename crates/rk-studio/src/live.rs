@@ -1370,10 +1370,10 @@ impl Live {
                 .max(0) as usize;
             let chara = &mut actor.chara;
             let Some(gaze) = chara.gaze.as_mut() else { continue };
-            let (world, _) = chara.scene.world();
-            let scene_nodes = &chara.scene.nodes;
-            let parents = |n: usize| scene_nodes[n].parent;
-            let rates = gaze.update(&world, &parents, camera, pattern, dt);
+            // The few bones the eyes read, not the whole skeleton's.
+            let scene = &chara.scene;
+            let parents = |n: usize| scene.nodes[n].parent;
+            let rates = gaze.update(&|n| scene.world_of(n), &parents, camera, pattern, dt);
             let moved = actor.gaze_next.is_none_or(|(h, v)| {
                 (h[0] - rates.0[0]).abs() + (h[1] - rates.0[1]).abs() + (v - rates.1).abs() > 1e-4
             });

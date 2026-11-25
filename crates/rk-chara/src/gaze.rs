@@ -194,7 +194,7 @@ impl EyeLook {
     #[allow(clippy::needless_range_loop)]
     pub fn update(
         &mut self,
-        world: &[Mat4],
+        world: &dyn Fn(usize) -> Mat4,
         parents: &dyn Fn(usize) -> Option<usize>,
         target: Vec3,
         ptn: usize,
@@ -213,7 +213,7 @@ impl EyeLook {
         if look == LookType::NoLook {
             return self.rates(ptn);
         }
-        let root = world[self.root];
+        let root = world(self.root);
         let root_at = position(&root);
         let root_forward = unity::rotate(rotation(&root), Vec3::Z);
         let mut target = target;
@@ -236,7 +236,7 @@ impl EyeLook {
         // two converge on it (`n_cam_tl`, `n_cam_tr`).
         let mut aims = [target, target];
         if let (true, Some(center), LookType::Target | LookType::Forward) = (self.correct, self.center, look) {
-            let c = world[center];
+            let c = world(center);
             let mut local = c.inverse().transform_point3(target);
             local.z = local.z.max(0.5);
             let at = c.transform_point3(local);
@@ -256,12 +256,12 @@ impl EyeLook {
         for i in 0..self.eyes.len() {
             let eye = &self.eyes[i];
             let Some(parent) = parents(eye.node) else { continue };
-            let back = unity::inverse(rotation(&world[parent]));
+            let back = unity::inverse(rotation(&world(parent)));
             let goal = match look {
                 LookType::Target | LookType::Forward => aims[i],
                 _ => target,
             };
-            let dir = unity::rotate(back, unity::normalize(goal - position(&world[eye.node])));
+            let dir = unity::rotate(back, unity::normalize(goal - position(&world(eye.node))));
             let mut f = angle_around_axis(eye.reference_look, dir, eye.reference_up);
             let axis = unity::cross(eye.reference_up, dir);
             let flat = dir - unity::project(dir, eye.reference_up);
@@ -414,18 +414,21 @@ mod tests {
         // A target up and to the side: both eyes turn the same way, the
         // rates grow, then hold.
         let target = Vec3::new(0.6, 0.4, 1.0);
-        let first = gaze.update(&world, &parents, target, 0, 1.0 / 60.0);
+        let first = gaze.update(&|n| world[n], &parents, target, 0, 1.0 / 60.0);
         let mut last = first;
         for _ in 0..120 {
-            last = gaze.update(&world, &parents, target, 0, 1.0 / 60.0);
+            last = gaze.update(&|n| world[n], &parents, target, 0, 1.0 / 60.0);
         }
         assert!(last.0[0].abs() > first.0[0].abs(), "eased toward the target");
         assert!(last.0[0].signum() == last.0[1].signum() || last.0[1] == 0.0);
         assert!(last.1 != 0.0, "up or down moves the irises too");
-        let again = gaze.update(&world, &parents, target, 0, 1.0 / 60.0);
+        let again = gaze.update(&|n| world[n], &parents, target, 0, 1.0 / 60.0);
         assert!((again.0[0] - last.0[0]).abs() < 1e-4, "settled");
         // Without time passing nothing moves.
-        assert_eq!(gaze.update(&world, &parents, Vec3::new(-1.0, 0.0, 1.0), 0, 0.0), again);
+        assert_eq!(
+            gaze.update(&|n| world[n], &parents, Vec3::new(-1.0, 0.0, 1.0), 0, 0.0),
+            again
+        );
     }
 
     #[test]
@@ -455,7 +458,7 @@ mod tests {
         let camera = Vec3::new(0.8, 1.8, 1.5);
         let mut rates = ([0.0; 2], 0.0);
         for _ in 0..60 {
-            rates = gaze.update(&world, &parents, camera, 1, 1.0 / 60.0);
+            rates = gaze.update(&|n| world[n], &parents, camera, 1, 1.0 / 60.0);
         }
         eprintln!("rates {rates:?}");
         assert!(rates.0[0].abs() > 0.05 && rates.0[1].abs() > 0.05, "{rates:?}");
@@ -469,11 +472,11 @@ mod tests {
         let mut ahead = ([0.0; 2], 0.0);
         let (_, mut front) = head(LookType::Forward);
         for _ in 0..120 {
-            ahead = gaze.update(&world, &parents, Vec3::new(0.0, 0.0, -2.0), 0, 1.0 / 60.0);
-            front.update(&world, &parents, Vec3::ZERO, 0, 1.0 / 60.0);
+            ahead = gaze.update(&|n| world[n], &parents, Vec3::new(0.0, 0.0, -2.0), 0, 1.0 / 60.0);
+            front.update(&|n| world[n], &parents, Vec3::ZERO, 0, 1.0 / 60.0);
         }
         // Past the side limit the eyes look ahead, as the front pattern does.
-        let fwd = front.update(&world, &parents, Vec3::ZERO, 0, 1.0 / 60.0);
+        let fwd = front.update(&|n| world[n], &parents, Vec3::ZERO, 0, 1.0 / 60.0);
         assert!((ahead.0[0] - fwd.0[0]).abs() < 1e-3 && (ahead.1 - fwd.1).abs() < 1e-3);
     }
 }
