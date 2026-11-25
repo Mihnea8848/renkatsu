@@ -1811,7 +1811,7 @@ fn penetration_section(
         ]);
     }
     if aimed == Some(Mode::Oral) {
-        sliders.push(("Depth", &mut s.depth, 0.5, 2.0));
+        sliders.push(("Depth", &mut s.depth, 0.0, 1.0));
     }
     sliders.extend([
         ("Hit radius", &mut s.collider_radius_scale, 0.5, 1.5),
