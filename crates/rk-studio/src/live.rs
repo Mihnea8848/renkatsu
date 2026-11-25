@@ -84,6 +84,9 @@ struct Actor {
     /// whether this frame's pose turned it already.
     look_at: Vec3,
     neck_done: bool,
+    /// Which way the shaft points as the animation holds it, from root
+    /// to tip.
+    shaft_line: Option<Vec3>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -533,6 +536,15 @@ impl Actor {
         // script does in LateUpdate, and before the shaft is aimed at it.
         self.turn_neck(dt, true);
         self.neck_done = true;
+        // The line the shaft lies along as the animation holds it, before
+        // it is aimed: where a partner moves for more or less depth.
+        if let Some(shaft) = self.chara.shaft.as_ref() {
+            if let (Some(&root), Some(&tip)) = (shaft.points.first(), shaft.points.last()) {
+                let scene = &self.chara.scene;
+                let along = scene.world_of(tip).w_axis.truncate() - scene.world_of(root).w_axis.truncate();
+                self.shaft_line = along.try_normalize();
+            }
+        }
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
@@ -2429,6 +2441,25 @@ impl Live {
             self.actors[i].h_position = position;
         }
         let held = std::mem::take(&mut self.aims);
+        // Who moves for a shaft's depth, and by how much, from the aims of
+        // the frame before: the partner along the line of his shaft, or he
+        // when she is what he is snapped to.
+        let moved: Vec<(ObjectId, Vec3)> = held
+            .iter()
+            .filter_map(|&(him, aim)| {
+                let at = self.actors.iter().position(|a| a.id == him)?;
+                let depth = self.settings_of(at, scene)?.depth_offset;
+                let line = self.actors[at].shaft_line.filter(|_| depth != 0.0)?;
+                let mut up = scene.get(him).and_then(|o| o.parent);
+                while let Some(id) = up {
+                    if id == aim.partner {
+                        return Some((him, line * depth));
+                    }
+                    up = scene.get(id).and_then(|o| o.parent);
+                }
+                Some((aim.partner, -line * depth))
+            })
+            .collect();
         let obstacles = self.obstacles();
         for at in order {
             let id = self.actors[at].id;
@@ -2506,7 +2537,10 @@ impl Live {
                     &parameters,
                 )
             };
-            let world = scene.world_by(actor.id, &self.poses);
+            let mut world = scene.world_by(actor.id, &self.poses);
+            if let Some((_, by)) = moved.iter().find(|(id, _)| *id == actor.id) {
+                world = Mat4::from_translation(*by) * world;
+            }
             let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
             if actor.update(object, world, &mut read, &clock, keys, self.patient, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
@@ -3458,6 +3492,7 @@ impl Live {
             gaze_clock: std::time::Instant::now(),
             look_at: Vec3::ZERO,
             neck_done: false,
+            shaft_line: None,
             aim_job: None,
             aim_posed: None,
             guests_next: None,

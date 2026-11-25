@@ -1808,7 +1808,7 @@ fn penetration_section(
             ("Length squish", &mut s.length_squish, 0.0, 1.0),
             ("Girth squish", &mut s.girth_squish, 0.0, 2.0),
             ("Threshold", &mut s.squish_threshold, 0.0, 1.0),
-            ("Depth", &mut s.depth, 0.0, 1.0),
+            ("Depth", &mut s.depth_offset, -0.1, 0.1),
         ]);
     }
     sliders.extend([
