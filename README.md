@@ -155,7 +155,7 @@ lighting than the game has.
 
 ## Version history
 
-The latest version is 0.2.3, on the
+The latest version is 0.3.0, on the
 [releases page](https://github.com/Mihnea8848/renkatsu/releases).
 
 <details>
@@ -204,15 +204,20 @@ The latest version is 0.2.3, on the
   characters shading the map, CharaStudio's colour filters, fog, depth of
   field, sun shafts and mirrors. A map's furniture can be moved and its
   doors opened, and night scenes darken the map for lamps to light.
-- 0.2.3 poses characters by hand. Bones turn with handles as in
+- 0.3.0 poses characters by hand. Bones turn with handles as in
   CharaStudio's FK, and IK moves the hands, feet, elbows, knees and body
   with CharaStudio's own solver, ported to land within a hundredth of a
   millimetre of the game. Poses mirror, copy to the other side, bake from
   an animation and keep in the project. Keys on bones and IK targets play
   on a timeline, an Animator panel holds the skeleton and its keys, and a
-  character's animation plays alone and saves to reuse. The map's sun
-  turns by hand, directional lamps cast shadows, news shows pictures, and
-  updates install themselves.
+  character's animation plays alone and saves to reuse. Faces come alive:
+  hand patterns, expressions with presets, skin effects, blinking, and
+  eyes and heads that look at the camera or at anything in the scene.
+  The H scenes' effects follow the BetterPenetration plugin, with
+  Renkatsu's own depth, length and smoother shapes; skirts move on a GPU
+  cloth solver; and Properties are reworked into framed groups with
+  sliders. The map's sun turns by hand, directional lamps cast shadows,
+  news shows pictures, and updates install themselves.
 
 </details>
 
