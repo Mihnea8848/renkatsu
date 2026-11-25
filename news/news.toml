@@ -2,6 +2,65 @@
 # The format is described in README.md, beside this file.
 
 [[post]]
+date = 2026-11-25
+title = "Fluids come next"
+author = "Mihnea8848"
+summary = "Drips, drops and strands that stretch between two places, simulated rather than drawn. The first parts work in my builds."
+body = """
+The next thing I am working on is fluids. Some of the Ren'Py games made with Koikatsu characters have them, but they draw them by hand, frame by frame, on pictures taken from CharaStudio. No Koikatsu plugin simulates them, so in Renkatsu they are a feature of their own.
+
+There will be strands that stretch between two places as they pull apart, thinning in the middle, sagging and breaking into drops; drips that form, hang and fall; and drops that land on the body or the map, stick, slide down a slope and slowly dry, leaving wet marks behind. They can come from a place on a character, from a point you put anywhere in the scene, or from the H scenes themselves, and the timeline can key them.
+
+The first two parts work in my builds: the drops themselves, with how they fall, land, stick, slide and run together, and the strands, which bow when the two ends come closer or shorten and stay straight when they are thin. Next comes drawing them, glossy and slightly see-through, in the game's look and in a more realistic one. I am studying the moving loops of those games so that the motion looks right before it looks pretty.
+
+I will post here again when there is something to see.
+"""
+
+[[post]]
+date = 2026-11-25
+title = "A new Properties panel"
+author = "Mihnea8848"
+summary = "Properties are redone: framed groups, sliders, page icons and a search that finds any field. It comes with 0.3.0."
+body = """
+The Properties panel is redone, and it comes with 0.3.0. It had grown into long lists of rows that were hard to read and harder to use, so I tried three designs in the real program and kept the one that worked best.
+
+Each section is now a framed group, values with a range are sliders with their number beside them, and levels step. The name of what is selected, its pages as icons, the search and the settings share one line at the top, and each page has its title. The search finds a field on any page, not only the one that is open. Rows that cannot do anything right now are hidden instead of greyed out, and the diamonds for keys have a column of their own.
+
+Load card and the modules moved from the viewport's header into the Character section, where the rest of the character is. Panels can also be closed now, from their tab or from their own window once dragged out, and come back from the Window menu.
+"""
+pictures = [
+    { file = "images/2026-11-25-properties.jpg", caption = "The new Properties panel, on the Animation page of a character", after = 1 },
+]
+
+[[post]]
+date = 2026-11-25
+title = "Faces come alive"
+author = "Mihnea8848"
+summary = "Hand patterns, expressions with presets, blinking, and eyes and heads that follow the camera or anything in the scene. It comes with 0.3.0."
+body = """
+Characters in 0.3.0 have their faces and hands. Each hand takes one of CharaStudio's hand patterns, over whatever the animation does with the fingers. The face takes the game's eyebrows, eyes and mouths, each shown as a picture of the character herself, with tears, blush, how open the eyes and mouth are, and the extras of KK_ExpressionControl. Presets set a whole expression at once.
+
+The eyes blink as the game blinks them, each character on her own rhythm, and where she looks is set under Expression: ahead, at the camera, away from it, or at any object of the scene. Pick another character and she looks him in the face. Her head turns toward the camera too, by the game's own rules and limits.
+
+All of it takes keys on the timeline, so a face can change during an animation.
+"""
+pictures = [
+    { file = "images/2026-11-25-looking-at-the-camera.jpg", caption = "Eyes and head turned toward the camera, on a desk in the classroom", after = 0 },
+    { file = "images/2026-11-25-expression-section.png", caption = "Expression, with the patterns as pictures and where she looks", after = 2 },
+]
+
+[[post]]
+date = 2026-11-25
+title = "Skirts on a new cloth solver"
+author = "Mihnea8848"
+summary = "Skirts move on a cloth solver that runs on the graphics card, and come to rest when the character stands still. It comes with 0.3.0."
+body = """
+Skirts in 0.3.0 move on a new cloth solver that runs on the graphics card. Each skirt gets a kind, tight, pleated, flowing or fixed, guessed from the outfit and changeable on the Renkatsu page, and moves the way that kind of skirt should.
+
+Skirts now come to rest when the character stands still instead of shaking, rest on seats, beds and floors, and keep legs, arms and the floor out of them. Hems no longer catch inside a leg after a long run, and most of the black folds are gone. A character moved across the scene takes her cloth with her at once. Whether a skirt moves the way Koikatsu moves it or the way Renkatsu does is a choice per outfit.
+"""
+
+[[post]]
 date = 2026-11-24
 title = "Posing by hand works"
 author = "Mihnea8848"
