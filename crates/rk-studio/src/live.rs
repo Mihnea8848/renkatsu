@@ -105,6 +105,8 @@ struct Actor {
     /// The tongue's bones, once looked for, and whether it is out.
     tongue_chain: Option<Option<[usize; 5]>>,
     tongue_out: bool,
+    /// Where a shaft in her mouth lies, for a tongue put out under it.
+    tongue_guide: Option<(Vec3, Vec3, Vec3)>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -654,7 +656,12 @@ impl Actor {
                 self.rest[n]
             }
         });
-        rk_chara::tongue::put_out(&mut self.chara.scene, &chain, &from, amount);
+        match self.tongue_guide.filter(|_| self.mouth_held) {
+            Some((entry, along, down)) => {
+                rk_chara::tongue::lay_under(&mut self.chara.scene, &chain, &from, amount, entry, along, down)
+            }
+            None => rk_chara::tongue::put_out(&mut self.chara.scene, &chain, &from, amount),
+        }
         self.tongue_out = amount > 0.0;
     }
 
@@ -2754,7 +2761,29 @@ impl Live {
             let more = ((deep - shallowest) / stroke * (bottom - deepest)).clamp(0.0, MAX_REACH);
             reached.push((aim.partner, -line * more));
         }
+        // The line a tongue put out lies along under a shaft in her mouth:
+        // the mouth's entry, the way out along the shaft, and her chin's way.
+        let mut guides: Vec<(ObjectId, (Vec3, Vec3, Vec3))> = Vec::new();
+        for &(him, aim) in &held {
+            if aim.mode != rk_chara::better_penetration::Mode::Oral {
+                continue;
+            }
+            let (Some(line), Some(her)) = (
+                self.actors.iter().find(|a| a.id == him).and_then(|a| a.shaft_line),
+                self.actors.iter().find(|a| a.id == aim.partner),
+            ) else {
+                continue;
+            };
+            let Some(head) = her.chara.scene.find(her.chara.top, "cf_j_head") else {
+                continue;
+            };
+            let up = her.chara.scene.world_of(head).y_axis.truncate();
+            let along = -line;
+            let down = -(up - along * up.dot(along));
+            guides.push((aim.partner, (aim.entry, along, down)));
+        }
         for actor in &mut self.actors {
+            actor.tongue_guide = guides.iter().find(|(id, _)| *id == actor.id).map(|g| g.1);
             if !held.iter().any(|(_, a)| a.partner == actor.id) {
                 actor.strokes = None;
             }
@@ -3798,6 +3827,7 @@ impl Live {
             bare_mouth: None,
             tongue_chain: None,
             tongue_out: false,
+            tongue_guide: None,
             aim_job: None,
             aim_posed: None,
             guests_next: None,

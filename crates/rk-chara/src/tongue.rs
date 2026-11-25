@@ -53,6 +53,61 @@ pub fn put_out(scene: &mut Scene, chain: &[usize; 5], from: &[Trs; 5], amount: f
     }
 }
 
+/// How far below a shaft's middle the tongue lies, in metres: below the
+/// shaft's surface, so it shows under it rather than inside it.
+const UNDER: f32 = 0.02;
+
+/// How far the tip curls up against a shaft at full amount, in degrees.
+const CURL: f32 = 28.0;
+
+/// Puts the tongue out under a shaft by `amount`: out of the mouth along
+/// `along` (from the mouth toward his body), on the line `UNDER` below the
+/// shaft's middle at `entry`, `down` toward her chin. Each bone turns so
+/// the next lands on that line, and the tip curls up against the shaft.
+#[allow(clippy::too_many_arguments)]
+pub fn lay_under(
+    scene: &mut Scene,
+    chain: &[usize; 5],
+    from: &[Trs; 5],
+    amount: f32,
+    entry: Vec3,
+    along: Vec3,
+    down: Vec3,
+) {
+    let a = amount.clamp(0.0, 1.0);
+    for (&node, base) in chain.iter().zip(from) {
+        scene.nodes[node].local = *base;
+    }
+    let root = &mut scene.nodes[chain[0]].local;
+    root.pos += from[0].rot * (SLIDE * a);
+    let (Some(along), Some(down)) = (along.try_normalize(), down.try_normalize()) else {
+        return;
+    };
+    let line = entry + down * UNDER;
+    let world_rot = |scene: &Scene, n: usize| scene.world_of(n).to_scale_rotation_translation().1;
+    for i in 0..4 {
+        let (bone, child) = (chain[i], chain[i + 1]);
+        let at = scene.world_of(bone).w_axis.truncate();
+        let reach = scene.world_of(child).w_axis.truncate() - at;
+        let length = reach.length();
+        // Where on the line the next bone lands: as far along it as the
+        // bone reaches, or the nearest point when it cannot reach it.
+        let o = line - at;
+        let b = o.dot(along);
+        let disc = b * b - (o.length_squared() - length * length);
+        let s = -b + disc.max(0.0).sqrt();
+        let goal = line + along * s.max(-b);
+        let turned = Quat::from_rotation_arc(reach.normalize_or_zero(), (goal - at).normalize_or_zero());
+        // Only as much of the turn as the tongue is out.
+        let turn = Quat::IDENTITY.slerp(turned, a);
+        let rot = turn * world_rot(scene, bone);
+        let parent = scene.nodes[bone].parent.map_or(Quat::IDENTITY, |p| world_rot(scene, p));
+        scene.nodes[bone].local.rot = (parent.inverse() * rot).normalize();
+    }
+    let tip = &mut scene.nodes[chain[4]].local;
+    tip.rot = (tip.rot * Quat::from_rotation_x((-CURL * a).to_radians())).normalize();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +141,19 @@ mod tests {
         // None puts it back as it was.
         put_out(&mut scene, &nodes, &rest, 0.0);
         assert!(tip(&scene).distance(before) < 1e-6);
+    }
+
+    #[test]
+    fn under_a_shaft_the_tongue_lies_along_it() {
+        let (mut scene, nodes, rest) = chain();
+        // A shaft coming in level, its middle at the mouth, along -Z.
+        let entry = Vec3::new(0.0, 0.0, 0.03);
+        lay_under(&mut scene, &nodes, &rest, 1.0, entry, Vec3::Z, -Vec3::Y);
+        let at = |i: usize| scene.world_of(nodes[i]).w_axis.truncate();
+        // The middle bones lie on the line under the shaft.
+        for i in 2..4 {
+            assert!((at(i).y + UNDER).abs() < 0.004, "bone {i} at {}", at(i));
+        }
+        assert!(at(4).z > entry.z + 0.03, "reaches out past the mouth: {}", at(4));
     }
 }
