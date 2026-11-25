@@ -41,6 +41,16 @@
 //!      pull different ways are averaged (NvCloth), each by how deep the
 //!      point is behind it: cloth between two thighs sits between them.
 //!      What cannot give way, the floor and the map, has the last word.
+//!      A plane through where the point is on a limb only puts it out
+//!      the nearest way, and cloth that a limb came through stayed on
+//!      it: a net point may rest up to 2.4 cm under the skin where the
+//!      garment stands off its net, which leaves a thigh thinner than
+//!      a cell is wide near the knee, and a link drawn across it was
+//!      pushed on through. So a point, and the middle of a link, that
+//!      has the limb between it and what it hangs from (the point above
+//!      it in its column, the middle of the link a row up; `ACROSS`)
+//!      leaves the limb towards that, and whatever began a substep
+//!      inside a limb comes out no faster than a point goes.
 //!   5. friction on the positions, with a static and a kinetic
 //!      coefficient, against each thing's own motion and no more than its
 //!      push (Macklin et al. 2014).
@@ -157,6 +167,11 @@ pub struct Material {
     /// against gravity while its wearer stands (`props`): 1 hangs it at
     /// rest as it was made, 0 as plain cloth falls.
     pub lift: f32,
+    /// How fast the speeds of points next to each other even out, per
+    /// second: the cloth's own friction as it bends and shears, which
+    /// takes the motion of one point against its neighbours and leaves
+    /// the cloth's swing as a whole.
+    pub calm: f32,
 }
 
 /// The damping of cloth of `weight` kg/m2 from the air's drag: a plate
@@ -199,6 +214,7 @@ impl Material {
             damping: drag(weight),
             memory: 0.0,
             lift: 1.0,
+            calm: CALM,
         };
         match kind {
             // Suiting of 60 % wool and 38 % polyester (sample 33): 195
@@ -304,6 +320,25 @@ pub const HANG_LEAST: f32 = 0.1;
 /// fastest point and the fastest limb close in on each other in a
 /// substep, 2 x (4 + 4.8) m/s / 960.
 pub const NEAR: f32 = 0.02;
+/// How fast the speeds of points next to each other even out, per
+/// second: within three frames of 1/60 s. An approximation: cloth's
+/// inner friction is measured as hysteresis (Kawabata's 2HB and 2HG),
+/// which is not a rate. Without it cloth pushed together where a
+/// character sits or kneels never lay still: its links and hinges kept
+/// points moving 1 to 3 mm a frame (72 of a kneeling dress's 416, none
+/// with it). It costs some swing, about a tenth of a running dress's;
+/// with 60 a sixth, for no more rest.
+pub const CALM: f32 = 20.0;
+/// Two planes of the map whose normals are within 30 degrees of each
+/// other face the same way: the cosine.
+pub const LIKE: f32 = 0.866;
+/// A point and the one above it in its column are never more than a
+/// quarter turn apart round a limb: two points on a limb's skin that far
+/// apart are the square root of two of its thickness from each other,
+/// further than a link is long on anything but a limb thinner than the
+/// net is wide. Nearer than this to the place across the limb's line
+/// from the one above, the limb is between them.
+pub const ACROSS: f32 = std::f32::consts::SQRT_2;
 /// The least a hinge's compliance is, in units of a point's lightness
 /// over the substep squared. A point's hinges add up while its lengths
 /// are averaged, and with stiffer hinges than this the two swing each
@@ -442,6 +477,17 @@ pub fn corners(points: &[Point], id: u32) -> [u32; 3] {
         [j, right, j + cols]
     } else {
         [right, right + cols, j + cols]
+    }
+}
+
+/// The point above `i` in its column, where that is cloth that moves:
+/// what `i` hangs from.
+fn above(points: &[Point], i: u32) -> u32 {
+    let [first, cols, _] = points[i as usize].grid;
+    if i >= first + cols && !points[(i - cols) as usize].fixed {
+        i - cols
+    } else {
+        NONE
     }
 }
 
@@ -692,8 +738,12 @@ fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 /// The planes of the map a point at `p` may meet within a frame: of
 /// each triangle it is in front of and within `reach` of, the plane
 /// through the nearest point of the triangle, facing the point (the
-/// triangle's own where that point is inside it). The `MAP_PLANES`
-/// nearest are kept.
+/// triangle's own where that point is inside it). `MAP_PLANES` are
+/// kept: the nearest, but where there are more, one that faces as a
+/// nearer one does (`LIKE`) gives its place to one that faces another
+/// way. Among a desk's edge, the bar under it and a chair's back the
+/// four nearest were all of the edge, and the cloth went through the
+/// chair's back and was put out of it again every third frame.
 fn map_planes(p: Vec3, triangles: &[[Vec3; 3]], reach: f32, behind: f32, out: &mut [[f32; 4]]) {
     let mut far = [f32::MAX; MAP_PLANES];
     for plane in out.iter_mut() {
@@ -724,6 +774,25 @@ fn map_planes(p: Vec3, triangles: &[[Vec3; 3]], reach: f32, behind: f32, out: &m
             continue;
         }
         let dist = (p - q).dot(n);
+        if far[MAP_PLANES - 1] < f32::MAX {
+            let like = |a: &[f32; 4], b: Vec3| Vec3::new(a[0], a[1], a[2]).dot(b) > LIKE;
+            let face = |a: &[f32; 4]| Vec3::new(a[0], a[1], a[2]);
+            if (0..MAP_PLANES).any(|j| far[j] <= dist && like(&out[j], n)) {
+                continue;
+            }
+            // The farthest that faces as a nearer one does goes.
+            let spare = (1..MAP_PLANES)
+                .rev()
+                .find(|&j| (0..j).any(|i| like(&out[j], face(&out[i]))) || (dist < far[j] && like(&out[j], n)));
+            if let Some(j) = spare {
+                for m in j..MAP_PLANES - 1 {
+                    far[m] = far[m + 1];
+                    out[m] = out[m + 1];
+                }
+                far[MAP_PLANES - 1] = f32::MAX;
+                out[MAP_PLANES - 1] = [0.0; 4];
+            }
+        }
         let mut k = MAP_PLANES;
         while k > 0 && dist < far[k - 1] {
             k -= 1;
@@ -789,6 +858,7 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
     }
     let ends: Vec<[f32; 2]> = setup.shells.iter().map(Shell::ends).collect();
     let damp = (-material.damping * h).exp();
+    let calm = 1.0 - (-material.calm * h).exp();
     let keep = (-material.memory * h).exp();
     let mut was = vec![Vec3::ZERO; n];
     let fade = PRESSED_FADE.powf(h * 60.0);
@@ -805,7 +875,20 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 // the point up by as the frame says.
                 let fall = Vec3::new(0.0, -GRAVITY, 0.0);
                 let prop = waist(sub + 1, p.net).transform_vector3(p.prop);
-                let v = (state.vel[i] + (fall + prop * frame.lift) * h) * damp;
+                // Its speed goes some of the way to that of the points
+                // it is linked to.
+                let (mut around, mut count) = (Vec3::ZERO, 0.0f32);
+                for link in &setup.links[i * LINKS..(i + 1) * LINKS] {
+                    if link.to != NONE {
+                        around += state.vel[link.to as usize];
+                        count += 1.0;
+                    }
+                }
+                let mut own = state.vel[i];
+                if count > 0.0 {
+                    own += (around / count - own) * calm;
+                }
+                let v = (own + (fall + prop * frame.lift) * h) * damp;
                 state.pos[i] + v * h
             };
         }
@@ -915,6 +998,7 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 x = home + (x - home) * keep;
             }
             // 4. Contact: the planes of the body near the point.
+            let up = above(&setup.points, i as u32);
             let mut body = [Plane::default(); BODY_PLANES];
             let mut bodies = 0;
             for (k, s) in setup.shells.iter().enumerate() {
@@ -941,6 +1025,25 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     pushed: 0.0,
                 };
                 plane.d = to.transform_point3(on).dot(plane.n) + skin;
+                if !s.outside {
+                    // What began the substep inside a limb comes out no
+                    // faster than a point goes: a point deep in it is
+                    // not put on its skin at once.
+                    plane.d -= (began - FASTEST * h).max(0.0);
+                    // A limb that came between the point and the one it
+                    // hangs from is left towards that one, whichever
+                    // side the point is nearer: back the way it came.
+                    if up != NONE {
+                        let lu = from.inverse().transform_point3(was[up as usize]);
+                        if let Some((_, way, far, _)) = on_shell(s, ends[k], lu) {
+                            if ((l - on) + way * far).length() < ACROSS * r {
+                                plane.n = to.transform_vector3(way).normalize_or_zero();
+                                plane.d = (to.transform_point3(on).dot(plane.n) + skin)
+                                    .min(to.transform_point3(l).dot(plane.n) + FASTEST * h);
+                            }
+                        }
+                    }
+                }
                 if s.outside && began > 0.0 {
                     // Inside an arm or a hand the cloth leaves it
                     // towards the body: it is under a hand on a lap.
@@ -1027,6 +1130,10 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                 }
                 let began_at = (x0 + was[link.to as usize]) * 0.5;
                 let middle = (x + next[link.to as usize]) * 0.5;
+                // What the middle hangs from: the middle of the link a
+                // row up.
+                let up_to = above(&setup.points, link.to);
+                let hangs = (up != NONE && up_to != NONE).then(|| (was[up as usize] + was[up_to as usize]) * 0.5);
                 for (k, s) in setup.shells.iter().enumerate() {
                     if bodies == BODY_PLANES || (s.outside && !frame.arms) {
                         continue;
@@ -1043,8 +1150,23 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
                     if began < -NEAR {
                         continue;
                     }
-                    let nrm = to.transform_vector3(dir).normalize_or_zero();
-                    let deep = to.transform_point3(on).dot(nrm) + skin - middle.dot(nrm);
+                    let mut nrm = to.transform_vector3(dir).normalize_or_zero();
+                    let mut deep = to.transform_point3(on).dot(nrm) + skin - middle.dot(nrm);
+                    if !s.outside {
+                        // As a point: out no faster than a point goes,
+                        // and towards what it hangs from where the limb
+                        // came between.
+                        let across = hangs
+                            .and_then(|at| on_shell(s, ends[k], from.inverse().transform_point3(at)))
+                            .filter(|&(_, way, far, _)| ((l - on) + way * far).length() < ACROSS * r);
+                        if let Some((_, way, _, _)) = across {
+                            nrm = to.transform_vector3(way).normalize_or_zero();
+                            deep = (to.transform_point3(on).dot(nrm) + skin - middle.dot(nrm))
+                                .min((to.transform_point3(l) - middle).dot(nrm) + FASTEST * h);
+                        } else {
+                            deep -= (began - FASTEST * h).max(0.0);
+                        }
+                    }
                     if deep <= 0.0 {
                         continue;
                     }
@@ -1218,6 +1340,25 @@ fn poses(from: &[Mat4], to: &[Mat4], substeps: u32) -> Vec<Mat4> {
     out
 }
 
+/// How many whole substeps of `SUBSTEP_TIME` the time owed and `dt`
+/// more make, and what is left is owed on. Every substep stands for the
+/// same time whatever the frame's: how stiff a link or a hinge is after
+/// one round depends on the substep's length, so with frames cut into
+/// substeps of their own length cloth at rest took a new shape with
+/// every frame of another length and never lay still in an app whose
+/// frames are uneven. A frame too long for `MOST_SUBSTEPS` loses the
+/// rest of its time.
+pub fn whole_substeps(owed: &mut f32, dt: f32) -> u32 {
+    *owed += dt.max(0.0);
+    let whole = (*owed / SUBSTEP_TIME + 1e-3).floor() as u32;
+    if whole > MOST_SUBSTEPS {
+        *owed = 0.0;
+        return MOST_SUBSTEPS;
+    }
+    *owed = (*owed - whole as f32 * SUBSTEP_TIME).max(0.0);
+    whole
+}
+
 /// How many substeps a frame of `dt` seconds is cut into.
 pub fn substeps(dt: f32) -> u32 {
     ((dt / SUBSTEP_TIME).ceil() as u32).clamp(1, MOST_SUBSTEPS)
@@ -1251,6 +1392,8 @@ pub struct Drape {
     /// The way gravity pulls where the cloth was made, in the first
     /// waist's space.
     down: Vec3,
+    /// Time that passed and no substep stood for yet.
+    owed: f32,
 }
 
 /// How many rows of a net of `cols` by `rows` points resting at `rest`
@@ -1332,6 +1475,7 @@ impl Clone for Drape {
             fastest: 0.0,
             ways: self.ways.clone(),
             down: self.down,
+            owed: 0.0,
             spans: self.spans.clone(),
         }
     }
@@ -1596,6 +1740,7 @@ impl Drape {
             ways: link_ways,
             spans,
             down: back.transform_vector3(Vec3::Y).normalize_or_zero() * -1.0,
+            owed: 0.0,
         })
     }
 
@@ -1704,8 +1849,15 @@ impl Drape {
             }
             self.was.clone_from(&now);
             self.ready = true;
+            self.owed = 0.0;
         }
         if dt > 0.0 {
+            // Until a whole substep is owed the body's way waits too.
+            let subs = whole_substeps(&mut self.owed, dt);
+            if subs == 0 {
+                return;
+            }
+            let dt = subs as f32 * SUBSTEP_TIME;
             let reach = Vec3::splat(self.reach + MAP_MARGIN);
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
             for m in now[shells..].iter().chain(&self.was[shells..]) {
@@ -1718,7 +1870,6 @@ impl Drape {
                 self.map = Some((from, Arc::new(self.nearby.surfaces.corners())));
             }
             let map = self.map.as_ref().map(|(_, m)| m.clone()).filter(|m| !m.is_empty());
-            let subs = substeps(dt);
             live.push(Frame {
                 dt,
                 substeps: subs,
@@ -2304,6 +2455,106 @@ mod tests {
         assert!(out[0][0] > 0.5 && out[0][1] > 0.5, "{:?}", out[0]);
     }
 
+    #[test]
+    fn planes_of_the_map_that_face_another_way_are_kept_before_more_of_the_same() {
+        // Five pieces of a floor a centimetre under the point and a wall
+        // three centimetres beside it: the wall is among the four kept,
+        // wherever in the list it is.
+        let floor = |y: f32| {
+            [
+                Vec3::new(-1.0, y, -1.0),
+                Vec3::new(-1.0, y, 1.0),
+                Vec3::new(1.0, y, -1.0),
+            ]
+        };
+        let wall = [
+            Vec3::new(0.03, -1.0, -1.0),
+            Vec3::new(0.03, -1.0, 1.0),
+            Vec3::new(0.03, 1.0, -1.0),
+        ];
+        let p = Vec3::new(0.0, 0.0, -0.5);
+        let floors = [-0.01, -0.01, -0.012, -0.014, -0.016].map(floor);
+        for at in [0, 3, 5] {
+            let mut map = floors.to_vec();
+            map.insert(at, wall);
+            let mut out = [[0.0f32; 4]; MAP_PLANES];
+            map_planes(p, &map, 0.07, 0.006, &mut out);
+            assert!(out.iter().any(|o| o[0] < -0.99), "wall at {at}: {out:?}");
+            assert_eq!(out[0], [0.0, 1.0, 0.0, -0.01], "wall at {at}");
+        }
+    }
+
+    #[test]
+    fn a_point_deep_in_a_limb_comes_out_no_faster_than_a_point_goes() {
+        // 4.5 cm under the skin of the top of a limb, over a frame of four
+        // substeps: up by what a point goes in that time and no more,
+        // and without speed.
+        let setup = one_point_by_a_limb();
+        let skin = 0.05 + setup.material.thickness;
+        let mut state = State::new(setup.points.len());
+        let mut frame = still(&setup, Begin::Reset, None);
+        run(&setup, &mut state, &frame);
+        frame.begin = Begin::Keep;
+        frame.dt = 4.0 * SUBSTEP_TIME;
+        frame.substeps = 4;
+        frame.poses.truncate(5 * setup.slots());
+        let start = skin - 0.045;
+        for i in 8..16 {
+            state.pos[i] = Vec3::new(0.0, start, 0.0);
+            state.vel[i] = Vec3::ZERO;
+        }
+        run(&setup, &mut state, &frame);
+        let rose = state.pos[8].y - start;
+        assert!((rose - FASTEST * frame.dt).abs() < 1e-4, "{rose}");
+        assert!(state.vel[8].length() < 1e-3, "{}", state.vel[8]);
+    }
+
+    #[test]
+    fn a_limb_between_a_point_and_the_one_it_hangs_from_is_left_towards_that_one() {
+        // A point on top of a limb and the one below it in its column
+        // under the limb, as after the limb came through the cloth
+        // between them. The lower one goes through the limb to the top,
+        // no faster than a point goes, and rests there.
+        let (a, b) = (Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0));
+        let mut setup = tube(8, 3, 0.05, 0.05, a, b);
+        setup.links.iter_mut().for_each(|l| l.to = NONE);
+        setup.hinges.iter_mut().for_each(|h| h.a = NONE);
+        setup.points.iter_mut().for_each(|p| p.anchor = NONE);
+        setup.points.iter_mut().for_each(|p| p.cell = false);
+        assert!(!setup.points[8].fixed && !setup.points[16].fixed);
+        let skin = 0.05 + setup.material.thickness;
+        let mut state = State::new(setup.points.len());
+        let mut frame = still(&setup, Begin::Reset, None);
+        run(&setup, &mut state, &frame);
+        frame.begin = Begin::Keep;
+        for i in 8..16 {
+            state.pos[i] = Vec3::new(0.0, skin, 0.0);
+            state.vel[i] = Vec3::ZERO;
+            state.pos[i + 8] = Vec3::new(0.005, -skin, 0.0);
+            state.vel[i + 8] = Vec3::ZERO;
+        }
+        let mut was = state.pos[16];
+        for _ in 0..4 {
+            run(&setup, &mut state, &frame);
+            let moved = (state.pos[16] - was).length();
+            assert!(moved <= FASTEST * frame.dt + 1e-3, "{moved}");
+            was = state.pos[16];
+        }
+        assert!((state.pos[16].y - skin).abs() < 2e-3, "{}", state.pos[16]);
+        assert!(state.vel[16].length() < 0.05, "{}", state.vel[16]);
+        // Without the one above it stays under the limb, as before.
+        let mut alone = setup.clone();
+        alone.points[8].fixed = true;
+        let mut state = State::new(alone.points.len());
+        frame.begin = Begin::Reset;
+        run(&alone, &mut state, &frame);
+        frame.begin = Begin::Keep;
+        state.pos[16] = Vec3::new(0.005, -skin, 0.0);
+        state.vel[16] = Vec3::ZERO;
+        run(&alone, &mut state, &frame);
+        assert!(state.pos[16].y < -skin + 1e-3, "{}", state.pos[16]);
+    }
+
     /// Makes the cloth of `setup` of bending length `c`.
     fn soften(setup: &mut Setup, c: f32) {
         setup.material.bending_length = c;
@@ -2533,6 +2784,56 @@ mod tests {
         // The waist's own row always, and never the two lowest.
         assert_eq!(held_rows(&rest, 4, 6, Vec3::new(0.0, 2.0, 0.0), Vec3::Y), 1);
         assert_eq!(held_rows(&rest, 4, 6, Vec3::new(0.0, 0.0, 0.0), Vec3::Y), 4);
+    }
+
+    #[test]
+    fn the_speeds_of_points_next_to_each_other_even_out() {
+        // One point of a hanging strip given a speed across it: after a
+        // substep it has less of it against the point above with the
+        // cloth's inner friction than without.
+        let against = |calm: f32| {
+            let material = Material {
+                calm,
+                ..Material::default()
+            };
+            let setup = strip(6, 0.04, material);
+            let mut state = State::new(setup.points.len());
+            let mut frame = still(&setup, Begin::Reset, None);
+            run(&setup, &mut state, &frame);
+            frame.begin = Begin::Keep;
+            frame.dt = SUBSTEP_TIME;
+            frame.substeps = 1;
+            frame.poses.truncate(2 * setup.slots());
+            let before = state.vel[4] - state.vel[3];
+            state.vel[4] += Vec3::Z * 0.5;
+            run(&setup, &mut state, &frame);
+            (state.vel[4] - state.vel[3] - before).z
+        };
+        let (with, without) = (against(CALM), against(0.0));
+        assert!(with < without - 0.004 && with > 0.0, "{with} {without}");
+    }
+
+    #[test]
+    fn uneven_frames_are_cut_into_substeps_of_one_length() {
+        // 1/60 s is 16 substeps, every time.
+        let mut owed = 0.0;
+        for _ in 0..100 {
+            assert_eq!(whole_substeps(&mut owed, 1.0 / 60.0), 16);
+        }
+        // 1/144 s is six or seven, 960 in a second, and nothing is lost.
+        let (mut owed, mut all) = (0.0, 0);
+        for _ in 0..144 {
+            let n = whole_substeps(&mut owed, 1.0 / 144.0);
+            assert!(n == 6 || n == 7, "{n}");
+            all += n;
+        }
+        assert!((959..=960).contains(&all), "{all}");
+        // Less than a substep waits; a hitch is cut short.
+        let mut owed = 0.0;
+        assert_eq!(whole_substeps(&mut owed, 0.0004), 0);
+        assert_eq!(whole_substeps(&mut owed, 0.0007), 1);
+        assert_eq!(whole_substeps(&mut owed, 1.0), MOST_SUBSTEPS);
+        assert_eq!(owed, 0.0);
     }
 
     #[test]

@@ -32,6 +32,9 @@ struct Sub {
     own_reach: f32,
     // How much of a point's `prop` is there.
     lift: f32,
+    // How much of the way to its neighbours' speed a point's goes in a
+    // substep.
+    calm: f32,
 }
 
 struct Point {
@@ -88,7 +91,8 @@ struct Bound {
 @group(0) @binding(8) var<storage, read_write> planes: array<vec4<f32>>;
 // Three corners per triangle.
 @group(0) @binding(9) var<storage, read> triangles: array<vec4<f32>>;
-// Per point: place and pressed, round and inner, down.
+// Per point: place and pressed, round and inner, down, and how sharply
+// the net bends towards its outside and its inside there.
 @group(0) @binding(10) var<storage, read_write> frames: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read> bound: array<Bound>;
 @group(0) @binding(12) var<storage, read_write> out: array<f32>;
@@ -115,6 +119,17 @@ const HINGE_LEAST: f32 = 30.0;
 const HINGE_SKEW: vec2<f32> = vec2<f32>(0.2, 0.5);
 const FLATTEN: f32 = 0.8;
 const VERTEX_GAP: f32 = 0.003;
+const ACROSS: f32 = 1.4142135;
+// As `ACROSS` and `LIKE` of the twin.
+const LIKE: f32 = 0.866;
+// Vectors per point in `frames`.
+const FRAME: u32 = 4u;
+// How much of a fold's radius a layer may stand off the net by. The
+// fold is measured at points a cell apart, which is coarse: with a
+// half, black triangles were still left in a running dress (161 dark
+// pixels over 47 pictures against 320 before; 85 with a quarter, which
+// is what the pictures have without any).
+const FOLD: f32 = 0.25;
 
 // A vertex: floats, and where the posed fields sit, as in skin.wgsl.
 const STRIDE: u32 = 22u;
@@ -202,6 +217,15 @@ fn hinge_normal(a0: vec3<f32>, a1: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec
     let sine = length(n) / max(length(u) * length(v), 1e-12);
     let trust = clamp((sine - HINGE_SKEW.x) / (HINGE_SKEW.y - HINGE_SKEW.x), 0.0, 1.0);
     return vec4<f32>(normalize_or_zero(n), trust);
+}
+
+// The point above `i` in its column, where that is cloth that moves.
+fn above(i: u32) -> u32 {
+    let g = points[i].grid;
+    if i >= g.x + g.y && !fixed(i - g.y) {
+        return i - g.y;
+    }
+    return NONE;
 }
 
 // The pose of slot `k` at the substep's start (0) or end (1).
@@ -396,6 +420,34 @@ fn cs_find(@builtin(global_invocation_id) id: vec3<u32>) {
                 continue;
             }
             dist = dot(p - q, n);
+            // With four kept, one that faces as a nearer one does is
+            // left out, and the farthest kept that does goes.
+            if f3 < 3.4e38 {
+                if (f0 <= dist && dot(b0.xyz, n) > LIKE) || (f1 <= dist && dot(b1.xyz, n) > LIKE)
+                    || (f2 <= dist && dot(b2.xyz, n) > LIKE) || (f3 <= dist && dot(b3.xyz, n) > LIKE) {
+                    continue;
+                }
+                let spare3 = dot(b3.xyz, b0.xyz) > LIKE || dot(b3.xyz, b1.xyz) > LIKE || dot(b3.xyz, b2.xyz) > LIKE
+                    || (dist < f3 && dot(b3.xyz, n) > LIKE);
+                let spare2 = dot(b2.xyz, b0.xyz) > LIKE || dot(b2.xyz, b1.xyz) > LIKE || (dist < f2 && dot(b2.xyz, n) > LIKE);
+                let spare1 = dot(b1.xyz, b0.xyz) > LIKE || (dist < f1 && dot(b1.xyz, n) > LIKE);
+                if spare3 {
+                    f3 = 3.4e38;
+                    b3 = vec4<f32>(0.0);
+                } else if spare2 {
+                    f2 = f3;
+                    b2 = b3;
+                    f3 = 3.4e38;
+                    b3 = vec4<f32>(0.0);
+                } else if spare1 {
+                    f1 = f2;
+                    b1 = b2;
+                    f2 = f3;
+                    b2 = b3;
+                    f3 = 3.4e38;
+                    b3 = vec4<f32>(0.0);
+                }
+            }
             // In after the nearer ones and those as near, the farthest out.
             if dist < f3 {
                 f3 = dist;
@@ -504,7 +556,20 @@ fn cs_predict(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let fall = vec3<f32>(0.0, -GRAVITY, 0.0);
         let prop = vector_of(poses[waist_at(1u, i)].m, points[i].prop.xyz);
-        let v = (vel[i].xyz + (fall + prop * sub.lift) * sub.h) * sub.damp;
+        var around = vec3<f32>(0.0);
+        var count = 0.0;
+        for (var s = 0u; s < LINKS; s++) {
+            let to = topo[i * PER_POINT + s].x;
+            if to != NONE {
+                around += vel[to].xyz;
+                count += 1.0;
+            }
+        }
+        var own = vel[i].xyz;
+        if count > 0.0 {
+            own += (around / count - own) * sub.calm;
+        }
+        let v = (own + (fall + prop * sub.lift) * sub.h) * sub.damp;
         next[i * 2u] = vec4<f32>(pos[i].xyz + v * sub.h, 0.0);
     }
 }
@@ -613,6 +678,7 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         x = home + (x - home) * sub.keep;
     }
     // 4. Contact: the planes of the body near the point.
+    let up = above(i);
     var held: array<Plane, 21>;
     var bodies = 0u;
     for (var k = 0u; k < sub.shells; k++) {
@@ -640,6 +706,18 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         plane.moved = moved;
         plane.pushed = 0.0;
         plane.d = dot(point_of(fin, o.on), plane.n) + skin;
+        if !outside {
+            // Out of a limb no faster than a point goes, and towards
+            // the point it hangs from where the limb came between.
+            plane.d -= max(began - FASTEST * h, 0.0);
+            if up != NONE {
+                let ou = on_shell(k, point_of(start.inv, was(up)));
+                if ou.ok && length((l - o.on) + ou.dir * ou.dist) < ACROSS * o.r {
+                    plane.n = normalize_or_zero(vector_of(fin, ou.dir));
+                    plane.d = min(dot(point_of(fin, o.on), plane.n) + skin, dot(point_of(fin, l), plane.n) + FASTEST * h);
+                }
+            }
+        }
         if outside && began > 0.0 {
             var clear = 3.4e38;
             var way = vec3<f32>(0.0);
@@ -711,6 +789,13 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let began_at = (x0 + was(link.x)) * 0.5;
         let middle = (x + ahead(link.x)) * 0.5;
+        // What the middle hangs from: the middle of the link a row up.
+        let up_to = above(link.x);
+        let hung = up != NONE && up_to != NONE;
+        var hangs = vec3<f32>(0.0);
+        if hung {
+            hangs = (was(up) + was(up_to)) * 0.5;
+        }
         for (var k = 0u; k < sub.shells; k++) {
             let outside = shell_outside(k);
             if bodies == BODY_PLANES || (outside && (sub.flags & 1u) == 0u) {
@@ -730,8 +815,22 @@ fn cs_solve(@builtin(global_invocation_id) id: vec3<u32>) {
             if began < -NEAR {
                 continue;
             }
-            let nrm = normalize_or_zero(vector_of(fin, o.dir));
-            let deep = dot(point_of(fin, o.on), nrm) + skin - dot(middle, nrm);
+            var nrm = normalize_or_zero(vector_of(fin, o.dir));
+            var deep = dot(point_of(fin, o.on), nrm) + skin - dot(middle, nrm);
+            if !outside {
+                var across = false;
+                if hung {
+                    let ou = on_shell(k, point_of(start.inv, hangs));
+                    if ou.ok && length((l - o.on) + ou.dir * ou.dist) < ACROSS * o.r {
+                        across = true;
+                        nrm = normalize_or_zero(vector_of(fin, ou.dir));
+                        deep = min(dot(point_of(fin, o.on), nrm) + skin - dot(middle, nrm), dot(point_of(fin, l) - middle, nrm) + FASTEST * h);
+                    }
+                }
+                if !across {
+                    deep -= max(began - FASTEST * h, 0.0);
+                }
+            }
             if deep <= 0.0 {
                 continue;
             }
@@ -859,9 +958,49 @@ fn cs_frames(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = points[i];
     let ring = (pos[p.around.y].xyz - pos[p.around.x].xyz) * p.turn;
     let down = pos[p.around.w].xyz - pos[p.around.z].xyz;
-    frames[i * 3u] = pos[i];
-    frames[i * 3u + 1u] = vec4<f32>(ring, p.inner);
-    frames[i * 3u + 2u] = vec4<f32>(down, 0.0);
+    frames[i * FRAME] = pos[i];
+    frames[i * FRAME + 1u] = vec4<f32>(ring, p.inner);
+    frames[i * FRAME + 2u] = vec4<f32>(down, 0.0);
+    // How sharply the net bends here and at the points next to it, round
+    // the skirt and down it, towards the side its normal points to and
+    // towards the other. The hem's row, which has none below it, takes
+    // the row's above.
+    let face = normalize_or_zero(cross(ring, down));
+    var most = bends(i, face);
+    most = max(most, bends(p.around.x, face));
+    most = max(most, bends(p.around.y, face));
+    most = max(most, bends(p.around.z, face));
+    most = max(most, bends(p.around.w, face));
+    if p.around.w == i && i == p.around.z + 2u * p.grid.y {
+        most = max(most, bends(i - p.grid.y, face));
+    }
+    frames[i * FRAME + 3u] = vec4<f32>(most, 0.0, 0.0);
+}
+
+// How sharply the net bends at point `j` towards `face` and away from
+// it, the sharper of round the skirt and down it.
+fn bends(j: u32, face: vec3<f32>) -> vec2<f32> {
+    let q = points[j];
+    let k_ring = dot(bend(j, q.around.x, q.around.y), face);
+    let k_down = dot(bend(j, q.around.z, q.around.w), face);
+    return vec2<f32>(max(max(k_ring, k_down), 0.0), max(max(-k_ring, -k_down), 0.0));
+}
+
+// The curvature of the net at point `i` between its neighbours `a` and
+// `b`: one over the radius of the circle through the three (Menger),
+// towards that circle's middle. Nothing where a neighbour is the point
+// itself, at an edge of the net.
+fn bend(i: u32, a: u32, b: u32) -> vec3<f32> {
+    if a == i || b == i {
+        return vec3<f32>(0.0);
+    }
+    let u = pos[a].xyz - pos[i].xyz;
+    let v = pos[b].xyz - pos[i].xyz;
+    let sides = length(u) * length(v) * length(u - v);
+    if sides < 1e-12 {
+        return vec3<f32>(0.0);
+    }
+    return normalize_or_zero(u + v) * (2.0 * length(cross(u, v)) / sides);
 }
 
 // Puts a skinned mesh's bound vertices on the nets: each where it rests
@@ -880,11 +1019,13 @@ fn cs_dress(@builtin(global_invocation_id) id: vec3<u32>) {
     var at = vec4<f32>(0.0);
     var ring = vec4<f32>(0.0);
     var down = vec3<f32>(0.0);
+    var folds = vec2<f32>(0.0);
     for (var k = 0u; k < 3u; k++) {
-        let c = b.at[k + 1u] * 3u;
+        let c = b.at[k + 1u] * FRAME;
         at += frames[c] * b.bary[k];
         ring += frames[c + 1u] * b.bary[k];
         down += frames[c + 2u].xyz * b.bary[k];
+        folds += frames[c + 3u].xy * b.bary[k];
     }
     let e1 = normalize_or_zero(down);
     let e3 = normalize_or_zero(cross(ring.xyz, down));
@@ -901,7 +1042,32 @@ fn cs_dress(@builtin(global_invocation_id) id: vec3<u32>) {
     // Cloth pressed on something lies flat on it: what the layers stand
     // off the net by, more than the innermost one, mostly goes.
     let inner = ring.w;
-    let off = inner + (b.place.z - inner) * (1.0 - FLATTEN * at.w);
+    var off = inner + (b.place.z - inner) * (1.0 - FLATTEN * at.w);
+    // A layer that stands off the net further than the net's fold is
+    // round turns inside out on the inside of the fold: its faces flip
+    // while their normals do not, and the outline shows through as
+    // black triangles. It stands off no further than `FOLD` of the
+    // fold's radius there.
+    // Only away from the body. On it the net's dips are the body's, the
+    // net may be under the skin by what its layers stand off it, and a
+    // layer drawn in let a thigh show through the lap of a sitting
+    // dress: nothing within the cloth's thickness of the skin, all of
+    // it from twice that.
+    var under = -1.0;
+    for (var k = 0u; k < sub.shells; k++) {
+        if shell_outside(k) {
+            continue;
+        }
+        let pose = poses[pose_at(0u, k)];
+        let scale = length(pose.m[0].xyz);
+        let s = on_shell(k, point_of(pose.inv, at.xyz));
+        if s.ok {
+            under = max(under, (s.r - s.dist) * scale);
+        }
+    }
+    let away = clamp((-under - sub.thickness) / sub.thickness, 0.0, 1.0);
+    let folded = max(clamp(off, -FOLD / max(folds.y, 1e-6), FOLD / max(folds.x, 1e-6)), min(off, max(inner, 0.0)));
+    off = mix(off, folded, away);
     let moved = at.xyz + e1 * b.place.x + e2 * b.place.y + e3 * off;
     var p = mix(skinned, moved, weight);
     let n = normalize_or_zero(mix(skinned_n, e1 * b.normal.x + e2 * b.normal.y + e3 * b.normal.z, weight));
