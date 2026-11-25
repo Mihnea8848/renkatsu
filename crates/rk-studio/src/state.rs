@@ -398,6 +398,8 @@ pub struct State {
     pub updating: Option<crate::self_update::Updating>,
     /// The updated program to start once Renkatsu has quit.
     pub restart_into: Option<PathBuf>,
+    /// What the designs of the animation panels on trial remember.
+    pub anim: crate::anim_design::Anim,
     /// A key copied, to paste on a bone.
     pub key_clipboard: Option<rk_chara::pose::BoneEdit>,
     /// Playing a sequence with keys starts over at its end.
@@ -474,7 +476,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 23],
+    pub sections: [bool; 24],
     /// Expression presets: Renkatsu's own, then the plugins' from the game
     /// folder under each plugin's name; read when first shown.
     pub expressions: Option<(Vec<Preset>, Vec<PresetGroup>)>,
@@ -910,6 +912,7 @@ impl State {
             update: None,
             updating: None,
             restart_into: None,
+            anim: Default::default(),
             key_clipboard: None,
             loop_sequence: true,
             solo: None,
@@ -948,7 +951,7 @@ impl State {
             expression_name: String::new(),
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true, false, true,
+                true, true, true, true, false, true, true,
             ],
             property_tab: 0,
             profiles: Default::default(),

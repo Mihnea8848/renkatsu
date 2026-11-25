@@ -1182,6 +1182,16 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
+                if *name == "Auto key" && st.anim.design.is_some() {
+                    // The same switch as the animation panels' bar has.
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, st.anim.auto_key);
+                    if resp.clicked() {
+                        st.anim.auto_key = !st.anim.auto_key;
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 if LATER_TOOLS.contains(name) {
                     // Shown, greyed, until they do something.
                     ui.interact(row, id, Sense::hover()).on_hover_text("Not available yet");
@@ -2140,6 +2150,14 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
     if st.solo.is_some() {
         let length = st.doc.scene().sequence.length.max(0.01);
         st.solo_time = (st.solo_time + dt).rem_euclid(length);
+    }
+    // Within a loop range, playing starts over at its end.
+    if st.anim.range_on && st.playback == crate::state::Playback::Playing {
+        let fps = st.doc.scene().sequence.fps.max(1.0);
+        let (from, to) = (st.anim.range.0 as f32 / fps, st.anim.range.1 as f32 / fps);
+        if st.clock > to || st.clock < from {
+            st.clock = from;
+        }
     }
     // A sequence with keys plays to its end, then starts over or holds.
     let sequence = &st.doc.scene().sequence;

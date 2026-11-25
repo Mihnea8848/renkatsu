@@ -275,6 +275,9 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         // The Animation page: what the character plays, and the pair it
         // is snapped into.
         if let Content::Character { animation, .. } = &mut object.content {
+            if has(Part::Animation) {
+                key_section(ui, k, st, object.id);
+            }
             if has(Part::Animation) && section(ui, k, st, 6, "Animation") {
                 let playing = built.as_ref().and_then(|b| b.animation);
                 row(ui, k, "Clip", None, |ui, rect| {
@@ -2375,6 +2378,128 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
         }
         section_end(ui, k);
     }
+}
+
+/// Section number of the selected keys.
+pub const KEY_SECTION: usize = 23;
+
+/// The keys selected in the tracks, of design B of the animation panels:
+/// their frame and how they go into the next, and a single key's values.
+fn key_section(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId) {
+    use crate::anim_design::{sheet, time, Design, KeyRef};
+    if st.anim.design != Some(Design::B) {
+        return;
+    }
+    let keys: Vec<KeyRef> = st.anim.selected.iter().filter(|key| key.0 == id).cloned().collect();
+    if keys.is_empty() || !section(ui, k, st, KEY_SECTION, "Key") {
+        return;
+    }
+    let ui_id = ui.id().with("key");
+    let single = match keys.as_slice() {
+        [key] => sheet::key_of(st, key).map(|found| (key.clone(), found)),
+        _ => None,
+    };
+    row(ui, k, "Channel", None, |ui, rect| {
+        let shown = match &single {
+            Some(((_, name, _), _)) => crate::anim_design::rows(st, true)
+                .into_iter()
+                .find(|r| r.object == id && r.name == *name)
+                .map_or_else(|| name.clone(), |r| r.label),
+            None => format!("{} keys", keys.len()),
+        };
+        label(
+            ui.painter(),
+            k,
+            Pos2::new(rect.left() + 4.0, rect.center().y),
+            &shown,
+            k.t.text,
+        );
+    });
+    // The frame, the first key's when several are selected: a change
+    // moves them all by as much.
+    let first = keys.iter().map(|key| key.2).min().unwrap_or(0);
+    let mut frame = first as f32;
+    row(ui, k, "Frame", None, |ui, rect| {
+        let field = rect.with_max_x(rect.left() + 76.0);
+        widgets::number_to(
+            ui,
+            k,
+            field,
+            ui_id.with("frame"),
+            &mut frame,
+            Marker::None,
+            true,
+            0.25,
+            0,
+        );
+    });
+    let by = frame.round() as i32 - first;
+    if by != 0 {
+        sheet::retime_held(st, |f| f + by, false, true);
+    }
+    let eases: Vec<&str> = time::EASES.iter().map(|(_, name, _)| *name).collect();
+    let current = sheet::ease_of(st).and_then(|ease| time::EASES.iter().position(|(e, ..)| *e == ease));
+    let mut chosen = current.unwrap_or(usize::MAX);
+    row(ui, k, "Interpolation", None, |ui, rect| {
+        widgets::combo(ui, k, rect, ui_id.with("ease"), &mut chosen, &eases);
+    });
+    if let Some((ease, ..)) = time::EASES.get(chosen).filter(|_| Some(chosen) != current) {
+        sheet::set_ease(st, *ease);
+    }
+    // A single key's own values: a value's number, or a bone's turn.
+    if let Some((key, found)) = single.filter(|_| by == 0) {
+        if rk_chara::channels::Channel::of_key(&key.1).is_some() {
+            let was = rk_chara::channels::of_edit(found.edit);
+            let mut value = was;
+            row(ui, k, "Value", None, |ui, rect| {
+                let field = rect.with_max_x(rect.left() + 76.0);
+                widgets::number(ui, k, field, ui_id.with("value"), &mut value, Marker::None, true, 0.01);
+            });
+            if value != was {
+                sheet::set_edit(st, &key, rk_chara::channels::as_edit(value));
+            }
+        } else {
+            let (y, x, z) = found.edit.rot.to_euler(glam::EulerRot::YXZ);
+            let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
+            let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
+            let mut angles = shown;
+            row(ui, k, "Rotation", None, |ui, rect| {
+                vec3(ui, k, rect, ui_id.with("rotation"), &mut angles, 0.5);
+            });
+            if angles != shown {
+                let rot = rk_chara::scene::euler_deg(angles[0], angles[1], angles[2]);
+                sheet::set_edit(st, &key, rk_chara::pose::BoneEdit { rot, ..found.edit });
+            }
+        }
+    }
+    wide_row(ui, k, "Key actions", |ui, rect| {
+        let w = ((rect.width() - 8.0) / 3.0).floor();
+        let cell = |n: usize| {
+            Rect::from_min_size(
+                Pos2::new(rect.left() + n as f32 * (w + 4.0), rect.top()),
+                Vec2::new(w, rect.height()),
+            )
+        };
+        for (n, (mark, name)) in [
+            (icon::COPY, "Copy"),
+            (icon::CLIPBOARD, "Paste"),
+            (icon::TRASH, "Delete"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ready = n != 1 || !st.anim.clipboard.is_empty();
+            let resp = widgets::action_button(ui, k, cell(n), ui_id.with(("act", n)), Some(mark), name, ready);
+            if resp.clicked() {
+                match n {
+                    0 => sheet::copy(st),
+                    1 => sheet::paste(st, id, None),
+                    _ => sheet::delete(st),
+                }
+            }
+        }
+    });
+    section_end(ui, k);
 }
 
 /// Who the character is (part 1), what it likes (part 2) or what it is

@@ -65,7 +65,7 @@ pub fn shown(st: &State, id: ObjectId, bone: &str) -> BoneEdit {
 /// Gives a bone an edit: its key at the playhead when it has keys, else
 /// the pose layer's. With `held` it joins the step of a drag.
 pub fn write(st: &mut State, id: ObjectId, bone: &str, edit: BoneEdit, held: bool) {
-    if keyed(st, id, bone) {
+    if keyed(st, id, bone) || st.anim.auto_key {
         let at = now(st);
         let mut sequence = st.doc.scene().sequence.clone();
         let near = sequence.near();
@@ -114,7 +114,7 @@ pub fn write_many(st: &mut State, id: ObjectId, edits: Vec<(String, BoneEdit)>, 
     let mut keyed_any = false;
     let layer = pose_layer.get_or_insert_with(Default::default);
     for (bone, edit) in edits {
-        if keyed(st, id, &bone) {
+        if keyed(st, id, &bone) || st.anim.auto_key {
             keys::set(&mut sequence.track_mut(id, &object.name).keys, &bone, at, edit, near);
             keyed_any = true;
         } else if let Some(target) = rk_chara::pose::ik_key_target(&bone) {

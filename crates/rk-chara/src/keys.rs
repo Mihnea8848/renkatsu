@@ -21,6 +21,12 @@ pub enum Ease {
     Linear,
     /// Holds the key until the next.
     Step,
+    /// Slow out of the key, then at pace.
+    EaseIn,
+    /// At pace, then slow into the next.
+    EaseOut,
+    /// By the key's handles; at rest they make the smooth curve.
+    Bezier,
 }
 
 impl Ease {
@@ -29,7 +35,9 @@ impl Ease {
     pub fn share(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
-            Ease::Smooth => t * t * (3.0 - 2.0 * t),
+            Ease::Smooth | Ease::Bezier => t * t * (3.0 - 2.0 * t),
+            Ease::EaseIn => t * t,
+            Ease::EaseOut => t * (2.0 - t),
             Ease::Linear => t,
             Ease::Step => 0.0,
         }
