@@ -138,10 +138,8 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
     let mut load_card = false;
 
     let page_shown = pages[st.property_tab];
-    // An object of one page has its icon in the header right above.
-    let page_glyph = (pages.len() > 1).then_some(page_shown.glyph);
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        page_title(ui, k, page_shown.name, page_glyph);
+        page_title(ui, k, page_shown.name, page_shown.glyph);
         // What the body shows in an H scene. The levels are the game's
         // `siru`: a page of its own, since none of it is of the card.
         let id = ui.id();
@@ -2838,19 +2836,17 @@ fn header(
 }
 
 /// The name of the open page, at the top of the page, after the page's
-/// icon when it has one. A search shows rows of every page, so it has
+/// icon in plain white. A search shows rows of every page, so it has
 /// none then.
-fn page_title(ui: &mut Ui, k: &Look, name: &str, glyph_: Option<&str>) {
+fn page_title(ui: &mut Ui, k: &Look, name: &str, glyph_: &str) {
     if !searched(ui).is_empty() {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), k.d.row + 6.0), Sense::hover());
     let y = rect.center().y + 2.0;
-    let mut x = rect.left() + FRAME_GAP + 4.0;
-    if let Some(g) = glyph_ {
-        glyph(ui.painter(), k, Pos2::new(x + 9.0, y), g, 18.0, k.t.text_bright);
-        x += 24.0;
-    }
+    let x = rect.left() + FRAME_GAP + 4.0;
+    glyph(ui.painter(), k, Pos2::new(x + 9.0, y), glyph_, 18.0, k.t.text_bright);
+    let x = x + 24.0;
     ui.painter().text(
         Pos2::new(x, y),
         Align2::LEFT_CENTER,
