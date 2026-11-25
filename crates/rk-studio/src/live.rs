@@ -1040,11 +1040,11 @@ impl Live {
         self.actors.iter().find(|a| a.id == id)?.chara.face.as_ref()
     }
 
-    /// The eye look pattern a character's card gives, and whether its
-    /// eyes can look at all.
+    /// The eye look pattern a character has until its pose picks one, and
+    /// whether its eyes can look at all.
     pub fn card_eyes_look(&self, id: ObjectId) -> Option<i32> {
         let chara = &self.actors.iter().find(|a| a.id == id)?.chara;
-        chara.gaze.as_ref().map(|_| chara.look_patterns[0])
+        chara.gaze.as_ref().map(|_| EYES_AHEAD)
     }
 
     /// The neck look pattern a character's card gives, and whether its
@@ -1059,6 +1059,11 @@ impl Live {
 /// re-posing one character moves the others' bones by rounding dust, and
 /// reading that dust as a change would settle them again every frame.
 const STILL: f32 = 1e-4;
+
+/// The eye look pattern of a pose that picks none: ahead. Cards often
+/// save the maker's "this way", but eyes that follow the camera unasked
+/// stare out of every shot.
+const EYES_AHEAD: i32 = 0;
 
 /// What BetterPenetration aims a shaft with in a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1361,7 +1366,7 @@ impl Live {
                 .layer
                 .as_ref()
                 .and_then(|l| l.eyes_look)
-                .unwrap_or(actor.chara.look_patterns[0])
+                .unwrap_or(EYES_AHEAD)
                 .max(0) as usize;
             let chara = &mut actor.chara;
             let Some(gaze) = chara.gaze.as_mut() else { continue };
