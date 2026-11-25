@@ -271,6 +271,9 @@ pub fn solve(
     };
     let distance = unity::distance(start, entry);
     let (length, girth) = squish(base_length, distance, s);
+    // `GetMaxDanLength`, which Studio's plugin applies to every hole. The
+    // main game's applies it to the mouth only: its vagina and anus are
+    // limited by their surfaces instead, which Studio's aim does not use.
     let length = length.min(distance + unity::distance(entry, end));
     let mut v1 = unity::normalize(entry - start);
     let mut v2 = unity::normalize(end - entry);
@@ -328,7 +331,8 @@ pub fn solve(
 /// double precision).
 fn past_entry(side: f32, left: f32, turn: f64) -> f32 {
     let (a, b) = (f64::from(side), f64::from(left));
-    let zero = |v: f64| v.abs() < 1e-6;
+    // `MathHelpers.ApproximatelyZero`.
+    let zero = |v: f64| v.abs() < 1e-4;
     if zero(a) || zero(b) || zero(turn) {
         return 0.0;
     }
