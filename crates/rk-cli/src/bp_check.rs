@@ -195,11 +195,13 @@ pub fn check(dir: &Path, only: &[String], bones_listed: bool) -> Result<()> {
         )
         .map(|c| c.ext.contains_key(bp::KEY))
         .unwrap_or(false);
-        let settings = if card_has {
+        let mut settings = if card_has {
             him.better_penetration
         } else {
             bp::Settings::studio()
         };
+        // Studio's shaft folds at the entry; it is measured as it is.
+        settings.smooth_bend = false;
         // Renkatsu's body-following end, against Studio's at her waist.
         if mode != Mode::Oral {
             use rk_chara::body_collision as bc;

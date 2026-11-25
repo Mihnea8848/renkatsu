@@ -304,6 +304,9 @@ pub fn solve(
             points[i - 1] + v1 * segment
         };
     }
+    if s.smooth_bend && !straight {
+        smooth_bend(&mut points, entry, v1, v2, distance, segment);
+    }
     // The virtual points reach on at the unsquished length, one segment
     // and then two at a time.
     let mut virtual_points = Vec::new();
@@ -329,6 +332,47 @@ pub fn solve(
         points,
         virtual_points,
         girth,
+    }
+}
+
+/// Lays the points along a path that turns smoothly at the entry instead
+/// of folding there: straight from the first point along `v1`, a
+/// quadratic curve around the entry over about one and a half segments
+/// each side, and straight on along `v2`. The points keep
+/// their spacing, so the shaft keeps its length.
+fn smooth_bend(points: &mut [Vec3], entry: Vec3, v1: Vec3, v2: Vec3, distance: f32, segment: f32) {
+    let length = segment * (points.len() - 1) as f32;
+    let r = (1.5 * segment).min(distance * 0.9).min((length - distance) * 0.9);
+    if r <= 1e-4 {
+        return;
+    }
+    let (a, b) = (entry - v1 * r, entry + v2 * r);
+    // The entry as the control point: the curve leaves along `v1` and
+    // comes out along `v2`, with no corner anywhere, and passes inside the
+    // corner by a few millimetres, well within the shaft's thickness.
+    let control = entry;
+    let mut path = vec![points[0], a];
+    const STEPS: usize = 24;
+    for k in 1..=STEPS {
+        let t = k as f32 / STEPS as f32;
+        let u = 1.0 - t;
+        path.push(a * (u * u) + control * (2.0 * u * t) + b * (t * t));
+    }
+    path.push(b + v2 * length);
+    let mut along = 0.0;
+    let mut at = 0;
+    for (i, point) in points.iter_mut().enumerate().skip(1) {
+        let want = segment * i as f32;
+        loop {
+            let piece = path[at].distance(path[at + 1]);
+            if along + piece >= want || at + 2 == path.len() {
+                let t = if piece > 0.0 { (want - along) / piece } else { 0.0 };
+                *point = path[at].lerp(path[at + 1], t);
+                break;
+            }
+            along += piece;
+            at += 1;
+        }
     }
 }
 
@@ -1012,6 +1056,11 @@ pub struct Settings {
     /// The shaft's length as a share of the body's own. Renkatsu's own.
     #[serde(default = "full_length")]
     pub length: f32,
+    /// The turn at the entry as a smooth arc over the segments around it,
+    /// rather than the plugin's fold at the one segment that crosses it.
+    /// Renkatsu's own.
+    #[serde(default = "yes")]
+    pub smooth_bend: bool,
 }
 
 fn full_length() -> f32 {
@@ -1063,6 +1112,7 @@ impl Settings {
             depth: 0.0,
             stiffness: 0.0,
             length: 1.0,
+            smooth_bend: true,
         }
     }
 }
@@ -1104,6 +1154,50 @@ pub fn read(ext: &ExtData) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_smooth_bend_turns_over_several_segments_and_keeps_the_length() {
+        let starts: Vec<Vec3> = (0..10).map(|i| Vec3::new(0.0, 0.0, i as f32 * 0.015)).collect();
+        let (entry, end) = (Vec3::new(0.0, 0.0, 0.06), Vec3::new(0.0, 0.3, 0.2));
+        let shaft = |smooth_bend: bool| {
+            let s = Settings {
+                smooth_bend,
+                length_squish: 0.0,
+                ..Settings::studio()
+            };
+            solve(&starts, &[], entry, end, 0.135, &s, false).points
+        };
+        let sharpest = |p: &[Vec3]| {
+            p.windows(3)
+                .map(|w| (w[1] - w[0]).angle_between(w[2] - w[1]).to_degrees())
+                .fold(0.0f32, f32::max)
+        };
+        let (folded, smooth) = (shaft(false), shaft(true));
+        assert!(
+            sharpest(&smooth) < sharpest(&folded) * 0.6,
+            "{} vs {}",
+            sharpest(&smooth),
+            sharpest(&folded)
+        );
+        let length = |p: &[Vec3]| p.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+        assert!(
+            (length(&smooth) - length(&folded)).abs() < 0.002,
+            "{} {}",
+            length(&smooth),
+            length(&folded)
+        );
+        // Still in the mouth: the shaft passes within a few millimetres of
+        // the entry, far less than its thickness.
+        let near = smooth
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let t = ((entry - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                (a + (b - a) * t).distance(entry)
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(near < 0.008, "{near}");
+    }
 
     #[test]
     fn a_stiff_shaft_stays_on_its_line_past_the_entry() {
@@ -1191,6 +1285,7 @@ mod tests {
         let s = Settings {
             length_squish: 0.0,
             girth_squish: 0.0,
+            smooth_bend: false,
             ..Settings::default()
         };
         let starts = shaft(9, 0.19);
