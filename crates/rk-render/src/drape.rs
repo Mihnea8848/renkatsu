@@ -42,6 +42,8 @@ struct Sub {
     keep: f32,
     own_reach: f32,
     lift: f32,
+    calm: f32,
+    pad: [f32; 3],
 }
 
 const ARMS: u32 = 1;
@@ -103,7 +105,7 @@ pub struct Pipelines {
 /// numbers.
 const BEGIN: &[(u32, bool)] = &[(1, true), (2, true), (4, false), (7, false)];
 const FIND: &[(u32, bool)] = &[(1, true), (4, false), (8, true), (9, false)];
-const PREDICT: &[(u32, bool)] = &[(1, true), (2, true), (3, true), (4, false), (7, false)];
+const PREDICT: &[(u32, bool)] = &[(1, true), (2, true), (3, true), (4, false), (5, false), (7, false)];
 const SOLVE: &[(u32, bool)] = &[
     (1, true),
     (2, true),
@@ -279,7 +281,7 @@ impl Gpu {
         const _: () = assert!(OWN == 4);
         buffers.insert(8, empty("drape planes", n * (MAP_PLANES + 1) * 16));
         buffers.insert(9, empty("drape map", 48));
-        buffers.insert(10, empty("drape frames", n * 48));
+        buffers.insert(10, empty("drape frames", n * 64));
         let subs = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("drape substeps"),
             size: (DRESS_SLOT + 1) * SUB_STRIDE,
@@ -380,6 +382,8 @@ impl Gpu {
             keep: (-material.memory * h).exp(),
             own_reach: 2.0 * FASTEST * frame.dt + material.thickness,
             lift: frame.lift,
+            calm: 1.0 - (-material.calm * h).exp(),
+            pad: [0.0; 3],
         };
         let mut bytes = vec![0u8; (subs as u64 * SUB_STRIDE) as usize];
         for s in 0..subs {
