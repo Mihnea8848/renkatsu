@@ -126,7 +126,8 @@ enum Cmd {
         #[arg(long, conflicts_with = "game_skirts")]
         gpu_skirts: bool,
         /// The kind of cloth the GPU solver makes the skirts of: tight,
-        /// pleated (as without this), flowing or fixed.
+        /// pleated, flowing or fixed. Without this it is guessed from
+        /// the clothing.
         #[arg(long, requires = "gpu_skirts")]
         skirt_kind: Option<SkirtKind>,
         /// A folder to write the skirts' cloth to after every frame

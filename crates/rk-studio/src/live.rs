@@ -486,6 +486,7 @@ impl Actor {
             liquid,
             liquid_clothes,
             game_skirts,
+            skirt_kinds,
             animation: pose,
             pose_layer,
             ..
@@ -508,6 +509,11 @@ impl Actor {
         // skirts again.
         let advanced = !game_skirts.contains(&self.recipe.outfit);
         if self.chara.physics.set_advanced(advanced) {
+            again = true;
+        }
+        // The kind of cloth too, guessed unless the scene chose one.
+        let kind = crate::scene::skirt_kind(skirt_kinds, self.recipe.outfit).map(crate::scene::SkirtKind::kind);
+        if self.chara.physics.set_skirt_kind(kind) {
             again = true;
         }
 

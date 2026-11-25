@@ -12,7 +12,10 @@
 //!
 //! The solver, per substep and all points at once:
 //! - `predict`: gravity and damping move each point on; the rows fixed to
-//!   the body go where the waist carries them.
+//!   the body go where the waist carries them. A garment made to hang
+//!   in a shape plain cloth would not fall into is propped up by what
+//!   gravity pulls across that shape (`props`), so it comes back to it
+//!   without being stiff.
 //! - `solve`, from the predicted places of the neighbours:
 //!   1. the lengths along the net and its diagonals (XPBD, Macklin et al.
 //!      2016), each point taking the mean of what its stretched links ask
@@ -64,7 +67,8 @@
 //! order, contacts and lengths meet in one place per point, and the twin
 //! does the same sums in the same order.
 //!
-//! What a garment is made of is its `Material`, by its `Kind`.
+//! What a garment is made of is its `Material`, by its `Kind`; the kind
+//! is guessed from the clothing (`kind::guess`) unless one is chosen.
 
 use super::cloth::{Nearby, Obstacles};
 use super::net::{Binding, Net};
@@ -106,77 +110,144 @@ impl Kind {
     }
 }
 
+/// The way a link or a hinge runs on the net.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    /// Round the skirt, along a row.
+    Round,
+    /// Down the skirt, along a column.
+    Down,
+    Diagonal,
+}
+
 /// What a piece of cloth is made of.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
-    /// Peirce's bending length in metres: bending stiffness per width
-    /// over weight per area is g times its cube (Peirce 1930, "The
-    /// handle of cloth as a measurable quantity"). A strip twice this
-    /// long held out level by one end hangs 41.5 degrees down. Apparel
-    /// cloth is 1.5 to 5 cm; 4 cm is what the net before this used down
-    /// the skirt.
+    /// Peirce's bending length of the cloth in metres: bending stiffness
+    /// per width over weight per area is g times its cube (Peirce 1930,
+    /// "The handle of cloth as a measurable quantity"). A strip twice
+    /// this long held out level by one end hangs 41.5 degrees down.
     pub bending_length: f32,
+    /// The bending length down the skirt of the garment as it was made,
+    /// where its make stiffens it that way: pressed pleats, gathers and
+    /// layers under it. The same as `bending_length` for plain cloth.
+    pub fold: f32,
     /// Shear stiffness in newtons per metre and radian. Kawabata's
-    /// tables put apparel cloth at 0.5 to 1.5 gf/(cm deg); 1 gf/(cm deg)
-    /// is 56 N/m per radian. From memory, to be checked in step 2.
+    /// 1 gf/(cm deg) is 56.2 N/m per radian.
     pub shear: f32,
-    /// Weight per area, kg/m2: apparel cloth is 0.15 to 0.25.
+    /// Weight per area, kg/m2.
     pub weight: f32,
     /// How far the innermost layer keeps off the skin, the floor and
     /// the map: half a centimetre covers a 4.3 cm link's sag over a
     /// thigh of 7 cm radius (0.043^2 / (8 x 0.07) = 3.3 mm).
     pub thickness: f32,
-    /// Static and kinetic friction of cloth on skin. Measured values for
-    /// dry skin are 0.3 to 0.6 (Derler and Gerhardt 2012, "Tribology of
-    /// skin", from memory). The same on the floor and the map for now.
+    /// Static and kinetic friction of cloth on skin. Dry skin is
+    /// typically about 0.5 against other materials (Derler and Gerhardt
+    /// 2012, "Tribology of skin", a review; no split into static and
+    /// kinetic was found, the kinetic one here is a guess). The same on
+    /// the floor and the map for now.
     pub friction: [f32; 2],
-    /// How fast speed dies away, per second. The user's Unity demos take
-    /// 0.05 of it per step of 1/90 s: -ln(0.95) x 90.
+    /// How fast speed dies away, per second (`drag`).
     pub damping: f32,
     /// How fast a point goes back to where it rests on the waist, per
     /// second: what a shape that stands by itself is held by. Nothing
     /// for cloth that only hangs.
     pub memory: f32,
+    /// How much of the shape the garment was made in its make carries
+    /// against gravity while its wearer stands (`props`): 1 hangs it at
+    /// rest as it was made, 0 as plain cloth falls.
+    pub lift: f32,
+}
+
+/// The damping of cloth of `weight` kg/m2 from the air's drag: a plate
+/// moving flat on has a drag coefficient of 1.28 (NASA Glenn, "Shape
+/// Effects on Drag"), so it slows by air density x 1.28 x speed^2 /
+/// (2 x weight), taken at the 1 m/s a hem moves at when walking. A rate
+/// that does not grow with the speed is an approximation.
+fn drag(weight: f32) -> f32 {
+    1.225 * 1.28 * 1.0 / (2.0 * weight)
+}
+
+/// Kawabata's shear stiffness in gf/(cm deg) as N/m per radian.
+fn shear(gf_cm_deg: f32) -> f32 {
+    gf_cm_deg * 9.80665e-3 / 0.01 * 180.0 / std::f32::consts::PI
 }
 
 impl Material {
-    /// The cloth of a kind of skirt. Bending lengths: soft apparel cloth
-    /// is 1.5 to 2.5 cm and firm cloth 4 to 5 cm in Peirce's tables; a
-    /// skirt that stands out by itself is stiffened or has layers under
-    /// it and is given more (from memory, not measured on a garment).
+    /// The cloth of a kind of skirt. The cloths are samples measured on
+    /// Kawabata's instruments in Luible 2008, "Study of mechanical
+    /// properties in the simulation of 3D garments" (thesis, Geneva,
+    /// annexes B and C): weight, shear stiffness G, and the bending
+    /// length as the cube root of bending rigidity B over weight, the
+    /// mean of warp and weft. Cantilever tests of dress cloth agree:
+    /// 0.85 to 1.53 cm (Guerarda and Ceven 2017, "Influence of women's
+    /// dress woven fabric structure on bending and drapability
+    /// properties", table 2). The cloth before this had 2.5 to 14 cm
+    /// from memory, which is what made skirts stiff.
+    ///
+    /// Not measured anywhere found, and so approximations: how much
+    /// pleats stiffen cloth along them (`fold` of the pleated kind),
+    /// `memory`, and `lift`.
     pub fn of(kind: Kind) -> Self {
-        let pleated = Material {
-            bending_length: 0.07,
-            shear: 56.0,
-            weight: 0.2,
+        let cloth = |bending_length: f32, g: f32, weight: f32| Material {
+            bending_length,
+            fold: bending_length,
+            shear: shear(g),
+            weight,
             thickness: 0.006,
             friction: [0.5, 0.4],
-            damping: 4.6,
+            damping: drag(weight),
             memory: 0.0,
+            lift: 1.0,
         };
         match kind {
-            Kind::Pleated => pleated,
-            // Firm cloth cut close: it shears little, moves little by
-            // itself (three steps of the demos' damping in one) and
-            // stays by its cut.
+            // Suiting of 60 % wool and 38 % polyester (sample 33): 195
+            // g/m2, B 0.054, G 0.74. Down the skirt its pressed pleats
+            // stiffen it: the 4 cm the first cloth net had down the
+            // skirt, with which a pleated skirt keeps its panels when a
+            // leg lifts it.
+            Kind::Pleated => Material {
+                fold: 0.04,
+                ..cloth(0.014, 0.74, 0.195)
+            },
+            // Polyester and cotton twill (sample 19) for weight and
+            // shear: 180 g/m2, G 2.0. Its measured bending length is 2
+            // cm, but the game's tight garment with a net is the lined
+            // qipao of three sewn layers, and with 2 cm its front panel
+            // fell between the thighs on a chair: it keeps the 5 cm it
+            // had before, which is not measured. No pull back to its
+            // cut: with one it stayed in its standing shape on a chair
+            // and the legs came out of it. Nor a prop: it hangs onto
+            // the body. The qipao's net is a cone from the waist, and
+            // propped as made its panels stood 30 degrees off the legs.
             Kind::Tight => Material {
-                bending_length: 0.05,
-                shear: 168.0,
-                damping: 13.8,
-                memory: 6.0,
-                ..pleated
+                lift: 0.0,
+                ..cloth(0.05, 2.0, 0.18)
             },
+            // Polyester crepe (sample 23): 85 g/m2, B 0.016 and 0.007,
+            // G 0.2.
+            // G 0.2. Half propped: with all of it the game's long dress
+            // stood wider than the game has it, with none it hung as a
+            // tube. A judgement by eye.
             Kind::Flowing => Material {
-                bending_length: 0.025,
-                ..pleated
+                lift: 0.5,
+                ..cloth(0.0105, 0.2, 0.085)
             },
-            // As stiff as the solver holds a hinge at this net's size
-            // (`HINGE_LEAST`), and back in its shape in a few frames.
+            // Nylon tulle (sample 30) along its stiff way: B 0.276 at 10
+            // g/m2 a layer, G 2.24 and 5.42; ten layers' weight. A tutu
+            // is sewn to stand out: back in its shape in a few frames.
             Kind::Fixed => Material {
-                bending_length: 0.14,
                 memory: 40.0,
-                ..pleated
+                ..cloth(0.065, 3.8, 0.1)
             },
+        }
+    }
+
+    /// The bending length along `way`.
+    fn along(&self, way: Way) -> f32 {
+        match way {
+            Way::Down => self.fold,
+            _ => self.bending_length,
         }
     }
 }
@@ -225,6 +296,10 @@ pub const BODY_PLANES: usize = 16;
 pub const PUSH_LEAST: f32 = 1e-9;
 /// No point.
 pub const NONE: u32 = u32::MAX;
+/// The least share of its weight a link that leans is taken to pull
+/// along itself by (`props`): cloth made to stand out level or upwards
+/// still hangs from its top.
+pub const HANG_LEAST: f32 = 0.1;
 /// How near a shell's skin a point is given its plane: twice what the
 /// fastest point and the fastest limb close in on each other in a
 /// substep, 2 x (4 + 4.8) m/s / 960.
@@ -287,6 +362,9 @@ pub struct Point {
     /// Whether the cell that has this point as its first corner (with
     /// the next round the skirt and the two below) has cloth.
     pub cell: bool,
+    /// What the garment's make props this point up by, in the waist's
+    /// space, m/s2 (`props`).
+    pub prop: Vec3,
 }
 
 /// A length kept between a point and one next to it.
@@ -485,6 +563,9 @@ pub struct Frame {
     pub floor: Option<(Vec3, Vec3)>,
     /// The map's triangles near the cloth, fronts by their winding.
     pub map: Option<Arc<Vec<[Vec3; 3]>>>,
+    /// How much of each point's `prop` is there: the material's `lift`
+    /// by how upright the waist is.
+    pub lift: f32,
 }
 
 /// The cloth read back from the GPU: each point's place with how much
@@ -720,7 +801,11 @@ pub fn run(setup: &Setup, state: &mut State, frame: &Frame) {
             next[i] = if p.fixed {
                 waist(sub + 1, p.net).transform_point3(p.rest)
             } else {
-                let v = (state.vel[i] + Vec3::new(0.0, -GRAVITY, 0.0) * h) * damp;
+                // Gravity, and as much of what the garment's make props
+                // the point up by as the frame says.
+                let fall = Vec3::new(0.0, -GRAVITY, 0.0);
+                let prop = waist(sub + 1, p.net).transform_vector3(p.prop);
+                let v = (state.vel[i] + (fall + prop * frame.lift) * h) * damp;
                 state.pos[i] + v * h
             };
         }
@@ -1159,9 +1244,13 @@ pub struct Drape {
     /// The fastest a shell's middle went in a frame so far, in metres.
     pub fastest: f32,
     /// Per link whether it is a diagonal, and per hinge how long its two
-    /// links are at rest (their mean): what `set_material` needs.
-    diagonal: Vec<bool>,
-    spans: Vec<f32>,
+    /// links are at rest (their mean) and which way they run: what
+    /// `set_material` needs.
+    ways: Vec<Way>,
+    spans: Vec<(f32, Way)>,
+    /// The way gravity pulls where the cloth was made, in the first
+    /// waist's space.
+    down: Vec3,
 }
 
 /// How many rows of a net of `cols` by `rows` points resting at `rest`
@@ -1173,16 +1262,45 @@ fn held_rows(rest: &[Vec3], cols: usize, rows: usize, at: Vec3, up: Vec3) -> usi
         .clamp(1, rows.saturating_sub(2).max(1))
 }
 
+/// What the garment's make props each point of a column up by, the
+/// column hanging from a fixed point through `rest` (the fixed one
+/// first) and `down` being the way gravity pulls where the garment was
+/// made. A skirt in the game's files is not the shape its cloth would
+/// fall into: it flares and puffs as its pleats, gathers and underskirts
+/// would hold it, which are not in the files. They are taken to carry
+/// the part of each point's weight that is across the cloth where the
+/// point hangs and to leave the part along it: with its prop a point is
+/// pulled along the link it hangs by, by g x cos of the link's lean. A
+/// straight column so swings about the way it was made to hang as a
+/// pendulum does about straight down, and cloth made to hang straight
+/// down is propped by nothing. A column with a bend hangs a little
+/// straighter than made: each link goes the way of the pulls below it.
+/// (Holding the bends too takes the pull of a string under the weight
+/// below, many times g at the hips: a panel that a pose slackened was
+/// thrown out by it.) The prop turns with the waist while gravity does
+/// not. An approximation, Renkatsu's own.
+fn props(rest: &[Vec3], down: Vec3) -> Vec<Vec3> {
+    (0..rest.len())
+        .map(|k| {
+            if k == 0 {
+                return Vec3::ZERO;
+            }
+            let along = (rest[k] - rest[k - 1]).normalize_or_zero();
+            (along * along.dot(down).max(HANG_LEAST) - down) * GRAVITY
+        })
+        .collect()
+}
+
 /// A link's compliance and buckling load in `material`.
-fn link_of(material: &Material, rest: f32, diagonal: bool) -> (f32, f32) {
+fn link_of(material: &Material, rest: f32, way: Way) -> (f32, f32) {
     // A diagonal stands for the shear of half a cell.
-    let soft = if diagonal {
+    let soft = if way == Way::Diagonal {
         material.weight * rest * rest * 0.5 / material.shear
     } else {
         0.0
     };
     // Euler's load of a strip as long as the link, per its weight.
-    let buckle = std::f32::consts::PI.powi(2) * GRAVITY * material.bending_length.powi(3) / rest.max(1e-4).powi(3);
+    let buckle = std::f32::consts::PI.powi(2) * GRAVITY * material.along(way).powi(3) / rest.max(1e-4).powi(3);
     (soft, buckle)
 }
 
@@ -1190,8 +1308,8 @@ fn link_of(material: &Material, rest: f32, diagonal: bool) -> (f32, f32) {
 /// bending length c, stiffness 4 B / L^3 per width on the middle's
 /// offset h (h = L x angle / 2, energy B angle^2 / 2L), B = weight x g x
 /// c^3, over a point's mass weight x L per width.
-fn hinge_soft(material: &Material, span: f32) -> f32 {
-    span.powi(4) / (4.0 * GRAVITY * material.bending_length.powi(3))
+fn hinge_soft(material: &Material, span: f32, way: Way) -> f32 {
+    span.powi(4) / (4.0 * GRAVITY * material.along(way).powi(3))
 }
 
 impl Clone for Drape {
@@ -1212,7 +1330,8 @@ impl Clone for Drape {
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
-            diagonal: self.diagonal.clone(),
+            ways: self.ways.clone(),
+            down: self.down,
             spans: self.spans.clone(),
         }
     }
@@ -1223,13 +1342,13 @@ impl Drape {
     pub(super) fn set_material(&mut self, material: Material) {
         let mut setup = self.live.setup.clone();
         setup.material = material;
-        for (link, &diagonal) in setup.links.iter_mut().zip(&self.diagonal) {
+        for (link, &way) in setup.links.iter_mut().zip(&self.ways) {
             if link.to != NONE {
-                (link.soft, link.buckle) = link_of(&material, link.rest, diagonal);
+                (link.soft, link.buckle) = link_of(&material, link.rest, way);
             }
         }
-        for (hinge, &span) in setup.hinges.iter_mut().zip(&self.spans) {
-            hinge.soft = hinge_soft(&material, span);
+        for (hinge, &(span, way)) in setup.hinges.iter_mut().zip(&self.spans) {
+            hinge.soft = hinge_soft(&material, span, way);
         }
         self.live = Arc::new(Live {
             setup,
@@ -1274,7 +1393,7 @@ impl Drape {
                     .map(|top| (top, up))
             });
         let (mut points, mut links, mut hinges, mut parts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut diagonals, mut spans) = (Vec::new(), Vec::new());
+        let (mut link_ways, mut spans) = (Vec::new(), Vec::new());
         for (k, net) in nets.iter().enumerate() {
             let part = net.part();
             let first = points.len();
@@ -1340,7 +1459,22 @@ impl Drape {
                     turn,
                     grid: [first as u32, cols as u32, rows as u32],
                     cell: cell(i),
+                    prop: Vec3::ZERO,
                 });
+            }
+            // How each column was made to hang, the wearer standing as
+            // the body was fitted.
+            let down = world(scene, part.waist)
+                .inverse()
+                .transform_vector3(Vec3::NEG_Y)
+                .normalize_or_zero();
+            for c in 0..cols {
+                let column: Vec<Vec3> = (held - 1..rows).map(|r| part.rest_on_waist[at(c, r)]).collect();
+                for (r, prop) in (held - 1..rows).zip(props(&column, down)) {
+                    if !fixed(at(c, r)) {
+                        points[first + at(c, r)].prop = prop;
+                    }
+                }
             }
             // The links of each point.
             let mut mine = vec![
@@ -1352,14 +1486,19 @@ impl Drape {
                 };
                 count * LINKS
             ];
-            let mut diagonal = vec![false; count * LINKS];
+            let mut ways = vec![Way::Round; count * LINKS];
             for &(a, b, kind) in part.links {
                 let (a, b) = (a as usize, b as usize);
                 if fixed(a) && fixed(b) {
                     continue;
                 }
                 let rest = (part.rest[a] - part.rest[b]).length();
-                let (soft, buckle) = link_of(&material, rest, kind == super::net::DIAGONAL);
+                let way = match kind {
+                    super::net::DIAGONAL => Way::Diagonal,
+                    _ if a % cols == b % cols => Way::Down,
+                    _ => Way::Round,
+                };
+                let (soft, buckle) = link_of(&material, rest, way);
                 for (from, to) in [(a, b), (b, a)] {
                     let slots = &mut mine[from * LINKS..(from + 1) * LINKS];
                     if let Some(k) = slots.iter().position(|l| l.to == NONE) {
@@ -1369,16 +1508,16 @@ impl Drape {
                             soft,
                             buckle,
                         };
-                        diagonal[from * LINKS + k] = kind == super::net::DIAGONAL;
+                        ways[from * LINKS + k] = way;
                     }
                 }
             }
-            diagonals.extend(diagonal);
+            link_ways.extend(ways);
             links.extend(mine);
             // The hinges: each bend of the net at its middle point and at
             // its two ends.
             let mut mine = vec![Hinge::NONE; count * HINGES];
-            let mut span = vec![0.0f32; count * HINGES];
+            let mut span = vec![(0.0f32, Way::Round); count * HINGES];
             for bend in part.bends {
                 let [a, b] = bend.ends.map(|e| e as usize);
                 let m = bend.at as usize;
@@ -1394,7 +1533,8 @@ impl Drape {
                     ((pm - (pa + pb) * 0.5).dot(nrm), bend.axis.map(|k| first as u32 + k))
                 };
                 let len = ((pm - pa).length() + (pm - pb).length()) * 0.5;
-                let soft = hinge_soft(&material, len);
+                let way = if bend.round { Way::Round } else { Way::Down };
+                let soft = hinge_soft(&material, len, way);
                 let hinge = |a: usize, b: usize, side: f32| Hinge {
                     a: (first + a) as u32,
                     b: (first + b) as u32,
@@ -1406,7 +1546,7 @@ impl Drape {
                 let mut put = |at: usize, range: std::ops::Range<usize>, hinge: Hinge| {
                     if let Some(k) = range.clone().find(|&k| mine[at * HINGES + k].a == NONE) {
                         mine[at * HINGES + k] = hinge;
-                        span[at * HINGES + k] = len;
+                        span[at * HINGES + k] = (len, way);
                     }
                 };
                 put(m, 0..2, hinge(a, b, 1.0));
@@ -1453,8 +1593,9 @@ impl Drape {
             nearby: Nearby::default(),
             map: None,
             fastest: 0.0,
-            diagonal: diagonals,
+            ways: link_ways,
             spans,
+            down: back.transform_vector3(Vec3::Y).normalize_or_zero() * -1.0,
         })
     }
 
@@ -1487,6 +1628,7 @@ impl Drape {
             arms: false,
             floor: None,
             map: None,
+            lift: 0.0,
         });
     }
 
@@ -1508,6 +1650,11 @@ impl Drape {
         let shells = live.setup.shells.len();
         let now: Vec<Mat4> = self.nodes.iter().map(|&n| world(scene, n)).collect();
         let waist = now[shells];
+        // The garment's make holds its shape for a wearer who is
+        // upright, and less the more she leans: lying, cloth falls as
+        // cloth.
+        let upright = waist.transform_vector3(self.down).normalize_or_zero().dot(Vec3::NEG_Y);
+        let lift = live.setup.material.lift * upright.clamp(0.0, 1.0);
         // A limb that jumped, as when a pose is put on at once, would go
         // through the cloth: it starts again.
         let back = waist.inverse();
@@ -1551,6 +1698,7 @@ impl Drape {
                     arms: false,
                     floor: None,
                     map: None,
+                    lift,
                 });
                 from = to;
             }
@@ -1579,6 +1727,7 @@ impl Drape {
                 arms: true,
                 floor,
                 map,
+                lift,
             });
         }
         self.was = now;
@@ -1601,6 +1750,7 @@ pub mod sample {
             arms: true,
             floor,
             map: None,
+            lift: 0.0,
         }
     }
 
@@ -1655,6 +1805,7 @@ pub mod sample {
                 turn: 1.0,
                 grid: [0, cols as u32, rows as u32],
                 cell: r + 1 < rows,
+                prop: Vec3::ZERO,
             });
             let mut near = vec![(at(c + 1, r), false), (at(c + cols - 1, r), false)];
             if r > 0 {
@@ -1769,6 +1920,7 @@ pub mod sample {
                     arms: true,
                     floor,
                     map: None,
+                    lift: 0.0,
                 }
             })
             .collect::<Vec<_>>()
@@ -1818,6 +1970,7 @@ mod tests {
                 turn: 1.0,
                 grid: [0, 1, count as u32],
                 cell: false,
+                prop: Vec3::ZERO,
             });
             if i > 0 {
                 links[i * LINKS] = link(i - 1);
@@ -2156,11 +2309,11 @@ mod tests {
         setup.material.bending_length = c;
         let material = setup.material;
         for link in setup.links.iter_mut().filter(|l| l.to != NONE) {
-            link.buckle = link_of(&material, link.rest, false).1;
+            link.buckle = link_of(&material, link.rest, Way::Round).1;
         }
         let spacing = setup.links[0].rest;
         for hinge in &mut setup.hinges {
-            hinge.soft = hinge_soft(&material, spacing);
+            hinge.soft = hinge_soft(&material, spacing, Way::Round);
         }
     }
 
@@ -2293,21 +2446,78 @@ mod tests {
     }
 
     #[test]
+    fn a_straight_column_is_propped_to_hang_along_itself() {
+        // Three points 30 degrees off straight down: with its prop each
+        // is pulled along the column by g x cos 30, the fixed top is
+        // propped by nothing.
+        let lean = Vec3::new(0.5, -(0.75f32.sqrt()), 0.0);
+        let rest: Vec<Vec3> = (0..4).map(|k| lean * (k as f32 * 0.04)).collect();
+        let fall = Vec3::NEG_Y * GRAVITY;
+        let prop = props(&rest, Vec3::NEG_Y);
+        assert_eq!(prop[0], Vec3::ZERO);
+        for prop in &prop[1..] {
+            assert!(
+                (*prop + fall - lean * (GRAVITY * 0.75f32.sqrt())).length() < 1e-4,
+                "{prop}"
+            );
+        }
+        // One made to hang straight down is propped by nothing.
+        let straight: Vec<Vec3> = (0..3).map(|k| Vec3::NEG_Y * (k as f32 * 0.04)).collect();
+        assert!(props(&straight, Vec3::NEG_Y)[2].length() < 1e-4);
+        // One made to stand out level still hangs from its top.
+        let level: Vec<Vec3> = (0..3).map(|k| Vec3::X * (k as f32 * 0.04)).collect();
+        assert!((props(&level, Vec3::NEG_Y)[2] + fall - Vec3::X * (GRAVITY * HANG_LEAST)).length() < 1e-4);
+    }
+
+    #[test]
+    fn cloth_made_to_lean_hangs_as_it_was_made_and_plain_cloth_falls() {
+        // A strip of soft cloth made 30 degrees off straight down.
+        let mut setup = strip(8, 0.03, Material::of(Kind::Flowing));
+        let lean = Vec3::new(0.5, -(0.75f32.sqrt()), 0.0);
+        for (k, p) in setup.points.iter_mut().enumerate() {
+            p.rest = lean * (k as f32 * 0.03);
+        }
+        let column: Vec<Vec3> = setup.points[1..].iter().map(|p| p.rest).collect();
+        for (p, prop) in setup.points[1..].iter_mut().zip(props(&column, Vec3::NEG_Y)) {
+            p.prop = prop;
+        }
+        let end = |lift: f32| {
+            let mut state = State::new(setup.points.len());
+            let frame = |begin| Frame {
+                lift,
+                ..still(&setup, begin, None)
+            };
+            run(&setup, &mut state, &frame(Begin::Reset));
+            for _ in 0..300 {
+                run(&setup, &mut state, &frame(Begin::Keep));
+            }
+            (state.pos[7], state.vel[7].length())
+        };
+        let (made, speed) = end(1.0);
+        assert!((made - setup.points[7].rest).length() < 0.002, "{made}");
+        assert!(speed < 0.01, "{speed}");
+        let (fallen, _) = end(0.0);
+        assert!(fallen.x < setup.points[7].rest.x - 0.03, "{fallen}");
+    }
+
+    #[test]
     fn stiffer_kinds_of_cloth_hold_a_strip_out_further() {
+        // Three centimetres of cloth held out level: about twice the
+        // bending length of the softest kind.
         let low = |kind: Kind| {
-            let setup = strip(8, 0.03, Material::of(kind));
+            let setup = strip(5, 0.01, Material::of(kind));
             let mut state = State::new(setup.points.len());
             run(&setup, &mut state, &still(&setup, Begin::Reset, None));
             settle(&setup, &mut state, 300);
-            state.pos[7].y
+            state.pos[4].y
         };
         let (flowing, pleated, fixed) = (low(Kind::Flowing), low(Kind::Pleated), low(Kind::Fixed));
         assert!(
-            flowing < pleated - 0.01 && pleated < fixed - 0.01,
+            flowing < pleated - 0.001 && pleated < fixed - 0.001,
             "{flowing} {pleated} {fixed}"
         );
         // What stands by itself stays within a few millimetres.
-        assert!(fixed > -0.01, "{fixed}");
+        assert!(fixed > -0.005, "{fixed}");
         for kind in Kind::ALL {
             assert_eq!(Kind::named(kind.name()), Some(kind));
         }

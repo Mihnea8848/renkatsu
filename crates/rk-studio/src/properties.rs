@@ -183,7 +183,10 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
         // Renkatsu's own improvements on the game.
         if page_name == RENKATSU_PAGE {
             let Content::Character {
-                outfit, game_skirts, ..
+                outfit,
+                game_skirts,
+                skirt_kinds,
+                ..
             } = &mut object.content
             else {
                 return;
@@ -199,6 +202,21 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
                 } else if !game_skirts.contains(outfit) {
                     game_skirts.push(*outfit);
                     game_skirts.sort_unstable();
+                }
+                // The kind of cloth, per outfit too: guessed from the
+                // clothing unless one is chosen.
+                let kinds = crate::scene::SkirtKind::ALL;
+                let was = crate::scene::skirt_kind(skirt_kinds, *outfit);
+                let mut chosen = was
+                    .and_then(|k| kinds.iter().position(|o| *o == k))
+                    .map_or(0, |i| i + 1);
+                row(ui, k, "Kind", None, |ui, rect| {
+                    let options = ["Auto", "Tight", "Pleated", "Flowing", "Fixed"];
+                    widgets::combo(ui, k, rect, ui.id().with("skirt kind"), &mut chosen, &options);
+                });
+                let now = chosen.checked_sub(1).map(|i| kinds[i]);
+                if now != was {
+                    crate::scene::choose_skirt_kind(skirt_kinds, *outfit, now);
                 }
                 section_end(ui, k);
             }

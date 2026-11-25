@@ -210,6 +210,56 @@ impl Animation {
     }
 }
 
+/// A kind of skirt cloth chosen by hand (`rk_chara::physics::drape::Kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkirtKind {
+    Tight,
+    Pleated,
+    Flowing,
+    Fixed,
+}
+
+impl SkirtKind {
+    pub const ALL: [SkirtKind; 4] = [
+        SkirtKind::Tight,
+        SkirtKind::Pleated,
+        SkirtKind::Flowing,
+        SkirtKind::Fixed,
+    ];
+
+    pub fn kind(self) -> rk_chara::physics::drape::Kind {
+        use rk_chara::physics::drape::Kind;
+        match self {
+            SkirtKind::Tight => Kind::Tight,
+            SkirtKind::Pleated => Kind::Pleated,
+            SkirtKind::Flowing => Kind::Flowing,
+            SkirtKind::Fixed => Kind::Fixed,
+        }
+    }
+}
+
+/// The kind of skirt cloth of one outfit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkirtChoice {
+    pub outfit: usize,
+    pub kind: SkirtKind,
+}
+
+/// The kind chosen for `outfit` among `choices`, none for the guess.
+pub fn skirt_kind(choices: &[SkirtChoice], outfit: usize) -> Option<SkirtKind> {
+    choices.iter().find(|c| c.outfit == outfit).map(|c| c.kind)
+}
+
+/// Chooses `kind` for `outfit` in `choices`, none for the guess.
+pub fn choose_skirt_kind(choices: &mut Vec<SkirtChoice>, outfit: usize, kind: Option<SkirtKind>) {
+    choices.retain(|c| c.outfit != outfit);
+    if let Some(kind) = kind {
+        choices.push(SkirtChoice { outfit, kind });
+        choices.sort_unstable_by_key(|c| c.outfit);
+    }
+}
+
 /// What an object is, with the values only that kind has.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -241,6 +291,11 @@ pub enum Content {
         /// others use Advanced Skirt Physics.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         game_skirts: Vec<usize>,
+        /// The kind of cloth the skirts of an outfit are made of, where
+        /// it was chosen by hand; the others are guessed from the
+        /// clothing. In the order of the outfits.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skirt_kinds: Vec<SkirtChoice>,
         /// The animation the character plays or the pose it holds; none
         /// leaves it as it was built. Scenes of Renkatsu 0.1.4 and older
         /// call it `pose`.
@@ -424,6 +479,7 @@ impl Content {
             liquid: [0; rk_chara::siru::PARTS],
             liquid_clothes: true,
             game_skirts: Vec::new(),
+            skirt_kinds: Vec::new(),
             animation: None,
             pose_layer: None,
             profile: None,
@@ -3306,6 +3362,55 @@ mod tests {
         assert!(text.contains("game_skirts = [2]"), "{text}");
         let back: Scene = toml::from_str(&text).unwrap();
         assert_eq!(back.get(anna).unwrap().content, edited.content);
+    }
+
+    #[test]
+    fn skirt_kinds_are_saved_per_outfit() {
+        let (mut doc, [_, anna, ..]) = cast();
+        // Every outfit's kind is guessed unless one is chosen, and an
+        // empty list is not written.
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(!text.contains("skirt_kinds"), "{text}");
+        let mut edited = doc.scene().get(anna).unwrap().clone();
+        let Content::Character { skirt_kinds, .. } = &mut edited.content else {
+            panic!("Anna is a character");
+        };
+        choose_skirt_kind(skirt_kinds, 3, Some(SkirtKind::Fixed));
+        choose_skirt_kind(skirt_kinds, 1, Some(SkirtKind::Tight));
+        choose_skirt_kind(skirt_kinds, 1, Some(SkirtKind::Flowing));
+        assert_eq!(skirt_kind(skirt_kinds, 1), Some(SkirtKind::Flowing));
+        assert_eq!(skirt_kind(skirt_kinds, 2), None);
+        assert!(doc.edit(edited.clone(), false));
+        let text = toml::to_string(doc.scene()).unwrap();
+        assert!(
+            text.contains("outfit = 1") && text.contains("kind = \"flowing\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("outfit = 3") && text.contains("kind = \"fixed\""),
+            "{text}"
+        );
+        let back: Scene = toml::from_str(&text).unwrap();
+        assert_eq!(back.get(anna).unwrap().content, edited.content);
+        // Back to the guess: the outfit leaves the list.
+        let Content::Character { skirt_kinds, .. } = &mut edited.content else {
+            panic!("Anna is a character");
+        };
+        choose_skirt_kind(skirt_kinds, 1, None);
+        choose_skirt_kind(skirt_kinds, 3, None);
+        assert!(doc.edit(edited, false));
+        assert!(!toml::to_string(doc.scene()).unwrap().contains("skirt_kinds"));
+    }
+
+    #[test]
+    fn a_scene_from_before_skirt_kinds_still_opens() {
+        let (doc, [_, anna, ..]) = cast();
+        let text = toml::to_string(doc.scene()).unwrap();
+        let back: Scene = toml::from_str(&text).unwrap();
+        let Content::Character { skirt_kinds, .. } = &back.get(anna).unwrap().content else {
+            panic!("Anna is a character");
+        };
+        assert!(skirt_kinds.is_empty());
     }
 
     #[test]

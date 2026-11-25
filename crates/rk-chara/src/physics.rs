@@ -169,6 +169,7 @@ impl Curve {
 
 pub mod cloth;
 pub mod drape;
+pub mod kind;
 pub mod net;
 pub mod shell;
 
@@ -1996,11 +1997,26 @@ impl Physics {
         }
     }
 
-    /// Makes the skirts' cloth of `kind` for the GPU solver.
-    pub fn set_skirt_kind(&mut self, kind: drape::Kind) {
-        if let Some(cloth) = &mut self.cloth {
-            cloth.set_material(drape::Material::of(kind));
-        }
+    /// What is known of each skirt that has a cloth net, the one that
+    /// carries the most vertices first: what `kind::guess` tells the
+    /// kind of cloth from.
+    pub fn garments(&self, scene: &Scene) -> Vec<kind::Garment> {
+        self.cloth
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.garments(scene, &self.bones))
+    }
+
+    /// Makes the skirts' cloth of `kind` for the GPU solver, none for
+    /// the kind guessed from the clothing (`kind::guess`). Whether that
+    /// changed the cloth, which then starts again.
+    pub fn set_skirt_kind(&mut self, kind: Option<drape::Kind>) -> bool {
+        self.cloth.as_mut().is_some_and(|c| c.set_kind(kind))
+    }
+
+    /// The kind of cloth the skirts are guessed to be and the kind they
+    /// are made of; none without skirts that have cloth.
+    pub fn skirt_kinds(&self) -> Option<[drape::Kind; 2]> {
+        self.cloth.as_ref().filter(|c| c.has_nets()).map(cloth::Cloth::kinds)
     }
 
     /// The fastest a part of the body went in a frame since the GPU
@@ -2469,6 +2485,24 @@ mod tests {
         physics.start(&mut scene);
         physics.fit_cloth(&scene, &std::collections::HashMap::new(), true);
         (scene, physics, waist)
+    }
+
+    #[test]
+    fn the_skirt_kind_is_the_guess_until_one_is_chosen() {
+        use drape::Kind;
+        let (scene, mut physics, _) = skirt();
+        let [guessed, made] = physics.skirt_kinds().expect("a skirt with cloth");
+        assert_eq!(guessed, made);
+        assert_eq!(guessed, kind::guess(&physics.garments(&scene)[0]).0);
+        // Choosing what it is already changes nothing; another kind
+        // does, and none goes back to the guess.
+        assert!(!physics.set_skirt_kind(Some(guessed)));
+        assert!(!physics.set_skirt_kind(None));
+        let other = Kind::ALL.into_iter().find(|k| *k != guessed).unwrap();
+        assert!(physics.set_skirt_kind(Some(other)));
+        assert_eq!(physics.skirt_kinds(), Some([guessed, other]));
+        assert!(physics.set_skirt_kind(None));
+        assert_eq!(physics.skirt_kinds(), Some([guessed, guessed]));
     }
 
     #[test]
