@@ -285,6 +285,12 @@ pub fn solve(
     } else if vectors_equal(v1, v2, 0.001) || length <= distance {
         v2 = v1;
         straight = true;
+    } else if s.stiffness > 0.0 {
+        v2 = unity::normalize(v2.lerp(v1, s.stiffness.clamp(0.0, 1.0)));
+        if vectors_equal(v1, v2, 0.001) {
+            v2 = v1;
+            straight = true;
+        }
     }
     let turn = f64::from(unity::angle(v1, -v2)).to_radians();
     let segment = length / (starts.len() - 1) as f32;
@@ -998,6 +1004,11 @@ pub struct Settings {
     /// stretches from its shallowest point to reach it. Renkatsu's own.
     #[serde(default)]
     pub depth: f32,
+    /// How straight the shaft stays past the entry: 0 turns it to the end
+    /// as the plugin does, 1 keeps it on the line it came in on.
+    /// Renkatsu's own.
+    #[serde(default)]
+    pub stiffness: f32,
 }
 
 fn yes() -> bool {
@@ -1043,6 +1054,7 @@ impl Settings {
             oral_mouth: true,
             clipping_depth: None,
             depth: 0.0,
+            stiffness: 0.0,
         }
     }
 }
@@ -1084,6 +1096,23 @@ pub fn read(ext: &ExtData) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stiff_shaft_stays_on_its_line_past_the_entry() {
+        let starts: Vec<Vec3> = (0..10).map(|i| Vec3::new(0.0, 0.0, i as f32 * 0.015)).collect();
+        // The end turns away from the line at the entry.
+        let (entry, end) = (Vec3::new(0.0, 0.0, 0.05), Vec3::new(0.0, 0.2, 0.2));
+        let tip = |stiffness: f32| {
+            let s = Settings {
+                stiffness,
+                ..Settings::studio()
+            };
+            solve(&starts, &[], entry, end, 0.135, &s, false).points[9]
+        };
+        assert!(tip(0.0).y > 0.03, "bends to the end: {}", tip(0.0));
+        assert!(tip(1.0).y.abs() < 1e-4, "stays straight: {}", tip(1.0));
+        assert!(tip(0.5).y > 0.0 && tip(0.5).y < tip(0.0).y);
+    }
 
     #[test]
     fn a_card_without_the_data_has_the_defaults() {

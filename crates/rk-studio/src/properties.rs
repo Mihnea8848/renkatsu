@@ -188,8 +188,29 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State) {
             }
         }
         if has(Part::Penetration) {
-            if let Some(card) = built.as_ref().and_then(|b| b.better_penetration) {
-                penetration_section(ui, k, st, &mut object, card);
+            // Her own shaft while it is aimed; else the shaft aimed at her,
+            // whose settings the pair shares; else her own, if she has one.
+            let own = built.as_ref().and_then(|b| b.better_penetration);
+            let aimed = st.live.as_ref().and_then(|l| l.aim(object.id)).is_some();
+            let linked = st.live.as_ref().and_then(|l| l.shaft_on(object.id));
+            if let (Some(card), true) = (own, aimed || linked.is_none()) {
+                penetration_section(ui, k, st, &mut object, card, None);
+            } else if let Some(him) = linked {
+                // Her side of the pair: the same settings as his shaft's.
+                let card = st
+                    .live
+                    .as_ref()
+                    .and_then(|l| l.built(him))
+                    .and_then(|b| b.better_penetration);
+                if let (Some(mut his), Some(card)) = (st.doc.scene().get(him).cloned(), card) {
+                    let before = his.clone();
+                    let name = his.name.clone();
+                    penetration_section(ui, k, st, &mut his, card, Some(&name));
+                    if his != before {
+                        let held = ui.input(|i| i.pointer.any_down());
+                        st.doc.edit(his, held);
+                    }
+                }
             }
         }
         // All of a character's physics in one section, Renkatsu's own
@@ -1660,6 +1681,7 @@ fn penetration_section(
     st: &mut State,
     object: &mut crate::scene::Object,
     card: rk_chara::better_penetration::Settings,
+    with: Option<&str>,
 ) {
     use rk_chara::better_penetration::{AutoTarget, Mode};
     let others: Vec<(crate::scene::ObjectId, String)> = st
@@ -1704,28 +1726,42 @@ fn penetration_section(
         return;
     }
     let off = (!s.enabled).then_some("BetterPenetration is off");
-    row(ui, k, "Partner", off, |ui, rect| {
-        let name = penetration_target
-            .and_then(|t| others.iter().find(|(id, _)| *id == t.partner))
-            .map_or("None", |(_, name)| name.as_str());
-        let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(rect.width());
-            if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
-                *penetration_target = None;
-                ui.close();
-            }
-            for (id, name) in &others {
-                let on = penetration_target.is_some_and(|t| t.partner == *id);
-                if widgets::check_item(ui, k, on, name, "").clicked() {
-                    let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
-                    *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+    // From her side the pair is shown by whose shaft it is; the partner
+    // and the hole are chosen on his.
+    if let Some(him) = with {
+        row(ui, k, "With", off, |ui, rect| {
+            label(&ui.painter().with_clip_rect(rect), k, rect.left_center(), him, k.t.text);
+        });
+    }
+    let linked = st.live.as_ref().and_then(|l| l.aim(object.id)).map(|a| a.partner);
+    if with.is_none() {
+        row(ui, k, "Partner", off, |ui, rect| {
+            // The partner chosen, or the one the shaft links to on its own.
+            let name = penetration_target
+                .map(|t| t.partner)
+                .or(linked)
+                .and_then(|p| others.iter().find(|(id, _)| *id == p))
+                .map_or("None", |(_, name)| name.as_str());
+            let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("partner"), name);
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(rect.width());
+                if widgets::check_item(ui, k, penetration_target.is_none(), "None", "").clicked() {
+                    *penetration_target = None;
                     ui.close();
                 }
-            }
+                for (id, name) in &others {
+                    let on = penetration_target.is_some_and(|t| t.partner == *id);
+                    if widgets::check_item(ui, k, on, name, "").clicked() {
+                        let mode = penetration_target.map_or(Mode::Vaginal, |t| t.mode);
+                        *penetration_target = Some(crate::scene::PenetrationTarget { partner: *id, mode });
+                        ui.close();
+                    }
+                }
+            });
         });
-    });
-    if let Some(target) = penetration_target.as_mut() {
+    }
+    if with.is_some() {
+    } else if let Some(target) = penetration_target.as_mut() {
         row(ui, k, "Target", off, |ui, rect| {
             let options: Vec<(&str, bool)> = Mode::ALL.iter().map(|m| (m.label(), true)).collect();
             let chosen = Mode::ALL.iter().position(|m| *m == target.mode);
@@ -1779,6 +1815,7 @@ fn penetration_section(
             (SHAFT, "Length squish", &mut s.length_squish, 0.0, 1.0),
             (SHAFT, "Girth squish", &mut s.girth_squish, 0.0, 2.0),
             (SHAFT, "Squish threshold", &mut s.squish_threshold, 0.0, 1.0),
+            (SHAFT, "Stiffness", &mut s.stiffness, 0.0, 1.0),
         ]);
     }
     if aimed == Some(Mode::Oral) {

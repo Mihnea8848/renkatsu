@@ -639,6 +639,20 @@ impl Actor {
                 }
             }
         }
+        // Each arm's bones, and where its hand and elbow are before the lean,
+        // so the hands stay where the animation put them.
+        let arms: Vec<([usize; 3], Mat4, Vec3)> = ["L", "R"]
+            .iter()
+            .filter_map(|side| {
+                let bone = |name: &str| scene.find(top, &format!("{name}_{side}"));
+                let nodes = [bone("cf_j_arm00")?, bone("cf_j_forearm01")?, bone("cf_j_hand")?];
+                Some((
+                    nodes,
+                    scene.world_of(nodes[2]),
+                    scene.world_of(nodes[1]).w_axis.truncate(),
+                ))
+            })
+            .collect();
         let goal = scene.world_of(mouth).w_axis.truncate() + by;
         // A few passes, each bone turning its share of what is left.
         for _ in 0..10 {
@@ -657,6 +671,9 @@ impl Actor {
                     .map_or(Quat::IDENTITY, |p| scene.world_of(p).to_scale_rotation_translation().1);
                 scene.nodes[node].local.rot = (parent.inverse() * turn * rot).normalize();
             }
+        }
+        for (nodes, hand, elbow) in arms {
+            keep_hand(scene, nodes, &hand, elbow);
         }
     }
 
@@ -1192,6 +1209,43 @@ impl Live {
 /// reading that dust as a change would settle them again every frame.
 const STILL: f32 = 1e-4;
 
+/// Puts a hand back where it was (`hand`, its world matrix before), by
+/// turning the upper arm and the forearm, the elbow bending toward where
+/// it was (`elbow`): a two-bone IK.
+fn keep_hand(scene: &mut rk_chara::scene::Scene, [upper, lower, hand]: [usize; 3], was: &Mat4, elbow: Vec3) {
+    let rot_of = |scene: &rk_chara::scene::Scene, n: usize| scene.world_of(n).to_scale_rotation_translation().1;
+    let set_world_rot = |scene: &mut rk_chara::scene::Scene, n: usize, rot: Quat| {
+        let parent = scene.nodes[n].parent.map_or(Quat::IDENTITY, |p| rot_of(scene, p));
+        scene.nodes[n].local.rot = (parent.inverse() * rot).normalize();
+    };
+    let at = |scene: &rk_chara::scene::Scene, n: usize| scene.world_of(n).w_axis.truncate();
+    let (a, b, c) = (at(scene, upper), at(scene, lower), at(scene, hand));
+    let goal = was.w_axis.truncate();
+    let (l1, l2) = (a.distance(b), b.distance(c));
+    let Some(toward) = (goal - a).try_normalize() else {
+        return;
+    };
+    let reach = a.distance(goal).clamp((l1 - l2).abs() + 1e-4, l1 + l2 - 1e-4);
+    // Where the elbow goes: on the side it was, at the angle the two
+    // lengths make (law of cosines).
+    let cos = ((l1 * l1 + reach * reach - l2 * l2) / (2.0 * l1 * reach)).clamp(-1.0, 1.0);
+    let side = elbow - a;
+    let Some(bend) = (side - toward * side.dot(toward)).try_normalize() else {
+        return;
+    };
+    let new_elbow = a + toward * (l1 * cos) + bend * (l1 * (1.0 - cos * cos).sqrt());
+    if let (Some(from), Some(to)) = ((b - a).try_normalize(), (new_elbow - a).try_normalize()) {
+        let turned = Quat::from_rotation_arc(from, to) * rot_of(scene, upper);
+        set_world_rot(scene, upper, turned);
+    }
+    let (b, c) = (at(scene, lower), at(scene, hand));
+    if let (Some(from), Some(to)) = ((c - b).try_normalize(), (goal - b).try_normalize()) {
+        let turned = Quat::from_rotation_arc(from, to) * rot_of(scene, lower);
+        set_world_rot(scene, lower, turned);
+    }
+    set_world_rot(scene, hand, was.to_scale_rotation_translation().1);
+}
+
 /// How many places of an animation's loop a mouth's depth is kept for.
 const STROKE_SLOTS: usize = 32;
 
@@ -1364,7 +1418,7 @@ impl Live {
             (Some(t), _) => (Some(t.partner), t.mode),
             (None, Some(mode)) => (None, mode),
             (None, None) if settings.auto_link => {
-                let (partner, mode) = self.auto_link(at, shaft, held)?;
+                let (partner, mode) = self.auto_link(at, scene, shaft, held)?;
                 (Some(partner), mode)
             }
             (None, None) => return None,
@@ -1424,6 +1478,7 @@ impl Live {
     fn auto_link(
         &self,
         at: usize,
+        scene: &Scene,
         shaft: &rk_chara::better_penetration::Shaft,
         held: Option<Aim>,
     ) -> Option<(ObjectId, rk_chara::better_penetration::Mode)> {
@@ -1439,14 +1494,20 @@ impl Live {
             .h_position
             .as_ref()
             .and_then(|(controller, state)| self.dan_aims.as_ref()?.aim(controller, state));
+        // Without an H position he plays, only a partner snapped with him
+        // is linked, and only while he plays an animation: a shaft at rest
+        // reaches for no one.
         let modes: Vec<bp::Mode> = match wanted {
             Some(None) => return None,
             Some(Some(mode)) => vec![mode],
-            None => bp::Mode::ALL.to_vec(),
+            None if actor.playing.is_some() => bp::Mode::ALL.to_vec(),
+            None => return None,
         };
+        let parent = |id: ObjectId| scene.get(id).and_then(|o| o.parent);
+        let snapped = |a: ObjectId, b: ObjectId| parent(a) == Some(b) || parent(b) == Some(a);
         let mut places = Vec::new();
         for (i, other) in self.actors.iter().enumerate() {
-            if i == at {
+            if i == at || (wanted.is_none() && !snapped(actor.id, other.id)) {
                 continue;
             }
             let names = bp::bones_by_name(&other.chara.scene, other.chara.top);
@@ -1634,6 +1695,11 @@ impl Live {
     }
 
     /// Where a character's shaft is aimed this frame, if anywhere.
+    /// The character whose shaft is linked to `her` this frame.
+    pub fn shaft_on(&self, her: ObjectId) -> Option<ObjectId> {
+        self.aims.iter().find(|(_, a)| a.partner == her).map(|(him, _)| *him)
+    }
+
     pub fn aim(&self, id: ObjectId) -> Option<Aim> {
         self.aims.iter().find(|(who, _)| *who == id).map(|(_, aim)| *aim)
     }
