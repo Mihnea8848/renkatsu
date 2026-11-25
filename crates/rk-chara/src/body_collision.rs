@@ -35,7 +35,7 @@ pub const INNER_HEAD_TARGET: &str = "cf_J_FaceBase";
 /// The options the collision reads, with the plugin's defaults
 /// (`KK_BetterPenetration.Awake`, the `Config.Bind` calls, and the lists
 /// at the top of the class).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyOptions {
     /// "Clipping Offset: Front Collision N" (`frontOffsets`).
     pub front_offsets: [f32; 3],
@@ -89,6 +89,81 @@ impl Default for BodyOptions {
             limit_correction: false,
             max_correction: 0.2,
         }
+    }
+}
+
+impl BodyOptions {
+    /// The main game plugin's settings as its BepInEx config file holds
+    /// them: "Female Options" and "Male 1 Options". What the file leaves
+    /// out keeps the plugin's defaults.
+    pub fn from_config(text: &str) -> BodyOptions {
+        let mut o = BodyOptions::default();
+        let mut section = "";
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = match name {
+                    "Female Options" => "female",
+                    "Male 1 Options" => "male",
+                    _ => "",
+                };
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim());
+            let number = value.parse::<f32>().ok();
+            let flag = match value {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+            let set = |to: &mut f32| {
+                if let Some(v) = number {
+                    *to = v;
+                }
+            };
+            let switch = |to: &mut bool| {
+                if let Some(v) = flag {
+                    *to = v;
+                }
+            };
+            match (section, key) {
+                ("female", "Clipping Depth") => set(&mut o.clipping_depth),
+                ("female", "Target Offset: Vagina Target") => set(&mut o.kokan_offset),
+                ("female", "Target Offset: Inner Vagina Target") => set(&mut o.inner_kokan_offset),
+                ("female", "Target Offset: Mouth Target") => set(&mut o.mouth_offset),
+                ("female", "Target Offset: Inner Mouth Target") => set(&mut o.inner_mouth_offset),
+                ("male", "Simplify Penetration Calculation") => switch(&mut o.simplify_vaginal),
+                ("male", "Simplify Oral Calculation") => switch(&mut o.simplify_oral),
+                ("male", "Simplify Anal Calculation") => switch(&mut o.simplify_anal),
+                ("male", "Limit Penis Movement") => switch(&mut o.limit_correction),
+                ("male", "Limit Penis Amount") => set(&mut o.max_correction),
+                ("female", key) => {
+                    for (prefix, into) in [
+                        ("Clipping Offset: Front Collision ", &mut o.front_offsets),
+                        ("Clipping Offset: Back Collision ", &mut o.back_offsets),
+                    ] {
+                        if let Some(i) = key.strip_prefix(prefix).and_then(|i| i.parse::<usize>().ok()) {
+                            if let Some(slot) = into.get_mut(i) {
+                                set(slot);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        o
+    }
+
+    /// The settings of the plugin installed in the game at `game_dir`, or
+    /// its defaults without one.
+    pub fn of_game(game_dir: &std::path::Path) -> BodyOptions {
+        std::fs::read_to_string(game_dir.join("BepInEx/config/animal42069.KKbetterpenetration.cfg"))
+            .map(|text| BodyOptions::from_config(&text))
+            .unwrap_or_default()
     }
 }
 
@@ -1063,5 +1138,19 @@ mod tests {
         };
         let held = adjust_dan_to_target(Mode::Anal, &moved, &side, &s, &o, 0.016);
         assert!((unity::distance(held.end, moved.last_end) - 0.2 * 0.016).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_plugins_config_file_sets_the_options() {
+        let text = "[Female Options]\nClipping Depth = 0.03\nClipping Offset: Front Collision 1 = 0.08\n\
+                    Target Offset: Mouth Target = 0.01\n[Male 1 Options]\nLimit Penis Movement = true\n\
+                    Limit Penis Amount = 0.3\n[Male 2 Options]\nLimit Penis Amount = 0.9\n";
+        let o = BodyOptions::from_config(text);
+        assert_eq!(o.clipping_depth, 0.03);
+        assert_eq!(o.front_offsets, [-0.04, 0.08, 0.06]);
+        assert_eq!(o.mouth_offset, 0.01);
+        assert!(o.limit_correction);
+        assert_eq!(o.max_correction, 0.3, "the second male's is not the first's");
+        assert_eq!(o.back_offsets, BodyOptions::default().back_offsets);
     }
 }

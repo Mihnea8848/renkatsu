@@ -1078,6 +1078,12 @@ impl Live {
         chara.gaze.as_ref().map(|_| EYES_AHEAD)
     }
 
+    /// How far inside her skin her body keeps a shaft, as the game's
+    /// BetterPenetration config sets it.
+    pub fn clipping_depth(&self) -> f32 {
+        self.body_options.clipping_depth
+    }
+
     /// The neck look pattern a character's card gives, and whether its
     /// head can turn at all.
     pub fn card_neck_look(&self, id: ObjectId) -> Option<i32> {
@@ -1138,6 +1144,7 @@ struct BodyAim {
     back: [rk_chara::body_collision::CollisionPoint; 3],
     up: Vec3,
     inner: Vec3,
+    options: rk_chara::body_collision::BodyOptions,
 }
 
 impl BodyAim {
@@ -1145,10 +1152,12 @@ impl BodyAim {
         mode: rk_chara::better_penetration::Mode,
         world: &[Mat4],
         names: &std::collections::HashMap<String, usize>,
+        options: rk_chara::body_collision::BodyOptions,
     ) -> Option<BodyAim> {
         use rk_chara::body_collision as bc;
-        let points = bc::CollisionPoints::find(world, |n| names.get(n).copied(), &bc::BodyOptions::default())?;
+        let points = bc::CollisionPoints::find(world, |n| names.get(n).copied(), &options)?;
         Some(BodyAim {
+            options,
             front: points.front.try_into().ok()?,
             back: points.back.try_into().ok()?,
             up: world[*names.get(mode.entry_bone())?]
@@ -1184,13 +1193,13 @@ impl BodyAim {
             points: &points,
         };
         let mode = if job.vaginal { Mode::Vaginal } else { Mode::Anal };
-        let options = bc::BodyOptions::default();
+        let options = &self.options;
         bc::adjust_dan_to_target(
             mode,
             &dan,
             &partner,
             &job.settings,
-            &options,
+            options,
             rk_chara::better_penetration::PULL_STEP,
         )
         .end
@@ -1293,7 +1302,13 @@ impl Live {
                 settings,
                 vaginal: mode == bp::Mode::Vaginal,
                 body: (settings.body_collision && mode != bp::Mode::Oral)
-                    .then(|| BodyAim::of(mode, &world, &names))
+                    .then(|| {
+                        let mut options = self.body_options;
+                        if let Some(depth) = settings.clipping_depth {
+                            options.clipping_depth = depth;
+                        }
+                        BodyAim::of(mode, &world, &names, options)
+                    })
                     .flatten(),
             },
         ))
@@ -1764,6 +1779,9 @@ pub struct Live {
     /// CharaStudio's list, which tells the position an animation file was
     /// taken from; the position of each file, once found.
     dan_aims: Option<std::sync::Arc<rk_chara::dan_look::Aims>>,
+    /// The main game BetterPenetration's settings for her body, from its
+    /// config in the game folder, read with the H positions.
+    body_options: rk_chara::body_collision::BodyOptions,
     h_library: Option<std::sync::Arc<rk_chara::animations::Library>>,
     h_positions: std::collections::HashMap<std::path::PathBuf, Option<(String, String)>>,
     /// The half and the position of each animation file an H pair plays,
@@ -1854,6 +1872,7 @@ impl Live {
         Ok(Live {
             aims: Vec::new(),
             dan_aims: None,
+            body_options: Default::default(),
             h_library: None,
             h_positions: Default::default(),
             h_halves: Default::default(),
@@ -2391,6 +2410,9 @@ impl Live {
         if self.dan_aims.is_none() && self.actors.iter().any(|a| a.chara.shaft.is_some()) {
             if let Ok(game) = games.get(&mods) {
                 self.dan_aims = Some(std::sync::Arc::new(rk_chara::dan_look::Aims::read(game)));
+                if let Ok(config) = rk_core::Config::load() {
+                    self.body_options = rk_chara::body_collision::BodyOptions::of_game(&config.game_dir);
+                }
                 self.h_library = Some(std::sync::Arc::new(rk_chara::animations::Library::read(game)));
             }
         }

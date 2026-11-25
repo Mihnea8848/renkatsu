@@ -1851,6 +1851,29 @@ fn penetration_section(
         row(ui, k, "Body", off, |ui, rect| {
             widgets::checkbox(ui, k, rect, ui_id.with("body"), &mut s.body_collision, "Follow");
         });
+        // How far inside her skin her body keeps the shaft: the game's
+        // config gives it, a character may take its own.
+        if s.body_collision {
+            let config = st.live.as_ref().map_or(0.02, |l| l.clipping_depth());
+            let mut depth = s.clipping_depth.unwrap_or(config);
+            row(ui, k, "Clipping depth", off, |ui, rect| {
+                widgets::number_to(
+                    ui,
+                    k,
+                    rect,
+                    ui_id.with("clipping"),
+                    &mut depth,
+                    Marker::None,
+                    true,
+                    FINE,
+                    3,
+                );
+            });
+            depth = depth.clamp(0.0, 0.2);
+            if (depth - s.clipping_depth.unwrap_or(config)).abs() > f32::EPSILON {
+                s.clipping_depth = Some(depth);
+            }
+        }
     }
     // The plugin keeps this on the card without a control in Studio: the
     // shaft's deeper points push her belly's dynamic bone.

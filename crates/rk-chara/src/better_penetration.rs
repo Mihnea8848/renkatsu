@@ -989,6 +989,10 @@ pub struct Settings {
     /// open); Studio leaves the mouth as it was set.
     #[serde(default = "yes")]
     pub oral_mouth: bool,
+    /// How far inside her skin her body keeps the shaft (the main game
+    /// plugin's "Clipping Depth"); none takes the plugin's setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipping_depth: Option<f32>,
 }
 
 fn yes() -> bool {
@@ -1032,6 +1036,7 @@ impl Settings {
             body_collision: true,
             pull_holes: false,
             oral_mouth: true,
+            clipping_depth: None,
         }
     }
 }
