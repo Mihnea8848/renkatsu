@@ -191,7 +191,7 @@ fn move_menu(ui: &mut Ui, k: &Look, st: &State, rel: &str, asks: &mut Asks) {
         }
         ui.separator();
         if widgets::menu_item(ui, k, icon::FOLDER_SIMPLE_PLUS, "New folder", "", true) {
-            asks.file(FileOp::NewFolder(content::parent(rel).to_owned()));
+            asks.file(FileOp::IntoNewFolder(with_selection(st, rel)));
         }
     });
 }
