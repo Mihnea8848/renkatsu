@@ -1076,6 +1076,13 @@ pub fn interact(ui: &Ui, st: &mut State, scene: &egui::Response, full: Rect) -> 
         return true;
     }
 
+    // A click on a dot of a motion trail moves the playhead to its frame.
+    if st.anim.trail && scene.clicked_by(PointerButton::Primary) && !alt {
+        if let Some(frame) = pos.and_then(|pos| trail_frame_at(st, &view, pos)) {
+            crate::timeline::time::go_to(st, frame as f32);
+            return true;
+        }
+    }
     // The Pose tool: a click on a bone's ball chooses the bone, and shows
     // it on the Pose page; elsewhere it selects as the Select tool does.
     if pose && scene.clicked_by(PointerButton::Primary) && !alt {
@@ -1945,6 +1952,112 @@ fn icon_look(st: &State, view: &View, id: ObjectId, kind: Kind) -> IconLook {
     look
 }
 
+/// The onion skin: ghosts of the selected character as she stands a few
+/// frames before the playhead (red) and after it (green), fainter the
+/// further, laid over the picture, which they never change. While the
+/// switch is off nothing is drawn or worked out, and what the ghosts kept
+/// is let go.
+fn draw_ghosts(p: &egui::Painter, k: &Look, st: &mut State, view: &View, pixels: [u32; 2]) {
+    let chosen = st
+        .doc
+        .selection()
+        .filter(|o| matches!(o.content, crate::scene::Content::Character { .. }))
+        .map(|o| o.id);
+    let Some(id) = chosen.filter(|_| st.anim.onion) else {
+        if let Some(live) = st.live.as_mut() {
+            live.release_ghosts();
+        }
+        return;
+    };
+    let sequence = &st.doc.scene().sequence;
+    let fps = sequence.fps.max(1.0);
+    let last = crate::timeline::frame_of(sequence.length, fps);
+    let here = crate::timeline::now(st).round() as i32;
+    let reach = st.anim.onion_frames.round().max(1.0) as i32;
+    // The furthest first, so that the nearest lie on top.
+    let mut frames: Vec<i32> = (-reach..=reach)
+        .filter(|by| *by != 0)
+        .map(|by| here + by)
+        .filter(|f| (0..=last).contains(f))
+        .collect();
+    frames.sort_by_key(|f| -(f - here).abs());
+    let ghosts: Vec<(f32, [f32; 4])> = frames
+        .iter()
+        .map(|frame| {
+            let away = (frame - here).abs() as f32;
+            let tint = if *frame < here { k.t.stop } else { k.t.play };
+            let alpha = 0.5 * (1.0 - (away - 1.0) / reach as f32 * 0.7);
+            let [r, g, b, _] = egui::Rgba::from(tint).to_srgba_unmultiplied();
+            (
+                *frame as f32 / fps,
+                [f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0, alpha],
+            )
+        })
+        .collect();
+    let layer = st
+        .live
+        .as_mut()
+        .and_then(|l| l.paint_ghosts(pixels, view.view_proj, id, st.doc.scene(), &ghosts));
+    if let Some(layer) = layer {
+        let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        p.image(layer, view.rect, whole, Color32::WHITE);
+    }
+}
+
+/// A trail's dots this near the pointer take its click.
+const TRAIL_REACH: f32 = 7.0;
+
+/// The frame of the motion trails' dot under `pos`, the nearest.
+fn trail_frame_at(st: &State, view: &View, pos: Pos2) -> Option<i32> {
+    let trails = st.anim.trails.as_ref()?;
+    trails
+        .trails
+        .iter()
+        .flat_map(|trail| trail.points.iter().enumerate())
+        .filter_map(|(i, at)| Some((trails.first + i as i32, view.screen(*at)?.distance(pos))))
+        .filter(|(_, away)| *away <= TRAIL_REACH)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(frame, _)| frame)
+}
+
+/// The motion trails: a line through where each chosen bone is at every
+/// frame, red before the playhead and green after, as the onion skin's
+/// ghosts are; a dot each frame, a larger one where the bone has a key,
+/// and the playhead's own in white. Drawn over the scene, in front of
+/// everything, so that a trail behind the character still reads.
+fn draw_trails(p: &egui::Painter, k: &Look, st: &mut State, view: &View, pointer: Option<Pos2>) {
+    crate::timeline::trail::update(st);
+    let Some(trails) = st.anim.trails.as_ref() else { return };
+    let here = crate::timeline::now(st).round() as i32;
+    let under = pointer.and_then(|pos| trail_frame_at(st, view, pos));
+    let tint = |frame: i32| if frame < here { k.t.stop } else { k.t.play };
+    let dark = Color32::from_black_alpha(170);
+    for trail in &trails.trails {
+        let on_screen: Vec<Option<Pos2>> = trail.points.iter().map(|at| view.screen(*at)).collect();
+        for (i, pair) in on_screen.windows(2).enumerate() {
+            if let [Some(a), Some(b)] = pair {
+                let frame = trails.first + i as i32;
+                p.line_segment([*a, *b], Stroke::new(1.5, Theme::glass(tint(frame), 230)));
+            }
+        }
+        for (i, at) in on_screen.iter().enumerate() {
+            let Some(at) = at else { continue };
+            let frame = trails.first + i as i32;
+            let keyed = trail.keyed.contains(&frame);
+            if frame == here {
+                p.circle(*at, 5.0, Color32::WHITE, Stroke::new(1.5, k.t.select));
+            } else if keyed {
+                p.circle(*at, 4.0, tint(frame), Stroke::new(1.0, dark));
+            } else {
+                p.circle_filled(*at, 1.8, tint(frame));
+            }
+            if under == Some(frame) && frame != here {
+                p.circle_stroke(*at, 6.0, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+    }
+}
+
 /// Draws what the pointer works with over the scene's picture: the grid,
 /// the icons of the objects that have no picture, the gizmo of the active
 /// tool, the amount of a drag beside it, and the selection box.
@@ -1968,6 +2081,9 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     }
 
     draw_lamp_reach(&p, st, &view);
+    draw_ghosts(&p, k, st, &view, pixels);
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|pos| full.contains(*pos));
+    draw_trails(&p, k, st, &view, pointer);
     if st.sun_turning || st.sun_preview {
         draw_sun_dome(ui, &p, k, st, &view);
     }

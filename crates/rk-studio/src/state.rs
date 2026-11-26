@@ -398,8 +398,8 @@ pub struct State {
     pub updating: Option<crate::self_update::Updating>,
     /// The updated program to start once Renkatsu has quit.
     pub restart_into: Option<PathBuf>,
-    /// A key copied, to paste on a bone.
-    pub key_clipboard: Option<rk_chara::pose::BoneEdit>,
+    /// What the Timeline, its slider and the Animator remember.
+    pub anim: crate::timeline::Anim,
     /// Playing a sequence with keys starts over at its end.
     pub loop_sequence: bool,
     /// The character whose keys play alone, and where they are.
@@ -474,7 +474,7 @@ pub struct State {
     pub clock: f32,
 
     /// Properties sections that are open.
-    pub sections: [bool; 23],
+    pub sections: [bool; 24],
     /// Expression presets: Renkatsu's own, then the plugins' from the game
     /// folder under each plugin's name; read when first shown.
     pub expressions: Option<(Vec<Preset>, Vec<PresetGroup>)>,
@@ -910,7 +910,7 @@ impl State {
             update: None,
             updating: None,
             restart_into: None,
-            key_clipboard: None,
+            anim: Default::default(),
             loop_sequence: true,
             solo: None,
             solo_time: 0.0,
@@ -948,7 +948,7 @@ impl State {
             expression_name: String::new(),
             sections: [
                 true, true, true, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true, false, true,
+                true, true, true, true, false, true, true,
             ],
             property_tab: 0,
             profiles: Default::default(),
@@ -2596,7 +2596,10 @@ mod tests {
             rot: glam::Quat::from_rotation_y(0.4),
             ..Default::default()
         };
-        crate::keying::paste_key(&mut st, anna, "cf_j_neck", neck);
+        // With auto-key on, an edit of a bone without keys sets its key.
+        st.anim.auto_key = true;
+        crate::keying::write(&mut st, anna, "cf_j_neck", neck, false);
+        st.anim.auto_key = false;
         st.run(Command::SaveKeys);
         let rel = "Animations/Anna keys.rkkeys".to_owned();
         assert!(root.join(&rel).is_file());

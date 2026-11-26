@@ -1182,6 +1182,21 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
+                if matches!(*name, "Auto key" | "Onion skin" | "Motion trail") {
+                    // The same switches as the Timeline's bar has.
+                    let on = match *name {
+                        "Auto key" => &mut st.anim.auto_key,
+                        "Onion skin" => &mut st.anim.onion,
+                        _ => &mut st.anim.trail,
+                    };
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, *on);
+                    if resp.clicked() {
+                        *on = !*on;
+                    }
+                    y += palette_row(k);
+                    index += 1;
+                    continue;
+                }
                 if LATER_TOOLS.contains(name) {
                     // Shown, greyed, until they do something.
                     ui.interact(row, id, Sense::hover()).on_hover_text("Not available yet");
@@ -1611,14 +1626,13 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 15] = [
+const LATER_TOOLS: [&str; 14] = [
     "Replace",
     "Reload",
     "Accessories",
     "Gaze",
     "Look at camera",
     "Depth of field",
-    "Auto key",
     "Bake physics",
     "New shot from view",
     "Shot list",
@@ -2141,6 +2155,17 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         let length = st.doc.scene().sequence.length.max(0.01);
         st.solo_time = (st.solo_time + dt).rem_euclid(length);
     }
+    // Within a loop range, playing starts over at its end.
+    if let (Some([from, to]), true) = (
+        st.doc.scene().sequence.loop_range,
+        st.playback == crate::state::Playback::Playing,
+    ) {
+        let fps = st.doc.scene().sequence.fps.max(1.0);
+        let (from, to) = (from as f32 / fps, to as f32 / fps);
+        if st.clock > to || st.clock < from {
+            st.clock = from;
+        }
+    }
     // A sequence with keys plays to its end, then starts over or holds.
     let sequence = &st.doc.scene().sequence;
     if st.playback == crate::state::Playback::Playing && !sequence.tracks.is_empty() && st.clock > sequence.length {
@@ -2218,8 +2243,8 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         (full.width() * ppp).round() as u32,
         (full.height() * ppp).round() as u32,
     ];
-    // The grid is drawn behind what this picture shows.
-    live.keep_depth = st.gizmo.grid;
+    // The grid and the onion skin's ghosts lie behind the scene's depth.
+    live.keep_depth = st.gizmo.grid || st.anim.onion;
     live.map_motion = st.settings.map_motion;
     match live.paint(st.doc.scene(), size, [0.22, 0.22, 0.23, 1.0]) {
         Ok(id) => {

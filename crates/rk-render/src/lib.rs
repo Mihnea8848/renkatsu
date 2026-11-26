@@ -6,6 +6,7 @@
 
 pub mod drape;
 pub mod effects;
+pub mod ghost;
 pub mod highlight;
 pub mod lamp_shadow;
 pub mod map;
@@ -442,6 +443,10 @@ pub struct Renderer {
     effects: Option<effects::Gpu>,
     /// The selection outline's pipeline, once a frame asked for one.
     highlight: Option<highlight::Pass>,
+    /// The frame whose selection the highlight's depth holds.
+    highlight_frame: u64,
+    /// The ghosts' pipelines and buffers, while an editor draws ghosts.
+    ghosts: Option<ghost::Pass>,
     /// The map pass's pipelines, once a map was set.
     map: Option<map::Pipelines>,
     /// The map drawn with the characters, uploaded by `set_map`.
@@ -468,6 +473,8 @@ struct MeshBuffers {
     base: wgpu::Buffer,
     /// The skinning matrices of the frame, after a header.
     pose: wgpu::Buffer,
+    /// Bone indices and weights of each vertex.
+    skin: wgpu::Buffer,
     skin_group: wgpu::BindGroup,
     /// Whether `base` holds blend-shaped vertices rather than the mesh's own.
     shaped: bool,
@@ -1115,6 +1122,8 @@ impl Renderer {
             frame: 0,
             effects: None,
             highlight: None,
+            highlight_frame: 0,
+            ghosts: None,
             map: None,
             map_scene: None,
             drape_passes: None,
@@ -1712,6 +1721,7 @@ impl Renderer {
                         ib,
                         base,
                         pose: pose_buf,
+                        skin: skin_buf,
                         skin_group,
                         shaped,
                         used: frame,
@@ -2601,6 +2611,7 @@ impl Renderer {
                 !h.draws.is_empty() || !h.map_objects.is_empty() || !h.map_copies.is_empty()
             };
             if let Some(h) = env.highlight.as_ref().filter(|h| main && outlines(h)) {
+                self.highlight_frame = frame;
                 let targets = self.targets.as_ref().expect("made above");
                 {
                     let group = globals_group(self, base, &self.white);
@@ -2843,6 +2854,64 @@ impl Renderer {
         self.targets.as_ref().map(|t| &t.depth_texture)
     }
 
+    /// Draws ghosts of the last frame's meshes into `layer`, a texture of
+    /// `ghost::LAYER_FORMAT` and of that frame's size for an editor to lay
+    /// over its picture: each ghost one see-through tint, the first lowest,
+    /// behind what the frame's camera depth holds and left out where the
+    /// frame's highlighted meshes show. The frame must have drawn its camera
+    /// depth (`Environment::camera_depth`); its picture is not touched.
+    /// Returns false when no frame of that size was drawn.
+    pub fn paint_ghosts(
+        &mut self,
+        layer: &wgpu::TextureView,
+        size: [u32; 2],
+        view_proj: Mat4,
+        ghosts: &[ghost::Ghost],
+    ) -> bool {
+        let Some(targets) = self.targets.as_ref().filter(|t| t.size == size) else {
+            return false;
+        };
+        // A frame that highlighted nothing left an older frame's depth.
+        if self.highlight_frame != self.frame {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ghost own depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.highlight,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.queue.submit([encoder.finish()]);
+            self.highlight_frame = self.frame;
+        }
+        let pass = self.ghosts.get_or_insert_with(|| ghost::Pass::new(&self.device));
+        pass.paint(
+            &self.device,
+            &self.queue,
+            &self.meshes,
+            layer,
+            size,
+            view_proj,
+            &targets.depth_texture,
+            &targets.highlight,
+            ghosts,
+        );
+        true
+    }
+
+    /// Lets go of what the ghosts kept on the GPU.
+    pub fn forget_ghosts(&mut self) {
+        self.ghosts = None;
+    }
+
     /// Whether the device draws block-compressed (BC1 to BC7) textures.
     pub fn supports_bc(&self) -> bool {
         self.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
@@ -3029,6 +3098,17 @@ mod tests {
         )
         .validate(&module)
         .expect("shadow.wgsl validates");
+    }
+
+    #[test]
+    fn ghost_shader_is_valid_wgsl() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("ghost.wgsl")).expect("ghost.wgsl parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("ghost.wgsl validates");
     }
 
     #[test]

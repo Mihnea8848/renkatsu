@@ -382,6 +382,15 @@ impl BoneEdit {
         }
     }
 
+    /// This edit with `over` on it: what the two do one after the other.
+    pub fn then(&self, over: BoneEdit) -> BoneEdit {
+        BoneEdit {
+            pos: self.pos + over.pos,
+            rot: (self.rot * over.rot).normalize(),
+            scale: self.scale * over.scale,
+        }
+    }
+
     /// The edit that takes a bone from `base` to `posed`: `on` undone, to
     /// hold a pose over the bones as loaded. What is left of rounding, far
     /// below what shows, is dropped.
