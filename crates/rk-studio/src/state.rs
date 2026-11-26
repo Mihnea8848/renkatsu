@@ -218,6 +218,9 @@ pub enum FileOp {
     Delete(String),
     /// Make a folder inside this one, and start naming it.
     NewFolder(String),
+    /// Make a folder beside the first of these, move them all into it,
+    /// and start naming it.
+    IntoNewFolder(Vec<String>),
     Copy(String),
     Cut(String),
     /// Paste what was copied or cut into this folder.
@@ -497,6 +500,9 @@ pub struct State {
     pub folder: usize,
     /// The file selected in the Content panel, relative to the project.
     pub asset: Option<PathBuf>,
+    /// Everything selected in the Content panel, with Ctrl and Shift
+    /// clicks, relative to the project; `asset` is the last clicked.
+    pub assets: Vec<String>,
     /// Console levels shown: information, warnings, errors.
     pub levels: [bool; 3],
 
@@ -955,6 +961,7 @@ impl State {
             command_search: String::new(),
             folder: 0,
             asset: None,
+            assets: Vec::new(),
             levels: [true; 3],
             viewport_image: None,
             live: None,
@@ -2174,6 +2181,20 @@ impl State {
                 self.renaming_in_tree = inside != self.subfolder;
                 None
             }),
+            FileOp::IntoNewFolder(items) => (|| {
+                let Some(first) = items.first() else {
+                    return Ok(None);
+                };
+                let beside = content::parent(first).to_owned();
+                let folder = content::new_folder(&self.project, &beside, "New folder")?;
+                let mut moved = content::Moved::default();
+                for item in &items {
+                    moved.0.extend(content::move_into(&mut self.project, item, &folder)?.0);
+                }
+                self.content_renaming = Some((folder.clone(), content::leaf(&folder).to_owned()));
+                self.renaming_in_tree = beside != self.subfolder;
+                Ok(Some(moved))
+            })(),
             FileOp::Copy(rel) => {
                 self.clipboard = Some((rel, false));
                 Ok(None)
@@ -2862,6 +2883,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn move_into_new_folder_puts_the_items_in_a_folder_beside_them() {
+        let dir = scratch("into-new").join("P");
+        let mut st = State::new(Project::create(&dir, "P").unwrap(), Scene::new());
+        let sub = dir.join("Animations/Sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.rkanim"), b"x").unwrap();
+        std::fs::write(sub.join("b.rkanim"), b"x").unwrap();
+        st.run(Command::File(FileOp::IntoNewFolder(vec![
+            "Animations/Sub/a.rkanim".into(),
+            "Animations/Sub/b.rkanim".into(),
+        ])));
+        assert!(sub.join("New folder/a.rkanim").is_file());
+        assert!(sub.join("New folder/b.rkanim").is_file());
+        let (folder, _) = st.content_renaming.clone().expect("named next");
+        assert_eq!(folder, "Animations/Sub/New folder");
+    }
     #[test]
     fn the_outliners_commands_act_on_the_scene() {
         let home = scratch("scene");

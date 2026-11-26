@@ -27,6 +27,7 @@ pub enum Channel {
     EyeRoll,
     SmallIrises,
     Shaking,
+    Tongue,
     /// A hand's pattern, 0 left and 1 right.
     Hand(usize),
     /// A skin effect, by its place in `crate::skin_effects::EFFECTS`.
@@ -34,7 +35,7 @@ pub enum Channel {
 }
 
 /// The face's values in their order.
-pub const FACE: [Channel; 12] = [
+pub const FACE: [Channel; 13] = [
     Channel::Eyebrows,
     Channel::Eyes,
     Channel::Mouth,
@@ -47,6 +48,7 @@ pub const FACE: [Channel; 12] = [
     Channel::EyeRoll,
     Channel::SmallIrises,
     Channel::Shaking,
+    Channel::Tongue,
 ];
 
 impl Channel {
@@ -66,6 +68,7 @@ impl Channel {
             Channel::Eyes => "eyes",
             Channel::Mouth => "mouth",
             Channel::EyesOpen => "eyes_open",
+            Channel::Tongue => "tongue",
             Channel::Blink => "blink",
             Channel::MouthOpen => "mouth_open",
             Channel::Tears => "tears",
@@ -99,7 +102,12 @@ impl Channel {
     pub fn held(self) -> bool {
         !matches!(
             self,
-            Channel::EyesOpen | Channel::MouthOpen | Channel::Blush | Channel::EyeRoll | Channel::SmallIrises
+            Channel::EyesOpen
+                | Channel::MouthOpen
+                | Channel::Blush
+                | Channel::EyeRoll
+                | Channel::SmallIrises
+                | Channel::Tongue
         )
     }
 
@@ -110,6 +118,7 @@ impl Channel {
             Channel::Eyes => "Eyes".into(),
             Channel::Mouth => "Mouth".into(),
             Channel::EyesOpen => "Eyes open".into(),
+            Channel::Tongue => "Tongue".into(),
             Channel::Blink => "Blink".into(),
             Channel::MouthOpen => "Mouth open".into(),
             Channel::Tears => "Tears".into(),
@@ -134,6 +143,7 @@ impl Channel {
             Channel::Eyes => face.eyes as f32,
             Channel::Mouth => face.mouth as f32,
             Channel::EyesOpen => face.eyes_open,
+            Channel::Tongue => face.tongue,
             Channel::Blink => flag(face.blink),
             Channel::MouthOpen => face.mouth_open,
             Channel::Tears => f32::from(face.tears),
@@ -168,6 +178,7 @@ impl Channel {
             Channel::Eyes => face.eyes = whole,
             Channel::Mouth => face.mouth = whole,
             Channel::EyesOpen => face.eyes_open = value,
+            Channel::Tongue => face.tongue = value,
             Channel::Blink => face.blink = whole != 0,
             Channel::MouthOpen => face.mouth_open = value,
             Channel::Tears => face.tears = whole.clamp(0, 3) as u8,

@@ -1466,6 +1466,7 @@ fn face_sections(
             Channel::MouthOpen,
             &mut toggled,
         );
+        amount(ui, "Tongue", &mut face.tongue, 1.0, Channel::Tongue, &mut toggled);
         amount(ui, "Blush", &mut face.blush, 1.0, Channel::Blush, &mut toggled);
         row(ui, k, "Tears", waiting, |ui, rect| {
             let (rect, click) = key_mark(ui, k, rect, ui_id.with("tears key"), keyed.mark(Channel::Tears));
@@ -1483,6 +1484,7 @@ fn face_sections(
         face.eye_small = face.eye_small.clamp(0.0, 1.0);
         face.eyes_open = face.eyes_open.clamp(0.0, 1.0);
         face.mouth_open = face.mouth_open.clamp(0.0, 1.0);
+        face.tongue = face.tongue.clamp(0.0, 1.0);
         if face != next.face.unwrap_or(start) {
             next.face = Some(face);
         }
@@ -1677,6 +1679,54 @@ fn skin_effects_section(
 /// with its sliders' ranges, and the partner it aims at, which in Studio
 /// NodesConstraints holds. Settings left as the card has them stay the
 /// card's.
+/// The shaft's switches, each the plugin's config until a character sets
+/// its own: the balls turning with the shaft, the girth squishing in a
+/// mouth, and a limit on how fast the shaft's end may move.
+#[allow(clippy::too_many_arguments)]
+fn shaft_switches(
+    ui: &mut Ui,
+    k: &Look,
+    off: Option<&str>,
+    ui_id: Id,
+    balls: &mut Option<bool>,
+    mouth: Option<&mut Option<bool>>,
+    limit: &mut Option<f32>,
+    cfg: &rk_chara::body_collision::BodyOptions,
+) {
+    let mut follow = balls.unwrap_or(cfg.rotate_balls);
+    row(ui, k, "Balls", off, |ui, rect| {
+        widgets::checkbox(ui, k, rect, ui_id.with("balls"), &mut follow, "Follow");
+    });
+    if follow != balls.unwrap_or(cfg.rotate_balls) {
+        *balls = Some(follow);
+    }
+    if let Some(mouth) = mouth {
+        let mut squish = mouth.unwrap_or(cfg.squish_oral_girth);
+        row(ui, k, "In mouth", off, |ui, rect| {
+            widgets::checkbox(ui, k, rect, ui_id.with("in mouth"), &mut squish, "Squish");
+        });
+        if squish != mouth.unwrap_or(cfg.squish_oral_girth) {
+            *mouth = Some(squish);
+        }
+    }
+    let from_cfg = if cfg.limit_correction { cfg.max_correction } else { 0.0 };
+    let was = limit.unwrap_or(from_cfg);
+    let mut on = was > 0.0;
+    row(ui, k, "Limit", off, |ui, rect| {
+        widgets::checkbox(ui, k, rect, ui_id.with("limit"), &mut on, "Movement");
+    });
+    let mut speed = if was > 0.0 { was } else { cfg.max_correction.max(0.05) };
+    if on {
+        row(ui, k, "Max speed", off, |ui, rect| {
+            widgets::slider(ui, k, rect, ui_id.with("max speed"), &mut speed, (0.05, 1.0), FINE, 3);
+        });
+    }
+    let now = if on { speed } else { 0.0 };
+    if (now - was).abs() > f32::EPSILON {
+        *limit = Some(now);
+    }
+}
+
 fn penetration_section(
     ui: &mut Ui,
     k: &Look,
@@ -1853,8 +1903,24 @@ fn penetration_section(
             (PULL, "Return rate", &mut s.return_rate, 0.0, 1.0),
         ]);
     }
+    let cfg = st.live.as_ref().map(|l| l.body_options()).unwrap_or_default();
+    let mut switched = aimed.is_none();
     let mut drawn = [0; 3];
     for (group, name, value, low, high) in sliders {
+        // The shaft's switches after its sliders.
+        if group != SHAFT && !switched {
+            shaft_switches(
+                ui,
+                k,
+                off,
+                ui_id,
+                &mut s.balls_follow,
+                oral.then_some(&mut s.squish_in_mouth),
+                &mut s.limit,
+                &cfg,
+            );
+            switched = true;
+        }
         // Each group under its name, the pull's after its switches.
         if drawn[usize::from(group)] == 0 {
             sub(ui, k, ["Shaft", "Colliders", "Pull"][usize::from(group)]);
@@ -1871,6 +1937,18 @@ fn penetration_section(
         row(ui, k, name, off, |ui, rect| {
             widgets::slider(ui, k, rect, ui_id.with(name), value, (low, high), FINE, 3);
         });
+    }
+    if !switched {
+        shaft_switches(
+            ui,
+            k,
+            off,
+            ui_id,
+            &mut s.balls_follow,
+            oral.then_some(&mut s.squish_in_mouth),
+            &mut s.limit,
+            &cfg,
+        );
     }
     // The pull's switch shows even while the pull is off and has no rows.
     if drawn[usize::from(PULL)] == 0 && pull_rows {

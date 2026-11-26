@@ -3111,6 +3111,7 @@ pub fn build(game: &Game, card: &Card, opts: &BuildOptions) -> Result<Character>
             physics.solve_skirts_on_gpu(true);
         }
         physics.setup_bust(&mut b.scene, bust.softness, bust.weight, bust.size);
+        physics.breasts_meet(&b.scene);
         physics.settle(&mut b.scene, opts.settle_frames, opts.frame_time);
     }
 

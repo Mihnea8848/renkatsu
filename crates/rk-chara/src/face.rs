@@ -359,6 +359,10 @@ pub struct Face {
     /// KK_EyeShaking switches in Studio).
     #[serde(default)]
     pub shaking: bool,
+    /// How far the tongue is out past the lips, from 0 to 1: Renkatsu's
+    /// own, posing the tongue's bones (`crate::tongue`).
+    #[serde(default)]
+    pub tongue: f32,
 }
 
 impl Default for Face {
@@ -377,6 +381,7 @@ impl Default for Face {
             eye_y: 0.0,
             eye_small: 0.0,
             shaking: false,
+            tongue: 0.0,
         }
     }
 }
@@ -580,7 +585,7 @@ impl Rig {
             color[3] = 0.2 * face.blush.clamp(0.0, 1.0);
             m.set_color("_overcolor2", color);
         }
-        let out = face.mouth == TONGUE_OUT;
+        let out = face.mouth == TONGUE_OUT || face.tongue > 0.0;
         for (tongue, shown) in self.tongues.iter().zip([!out, out]) {
             for &r in tongue {
                 scene.renderers[r].enabled = shown;

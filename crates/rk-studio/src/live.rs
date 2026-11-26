@@ -89,6 +89,9 @@ struct Actor {
     shaft_line: Option<Vec3>,
     /// The share of its built length the shaft has now.
     shaft_length: f32,
+    /// Where the shaft's end was after its last aim, and the way it
+    /// pointed, for the plugin's movement limit.
+    last_end: Option<(Vec3, Vec3)>,
     /// How far her mouth reaches along a shaft for its depth, in the
     /// world, this frame and as last posed.
     reach_next: Option<Vec3>,
@@ -99,6 +102,11 @@ struct Actor {
     strokes: Option<(ObjectId, u64, [f32; STROKE_SLOTS])>,
     /// Where her mouth was last posed, before her lean.
     bare_mouth: Option<Vec3>,
+    /// The tongue's bones, once looked for, and whether it is out.
+    tongue_chain: Option<Option<[usize; 5]>>,
+    tongue_out: bool,
+    /// Where a shaft in her mouth lies, for a tongue put out under it.
+    tongue_guide: Option<(Vec3, Vec3, Vec3)>,
     /// BetterPenetration's aim of the shaft for this frame, and the one the
     /// character was last posed with.
     aim_job: Option<AimJob>,
@@ -569,18 +577,36 @@ impl Actor {
         if let Some(by) = self.reach_at {
             self.reach_mouth(by, motion_on);
         }
+        self.pose_tongue(motion_on);
         // BetterPenetration aims the shaft over the animation, FK and IK,
         // before the dynamic bones move.
         if let (Some(job), Some(shaft)) = (self.aim_job, self.chara.shaft.as_ref()) {
-            let end = match (&job.body, shaft.points.first()) {
+            let mut end = match (&job.body, shaft.points.first()) {
                 (Some(body), Some(&root)) => {
                     let start = self.chara.scene.world_of(root).w_axis.truncate();
                     body.end(&job, start, shaft.base_length)
                 }
                 _ => job.end,
             };
+            // The plugin's movement limit: the end goes no further from
+            // where it was than the limit allows in this frame's time,
+            // measured along the line it pointed in.
+            let limit = job.settings.limit.unwrap_or(0.0);
+            if let (Some((was, along)), true) = (self.last_end, limit > 0.0 && dt > 0.0) {
+                let cast = end + along * (was - end).dot(along) / along.length().max(1e-6);
+                let most = limit * dt;
+                if cast.distance(was) > most {
+                    end = was + (cast - was).normalize_or_zero() * most;
+                }
+            }
             self.aimed_end = Some(end);
             shaft.aim(&mut self.chara.scene, job.entry, end, &job.settings, job.vaginal);
+            self.last_end = shaft.end.map(|n| {
+                let m = self.chara.scene.world_of(n);
+                (m.w_axis.truncate(), m.z_axis.truncate().normalize_or_zero())
+            });
+        } else {
+            self.last_end = None;
         }
         // A partner's shaft holds the mouth where it last pulled it.
         if let (Some(at), Some(node)) = (self.mouth_at, self.mouth_node()) {
@@ -609,6 +635,34 @@ impl Actor {
         }
         face.mouth_open = 1.0;
         Some(face)
+    }
+
+    /// Puts the tongue out as far as the face shown asks, over the
+    /// animation's tongue, or the loaded one when no animation writes it.
+    fn pose_tongue(&mut self, animated: bool) {
+        let amount = self.face_shown().map_or(0.0, |f| f.tongue);
+        if amount <= 0.0 && !self.tongue_out {
+            return;
+        }
+        let top = self.chara.top;
+        let chain = *self
+            .tongue_chain
+            .get_or_insert_with(|| rk_chara::tongue::find(&self.chara.scene, top));
+        let Some(chain) = chain else { return };
+        let from = chain.map(|n| {
+            if animated {
+                self.chara.scene.nodes[n].local
+            } else {
+                self.rest[n]
+            }
+        });
+        match self.tongue_guide.filter(|_| self.mouth_held) {
+            Some((entry, along, down)) => {
+                rk_chara::tongue::lay_under(&mut self.chara.scene, &chain, &from, amount, entry, along, down)
+            }
+            None => rk_chara::tongue::put_out(&mut self.chara.scene, &chain, &from, amount),
+        }
+        self.tongue_out = amount > 0.0;
     }
 
     /// Bends her upper body so her mouth goes `by` further, as a person
@@ -1212,6 +1266,11 @@ impl Live {
         chara.gaze.as_ref().map(|_| EYES_AHEAD)
     }
 
+    /// The main game BetterPenetration's settings, from its config.
+    pub fn body_options(&self) -> rk_chara::body_collision::BodyOptions {
+        self.body_options
+    }
+
     /// How far inside her skin her body keeps a shaft, as the game's
     /// BetterPenetration config sets it.
     pub fn clipping_depth(&self) -> f32 {
@@ -1476,7 +1535,20 @@ impl Live {
             AimJob {
                 entry,
                 end,
-                settings,
+                settings: {
+                    // What the character leaves to the plugin's config.
+                    let o = &self.body_options;
+                    let mut s = settings;
+                    s.balls_follow = Some(s.balls_follow.unwrap_or(o.rotate_balls));
+                    s.limit = Some(
+                        s.limit
+                            .unwrap_or(if o.limit_correction { o.max_correction } else { 0.0 }),
+                    );
+                    if mode == bp::Mode::Oral && !s.squish_in_mouth.unwrap_or(o.squish_oral_girth) {
+                        s.girth_squish = 0.0;
+                    }
+                    s
+                },
                 vaginal: mode == bp::Mode::Vaginal,
                 body: (settings.body_collision && mode != bp::Mode::Oral)
                     .then(|| {
@@ -2689,7 +2761,29 @@ impl Live {
             let more = ((deep - shallowest) / stroke * (bottom - deepest)).clamp(0.0, MAX_REACH);
             reached.push((aim.partner, -line * more));
         }
+        // The line a tongue put out lies along under a shaft in her mouth:
+        // the mouth's entry, the way out along the shaft, and her chin's way.
+        let mut guides: Vec<(ObjectId, (Vec3, Vec3, Vec3))> = Vec::new();
+        for &(him, aim) in &held {
+            if aim.mode != rk_chara::better_penetration::Mode::Oral {
+                continue;
+            }
+            let (Some(line), Some(her)) = (
+                self.actors.iter().find(|a| a.id == him).and_then(|a| a.shaft_line),
+                self.actors.iter().find(|a| a.id == aim.partner),
+            ) else {
+                continue;
+            };
+            let Some(head) = her.chara.scene.find(her.chara.top, "cf_j_head") else {
+                continue;
+            };
+            let up = her.chara.scene.world_of(head).y_axis.truncate();
+            let along = -line;
+            let down = -(up - along * up.dot(along));
+            guides.push((aim.partner, (aim.entry, along, down)));
+        }
         for actor in &mut self.actors {
+            actor.tongue_guide = guides.iter().find(|(id, _)| *id == actor.id).map(|g| g.1);
             if !held.iter().any(|(_, a)| a.partner == actor.id) {
                 actor.strokes = None;
             }
@@ -3726,10 +3820,14 @@ impl Live {
             neck_done: false,
             shaft_line: None,
             shaft_length: 1.0,
+            last_end: None,
             reach_next: None,
             reach_at: None,
             strokes: None,
             bare_mouth: None,
+            tongue_chain: None,
+            tongue_out: false,
+            tongue_guide: None,
             aim_job: None,
             aim_posed: None,
             guests_next: None,
