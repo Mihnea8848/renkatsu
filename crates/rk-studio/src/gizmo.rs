@@ -1945,20 +1945,21 @@ fn icon_look(st: &State, view: &View, id: ObjectId, kind: Kind) -> IconLook {
     look
 }
 
-/// The onion skin: the selected character's body as lines, as it stands
-/// a few frames before the playhead (red, fainter the further) and after
-/// it (green). Drawn over the picture, which it never changes; nothing is
-/// drawn, or worked out, while the switch is off.
-fn draw_ghosts(p: &egui::Painter, k: &Look, st: &mut State, view: &View) {
-    if !st.anim.onion {
-        return;
-    }
-    let Some(id) = st
+/// The onion skin: ghosts of the selected character as she stands a few
+/// frames before the playhead (red) and after it (green), fainter the
+/// further, laid over the picture, which they never change. While the
+/// switch is off nothing is drawn or worked out, and what the ghosts kept
+/// is let go.
+fn draw_ghosts(p: &egui::Painter, k: &Look, st: &mut State, view: &View, pixels: [u32; 2]) {
+    let chosen = st
         .doc
         .selection()
         .filter(|o| matches!(o.content, crate::scene::Content::Character { .. }))
-        .map(|o| o.id)
-    else {
+        .map(|o| o.id);
+    let Some(id) = chosen.filter(|_| st.anim.onion) else {
+        if let Some(live) = st.live.as_mut() {
+            live.release_ghosts();
+        }
         return;
     };
     let sequence = &st.doc.scene().sequence;
@@ -1966,25 +1967,33 @@ fn draw_ghosts(p: &egui::Painter, k: &Look, st: &mut State, view: &View) {
     let last = crate::timeline::frame_of(sequence.length, fps);
     let here = crate::timeline::now(st).round() as i32;
     let reach = st.anim.onion_frames.round().max(1.0) as i32;
-    let frames: Vec<i32> = (-reach..=reach)
+    // The furthest first, so that the nearest lie on top.
+    let mut frames: Vec<i32> = (-reach..=reach)
         .filter(|by| *by != 0)
         .map(|by| here + by)
         .filter(|f| (0..=last).contains(f))
         .collect();
-    let times: Vec<f32> = frames.iter().map(|f| *f as f32 / fps).collect();
-    let Some(ghosts) = st.live.as_mut().and_then(|l| l.ghosts(id, st.doc.scene(), &times)) else {
-        return;
-    };
-    for (frame, lines) in frames.iter().zip(&ghosts) {
-        let away = (frame - here).abs() as f32;
-        let alpha = (210.0 * (1.0 - (away - 1.0) / reach as f32 * 0.75)) as u8;
-        let tint = if *frame < here { k.t.stop } else { k.t.play };
-        let stroke = Stroke::new(2.0, Theme::glass(tint, alpha));
-        for [from, to] in lines {
-            if let (Some(a), Some(b)) = (view.screen(*from), view.screen(*to)) {
-                p.line_segment([a, b], stroke);
-            }
-        }
+    frames.sort_by_key(|f| -(f - here).abs());
+    let ghosts: Vec<(f32, [f32; 4])> = frames
+        .iter()
+        .map(|frame| {
+            let away = (frame - here).abs() as f32;
+            let tint = if *frame < here { k.t.stop } else { k.t.play };
+            let alpha = 0.5 * (1.0 - (away - 1.0) / reach as f32 * 0.7);
+            let [r, g, b, _] = egui::Rgba::from(tint).to_srgba_unmultiplied();
+            (
+                *frame as f32 / fps,
+                [f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0, alpha],
+            )
+        })
+        .collect();
+    let layer = st
+        .live
+        .as_mut()
+        .and_then(|l| l.paint_ghosts(pixels, view.view_proj, id, st.doc.scene(), &ghosts));
+    if let Some(layer) = layer {
+        let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        p.image(layer, view.rect, whole, Color32::WHITE);
     }
 }
 
@@ -2011,7 +2020,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     }
 
     draw_lamp_reach(&p, st, &view);
-    draw_ghosts(&p, k, st, &view);
+    draw_ghosts(&p, k, st, &view, pixels);
     if st.sun_turning || st.sun_preview {
         draw_sun_dome(ui, &p, k, st, &view);
     }

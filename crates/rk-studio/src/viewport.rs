@@ -2238,8 +2238,8 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         (full.width() * ppp).round() as u32,
         (full.height() * ppp).round() as u32,
     ];
-    // The grid is drawn behind what this picture shows.
-    live.keep_depth = st.gizmo.grid;
+    // The grid and the onion skin's ghosts lie behind the scene's depth.
+    live.keep_depth = st.gizmo.grid || st.anim.onion;
     live.map_motion = st.settings.map_motion;
     match live.paint(st.doc.scene(), size, [0.22, 0.22, 0.23, 1.0]) {
         Ok(id) => {

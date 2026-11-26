@@ -281,6 +281,9 @@ struct Cli {
     anim_auto_key: bool,
     #[arg(long, hide = true)]
     anim_onion: bool,
+    /// The frames either side the onion skin starts with.
+    #[arg(long, hide = true)]
+    anim_onion_frames: Option<u32>,
     #[arg(long, hide = true)]
     anim_keyed_only: bool,
     /// Start with this loop range, as IN,OUT in frames.
@@ -930,6 +933,9 @@ impl Studio {
         state.anim.graph = cli.anim_graph;
         state.anim.auto_key = cli.anim_auto_key;
         state.anim.onion = cli.anim_onion;
+        if let Some(frames) = cli.anim_onion_frames {
+            state.anim.onion_frames = frames.clamp(1, 30) as f32;
+        }
         state.anim.keyed_only = cli.anim_keyed_only;
         if !cli.anim_range.is_empty() || !cli.anim_marker.is_empty() {
             let mut sequence = state.doc.scene().sequence.clone();
