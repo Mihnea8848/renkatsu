@@ -3,21 +3,6 @@
 
 [[post]]
 date = 2026-11-25
-title = "Fluids come next"
-author = "Mihnea8848"
-summary = "Drips, drops and strands that stretch between two places, simulated rather than drawn. The first parts work in my builds."
-body = """
-The next thing I am working on is fluids. Some of the Ren'Py games made with Koikatsu characters have them, but they draw them by hand, frame by frame, on pictures taken from CharaStudio. No Koikatsu plugin simulates them, so in Renkatsu they are a feature of their own.
-
-There will be strands that stretch between two places as they pull apart, thinning in the middle, sagging and breaking into drops; drips that form, hang and fall; and drops that land on the body or the map, stick, slide down a slope and slowly dry, leaving wet marks behind. They can come from a place on a character, from a point you put anywhere in the scene, or from the H scenes themselves, and the timeline can key them.
-
-The first two parts work in my builds: the drops themselves, with how they fall, land, stick, slide and run together, and the strands, which bow when the two ends come closer or shorten and stay straight when they are thin. Next comes drawing them, glossy and slightly see-through, in the game's look and in a more realistic one. I am studying the moving loops of those games so that the motion looks right before it looks pretty.
-
-I will post here again when there is something to see.
-"""
-
-[[post]]
-date = 2026-11-25
 title = "A new Properties panel"
 author = "Mihnea8848"
 summary = "Properties are redone: framed groups, sliders, page icons and a search that finds any field. It comes with 0.3.0."
