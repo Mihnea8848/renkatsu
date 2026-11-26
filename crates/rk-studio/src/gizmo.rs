@@ -1945,6 +1945,49 @@ fn icon_look(st: &State, view: &View, id: ObjectId, kind: Kind) -> IconLook {
     look
 }
 
+/// The onion skin: the selected character's body as lines, as it stands
+/// a few frames before the playhead (red, fainter the further) and after
+/// it (green). Drawn over the picture, which it never changes; nothing is
+/// drawn, or worked out, while the switch is off.
+fn draw_ghosts(p: &egui::Painter, k: &Look, st: &mut State, view: &View) {
+    if !st.anim.onion {
+        return;
+    }
+    let Some(id) = st
+        .doc
+        .selection()
+        .filter(|o| matches!(o.content, crate::scene::Content::Character { .. }))
+        .map(|o| o.id)
+    else {
+        return;
+    };
+    let sequence = &st.doc.scene().sequence;
+    let fps = sequence.fps.max(1.0);
+    let last = crate::timeline::frame_of(sequence.length, fps);
+    let here = crate::timeline::now(st).round() as i32;
+    let reach = st.anim.onion_frames.round().max(1.0) as i32;
+    let frames: Vec<i32> = (-reach..=reach)
+        .filter(|by| *by != 0)
+        .map(|by| here + by)
+        .filter(|f| (0..=last).contains(f))
+        .collect();
+    let times: Vec<f32> = frames.iter().map(|f| *f as f32 / fps).collect();
+    let Some(ghosts) = st.live.as_mut().and_then(|l| l.ghosts(id, st.doc.scene(), &times)) else {
+        return;
+    };
+    for (frame, lines) in frames.iter().zip(&ghosts) {
+        let away = (frame - here).abs() as f32;
+        let alpha = (210.0 * (1.0 - (away - 1.0) / reach as f32 * 0.75)) as u8;
+        let tint = if *frame < here { k.t.stop } else { k.t.play };
+        let stroke = Stroke::new(2.0, Theme::glass(tint, alpha));
+        for [from, to] in lines {
+            if let (Some(a), Some(b)) = (view.screen(*from), view.screen(*to)) {
+                p.line_segment([a, b], stroke);
+            }
+        }
+    }
+}
+
 /// Draws what the pointer works with over the scene's picture: the grid,
 /// the icons of the objects that have no picture, the gizmo of the active
 /// tool, the amount of a drag beside it, and the selection box.
@@ -1968,6 +2011,7 @@ pub fn draw(ui: &Ui, k: &Look, st: &mut State, full: Rect) {
     }
 
     draw_lamp_reach(&p, st, &view);
+    draw_ghosts(&p, k, st, &view);
     if st.sun_turning || st.sun_preview {
         draw_sun_dome(ui, &p, k, st, &view);
     }

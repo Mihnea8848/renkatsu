@@ -676,8 +676,8 @@ impl State {
     pub fn act(&mut self, action: Action, ctx: &egui::Context) {
         use crate::panels::Panel;
         use Action as A;
-        // An animation panel on trial takes the keys that act on keys.
-        if crate::anim_design::key_action(self, action) {
+        // The Timeline takes the keys that act on its keys.
+        if crate::timeline::key_action(self, action) {
             return;
         }
         // Keys that edit the scene act where the scene is worked on: in

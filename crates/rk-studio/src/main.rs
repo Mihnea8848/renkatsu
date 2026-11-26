@@ -10,7 +10,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod about;
-mod anim_design;
 mod anim_import;
 mod animations;
 mod animator;
@@ -270,10 +269,6 @@ struct Cli {
     /// picture a frame of an animation.
     #[arg(long, hide = true)]
     scene_time: Option<f32>,
-    /// The design of the Animator and the Timeline to show, to choose one:
-    /// a (dope sheet), b (tracks) or c (time slider and graph).
-    #[arg(long, hide = true, value_enum)]
-    animator_design: Option<anim_design::Design>,
     /// Start with these keys of the selected character selected, each as
     /// BONE:FRAME, to picture them.
     #[arg(long, hide = true, value_delimiter = ',')]
@@ -485,6 +480,8 @@ struct Studio {
     state: State,
     dock: DockState<Panel>,
     bottom: Panel,
+    /// The selected character's clip is to be baked once she is built.
+    bake_pending: bool,
     screenshot: Option<PathBuf>,
     clicks: Vec<Click>,
     /// Text typed once the clicks are done, or once this many are.
@@ -929,22 +926,26 @@ impl Studio {
             state.playback = Playback::Paused;
             state.clock = seconds;
         }
-        // The design of the animation panels on trial, and what its
-        // pictures start with.
-        state.anim.design = cli.animator_design;
+        // What the Timeline's pictures start with.
         state.anim.graph = cli.anim_graph;
         state.anim.auto_key = cli.anim_auto_key;
         state.anim.onion = cli.anim_onion;
         state.anim.keyed_only = cli.anim_keyed_only;
-        if let [from, to] = cli.anim_range[..] {
-            state.anim.range_on = true;
-            state.anim.range = (from, to);
-        }
-        for marker in &cli.anim_marker {
-            if let Some((frame, name)) = marker.split_once(':') {
-                let frame = frame.parse().with_context(|| format!("{frame} is not a frame"))?;
-                state.anim.markers.push((frame, name.to_owned()));
+        if !cli.anim_range.is_empty() || !cli.anim_marker.is_empty() {
+            let mut sequence = state.doc.scene().sequence.clone();
+            if let [from, to] = cli.anim_range[..] {
+                sequence.loop_range = Some([from, to]);
             }
+            for marker in &cli.anim_marker {
+                if let Some((frame, name)) = marker.split_once(':') {
+                    let frame = frame.parse().with_context(|| format!("{frame} is not a frame"))?;
+                    sequence.markers.push(sequence::Marker {
+                        frame,
+                        name: name.to_owned(),
+                    });
+                }
+            }
+            state.doc.edit_sequence(sequence, false);
         }
         if let Some(id) = state.doc.selected {
             for key in &cli.anim_select {
@@ -952,9 +953,6 @@ impl Studio {
                     let frame = frame.parse().with_context(|| format!("{frame} is not a frame"))?;
                     state.anim.selected.insert((id, bone.to_owned(), frame));
                 }
-            }
-            if cli.anim_bake {
-                state.anim.baked.insert(id, true);
             }
             for fold in &cli.anim_fold {
                 state.anim.toggled.insert(format!("{}/{fold}", id.0));
@@ -1056,7 +1054,7 @@ impl Studio {
             Bottom::Timeline => Panel::Timeline,
             Bottom::Animator => Panel::Animator,
         };
-        let design = cli.animator_design;
+        let bake_pending = cli.anim_bake;
         let share = cli.viewport_share.unwrap_or(0.75).clamp(0.2, 0.9);
         let state_opening = state.opening.is_some();
         Ok(Studio {
@@ -1064,12 +1062,11 @@ impl Studio {
             state,
             // A picture of the window is always of the default layout.
             dock: match cli.screenshot {
-                None if design.is_none() => {
-                    panels::saved_layout().unwrap_or_else(|| panels::default_layout(bottom, None, share))
-                }
-                _ => panels::default_layout(bottom, design, share),
+                None => panels::saved_layout().unwrap_or_else(|| panels::default_layout(bottom, share)),
+                Some(_) => panels::default_layout(bottom, share),
             },
             bottom,
+            bake_pending,
             screenshot: cli.screenshot.clone(),
             clicks: cli.click.clone(),
             type_text: cli.type_text.clone(),
@@ -1165,7 +1162,7 @@ fn fonts() -> egui::FontDefinitions {
 
 impl eframe::App for Studio {
     fn on_exit(&mut self) {
-        if self.screenshot.is_none() && self.state.anim.design.is_none() {
+        if self.screenshot.is_none() {
             if let Err(e) = panels::save_layout(&self.dock) {
                 eprintln!("The layout could not be kept: {e:#}");
             }
@@ -1375,9 +1372,20 @@ impl eframe::App for Studio {
             }
         }
 
+        // A scripted bake of the selected character's clip, once it plays.
+        if self.bake_pending {
+            if let Some(id) = self.state.doc.selected {
+                self.bake_pending = !timeline::bake(&mut self.state, id);
+            }
+        }
+
         // Posing by hand was switched on: the Animator panel comes forward.
-        let merged = self.state.anim.design == Some(anim_design::Design::B);
-        if std::mem::take(&mut self.state.show_animator) && !merged {
+        // Not over the Timeline, which lists the same bones in its tracks.
+        let timeline_shows = self
+            .dock
+            .iter_leaves()
+            .any(|(_, leaf)| leaf.tabs.get(leaf.active.0) == Some(&Panel::Timeline));
+        if std::mem::take(&mut self.state.show_animator) && !timeline_shows {
             panels::open(&mut self.dock, Panel::Animator);
             if let Some(tab) = self.dock.find_tab(&Panel::Animator) {
                 let _ = self.dock.set_active_tab(tab);
@@ -1450,7 +1458,7 @@ impl Studio {
             chrome::menu_row(ui, &k, &mut self.state, &mut self.dock, &mut reset)
         });
         if reset {
-            self.dock = panels::default_layout(self.bottom, self.state.anim.design, 0.75);
+            self.dock = panels::default_layout(self.bottom, 0.75);
             self.state.maximised = false;
         }
         bar("status", k.d.status_height).show(ui, |ui| chrome::status_bar(ui, &k, &mut self.state));

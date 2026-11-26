@@ -91,26 +91,13 @@ pub fn save_layout(dock: &DockState<Panel>) -> anyhow::Result<()> {
 
 /// Unity's arrangement, with the viewport given as much room as the side
 /// and bottom panels can spare.
-///
-/// A design of the animation panels on trial leaves out the panel it
-/// merges into another; `share` is the viewport's share of the height.
-pub fn default_layout(bottom: Panel, design: Option<crate::anim_design::Design>, share: f32) -> DockState<Panel> {
-    use crate::anim_design::Design;
+/// `share` is the viewport's share of the height.
+pub fn default_layout(bottom: Panel, share: f32) -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
     let surface = state.main_surface_mut();
     let [left, right] = surface.split_right(NodeIndex::root(), 0.795, vec![Panel::Outliner]);
     surface.split_below(right, 0.44, vec![Panel::Properties]);
-    let mut tabs = vec![Panel::Content, Panel::Console, Panel::Timeline, Panel::Animator];
-    match design {
-        Some(Design::A) => tabs.retain(|p| *p != Panel::Timeline),
-        Some(Design::B) => tabs.retain(|p| *p != Panel::Animator),
-        _ => {}
-    }
-    let bottom = match (design, bottom) {
-        (Some(Design::A), Panel::Timeline) => Panel::Animator,
-        (Some(Design::B), Panel::Animator) => Panel::Timeline,
-        _ => bottom,
-    };
+    let tabs = vec![Panel::Content, Panel::Console, Panel::Timeline, Panel::Animator];
     let active = tabs.iter().position(|p| *p == bottom).unwrap_or(0);
     let [top, below] = surface.split_below(left, share, tabs);
     let path = |node| egui_dock::NodePath {
@@ -218,24 +205,16 @@ impl TabViewer for Viewer<'_> {
         }
         let header = self.viewport_header(ui);
         let (k, st) = (self.k, &mut *self.st);
-        use crate::anim_design::{self, Design};
-        match (*tab, st.anim.design) {
-            (Panel::Viewport, Some(Design::C)) => {
-                // The time slider keeps a strip under the picture.
-                let full = ui.available_rect_before_wrap();
-                let strip = full.with_min_y(full.bottom() - anim_design::c::SLIDER);
-                let above = full.with_max_y(strip.top());
-                let mut picture = ui.new_child(egui::UiBuilder::new().max_rect(above));
-                picture.set_clip_rect(above.intersect(ui.clip_rect()));
-                viewport::show(&mut picture, k, st, header);
-                anim_design::c::slider(ui, k, st, strip);
-                return;
-            }
-            (Panel::Animator, Some(Design::A)) => return anim_design::a::show(ui, k, st, true),
-            (Panel::Timeline, Some(Design::B)) => return anim_design::b::show(ui, k, st),
-            (Panel::Animator, Some(Design::C)) => return anim_design::c::animator(ui, k, st),
-            (Panel::Timeline, Some(Design::C)) => return anim_design::c::timeline(ui, k, st),
-            _ => {}
+        if *tab == Panel::Viewport {
+            // The time slider keeps a strip under the picture.
+            let full = ui.available_rect_before_wrap();
+            let strip = full.with_min_y(full.bottom() - crate::timeline::slider::HEIGHT);
+            let above = full.with_max_y(strip.top());
+            let mut picture = ui.new_child(egui::UiBuilder::new().max_rect(above));
+            picture.set_clip_rect(above.intersect(ui.clip_rect()));
+            viewport::show(&mut picture, k, st, header);
+            crate::timeline::slider::show(ui, k, st, strip);
+            return;
         }
         match tab {
             Panel::Viewport => viewport::show(ui, k, st, header),
@@ -243,7 +222,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Properties => properties::show(ui, k, st),
             Panel::Content => crate::content_panel::show(ui, k, st),
             Panel::Console => console(ui, k, st),
-            Panel::Timeline => crate::timeline::show(ui, k, st),
+            Panel::Timeline => crate::timeline::tracks::show(ui, k, st),
             Panel::Animator => crate::animator::show(ui, k, st),
         }
     }
@@ -1150,7 +1129,7 @@ mod tests {
 
     #[test]
     fn a_kept_layout_comes_back_as_it_was() {
-        let mut dock = default_layout(Panel::Content, None, 0.75);
+        let mut dock = default_layout(Panel::Content, 0.75);
         let console = dock.find_tab(&Panel::Console).unwrap();
         dock.set_active_tab(console).unwrap();
         let text = toml::to_string(&dock).unwrap();

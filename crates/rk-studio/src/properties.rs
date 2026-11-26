@@ -1570,7 +1570,7 @@ impl KeyedValues {
             if was == now {
                 continue;
             }
-            if self.mark(channel).0 {
+            if self.mark(channel).0 || st.anim.auto_key {
                 crate::keying::write_value(st, id, &channel.key(), now, held);
             } else {
                 channel.set(&mut out, &self.start, now);
@@ -2365,7 +2365,7 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
                 rk_chara::scene::euler_deg(angles[0], angles[1], angles[2])
             };
             let edit = rk_chara::pose::BoneEdit { rot, ..edit };
-            if crate::keying::keyed(st, id, &name) {
+            if crate::keying::keyed(st, id, &name) || st.anim.auto_key {
                 crate::keying::write(st, id, &name, edit, false);
             } else {
                 let layer = pose_layer.get_or_insert_with(Default::default);
@@ -2383,29 +2383,32 @@ fn pose_sections(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::Object
 /// Section number of the selected keys.
 pub const KEY_SECTION: usize = 23;
 
-/// The keys selected in the tracks, of design B of the animation panels:
-/// their frame and how they go into the next, and a single key's values.
+/// The keys selected in the Timeline: their frame, how they go into the
+/// next key and their values. With several selected the first one's show,
+/// and a change goes to all of them: the frame moves them by as much, a
+/// number sets that number on each.
 fn key_section(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId) {
-    use crate::anim_design::{sheet, time, Design, KeyRef};
-    if st.anim.design != Some(Design::B) {
-        return;
-    }
+    use crate::timeline::{sheet, time, KeyRef};
+    use rk_chara::channels::Channel;
     let keys: Vec<KeyRef> = st.anim.selected.iter().filter(|key| key.0 == id).cloned().collect();
-    if keys.is_empty() || !section(ui, k, st, KEY_SECTION, "Key") {
+    let Some(found) = keys.first().and_then(|key| sheet::key_of(st, key)) else {
+        return;
+    };
+    if !section(ui, k, st, KEY_SECTION, "Key") {
         return;
     }
     let ui_id = ui.id().with("key");
-    let single = match keys.as_slice() {
-        [key] => sheet::key_of(st, key).map(|found| (key.clone(), found)),
-        _ => None,
-    };
+    let plain = |name: &str| name.strip_prefix(crate::sequence::BAKED).unwrap_or(name).to_owned();
     row(ui, k, "Channel", None, |ui, rect| {
-        let shown = match &single {
-            Some(((_, name, _), _)) => crate::anim_design::rows(st, true)
-                .into_iter()
-                .find(|r| r.object == id && r.name == *name)
-                .map_or_else(|| name.clone(), |r| r.label),
-            None => format!("{} keys", keys.len()),
+        let shown = match keys.as_slice() {
+            [(_, name, _)] => match Channel::of_key(name) {
+                Some(channel) => channel.label(),
+                None => match rk_chara::pose::ik_key_target(name) {
+                    Some(target) => rk_chara::pose::ik_label(target).to_owned(),
+                    None => crate::bones::pose_label(&plain(name)),
+                },
+            },
+            _ => format!("{} keys", keys.len()),
         };
         label(
             ui.painter(),
@@ -2415,8 +2418,6 @@ fn key_section(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId
             k.t.text,
         );
     });
-    // The frame, the first key's when several are selected: a change
-    // moves them all by as much.
     let first = keys.iter().map(|key| key.2).min().unwrap_or(0);
     let mut frame = first as f32;
     row(ui, k, "Frame", None, |ui, rect| {
@@ -2441,35 +2442,63 @@ fn key_section(ui: &mut Ui, k: &Look, st: &mut State, id: crate::scene::ObjectId
     let current = sheet::ease_of(st).and_then(|ease| time::EASES.iter().position(|(e, ..)| *e == ease));
     let mut chosen = current.unwrap_or(usize::MAX);
     row(ui, k, "Interpolation", None, |ui, rect| {
-        widgets::combo(ui, k, rect, ui_id.with("ease"), &mut chosen, &eases);
+        let text = current.map_or("Mixed", |i| eases[i]);
+        let resp = widgets::dropdown_field(ui, k, rect, ui_id.with("ease"), text);
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(rect.width() - 10.0);
+            for (i, name) in eases.iter().enumerate() {
+                if widgets::check_item(ui, k, Some(i) == current, name, "").clicked() {
+                    chosen = i;
+                    ui.close();
+                }
+            }
+        });
     });
     if let Some((ease, ..)) = time::EASES.get(chosen).filter(|_| Some(chosen) != current) {
         sheet::set_ease(st, *ease);
     }
-    // A single key's own values: a value's number, or a bone's turn.
-    if let Some((key, found)) = single.filter(|_| by == 0) {
-        if rk_chara::channels::Channel::of_key(&key.1).is_some() {
-            let was = rk_chara::channels::of_edit(found.edit);
-            let mut value = was;
-            row(ui, k, "Value", None, |ui, rect| {
-                let field = rect.with_max_x(rect.left() + 76.0);
-                widgets::number(ui, k, field, ui_id.with("value"), &mut value, Marker::None, true, 0.01);
-            });
-            if value != was {
-                sheet::set_edit(st, &key, rk_chara::channels::as_edit(value));
-            }
-        } else {
-            let (y, x, z) = found.edit.rot.to_euler(glam::EulerRot::YXZ);
+    // The values, where the keys are all values or all bones.
+    let values = keys.iter().all(|key| Channel::of_key(&key.1).is_some());
+    let bones = keys
+        .iter()
+        .all(|key| Channel::of_key(&key.1).is_none() && rk_chara::pose::ik_key_target(&key.1).is_none());
+    if by != 0 {
+        // The keys have just moved: their values show again next frame.
+    } else if values {
+        let was = rk_chara::channels::of_edit(found.edit);
+        let mut value = was;
+        row(ui, k, "Value", None, |ui, rect| {
+            let field = rect.with_max_x(rect.left() + 76.0);
+            widgets::number(ui, k, field, ui_id.with("value"), &mut value, Marker::None, true, 0.01);
+        });
+        if value != was {
+            sheet::set_edits(st, |_, _| rk_chara::channels::as_edit(value));
+        }
+    } else if bones {
+        let angles_of = |edit: &rk_chara::pose::BoneEdit| {
+            let (y, x, z) = edit.rot.to_euler(glam::EulerRot::YXZ);
             let tidy = |a: f32| if a.abs() < 1e-4 { 0.0 } else { a };
-            let shown = [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())];
-            let mut angles = shown;
-            row(ui, k, "Rotation", None, |ui, rect| {
-                vec3(ui, k, rect, ui_id.with("rotation"), &mut angles, 0.5);
+            [tidy(x.to_degrees()), tidy(y.to_degrees()), tidy(z.to_degrees())]
+        };
+        let shown = angles_of(&found.edit);
+        let mut angles = shown;
+        row(ui, k, "Rotation", None, |ui, rect| {
+            vec3(ui, k, rect, ui_id.with("rotation"), &mut angles, 0.5);
+        });
+        if angles != shown {
+            // Each key takes the angles that changed and keeps its others.
+            sheet::set_edits(st, |_, edit| {
+                let mut own = angles_of(&edit);
+                for axis in 0..3 {
+                    if angles[axis] != shown[axis] {
+                        own[axis] = angles[axis];
+                    }
+                }
+                rk_chara::pose::BoneEdit {
+                    rot: rk_chara::scene::euler_deg(own[0], own[1], own[2]),
+                    ..edit
+                }
             });
-            if angles != shown {
-                let rot = rk_chara::scene::euler_deg(angles[0], angles[1], angles[2]);
-                sheet::set_edit(st, &key, rk_chara::pose::BoneEdit { rot, ..found.edit });
-            }
         }
     }
     wide_row(ui, k, "Key actions", |ui, rect| {

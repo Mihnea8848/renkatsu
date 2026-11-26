@@ -1182,8 +1182,8 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
-                if *name == "Auto key" && st.anim.design.is_some() {
-                    // The same switch as the animation panels' bar has.
+                if *name == "Auto key" {
+                    // The same switch as the Timeline's bar has.
                     let resp = widgets::tool_row(ui, k, row, id, g, name, st.anim.auto_key);
                     if resp.clicked() {
                         st.anim.auto_key = !st.anim.auto_key;
@@ -1621,14 +1621,13 @@ fn fk_parts(ui: &mut Ui, k: &Look, st: &mut State, area: Rect, layer: &rk_chara:
 }
 
 /// Tools of the modes that do nothing yet.
-const LATER_TOOLS: [&str; 15] = [
+const LATER_TOOLS: [&str; 14] = [
     "Replace",
     "Reload",
     "Accessories",
     "Gaze",
     "Look at camera",
     "Depth of field",
-    "Auto key",
     "Bake physics",
     "New shot from view",
     "Shot list",
@@ -2152,9 +2151,12 @@ fn live_picture(ui: &Ui, st: &mut State, full: Rect) {
         st.solo_time = (st.solo_time + dt).rem_euclid(length);
     }
     // Within a loop range, playing starts over at its end.
-    if st.anim.range_on && st.playback == crate::state::Playback::Playing {
+    if let (Some([from, to]), true) = (
+        st.doc.scene().sequence.loop_range,
+        st.playback == crate::state::Playback::Playing,
+    ) {
         let fps = st.doc.scene().sequence.fps.max(1.0);
-        let (from, to) = (st.anim.range.0 as f32 / fps, st.anim.range.1 as f32 / fps);
+        let (from, to) = (from as f32 / fps, to as f32 / fps);
         if st.clock > to || st.clock < from {
             st.clock = from;
         }

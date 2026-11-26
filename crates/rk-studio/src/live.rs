@@ -201,6 +201,8 @@ struct Actor {
     /// The edits made by hand the bones were last posed with, and their
     /// bones' nodes.
     layer: Option<rk_chara::pose::Layer>,
+    /// The baked clip's edits at the frame shown, while it poses her.
+    baked: Option<std::collections::BTreeMap<String, rk_chara::pose::BoneEdit>>,
     edits: Vec<(usize, rk_chara::pose::BoneEdit)>,
     /// The bones CharaStudio poses by hand (FK), as found on it.
     fk: Vec<rk_chara::bone_info::FkBone>,
@@ -464,6 +466,15 @@ impl Playing {
         self.motion
             .phase(self.motion.normalized(pose.start, time, pose.speed), pose.force_loop)
     }
+}
+
+/// An onion skin: for each time asked for, the body's joints as lines in
+/// the world.
+pub type Ghosts = Vec<Vec<[Vec3; 2]>>;
+
+/// Whether a name is a joint's that has a name of its own to show.
+fn named_bone(name: &str) -> bool {
+    crate::bones::pose_label(name) != name
 }
 
 /// The scene's time for one frame: the transport before and now, the
@@ -828,7 +839,7 @@ impl Actor {
         world: Mat4,
         game: &mut dyn FnMut(Load) -> Result<Motion>,
         clock: &Clock,
-        keys: Option<&rk_chara::keys::Keys>,
+        track: Option<&crate::sequence::Track>,
         patient: bool,
         log: &mut Log,
     ) -> bool {
@@ -1028,12 +1039,18 @@ impl Actor {
         // pose by hand: the bones' while FK is on, the IK targets' while IK
         // is, and the hands', the face's and the skin effects' always.
         let start = self.chara.face.as_ref().map(|f| f.start).unwrap_or_default();
+        let time = match clock.solo {
+            Some((solo, time)) if solo == self.id => time,
+            _ => clock.time,
+        };
+        // The clip baked to keys poses her in the clip's place while it
+        // is on, whatever FK is: each bone's edit over the bone as loaded.
+        let baked = track
+            .and_then(|t| t.baked_on())
+            .map(|k| rk_chara::keys::pose_at(k, time));
+        let keys = track.map(|t| &t.keys);
         let keyed = keys.filter(|k| !k.is_empty()).map(|k| {
             let mut l = pose_layer.as_deref().cloned().unwrap_or_default();
-            let time = match clock.solo {
-                Some((solo, time)) if solo == self.id => time,
-                _ => clock.time,
-            };
             let (fk, ik) = (l.fk_on, l.ik_on);
             let mut at = rk_chara::keys::pose_at(k, time);
             at.retain(|name, _| {
@@ -1052,8 +1069,9 @@ impl Actor {
         // else at once, and the cloth nets start again there. An edit by
         // hand moves it a little, and they follow.
         let fresh = again;
-        if layer != self.layer.as_ref() {
+        if layer != self.layer.as_ref() || baked != self.baked {
             self.layer = layer.cloned();
+            self.baked = baked;
             // A bone of CharaStudio's FK table takes its edit while one of
             // its parts is on.
             let fk = &self.fk;
@@ -1061,6 +1079,19 @@ impl Actor {
             self.edits = layer.map_or_else(Vec::new, |l| {
                 l.resolve_parts(&self.chara.scene, self.chara.top, parts_of)
             });
+            // The edits by hand go over the baked clip's as over the clip.
+            if let Some(baked) = &self.baked {
+                let (scene, top) = (&self.chara.scene, self.chara.top);
+                let mut under: std::collections::BTreeMap<usize, rk_chara::pose::BoneEdit> = baked
+                    .iter()
+                    .filter_map(|(name, edit)| Some((scene.find(top, name)?, *edit)))
+                    .collect();
+                for &(node, edit) in &self.edits {
+                    let below = under.entry(node).or_default();
+                    *below = below.then(edit);
+                }
+                self.edits = under.into_iter().collect();
+            }
             self.back_to_rest();
             // The face is blend shapes, set once for the layer.
             let shown = self.face_shown();
@@ -1141,7 +1172,7 @@ impl Actor {
         }
 
         let phase = match (&self.playing, pose) {
-            (Some(playing), Some(pose)) => Some(playing.phase(pose, clock.time)),
+            (Some(playing), Some(pose)) if self.baked.is_none() => Some(playing.phase(pose, clock.time)),
             _ => None,
         };
         let running = clock.now == Playback::Playing;
@@ -2419,6 +2450,135 @@ impl Live {
         Some((found, parts))
     }
 
+    /// A character's clip as keys: at each of `times` the edit that takes
+    /// each bone the clip moves from where it was loaded to where the clip
+    /// has it, thinned to the keys the motion needs. The bones are left
+    /// as they were. None while the clip is not read yet.
+    pub fn bake_clip(
+        &mut self,
+        id: ObjectId,
+        pose: &crate::scene::Animation,
+        times: &[f32],
+    ) -> Option<rk_chara::keys::Keys> {
+        use rk_chara::keys::{Ease, Key};
+        let actor = self.actors.iter_mut().find(|a| a.id == id)?;
+        let playing = actor.playing.as_ref()?;
+        let nodes = playing.bound.nodes();
+        let chara = &mut actor.chara;
+        let saved: Vec<Trs> = chara.scene.nodes.iter().map(|n| n.local).collect();
+        if let Some(heels) = &chara.heels {
+            heels.reset(&mut chara.scene);
+        }
+        let mut keys = rk_chara::keys::Keys::new();
+        for &time in times {
+            for &node in &nodes {
+                chara.scene.nodes[node].local = actor.rest[node];
+            }
+            playing.bound.apply(&mut chara.scene, playing.phase(pose, time));
+            for &node in &nodes {
+                let bone = &chara.scene.nodes[node];
+                keys.entry(bone.name.clone()).or_default().push(Key {
+                    time,
+                    edit: BoneEdit::baked(actor.rest[node], bone.local),
+                    ease: Ease::Linear,
+                    handles: None,
+                });
+            }
+        }
+        for (node, local) in chara.scene.nodes.iter_mut().zip(saved) {
+            node.local = local;
+        }
+        keys.values_mut().for_each(rk_chara::keys::thin);
+        Some(keys)
+    }
+
+    /// The onion skin of a built character: at each of `times` her body's
+    /// joints as lines in the world, each from a joint to the one it
+    /// hangs from, posed by her clip or its baked keys with the keys by
+    /// hand over them. IK and the physics are left out, and the bones are
+    /// left as they were.
+    pub fn ghosts(&mut self, id: ObjectId, scene: &crate::scene::Scene, times: &[f32]) -> Option<Ghosts> {
+        let Content::Character {
+            animation, pose_layer, ..
+        } = &scene.get(id)?.content
+        else {
+            return None;
+        };
+        let track = scene.sequence.track(id);
+        let actor = self.actors.iter_mut().find(|a| a.id == id)?;
+        let top = actor.chara.top;
+        let body = &mut actor.chara.scene;
+        // The joints with a name of their own, each with the nearest such
+        // joint above it.
+        let named = |node: usize| {
+            let name = &body.nodes[node].name;
+            crate::bones::pose_label(name) != *name
+        };
+        // Her own skeleton's, below its root: the clothes carry copies.
+        let root = body.find(actor.chara.animator, "cf_j_root")?;
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let mut stack = vec![(root, None::<usize>)];
+        while let Some((node, above)) = stack.pop() {
+            let own = named(node);
+            // No line from the root on the floor up to the hips.
+            if let (true, Some(above)) = (own, above.filter(|a| *a != root)) {
+                pairs.push((node, above));
+            }
+            let below = if own { Some(node) } else { above };
+            stack.extend(body.nodes[node].children.iter().map(|&c| (c, below)));
+        }
+        let saved: Vec<Trs> = body.nodes.iter().map(|n| n.local).collect();
+        let fk_on = pose_layer.as_ref().is_some_and(|l| l.fk_on);
+        let mut out = Vec::new();
+        for &time in times {
+            // From the bones as loaded, but for where she stands.
+            for (i, (node, rest)) in body.nodes.iter_mut().zip(&actor.rest).enumerate() {
+                if i != top {
+                    node.local = *rest;
+                }
+            }
+            let mut edits: std::collections::BTreeMap<String, BoneEdit> = Default::default();
+            match track.and_then(|t| t.baked_on()) {
+                Some(baked) => edits = rk_chara::keys::pose_at(baked, time),
+                None => {
+                    if let (Some(playing), Some(pose)) = (&actor.playing, animation.as_deref()) {
+                        playing.bound.apply(body, playing.phase(pose, time));
+                    }
+                }
+            }
+            if fk_on {
+                let mut by_hand = pose_layer.as_ref().map(|l| l.fk.clone()).unwrap_or_default();
+                if let Some(track) = track {
+                    by_hand.extend(
+                        rk_chara::keys::pose_at(&track.keys, time)
+                            .into_iter()
+                            .filter(|(name, _)| named_bone(name)),
+                    );
+                }
+                for (name, edit) in by_hand {
+                    let below = edits.entry(name).or_default();
+                    *below = below.then(edit);
+                }
+            }
+            let found: Vec<(usize, BoneEdit)> = edits
+                .iter()
+                .filter_map(|(name, edit)| Some((body.find(top, name)?, *edit)))
+                .collect();
+            rk_chara::pose::apply(body, &found);
+            let (world, _) = body.world();
+            out.push(
+                pairs
+                    .iter()
+                    .map(|&(joint, above)| [world[above].w_axis.truncate(), world[joint].w_axis.truncate()])
+                    .collect(),
+            );
+        }
+        for (node, local) in body.nodes.iter_mut().zip(saved) {
+            node.local = local;
+        }
+        Some(out)
+    }
+
     /// Where a built character's bone is and how it is turned: its place
     /// and turn in the world, its parent's turn in the world and its own
     /// turn in its parent, for the Pose tool's gizmo.
@@ -2867,8 +3027,8 @@ impl Live {
                 )
             };
             let world = scene.world_by(actor.id, &self.poses);
-            let keys = scene.sequence.track(actor.id).map(|t| &t.keys);
-            if actor.update(object, world, &mut read, &clock, keys, self.patient, log) {
+            let track = scene.sequence.track(actor.id);
+            if actor.update(object, world, &mut read, &clock, track, self.patient, log) {
                 self.cam.follow(actor.subject(), self.hold_camera);
             }
             // The bones that objects follow, now that they are posed.
@@ -3802,6 +3962,7 @@ impl Live {
             pose: None,
             paired_height: None,
             layer: None,
+            baked: None,
             edits: Vec::new(),
             playing: None,
             animation_problem: None,

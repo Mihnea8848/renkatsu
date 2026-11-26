@@ -1,20 +1,22 @@
 // Copyright (c) 2026 Mihnea Gîrbăcică (Mihnea8848)
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 
-//! Three designs of the Animator and the Timeline to choose one from,
-//! behind `--animator-design`: A a dope sheet in one panel, B the scene's
-//! tracks with the key's values in Properties, C a time slider over a
-//! graph editor. What they share is here: the rows a character's keys
-//! are listed in, by body part, and what the panels remember.
+//! The Timeline: the scene's sequence on one clock, a track an object. A
+//! character's track opens into her clip, the clip baked to keys and the
+//! keys by hand, then the parts of her body and their bones; the Graph
+//! switch shows the selected keys' curves in the sheet's place. A thin
+//! slider of the same frames lies under the viewport, and the Animator
+//! lists the same rows without their keys. What they share is here: the
+//! rows, and what the panels remember.
 
-pub mod a;
-pub mod b;
-pub mod c;
 pub mod graph;
 pub mod sheet;
+pub mod slider;
 pub mod time;
+pub mod tracks;
 
 use crate::scene::{Content, ObjectId};
+use crate::sequence::BAKED;
 use crate::state::{Look, State};
 use crate::widgets::{self, glyph, hair_h};
 use egui::{Color32, Id, Pos2, Rect, Sense, Ui, Vec2};
@@ -22,18 +24,8 @@ use egui_phosphor::regular as icon;
 use rk_chara::keys::Key;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The designs on offer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Design {
-    /// A dope sheet: Animator and Timeline in one panel.
-    A,
-    /// Tracks: the Timeline's rows open into layers, groups and bones.
-    B,
-    /// A time slider under the viewport and a graph editor.
-    C,
-}
-
-/// A key: whose, of which bone or value, and on which frame.
+/// A key: whose, of which bone or value (`baked/BONE` for a key of the
+/// baked clip), and on which frame.
 pub type KeyRef = (ObjectId, String, i32);
 
 /// What a drag on the keys does.
@@ -45,6 +37,12 @@ pub enum DragKind {
     Scale,
     /// Selects the keys in a box, from this corner.
     Select(Pos2),
+    /// Moves the selected keys of a curve along the frames and, on the
+    /// axis its point is of, in value.
+    Point { axis: usize },
+    /// Moves a handle of a key's curve into the next key: the one that
+    /// leaves the key, or the one that comes into the next.
+    Handle { leaves: bool, axis: usize },
 }
 
 /// A drag on the keys: the frame it began on and the one it is over.
@@ -70,7 +68,8 @@ impl Drag {
                     self.pivot + (frame as f32 - self.pivot) * (self.to - self.pivot) / reach
                 }
             }
-            DragKind::Select(_) => frame as f32,
+            // The graph's drags change the keys as they go.
+            _ => return frame as f32,
         };
         if snap {
             at.round()
@@ -80,9 +79,12 @@ impl Drag {
     }
 }
 
-/// What the animation panels remember, whichever design shows.
+/// The sequence, the selection and the pointer's place a drag of the
+/// graph began with: each frame the drag is made again from them.
+pub type DragFrom = (crate::sequence::Sequence, BTreeSet<KeyRef>, Pos2);
+
+/// What the Timeline, its slider and the Animator remember.
 pub struct Anim {
-    pub design: Option<Design>,
     /// The time shown: fitted to the panel, or `px` points a frame from
     /// the frame `first`.
     pub fit: bool,
@@ -94,33 +96,34 @@ pub struct Anim {
     pub keyed_only: bool,
     pub selected: BTreeSet<KeyRef>,
     pub drag: Option<Drag>,
-    /// An edit of a bone sets its key at the playhead.
+    pub drag_from: Option<DragFrom>,
+    /// The key whose handle is dragged.
+    pub handle: Option<KeyRef>,
+    /// The values the graph shows from and to, held while its points are
+    /// dragged.
+    pub frozen: Option<(f32, f32)>,
+    /// An edit of a bone, an IK target or a value sets its key at the
+    /// playhead.
     pub auto_key: bool,
+    /// Dragged keys show on whole frames as they go.
     pub snap: bool,
     /// Ghosts of the poses this many frames either side.
     pub onion: bool,
     pub onion_frames: f32,
-    /// Playing stays between two frames.
-    pub range_on: bool,
-    pub range: (i32, i32),
-    pub markers: Vec<(i32, String)>,
     /// Curves in place of the sheet.
     pub graph: bool,
     /// Drags scale the keys around the playhead.
     pub scale: bool,
     /// The keys copied: each bone's, by its frames after the first.
     pub clipboard: Vec<(String, i32, Key)>,
-    /// The characters whose clip was baked to a layer of keys, and
-    /// whether that layer is on.
-    pub baked: BTreeMap<ObjectId, bool>,
-    /// The value chosen in the list, and the bone chosen when it was.
+    /// The row chosen in the list when it is not the posed bone's own: a
+    /// value's or a baked bone's, with the bone chosen when it was.
     pub value: Option<(String, Option<String>)>,
 }
 
 impl Default for Anim {
     fn default() -> Self {
         Anim {
-            design: None,
             fit: true,
             px: 4.0,
             first: 0.0,
@@ -128,17 +131,16 @@ impl Default for Anim {
             keyed_only: false,
             selected: BTreeSet::new(),
             drag: None,
+            drag_from: None,
+            handle: None,
+            frozen: None,
             auto_key: false,
             snap: true,
             onion: false,
             onion_frames: 3.0,
-            range_on: false,
-            range: (0, 0),
-            markers: Vec::new(),
             graph: false,
             scale: false,
             clipboard: Vec::new(),
-            baked: BTreeMap::new(),
             value: None,
         }
     }
@@ -147,6 +149,12 @@ impl Default for Anim {
 /// The frame a key at `time` lies on.
 pub fn frame_of(time: f32, fps: f32) -> i32 {
     (time * fps).round() as i32
+}
+
+/// The playhead goes to `time`, on the frames, and holds the scene there.
+pub fn go_to(st: &mut State, time: f32) {
+    st.clock = st.doc.scene().sequence.snap(time);
+    st.playback = crate::state::Playback::Paused;
 }
 
 /// The playhead's frame, of the character playing alone while one does.
@@ -163,7 +171,7 @@ pub enum Kind {
     Object,
     /// The premade clip a character plays.
     Clip,
-    /// The clip baked to keys of its own.
+    /// The clip baked to keys of its own, as a layer in its place.
     Baked,
     /// The keys made by hand, as a layer over the clip.
     Layer,
@@ -195,6 +203,11 @@ impl Row {
             Kind::Object => self.object.0.to_string(),
             _ => format!("{}/{}", self.object.0, self.name),
         }
+    }
+
+    /// Whether it is of the baked clip.
+    pub fn baked(&self) -> bool {
+        self.kind == Kind::Baked || self.name.starts_with(BAKED)
     }
 }
 
@@ -229,10 +242,12 @@ pub fn part(bone: &str) -> &'static str {
     }
 }
 
-/// A character's bones, IK targets and values that take keys: the part
-/// each is listed under, its name among the keys, the name shown and its
-/// icon.
-fn channels(st: &State, id: ObjectId) -> Vec<(&'static str, String, String, &'static str)> {
+/// One of a character's rows to be: the part it is listed under, its name
+/// among the keys, the name shown and its icon.
+type Listed = (&'static str, String, String, &'static str);
+
+/// A character's bones, IK targets and values that take keys.
+fn channels(st: &State, id: ObjectId) -> Vec<Listed> {
     use rk_chara::channels::Channel;
     let keys = st.doc.scene().sequence.track(id).map(|t| &t.keys);
     let keyed = |name: &str| keys.is_some_and(|k| k.contains_key(name));
@@ -285,10 +300,9 @@ fn is_open(st: &State, fold: &str, starts: bool) -> bool {
 }
 
 /// The rows of the scene's keys: each object with keys and the selected
-/// character, opened into her clip, the parts of her body and their
-/// bones. With `layers` the keys by hand are a layer of their own beside
-/// the clip.
-pub fn rows(st: &State, layers: bool) -> Vec<Row> {
+/// character, opened into her clip, its baked keys and the keys by hand,
+/// each layer into the parts of her body and their bones.
+pub fn rows(st: &State) -> Vec<Row> {
     let scene = st.doc.scene();
     let fps = scene.sequence.fps.max(1.0);
     let mut ids: Vec<ObjectId> = scene
@@ -313,17 +327,20 @@ pub fn rows(st: &State, layers: bool) -> Vec<Row> {
     let mut out = Vec::new();
     for id in ids {
         let Some(object) = scene.get(id) else { continue };
-        let keys = scene.sequence.track(id).map(|t| &t.keys);
+        let track = scene.sequence.track(id);
         let frames = |name: &str| -> Vec<i32> {
-            keys.and_then(|k| k.get(name))
+            track
+                .and_then(|t| t.list(name))
                 .map(|l| l.iter().map(|k| frame_of(k.time, fps)).collect())
                 .unwrap_or_default()
         };
-        let list: Vec<_> = channels(st, id)
+        let found = |name: &str, label: &str| {
+            needle.is_empty() || label.to_lowercase().contains(&needle) || name.to_lowercase().contains(&needle)
+        };
+        let list: Vec<Listed> = channels(st, id)
             .into_iter()
             .filter(|(_, name, label, _)| {
-                (needle.is_empty() || label.to_lowercase().contains(&needle) || name.to_lowercase().contains(&needle))
-                    && (!st.anim.keyed_only || keys.is_some_and(|k| k.contains_key(name)))
+                found(name, label) && (!st.anim.keyed_only || track.is_some_and(|t| t.keys.contains_key(name)))
             })
             .collect();
         let merged = |names: &mut dyn Iterator<Item = &String>| -> Vec<(i32, Vec<String>)> {
@@ -370,8 +387,58 @@ pub fn rows(st: &State, layers: bool) -> Vec<Row> {
                 marks: Vec::new(),
             });
         }
-        if st.anim.baked.contains_key(&id) {
-            out.push(Row {
+        // A layer's rows: the parts of the body with any of `list`, each
+        // open into its bones.
+        let groups = |out: &mut Vec<Row>, list: &[Listed], prefix: &str, starts_open: bool| {
+            for group in GROUPS {
+                let members: Vec<_> = list.iter().filter(|c| c.0 == group).collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let marks = merged(&mut members.iter().map(|c| &c.1));
+                let mut head = Row {
+                    kind: Kind::Group,
+                    object: id,
+                    name: format!("{prefix}{group}"),
+                    label: group.to_owned(),
+                    glyph: "",
+                    tint: None,
+                    depth: 2,
+                    open: None,
+                    marks,
+                };
+                let open = narrowed || is_open(st, &head.fold(), starts_open && !head.marks.is_empty());
+                head.open = Some(open);
+                out.push(head);
+                if !open {
+                    continue;
+                }
+                for (_, name, label, mark) in members {
+                    out.push(Row {
+                        kind: Kind::Channel,
+                        object: id,
+                        name: name.clone(),
+                        label: label.clone(),
+                        glyph: mark,
+                        tint: None,
+                        depth: 3,
+                        open: None,
+                        marks: frames(name).into_iter().map(|f| (f, vec![name.clone()])).collect(),
+                    });
+                }
+            }
+        };
+        if let Some(baked) = track.and_then(|t| t.baked.as_ref()) {
+            let list: Vec<Listed> = baked
+                .keys
+                .keys()
+                .map(|bone| {
+                    let label = crate::bones::pose_label(bone);
+                    (part(bone), format!("{BAKED}{bone}"), label, icon::BONE)
+                })
+                .filter(|(_, name, label, _)| found(name, label))
+                .collect();
+            let mut layer = Row {
                 kind: Kind::Baked,
                 object: id,
                 name: "baked".to_owned(),
@@ -380,66 +447,31 @@ pub fn rows(st: &State, layers: bool) -> Vec<Row> {
                 tint: None,
                 depth: 1,
                 open: None,
-                marks: Vec::new(),
-            });
-        }
-        let mut depth = 1;
-        if layers {
-            let mut layer = Row {
-                kind: Kind::Layer,
-                object: id,
-                name: "keys".to_owned(),
-                label: "Keys".to_owned(),
-                glyph: icon::DIAMOND,
-                tint: None,
-                depth: 1,
-                open: None,
-                marks: all,
+                marks: merged(&mut list.iter().map(|c| &c.1)),
             };
-            let open = is_open(st, &layer.fold(), true);
+            let open = is_open(st, &layer.fold(), false);
             layer.open = Some(open);
             out.push(layer);
-            if !open {
-                continue;
+            if open {
+                groups(&mut out, &list, BAKED, false);
             }
-            depth = 2;
         }
-        for group in GROUPS {
-            let members: Vec<_> = list.iter().filter(|c| c.0 == group).collect();
-            if members.is_empty() {
-                continue;
-            }
-            let marks = merged(&mut members.iter().map(|c| &c.1));
-            let mut head = Row {
-                kind: Kind::Group,
-                object: id,
-                name: group.to_owned(),
-                label: group.to_owned(),
-                glyph: "",
-                tint: None,
-                depth,
-                open: None,
-                marks,
-            };
-            let open = narrowed || is_open(st, &head.fold(), !head.marks.is_empty());
-            head.open = Some(open);
-            out.push(head);
-            if !open {
-                continue;
-            }
-            for (_, name, label, mark) in members {
-                out.push(Row {
-                    kind: Kind::Channel,
-                    object: id,
-                    name: name.clone(),
-                    label: label.clone(),
-                    glyph: mark,
-                    tint: None,
-                    depth: depth + 1,
-                    open: None,
-                    marks: frames(name).into_iter().map(|f| (f, vec![name.clone()])).collect(),
-                });
-            }
+        let mut layer = Row {
+            kind: Kind::Layer,
+            object: id,
+            name: "keys".to_owned(),
+            label: "Keys".to_owned(),
+            glyph: icon::DIAMOND,
+            tint: None,
+            depth: 1,
+            open: None,
+            marks: all,
+        };
+        let open = is_open(st, &layer.fold(), true);
+        layer.open = Some(open);
+        out.push(layer);
+        if open {
+            groups(&mut out, &list, "", true);
         }
     }
     out
@@ -468,9 +500,14 @@ pub fn choose(st: &mut State, object: ObjectId, name: &str) {
         st.pose_ik = None;
         st.anim.value = Some((name.to_owned(), st.pose_bone.clone()));
     } else {
-        st.pose_bone = Some(name.to_owned());
+        // A baked bone's row chooses the bone, and stays the row chosen.
+        let bone = name.strip_prefix(BAKED).unwrap_or(name);
+        st.pose_bone = Some(bone.to_owned());
         st.pose_ik = None;
         st.property_tab = 1;
+        if bone != name {
+            st.anim.value = Some((name.to_owned(), st.pose_bone.clone()));
+        }
     }
 }
 
@@ -480,7 +517,7 @@ pub fn toggle_solo(st: &mut State, id: ObjectId) {
     if st.solo == Some(id) {
         let at = st.solo_time;
         st.solo = None;
-        crate::timeline::go_to(st, at);
+        go_to(st, at);
     } else {
         st.solo = Some(id);
         st.solo_time = st.clock.clamp(0.0, st.doc.scene().sequence.length);
@@ -490,18 +527,66 @@ pub fn toggle_solo(st: &mut State, id: ObjectId) {
     }
 }
 
-/// How the lists are drawn: the rows' height, and whether an object's
-/// row is a track's head.
+/// Whether a character plays a clip that is not baked to keys yet.
+fn can_bake(st: &State, id: ObjectId) -> bool {
+    let clip = matches!(
+        st.doc.scene().get(id).map(|o| &o.content),
+        Some(Content::Character { animation: Some(_), .. })
+    );
+    clip && st.doc.scene().sequence.track(id).is_none_or(|t| t.baked.is_none())
+}
+
+/// Bakes a character's clip to keys of its own, a key each frame of the
+/// sequence where the clip does not go straight: a layer that poses her
+/// in the clip's place while it is on. The clip's file is not touched.
+/// One step of the history. Returns whether she was built to bake.
+pub fn bake(st: &mut State, id: ObjectId) -> bool {
+    let Some(Content::Character {
+        animation: Some(clip), ..
+    }) = st.doc.scene().get(id).map(|o| o.content.clone())
+    else {
+        return true;
+    };
+    let mut sequence = st.doc.scene().sequence.clone();
+    let fps = sequence.fps.max(1.0);
+    let times: Vec<f32> = (0..=frame_of(sequence.length, fps)).map(|f| f as f32 / fps).collect();
+    let Some(keys) = st.live.as_mut().and_then(|l| l.bake_clip(id, &clip, &times)) else {
+        return false;
+    };
+    let name = st.doc.scene().get(id).map(|o| o.name.clone()).unwrap_or_default();
+    sequence.track_mut(id, &name).baked = Some(crate::sequence::BakedClip { on: true, keys });
+    st.doc.edit_sequence(sequence, false);
+    true
+}
+
+/// Changes a character's baked clip as one step of the history; `false`
+/// from `change` takes the layer away.
+fn edit_baked(st: &mut State, id: ObjectId, change: impl FnOnce(&mut crate::sequence::BakedClip) -> bool) {
+    let mut sequence = st.doc.scene().sequence.clone();
+    if let Some(track) = sequence.tracks.iter_mut().find(|t| t.object == id) {
+        if let Some(baked) = track.baked.as_mut() {
+            if !change(baked) {
+                track.baked = None;
+            }
+        }
+    }
+    sequence.tidy();
+    st.anim
+        .selected
+        .retain(|key| !(key.0 == id && key.1.starts_with(BAKED)));
+    st.doc.edit_sequence(sequence, false);
+}
+
+/// How the lists are drawn: the rows' height.
 #[derive(Clone, Copy)]
 pub struct Cells {
     pub row: f32,
-    pub tracks: bool,
 }
 
 impl Cells {
-    /// A row's height: taller for an object's in the tracks.
+    /// A row's height: taller for an object's, the head of its track.
     pub fn height(&self, row: &Row) -> f32 {
-        if self.tracks && row.kind == Kind::Object {
+        if row.kind == Kind::Object {
             self.row + 6.0
         } else {
             self.row
@@ -531,7 +616,7 @@ fn row_button(ui: &mut Ui, k: &Look, at: Rect, id: Id, mark: &str, on: bool, tip
 
 /// A row's name in the list: its fold, its icon and its name, and at its
 /// right end what the row offers. A click chooses or folds it.
-pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, cells: Cells) {
+pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect) {
     let t = &k.t;
     let id = ui
         .id()
@@ -546,13 +631,13 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
         _ if on => Some(t.select),
         Kind::Object => Some(t.header),
         _ if resp.hovered() => Some(t.row_hover),
-        Kind::Group | Kind::Layer => Some(Color32::from_white_alpha(5)),
+        Kind::Group | Kind::Layer | Kind::Baked => Some(Color32::from_white_alpha(5)),
         _ => None,
     };
     if let Some(fill) = fill {
         p.rect_filled(rect, 0.0, fill);
     }
-    if cells.tracks && row.kind == Kind::Object {
+    if row.kind == Kind::Object {
         // A track's head: the object's colour down its left edge.
         p.rect_filled(
             Rect::from_min_max(rect.min, Pos2::new(rect.left() + 3.0, rect.bottom())),
@@ -581,7 +666,7 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
         x += 18.0;
     }
     let font = match row.kind {
-        Kind::Object | Kind::Group | Kind::Layer => k.bold(k.d.text),
+        Kind::Object | Kind::Group | Kind::Layer | Kind::Baked => k.bold(k.d.text),
         _ => k.font(),
     };
     p.text(Pos2::new(x, y), egui::Align2::LEFT_CENTER, &row.label, font, text);
@@ -607,8 +692,7 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
             }
         }
         Kind::Clip => {
-            let baked = st.anim.baked.contains_key(&row.object);
-            if !baked
+            if can_bake(st, row.object)
                 && row_button(
                     ui,
                     k,
@@ -619,15 +703,24 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
                     "Bake to keys",
                 )
             {
-                st.anim.baked.insert(row.object, true);
+                bake(st, row.object);
                 handled = true;
             }
         }
         Kind::Baked => {
-            let shown = st.anim.baked.get(&row.object).copied().unwrap_or(false);
+            let shown = st
+                .doc
+                .scene()
+                .sequence
+                .track(row.object)
+                .is_some_and(|t| t.baked_on().is_some());
             let eye = if shown { icon::EYE } else { icon::EYE_SLASH };
-            if row_button(ui, k, slot(0), id.with("baked on"), eye, false, "Use baked keys") {
-                st.anim.baked.insert(row.object, !shown);
+            let tip = if shown { "Play the clip" } else { "Play the baked keys" };
+            if row_button(ui, k, slot(0), id.with("baked on"), eye, false, tip) {
+                edit_baked(st, row.object, |baked| {
+                    baked.on = !baked.on;
+                    true
+                });
                 handled = true;
             }
             if row_button(
@@ -639,11 +732,11 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
                 false,
                 "Delete baked keys",
             ) {
-                st.anim.baked.remove(&row.object);
+                edit_baked(st, row.object, |_| false);
                 handled = true;
             }
         }
-        Kind::Channel => {
+        Kind::Channel if !row.baked() => {
             // The key at the playhead: full with one, hollow without.
             let here = now(st).round() as i32;
             let has = row.marks.iter().any(|(f, _)| *f == here);
@@ -672,6 +765,7 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
                 handled = true;
             }
         }
+        Kind::Channel => {}
         Kind::Layer | Kind::Group => {
             let count: usize = row.marks.iter().map(|(_, names)| names.len()).sum();
             if count > 0 {
@@ -692,7 +786,7 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
         match row.kind {
             Kind::Object if !folds => st.doc.selected = Some(row.object),
             Kind::Channel => choose(st, row.object, &row.name),
-            Kind::Clip | Kind::Baked => st.doc.selected = Some(row.object),
+            Kind::Clip => st.doc.selected = Some(row.object),
             _ => {
                 let fold = row.fold();
                 if !st.anim.toggled.remove(&fold) {
@@ -703,7 +797,7 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
     }
     let (object, name) = (row.object, row.name.clone());
     match row.kind {
-        Kind::Channel => resp.context_menu(|ui| {
+        Kind::Channel if !row.baked() => resp.context_menu(|ui| {
             if widgets::menu_item(ui, k, icon::DIAMOND, "Set key", "", true) {
                 crate::keying::set_keys(st, object, std::slice::from_ref(&name));
                 ui.close();
@@ -720,13 +814,8 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
             }
         }),
         Kind::Object | Kind::Clip => resp.context_menu(|ui| {
-            let clip = matches!(
-                st.doc.scene().get(object).map(|o| &o.content),
-                Some(Content::Character { animation: Some(_), .. })
-            );
-            let free = clip && !st.anim.baked.contains_key(&object);
-            if widgets::menu_item(ui, k, icon::DIAMONDS_FOUR, "Bake to keys", "", free) {
-                st.anim.baked.insert(object, true);
+            if widgets::menu_item(ui, k, icon::DIAMONDS_FOUR, "Bake to keys", "", can_bake(st, object)) {
+                bake(st, object);
                 ui.close();
             }
             ui.separator();
@@ -739,13 +828,14 @@ pub fn name_cell(ui: &mut Ui, k: &Look, st: &mut State, row: &Row, rect: Rect, c
     };
 }
 
-/// What the keys take from the keyboard while an animation panel has the
-/// focus: Delete, copy and paste act on the keys, and Home fits the time.
-/// Returns whether the action was taken.
+/// What the keys take from the keyboard while the Timeline or the
+/// Animator has the focus: Delete, copy, paste and duplicate act on the
+/// selected keys, and Home fits the time. Returns whether the action was
+/// taken.
 pub fn key_action(st: &mut State, action: crate::keymap::Action) -> bool {
     use crate::keymap::Action as A;
     use crate::panels::Panel;
-    if st.anim.design.is_none() || !matches!(st.focus, Panel::Timeline | Panel::Animator) {
+    if !matches!(st.focus, Panel::Timeline | Panel::Animator) {
         return false;
     }
     match action {
@@ -762,27 +852,22 @@ pub fn key_action(st: &mut State, action: crate::keymap::Action) -> bool {
                 sheet::paste(st, id, None);
             }
         }
-        A::ResetView => st.anim.fit = true,
+        A::ResetView if st.focus == Panel::Timeline => st.anim.fit = true,
         _ => return false,
     }
     true
 }
 
-/// The ··· menu of a character's keys: saved, loaded, baked and cleared.
+/// The ··· menu of a character's keys: baked, saved, loaded and cleared.
 pub fn more_menu(ui: &mut Ui, k: &Look, st: &mut State) {
-    let Some(id) = st
+    let character = st
         .doc
         .selection()
         .filter(|o| matches!(o.content, Content::Character { .. }))
-        .map(|o| o.id)
-    else {
-        return;
-    };
-    let has_keys = st.doc.scene().sequence.track(id).is_some_and(|t| !t.keys.is_empty());
-    let clip = matches!(
-        st.doc.scene().get(id).map(|o| &o.content),
-        Some(Content::Character { animation: Some(_), .. })
-    );
+        .map(|o| o.id);
+    let has_keys = character
+        .and_then(|id| st.doc.scene().sequence.track(id))
+        .is_some_and(|t| !t.keys.is_empty());
     let saved: Vec<String> = {
         let mut files = Vec::new();
         crate::project::files_below(&st.project.folder(crate::project::ANIMATIONS), &mut files);
@@ -794,13 +879,17 @@ pub fn more_menu(ui: &mut Ui, k: &Look, st: &mut State) {
         rels.sort_by_key(|r| r.to_lowercase());
         rels
     };
-    let more = widgets::icon_button(ui, k, icon::DOTS_THREE, false);
+    let more = ui
+        .add_enabled_ui(character.is_some(), |ui| {
+            widgets::icon_button(ui, k, icon::DOTS_THREE, false)
+        })
+        .inner;
+    let Some(id) = character else { return };
     egui::Popup::menu(&more)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            let free = clip && !st.anim.baked.contains_key(&id);
-            if widgets::menu_item(ui, k, icon::DIAMONDS_FOUR, "Bake to keys", "", free) {
-                st.anim.baked.insert(id, true);
+            if widgets::menu_item(ui, k, icon::DIAMONDS_FOUR, "Bake to keys", "", can_bake(st, id)) {
+                bake(st, id);
                 ui.close();
             }
             ui.separator();
@@ -839,6 +928,7 @@ mod tests {
         assert_eq!(part("cf_j_index02_L"), "Hands");
         assert_eq!(part("cf_j_leg01_R"), "Legs");
         assert_eq!(part("cf_j_spine02"), "Torso");
+        assert_eq!(part("cf_j_spinesk_00"), "Other");
         assert_eq!(part("cf_d_bust01_L"), "Other");
     }
 

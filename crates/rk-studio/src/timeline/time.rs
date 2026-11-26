@@ -110,7 +110,7 @@ pub fn go_to(st: &mut State, frame: f32) {
     let sequence = &st.doc.scene().sequence;
     let time = frame.max(0.0) / sequence.fps.max(1.0);
     st.solo = None;
-    crate::timeline::go_to(st, time);
+    super::go_to(st, time);
 }
 
 /// The ruler: the frames' numbers, the loop range with its two ends to
@@ -120,8 +120,7 @@ pub fn ruler(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, rect: Rect, id:
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.header);
     hair_h(&p, rect.left(), rect.right(), rect.bottom() - 1.0, t.divider);
-    if st.anim.range_on {
-        let (from, to) = st.anim.range;
+    if let Some((from, to)) = range(st) {
         let band = Rect::from_min_max(
             Pos2::new(span.x(from as f32), rect.top()),
             Pos2::new(span.x(to as f32) + 1.0, rect.bottom() - 1.0),
@@ -160,21 +159,22 @@ pub fn ruler(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, rect: Rect, id:
         }
     }
     // The loop range's ends, each a bracket to drag.
-    if st.anim.range_on {
+    if let Some((from, to)) = range(st) {
         for end in 0..2 {
-            let frame = if end == 0 { st.anim.range.0 } else { st.anim.range.1 };
+            let frame = if end == 0 { from } else { to };
             let x = span.x(frame as f32);
             let grip = Rect::from_min_max(Pos2::new(x - 5.0, rect.top()), Pos2::new(x + 6.0, rect.bottom()));
             let resp = ui
                 .interact(grip, id.with(("range", end)), Sense::drag())
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
             if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
-                let to = (span.frame(at.x).round() as i32).clamp(0, span.frames);
-                if end == 0 {
-                    st.anim.range.0 = to.min(st.anim.range.1 - 1);
+                let at = (span.frame(at.x).round() as i32).clamp(0, span.frames);
+                let next = if end == 0 {
+                    [at.min(to - 1), to]
                 } else {
-                    st.anim.range.1 = to.max(st.anim.range.0 + 1);
-                }
+                    [from, at.max(from + 1)]
+                };
+                edit(st, true, |sequence| sequence.loop_range = Some(next));
             }
             let color = if resp.hovered() || resp.dragged() {
                 Color32::WHITE
@@ -199,16 +199,18 @@ pub fn ruler(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, rect: Rect, id:
             }
         }
     }
-    // The markers: a flag and its name, which a right click takes away.
-    let mut gone = None;
+    // The markers: a flag and its name, to drag along the frames; a right
+    // click names it or takes it away.
+    let markers = st.doc.scene().sequence.markers.clone();
+    let mut next = markers.clone();
     let mut jump = None;
-    for (i, (frame, name)) in st.anim.markers.iter().enumerate() {
-        let x = span.x(*frame as f32);
+    for (i, marker) in markers.iter().enumerate() {
+        let x = span.x(marker.frame as f32);
         let end = p
             .text(
                 Pos2::new(x + 19.0, rect.top() + 9.0),
                 Align2::LEFT_CENTER,
-                name,
+                &marker.name,
                 k.small(),
                 t.accent,
             )
@@ -222,19 +224,26 @@ pub fn ruler(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, rect: Rect, id:
             t.accent,
         );
         let flag = Rect::from_min_max(Pos2::new(x - 2.0, rect.top()), Pos2::new(end + 2.0, rect.top() + 16.0));
-        let resp = ui.interact(flag, id.with(("marker", i)), Sense::click());
+        let resp = ui.interact(flag, id.with(("marker", i)), Sense::click_and_drag());
         if resp.clicked() {
-            jump = Some(*frame);
+            jump = Some(marker.frame);
+        }
+        if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
+            next[i].frame = (span.frame(at.x).round() as i32).clamp(0, span.frames);
         }
         resp.context_menu(|ui| {
+            ui.set_min_width(160.0);
+            ui.add(egui::TextEdit::singleline(&mut next[i].name).desired_width(150.0));
+            ui.separator();
             if widgets::menu_item(ui, k, icon::TRASH, "Delete marker", "", true) {
-                gone = Some(i);
+                next[i].frame = -1;
                 ui.close();
             }
         });
     }
-    if let Some(i) = gone {
-        st.anim.markers.remove(i);
+    if next != markers {
+        next.retain(|m| m.frame >= 0);
+        edit(st, true, |sequence| sequence.markers = next);
     }
     if let Some(frame) = jump {
         go_to(st, frame as f32);
@@ -265,8 +274,7 @@ pub fn overlay(ui: &Ui, k: &Look, st: &State, span: &Span, ruler: Rect, bottom: 
     };
     shade(rows.left(), span.x(0.0), 70);
     shade(span.x(span.frames as f32) + 1.0, rows.right(), 70);
-    if st.anim.range_on {
-        let (from, to) = st.anim.range;
+    if let Some((from, to)) = range(st) {
         shade(span.x(0.0), span.x(from as f32), 50);
         shade(span.x(to as f32) + 1.0, span.x(span.frames as f32) + 1.0, 50);
         for frame in [from, to] {
@@ -279,10 +287,10 @@ pub fn overlay(ui: &Ui, k: &Look, st: &State, span: &Span, ruler: Rect, bottom: 
             );
         }
     }
-    for (frame, _) in &st.anim.markers {
+    for marker in &st.doc.scene().sequence.markers {
         hair_v(
             &p,
-            span.x(*frame as f32),
+            span.x(marker.frame as f32),
             ruler.top() + 16.0,
             rows.bottom(),
             Theme::glass(t.accent, 110),
@@ -333,7 +341,7 @@ pub fn transport(ui: &mut Ui, k: &Look, st: &mut State) {
         .on_hover_text("Go to start")
         .clicked()
     {
-        let start = if st.anim.range_on { st.anim.range.0 } else { 0 };
+        let start = range(st).map_or(0, |(from, _)| from);
         go_to(st, start as f32);
     }
     let here = now(st).round() as i32;
@@ -458,29 +466,34 @@ pub fn switches(ui: &mut Ui, k: &Look, st: &mut State) {
 
 /// The loop range and a marker at the playhead.
 pub fn range_and_marker(ui: &mut Ui, k: &Look, st: &mut State) {
-    if icon_button(ui, k, icon::BRACKETS_SQUARE, st.anim.range_on)
+    let on = range(st);
+    if icon_button(ui, k, icon::BRACKETS_SQUARE, on.is_some())
         .on_hover_text("Loop range")
         .clicked()
     {
-        st.anim.range_on = !st.anim.range_on;
         let sequence = &st.doc.scene().sequence;
         let last = frame_of(sequence.length, sequence.fps.max(1.0));
-        let (from, to) = st.anim.range;
-        if st.anim.range_on && (to <= from || to > last) {
-            // The selected keys' reach, or the whole sequence.
-            let frames: Vec<i32> = st.anim.selected.iter().map(|r| r.2).collect();
-            let low = frames.iter().copied().min().unwrap_or(0);
-            let high = frames.iter().copied().max().unwrap_or(last);
-            st.anim.range = if high > low { (low, high) } else { (0, last) };
-        }
+        // The selected keys' reach, or the whole sequence.
+        let frames: Vec<i32> = st.anim.selected.iter().map(|r| r.2).collect();
+        let low = frames.iter().copied().min().unwrap_or(0);
+        let high = frames.iter().copied().max().unwrap_or(last);
+        let next = match on {
+            Some(_) => None,
+            None if high > low => Some([low, high]),
+            None => Some([0, last]),
+        };
+        edit(st, false, |sequence| sequence.loop_range = next);
     }
-    if st.anim.range_on {
-        let (from, to) = st.anim.range;
+    if let Some((from, to)) = range(st) {
         if let Some(next) = whole(ui, k, ui.id().with("anim in"), from, 40.0) {
-            st.anim.range.0 = next.clamp(0, to - 1);
+            edit(st, true, |sequence| {
+                sequence.loop_range = Some([next.clamp(0, to - 1), to])
+            });
         }
         if let Some(next) = whole(ui, k, ui.id().with("anim out"), to, 40.0) {
-            st.anim.range.1 = next.max(from + 1);
+            edit(st, true, |sequence| {
+                sequence.loop_range = Some([from, next.max(from + 1)])
+            });
         }
     }
     if icon_button(ui, k, icon::FLAG_PENNANT, false)
@@ -488,12 +501,27 @@ pub fn range_and_marker(ui: &mut Ui, k: &Look, st: &mut State) {
         .clicked()
     {
         let here = now(st).round() as i32;
-        if !st.anim.markers.iter().any(|(f, _)| *f == here) {
-            let name = format!("Marker {}", st.anim.markers.len() + 1);
-            st.anim.markers.push((here, name));
-            st.anim.markers.sort();
-        }
+        edit(st, false, |sequence| {
+            if !sequence.markers.iter().any(|m| m.frame == here) {
+                let name = format!("Marker {}", sequence.markers.len() + 1);
+                sequence.markers.push(crate::sequence::Marker { frame: here, name });
+                sequence.markers.sort_by_key(|m| m.frame);
+            }
+        });
     }
+}
+
+/// The loop range, while playing stays in one.
+pub fn range(st: &State) -> Option<(i32, i32)> {
+    st.doc.scene().sequence.loop_range.map(|[from, to]| (from, to))
+}
+
+/// Changes the sequence's markers or loop range as one step of the
+/// history, or with `held` as part of a drag's.
+fn edit(st: &mut State, held: bool, change: impl FnOnce(&mut crate::sequence::Sequence)) {
+    let mut sequence = st.doc.scene().sequence.clone();
+    change(&mut sequence);
+    st.doc.edit_sequence(sequence, held);
 }
 
 /// The eases a key may have, as the lists name them.
@@ -506,11 +534,6 @@ pub const EASES: [(Ease, &str, &str); 6] = [
     (Ease::Bezier, "Bezier", icon::BEZIER_CURVE),
 ];
 
-/// The name of an ease.
-pub fn ease_name(ease: Ease) -> &'static str {
-    EASES.iter().find(|(e, ..)| *e == ease).map_or("", |(_, name, _)| name)
-}
-
 /// The switch that makes drags scale the keys around the playhead.
 pub fn scale_switch(ui: &mut Ui, k: &Look, st: &mut State) {
     if icon_button(ui, k, icon::ARROWS_OUT_LINE_HORIZONTAL, st.anim.scale)
@@ -518,34 +541,6 @@ pub fn scale_switch(ui: &mut Ui, k: &Look, st: &mut State) {
         .clicked()
     {
         st.anim.scale = !st.anim.scale;
-    }
-}
-
-/// The selected keys' interpolation, as a field that opens the list.
-pub fn ease_field(ui: &mut Ui, k: &Look, st: &mut State) {
-    let any = !st.anim.selected.is_empty();
-    let text = match super::sheet::ease_of(st) {
-        Some(ease) => ease_name(ease),
-        None if any => "Mixed",
-        None => "Interpolation",
-    };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(118.0, k.field()), Sense::hover());
-    let mut picked = None;
-    ui.add_enabled_ui(any, |ui| {
-        let resp = widgets::dropdown_field(ui, k, rect, ui.id().with("anim ease"), text);
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(rect.width() - 10.0);
-            let current = super::sheet::ease_of(st);
-            for (ease, name, _) in EASES {
-                if widgets::check_item(ui, k, current == Some(ease), name, "").clicked() {
-                    picked = Some(ease);
-                    ui.close();
-                }
-            }
-        });
-    });
-    if let Some(ease) = picked {
-        super::sheet::set_ease(st, ease);
     }
 }
 

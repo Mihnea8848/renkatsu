@@ -29,6 +29,32 @@ pub enum Ease {
     Bezier,
 }
 
+/// The handles of a curve at rest: the smooth curve's.
+pub const HANDLES: [f32; 4] = [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0];
+
+/// The share of the way at `t` along the curve of two handles, each a
+/// time and a share between the two keys (as CSS's cubic-bezier): the
+/// first leaves the key, the second comes into the next.
+pub fn bezier([x1, y1, x2, y2]: [f32; 4], t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (x1, x2) = (x1.clamp(0.0, 1.0), x2.clamp(0.0, 1.0));
+    let along = |s: f32, a: f32, b: f32| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * a + 3.0 * r * s * s * b + s * s * s
+    };
+    // The curve's time rises with its parameter, so halving finds it.
+    let (mut low, mut high) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (low + high) / 2.0;
+        if along(mid, x1, x2) < t {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    along((low + high) / 2.0, y1, y2)
+}
+
 impl Ease {
     /// The share of the way at `t`, from 0 to 1, of the time between two
     /// keys.
@@ -42,6 +68,18 @@ impl Ease {
             Ease::Step => 0.0,
         }
     }
+
+    /// The handles that draw this ease as a curve; none for a hold.
+    pub fn handles(self) -> Option<[f32; 4]> {
+        let third = 1.0 / 3.0;
+        match self {
+            Ease::Smooth | Ease::Bezier => Some(HANDLES),
+            Ease::Linear => Some([third, third, 2.0 * third, 2.0 * third]),
+            Ease::EaseIn => Some([third, 0.0, 2.0 * third, third]),
+            Ease::EaseOut => Some([third, 2.0 * third, 2.0 * third, 1.0]),
+            Ease::Step => None,
+        }
+    }
 }
 
 /// A bone's edit at a second.
@@ -52,6 +90,39 @@ pub struct Key {
     pub edit: BoneEdit,
     #[serde(default, skip_serializing_if = "is_smooth")]
     pub ease: Ease,
+    /// The handles of a bezier ease into the next key, when they were
+    /// moved from where they rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handles: Option<[f32; 4]>,
+}
+
+impl Key {
+    /// A key with the smooth ease.
+    pub fn new(time: f32, edit: BoneEdit) -> Key {
+        Key {
+            time,
+            edit,
+            ease: Ease::default(),
+            handles: None,
+        }
+    }
+
+    /// The share of the way to the next key at `t`, from 0 to 1, of the
+    /// time between them.
+    pub fn share(&self, t: f32) -> f32 {
+        match (self.ease, self.handles) {
+            (Ease::Bezier, Some(handles)) => bezier(handles, t),
+            (ease, _) => ease.share(t),
+        }
+    }
+
+    /// The handles its curve into the next key is drawn by.
+    pub fn curve(&self) -> Option<[f32; 4]> {
+        match (self.ease, self.handles) {
+            (Ease::Bezier, Some(handles)) => Some(handles),
+            (ease, _) => ease.handles(),
+        }
+    }
 }
 
 fn is_smooth(e: &Ease) -> bool {
@@ -69,14 +140,7 @@ pub fn set(keys: &mut Keys, bone: &str, time: f32, edit: BoneEdit, near: f32) {
         Some(key) => key.edit = edit,
         None => {
             let at = list.partition_point(|k| k.time < time);
-            list.insert(
-                at,
-                Key {
-                    time,
-                    edit,
-                    ease: Ease::default(),
-                },
-            );
+            list.insert(at, Key::new(time, edit));
         }
     }
 }
@@ -107,7 +171,7 @@ pub fn sample(list: &[Key], time: f32) -> Option<BoneEdit> {
     let a = &list[next - 1];
     let span = b.time - a.time;
     let t = if span > 0.0 {
-        a.ease.share((time - a.time) / span)
+        a.share((time - a.time) / span)
     } else {
         1.0
     };
@@ -144,6 +208,37 @@ pub fn blend(a: BoneEdit, b: BoneEdit, t: f32) -> BoneEdit {
         rot: a.rot.slerp(b.rot, t).normalize(),
         pos: a.pos.lerp(b.pos, t),
         scale: a.scale.lerp(b.scale, t),
+    }
+}
+
+/// Takes away the keys that the keys around them already give, going
+/// straight from one to the next: what is left poses the bone the same to
+/// within a tenth of a degree and of a millimetre.
+pub fn thin(list: &mut Vec<Key>) {
+    let close = |a: &BoneEdit, b: &BoneEdit| {
+        a.rot.angle_between(b.rot) < 0.002 && a.pos.abs_diff_eq(b.pos, 1e-4) && a.scale.abs_diff_eq(b.scale, 1e-4)
+    };
+    let all = std::mem::take(list);
+    let Some(first) = all.first() else { return };
+    list.push(*first);
+    let mut from = 0;
+    while from + 1 < all.len() {
+        // The furthest key the line from this one reaches with every key
+        // between on it.
+        let mut to = from + 1;
+        for end in from + 2..all.len() {
+            let (a, b) = (&all[from], &all[end]);
+            let on_line = all[from + 1..end].iter().all(|k| {
+                let t = (k.time - a.time) / (b.time - a.time).max(1e-6);
+                close(&blend(a.edit, b.edit, t), &k.edit)
+            });
+            if !on_line {
+                break;
+            }
+            to = end;
+        }
+        list.push(all[to]);
+        from = to;
     }
 }
 
@@ -220,11 +315,13 @@ mod tests {
                 time: 0.0,
                 edit: a,
                 ease: Ease::Step,
+                handles: None,
             },
             Key {
                 time: 1.0,
                 edit: b,
                 ease: Ease::Linear,
+                handles: None,
             },
         ];
         assert_eq!(sample(&list, 0.99), Some(a));
@@ -245,5 +342,39 @@ mod tests {
         let file = File { keys };
         let text = toml::to_string(&file).unwrap();
         assert_eq!(toml::from_str::<File>(&text).unwrap(), file);
+    }
+
+    #[test]
+    fn keys_on_a_line_are_thinned_away() {
+        let line = |time: f32, ease| Key {
+            time,
+            edit: turned(time * 10.0),
+            ease,
+            handles: None,
+        };
+        let mut list: Vec<Key> = (0..=10).map(|i| line(i as f32, Ease::Linear)).collect();
+        list[5].edit = turned(80.0);
+        thin(&mut list);
+        let times: Vec<f32> = list.iter().map(|k| k.time).collect();
+        assert_eq!(times, [0.0, 4.0, 5.0, 6.0, 10.0]);
+        let mut still = vec![line(0.0, Ease::Linear)];
+        thin(&mut still);
+        assert_eq!(still.len(), 1);
+    }
+
+    #[test]
+    fn a_bezier_at_rest_is_the_smooth_curve_and_its_handles_shape_it() {
+        for t in [0.0, 0.1, 0.37, 0.5, 0.82, 1.0] {
+            assert!((bezier(HANDLES, t) - Ease::Smooth.share(t)).abs() < 1e-4);
+            let line = Ease::Linear.handles().unwrap();
+            assert!((bezier(line, t) - t).abs() < 1e-4);
+            let slow = Ease::EaseIn.handles().unwrap();
+            assert!((bezier(slow, t) - t * t).abs() < 1e-4);
+        }
+        let mut key = Key::new(0.0, turned(0.0));
+        key.ease = Ease::Bezier;
+        assert!((key.share(0.5) - 0.5).abs() < 1e-4, "no handles: smooth");
+        key.handles = Some([0.1, 0.9, 0.2, 1.0]);
+        assert!(key.share(0.5) > 0.9, "handles pulled early arrive early");
     }
 }

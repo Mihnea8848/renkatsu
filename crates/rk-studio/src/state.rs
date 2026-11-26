@@ -398,10 +398,8 @@ pub struct State {
     pub updating: Option<crate::self_update::Updating>,
     /// The updated program to start once Renkatsu has quit.
     pub restart_into: Option<PathBuf>,
-    /// What the designs of the animation panels on trial remember.
-    pub anim: crate::anim_design::Anim,
-    /// A key copied, to paste on a bone.
-    pub key_clipboard: Option<rk_chara::pose::BoneEdit>,
+    /// What the Timeline, its slider and the Animator remember.
+    pub anim: crate::timeline::Anim,
     /// Playing a sequence with keys starts over at its end.
     pub loop_sequence: bool,
     /// The character whose keys play alone, and where they are.
@@ -913,7 +911,6 @@ impl State {
             updating: None,
             restart_into: None,
             anim: Default::default(),
-            key_clipboard: None,
             loop_sequence: true,
             solo: None,
             solo_time: 0.0,
@@ -2599,7 +2596,10 @@ mod tests {
             rot: glam::Quat::from_rotation_y(0.4),
             ..Default::default()
         };
-        crate::keying::paste_key(&mut st, anna, "cf_j_neck", neck);
+        // With auto-key on, an edit of a bone without keys sets its key.
+        st.anim.auto_key = true;
+        crate::keying::write(&mut st, anna, "cf_j_neck", neck, false);
+        st.anim.auto_key = false;
         st.run(Command::SaveKeys);
         let rel = "Animations/Anna keys.rkkeys".to_owned();
         assert!(root.join(&rel).is_file());

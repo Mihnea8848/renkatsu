@@ -9,6 +9,7 @@
 use super::time::Span;
 use super::{frame_of, now, Drag, DragKind, KeyRef, Kind, Row};
 use crate::scene::{Content, ObjectId};
+use crate::sequence::Track;
 use crate::state::{Look, State};
 use crate::theme::Theme;
 use crate::widgets::{self, glyph, hair_h};
@@ -31,10 +32,28 @@ pub fn diamond(p: &Painter, centre: Pos2, r: f32, fill: Color32, line: Color32) 
     ));
 }
 
+/// What a mark of the graph is, beside a key.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Point {
+    /// A key on the curve of an axis.
+    Curve { axis: usize },
+    /// A handle of the key's curve into the next key, on an axis: the one
+    /// that leaves the key, or the one that comes into the next.
+    Handle { leaves: bool, axis: usize },
+}
+
 /// A mark on the screen and the keys it stands for.
 pub struct Mark {
     pub at: Pos2,
     pub keys: Vec<KeyRef>,
+    /// What it is in the graph; none for a mark of the sheet.
+    pub point: Option<Point>,
+}
+
+/// What the graph gives the pointer's work: the value at a height of the
+/// screen, and the change a drag of its points and handles makes.
+pub struct Curves<'a> {
+    pub value_at: &'a dyn Fn(f32) -> f32,
 }
 
 /// A key of the scene's sequence.
@@ -43,8 +62,7 @@ pub fn key_of(st: &State, (object, name, frame): &KeyRef) -> Option<Key> {
     let fps = sequence.fps.max(1.0);
     sequence
         .track(*object)?
-        .keys
-        .get(name)?
+        .list(name)?
         .iter()
         .find(|k| frame_of(k.time, fps) == *frame)
         .copied()
@@ -78,7 +96,7 @@ pub fn lanes(ui: &Ui, k: &Look, st: &State, span: &Span, lanes: &[(Rect, &Row)],
             Kind::Object => {
                 p.rect_filled(*rect, 0.0, Theme::glass(t.header, 150));
             }
-            Kind::Group | Kind::Layer => {
+            Kind::Group | Kind::Layer | Kind::Baked => {
                 p.rect_filled(*rect, 0.0, Color32::from_white_alpha(5));
             }
             _ if i % 2 == 1 => {
@@ -88,16 +106,9 @@ pub fn lanes(ui: &Ui, k: &Look, st: &State, span: &Span, lanes: &[(Rect, &Row)],
         }
         hair_h(&p, rect.left(), rect.right(), rect.bottom() - 1.0, t.line);
         let y = rect.center().y;
-        match row.kind {
-            Kind::Clip => {
-                clip(ui, k, st, span, *rect, row.object);
-                continue;
-            }
-            Kind::Baked => {
-                baked(ui, k, st, span, *rect, row.object);
-                continue;
-            }
-            _ => {}
+        if row.kind == Kind::Clip {
+            clip(ui, k, st, span, *rect, row.object);
+            continue;
         }
         let summary = row.kind != Kind::Channel;
         // A bone's keys hang on a line from its first to its last.
@@ -119,7 +130,13 @@ pub fn lanes(ui: &Ui, k: &Look, st: &State, span: &Span, lanes: &[(Rect, &Row)],
             let centre = Pos2::new(span.x(shown(st, *frame, chosen > 0)) + 0.5, y);
             let under = pointer
                 .is_some_and(|at| rect.contains(at) && (at.x - centre.x).abs() <= r + 2.0 && st.anim.drag.is_none());
-            let size = if summary { r - 0.5 } else { r } + if under { 1.0 } else { 0.0 };
+            let size = if row.kind == Kind::Baked {
+                r - 2.5
+            } else if summary {
+                r - 0.5
+            } else {
+                r
+            } + if under { 1.0 } else { 0.0 };
             let (fill, line) = if chosen == keys.len() {
                 (t.select_bright, Color32::WHITE)
             } else if chosen > 0 {
@@ -142,7 +159,11 @@ pub fn lanes(ui: &Ui, k: &Look, st: &State, span: &Span, lanes: &[(Rect, &Row)],
             } else {
                 diamond(&p, centre, size, fill, line);
             }
-            marks.push(Mark { at: centre, keys });
+            marks.push(Mark {
+                at: centre,
+                keys,
+                point: None,
+            });
         }
     }
     marks
@@ -166,7 +187,12 @@ fn clip(ui: &Ui, k: &Look, st: &State, span: &Span, rect: Rect, id: ObjectId) {
     } else {
         (seconds / clip.speed.abs().max(0.01) * span.fps).max(1.0)
     };
-    let off = st.anim.baked.get(&id) == Some(&true);
+    let off = st
+        .doc
+        .scene()
+        .sequence
+        .track(id)
+        .is_some_and(|t| t.baked_on().is_some());
     let tint = crate::kinds::Kind::Animation.color();
     let (fill, line, text) = if off {
         (Theme::glass(tint, 22), Theme::glass(tint, 70), t.text_dim)
@@ -227,24 +253,6 @@ fn clip(ui: &Ui, k: &Look, st: &State, span: &Span, rect: Rect, id: ObjectId) {
     }
 }
 
-/// The clip baked to keys: a key each frame where they fit, dimmed while
-/// the layer is off.
-fn baked(ui: &Ui, k: &Look, st: &State, span: &Span, rect: Rect, id: ObjectId) {
-    let on = st.anim.baked.get(&id) == Some(&true);
-    let p = ui.painter().with_clip_rect(rect.intersect(span.rect));
-    let step = [1, 2, 5, 10, 30]
-        .into_iter()
-        .find(|s| *s as f32 * span.px >= 7.0)
-        .unwrap_or(60);
-    let fill = if on { k.t.text_dim } else { k.t.border };
-    let mut frame = 0;
-    while frame <= span.frames {
-        let centre = Pos2::new(span.x(frame as f32) + 0.5, rect.center().y);
-        diamond(&p, centre, 3.0, fill, Color32::from_black_alpha(120));
-        frame += step;
-    }
-}
-
 /// The ease the selected keys share.
 pub fn ease_of(st: &State) -> Option<Ease> {
     let mut eases = st
@@ -268,7 +276,7 @@ fn edit(st: &mut State, held: bool, change: impl FnOnce(&mut crate::sequence::Se
 }
 
 /// Puts a key on a frame of a bone's keys, over any key there.
-fn put(list: &mut Vec<Key>, mut key: Key, frame: i32, fps: f32) {
+pub(super) fn put(list: &mut Vec<Key>, mut key: Key, frame: i32, fps: f32) {
     key.time = frame as f32 / fps;
     list.retain(|k| frame_of(k.time, fps) != frame);
     let at = list.partition_point(|k| k.time < key.time);
@@ -280,12 +288,7 @@ pub fn set_ease(st: &mut State, ease: Ease) {
     let selected = st.anim.selected.clone();
     edit(st, false, |sequence, fps| {
         for (object, name, frame) in &selected {
-            let list = sequence
-                .tracks
-                .iter_mut()
-                .find(|t| t.object == *object)
-                .and_then(|t| t.keys.get_mut(name));
-            if let Some(key) = list.and_then(|l| l.iter_mut().find(|k| frame_of(k.time, fps) == *frame)) {
+            if let Some(key) = key_mut(sequence, &(*object, name.clone(), *frame), fps) {
                 key.ease = ease;
             }
         }
@@ -306,8 +309,9 @@ pub fn retime_held(st: &mut State, to: impl Fn(i32) -> i32, copy: bool, held: bo
         let last = frame_of(sequence.length, fps);
         for track in &mut sequence.tracks {
             let mut lifted = Vec::new();
-            for (_, name, frame) in selected.iter().filter(|key| key.0 == track.object) {
-                let Some(list) = track.keys.get_mut(name) else { continue };
+            let owner = track.object;
+            for (_, name, frame) in selected.iter().filter(|key| key.0 == owner) {
+                let Some(list) = track.list_mut(name) else { continue };
                 let Some(at) = list.iter().position(|k| frame_of(k.time, fps) == *frame) else {
                     continue;
                 };
@@ -315,24 +319,38 @@ pub fn retime_held(st: &mut State, to: impl Fn(i32) -> i32, copy: bool, held: bo
                 lifted.push((name.clone(), to(*frame).clamp(0, last), key));
             }
             for (name, frame, key) in lifted {
-                put(track.keys.entry(name.clone()).or_default(), key, frame, fps);
-                next.insert((track.object, name, frame));
+                if let Some(list) = track.list_mut(&name) {
+                    put(list, key, frame, fps);
+                    next.insert((track.object, name, frame));
+                }
             }
         }
     });
     st.anim.selected = next;
 }
 
-/// Gives a key another edit, as part of a drag's step.
-pub fn set_edit(st: &mut State, (object, name, frame): &KeyRef, to: rk_chara::pose::BoneEdit) {
+/// A key of a sequence, to change it.
+pub fn key_mut<'a>(
+    sequence: &'a mut crate::sequence::Sequence,
+    (object, name, frame): &KeyRef,
+    fps: f32,
+) -> Option<&'a mut Key> {
+    let track: &mut Track = sequence.tracks.iter_mut().find(|t| t.object == *object)?;
+    track
+        .list_mut(name)?
+        .iter_mut()
+        .find(|k| frame_of(k.time, fps) == *frame)
+}
+
+/// Changes the selected keys' edits, each by `change`, as part of a
+/// drag's step.
+pub fn set_edits(st: &mut State, change: impl Fn(&KeyRef, rk_chara::pose::BoneEdit) -> rk_chara::pose::BoneEdit) {
+    let selected = st.anim.selected.clone();
     edit(st, true, |sequence, fps| {
-        let list = sequence
-            .tracks
-            .iter_mut()
-            .find(|t| t.object == *object)
-            .and_then(|t| t.keys.get_mut(name));
-        if let Some(key) = list.and_then(|l| l.iter_mut().find(|k| frame_of(k.time, fps) == *frame)) {
-            key.edit = to;
+        for at in &selected {
+            if let Some(key) = key_mut(sequence, at, fps) {
+                key.edit = change(at, key.edit);
+            }
         }
     });
 }
@@ -343,11 +361,8 @@ pub fn delete(st: &mut State) {
     edit(st, false, |sequence, fps| {
         for (object, name, frame) in &selected {
             if let Some(track) = sequence.tracks.iter_mut().find(|t| t.object == *object) {
-                if let Some(list) = track.keys.get_mut(name) {
+                if let Some(list) = track.list_mut(name) {
                     list.retain(|k| frame_of(k.time, fps) != *frame);
-                    if list.is_empty() {
-                        track.keys.remove(name);
-                    }
                 }
             }
         }
@@ -387,8 +402,10 @@ pub fn paste(st: &mut State, object: ObjectId, onto: Option<&str>) {
                 _ => name,
             };
             let frame = (here + after).clamp(0, last);
-            put(track.keys.entry(name.clone()).or_default(), key, frame, fps);
-            next.insert((object, name, frame));
+            if let Some(list) = track.list_mut(&name) {
+                put(list, key, frame, fps);
+                next.insert((object, name, frame));
+            }
         }
     });
     st.anim.selected = next;
@@ -400,7 +417,17 @@ pub fn paste(st: &mut State, object: ObjectId, onto: Option<&str>) {
 /// a drag from empty time selects in a box, and the right button opens
 /// the keys' menu. `reach` is how far from a mark's centre counts.
 #[allow(clippy::too_many_arguments)]
-pub fn interact(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, area: Rect, id: Id, marks: &[Mark], reach: f32) {
+pub fn interact(
+    ui: &mut Ui,
+    k: &Look,
+    st: &mut State,
+    span: &Span,
+    area: Rect,
+    id: Id,
+    marks: &[Mark],
+    reach: f32,
+    curves: Option<&Curves>,
+) {
     let resp = ui.interact(area, id, Sense::click_and_drag());
     let hit = |at: Pos2| {
         marks
@@ -433,18 +460,29 @@ pub fn interact(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, area: Rect, 
         let from = origin.or(pointer).unwrap_or(area.center());
         match hit(from) {
             Some(mark) => {
-                if !mark.keys.iter().all(|key| st.anim.selected.contains(key)) {
+                let handle = matches!(mark.point, Some(Point::Handle { .. }));
+                if !handle && !mark.keys.iter().all(|key| st.anim.selected.contains(key)) {
                     if !shift {
                         st.anim.selected.clear();
                     }
                     st.anim.selected.extend(mark.keys.iter().cloned());
                 }
-                pick(st, mark);
-                let kind = if st.anim.scale {
-                    DragKind::Scale
-                } else {
-                    DragKind::Move { copy: alt }
+                if !handle {
+                    pick(st, mark);
+                }
+                let kind = match mark.point {
+                    Some(Point::Handle { leaves, axis }) => DragKind::Handle { leaves, axis },
+                    _ if st.anim.scale => DragKind::Scale,
+                    Some(Point::Curve { axis }) => DragKind::Point { axis },
+                    None => DragKind::Move { copy: alt },
                 };
+                // A drag of the graph changes the keys as it goes, each
+                // frame from how they were when it began.
+                if matches!(kind, DragKind::Point { .. } | DragKind::Handle { .. }) {
+                    let sequence = st.doc.scene().sequence.clone();
+                    st.anim.drag_from = Some((sequence, st.anim.selected.clone(), from));
+                    st.anim.handle = mark.keys.first().cloned();
+                }
                 let frame = span.frame(from.x);
                 st.anim.drag = Some(Drag {
                     kind,
@@ -468,7 +506,11 @@ pub fn interact(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, area: Rect, 
     }
     if let (Some(drag), Some(at)) = (st.anim.drag.as_mut(), pointer) {
         drag.to = span.frame(at.x);
-        if let DragKind::Select(from) = drag.kind {
+        let kind = drag.kind;
+        if let (DragKind::Point { .. } | DragKind::Handle { .. }, Some(curves)) = (kind, curves) {
+            super::graph::drag(st, span, kind, at, curves);
+        }
+        if let DragKind::Select(from) = kind {
             let reach = Rect::from_two_pos(from, at).intersect(area);
             let p = ui.painter().with_clip_rect(area);
             p.rect_filled(reach, 0.0, Theme::glass(k.t.select, 40));
@@ -502,6 +544,11 @@ pub fn interact(ui: &mut Ui, k: &Look, st: &mut State, span: &Span, area: Rect, 
                 }
             }
             DragKind::Scale => retime(st, |frame| drag.moved(frame, true) as i32, false),
+            DragKind::Point { .. } | DragKind::Handle { .. } => {
+                st.anim.drag_from = None;
+                st.anim.handle = None;
+                st.anim.frozen = None;
+            }
         }
     }
     if resp.clicked() {
@@ -591,6 +638,7 @@ mod tests {
             time,
             edit: BoneEdit::default(),
             ease: Ease::Linear,
+            handles: None,
         }
     }
 
