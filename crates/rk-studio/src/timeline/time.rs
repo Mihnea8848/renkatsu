@@ -435,7 +435,8 @@ pub fn length_fields(ui: &mut Ui, k: &Look, st: &mut State) {
     }
 }
 
-/// Auto-key, snapping and the onion skin with its reach.
+/// Auto-key, snapping, the onion skin with its reach and the motion
+/// trail.
 pub fn switches(ui: &mut Ui, k: &Look, st: &mut State) {
     let record = icon_button(ui, k, icon::RECORD, st.anim.auto_key).on_hover_text("Auto-key");
     if st.anim.auto_key {
@@ -461,6 +462,12 @@ pub fn switches(ui: &mut Ui, k: &Look, st: &mut State) {
         if let Some(next) = whole(ui, k, ui.id().with("anim onion"), reach, 34.0) {
             st.anim.onion_frames = next.clamp(1, 30) as f32;
         }
+    }
+    if icon_button(ui, k, icon::PATH, st.anim.trail)
+        .on_hover_text("Motion trail")
+        .clicked()
+    {
+        st.anim.trail = !st.anim.trail;
     }
 }
 

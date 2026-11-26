@@ -175,6 +175,7 @@ pub const MODES: [Mode; 7] = [
                 "Clips",
                 &[(icon::FILM_REEL, "Load clip"), (icon::WAVEFORM, "Bake physics")],
             ),
+            ("Show", &[(icon::GHOST, "Onion skin"), (icon::PATH, "Motion trail")]),
         ],
     },
     Mode {

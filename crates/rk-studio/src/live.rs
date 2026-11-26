@@ -2570,6 +2570,75 @@ impl Live {
         scene: &crate::scene::Scene,
         frames: &[(f32, [f32; 4])],
     ) -> Option<Vec<rk_render::ghost::Ghost>> {
+        let times: Vec<f32> = frames.iter().map(|(time, _)| *time).collect();
+        let meshes = self.posed_at(id, scene, &times, |body, _, _| rk_render::ghost::meshes(&body.pose()))?;
+        Some(
+            meshes
+                .into_iter()
+                .zip(frames)
+                .map(|(meshes, (_, tint))| rk_render::ghost::Ghost { meshes, tint: *tint })
+                .collect(),
+        )
+    }
+
+    /// Whether a built character's clip is read, so that it poses her.
+    pub fn clip_read(&self, id: ObjectId) -> bool {
+        self.actors
+            .iter()
+            .find(|a| a.id == id)
+            .is_some_and(|a| a.playing.is_some())
+    }
+
+    /// Where bones and IK targets of a built character are in the world
+    /// at each of `times`: for each name, a place a time. A bone's is its
+    /// joint as `posed_at` poses her; an IK target's is where its keys or
+    /// the pose put the target. A name she has not gets no places.
+    pub fn trail_points(
+        &mut self,
+        id: ObjectId,
+        scene: &crate::scene::Scene,
+        names: &[String],
+        times: &[f32],
+    ) -> Option<Vec<Vec<Vec3>>> {
+        let Content::Character { pose_layer, .. } = &scene.get(id)?.content else {
+            return None;
+        };
+        let track = scene.sequence.track(id);
+        let frames = self.posed_at(id, scene, times, |body, top, time| {
+            names
+                .iter()
+                .map(|name| match rk_chara::pose::ik_key_target(name) {
+                    Some(target) => {
+                        let keyed = track
+                            .and_then(|t| t.keys.get(name))
+                            .and_then(|list| rk_chara::keys::sample(list, time))
+                            .map(|edit| edit.pos);
+                        let posed = pose_layer.as_ref().and_then(|l| l.ik.get(target)).map(|t| t.pos);
+                        keyed.or(posed).map(|at| body.world_of(top).transform_point3(at))
+                    }
+                    None => body.find(top, name).map(|node| body.world_of(node).w_axis.truncate()),
+                })
+                .collect::<Vec<Option<Vec3>>>()
+        })?;
+        Some(
+            (0..names.len())
+                .map(|n| frames.iter().filter_map(|frame| frame[n]).collect())
+                .collect(),
+        )
+    }
+
+    /// Poses a built character as she stands at each of `times` and gives
+    /// what `read` makes of her bones there, with her top node and the
+    /// time. She is posed by her clip or its baked keys with the pose and
+    /// the keys by hand over them; IK, the turning neck, the heels and the
+    /// physics are left out. Her bones are left as they were.
+    fn posed_at<T>(
+        &mut self,
+        id: ObjectId,
+        scene: &crate::scene::Scene,
+        times: &[f32],
+        mut read: impl FnMut(&rk_chara::scene::Scene, usize, f32) -> T,
+    ) -> Option<Vec<T>> {
         let Content::Character {
             animation, pose_layer, ..
         } = &scene.get(id)?.content
@@ -2589,7 +2658,7 @@ impl Live {
             rk_chara::channels::Channel::of_key(name).is_none() && rk_chara::pose::ik_key_target(name).is_none()
         };
         let mut out = Vec::new();
-        for &(time, tint) in frames {
+        for &time in times {
             let baked = track.and_then(|t| t.baked_on());
             let mut edits: std::collections::BTreeMap<String, BoneEdit> =
                 baked.map(|b| rk_chara::keys::pose_at(b, time)).unwrap_or_default();
@@ -2621,10 +2690,7 @@ impl Live {
                 playing.bound.apply(body, playing.phase(pose, time));
             }
             rk_chara::pose::apply(body, &found);
-            out.push(rk_render::ghost::Ghost {
-                meshes: rk_render::ghost::meshes(&body.pose()),
-                tint,
-            });
+            out.push(read(body, top, time));
             for (node, local) in body.nodes.iter_mut().zip(&saved) {
                 node.local = *local;
             }

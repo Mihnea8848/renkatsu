@@ -1182,11 +1182,16 @@ fn palette(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
             if let Some(pipeline) = PIPELINES.iter().find(|p| p.tool == *name) {
                 pipeline_row(ui, k, row, id, g, pipeline);
             } else {
-                if *name == "Auto key" {
-                    // The same switch as the Timeline's bar has.
-                    let resp = widgets::tool_row(ui, k, row, id, g, name, st.anim.auto_key);
+                if matches!(*name, "Auto key" | "Onion skin" | "Motion trail") {
+                    // The same switches as the Timeline's bar has.
+                    let on = match *name {
+                        "Auto key" => &mut st.anim.auto_key,
+                        "Onion skin" => &mut st.anim.onion,
+                        _ => &mut st.anim.trail,
+                    };
+                    let resp = widgets::tool_row(ui, k, row, id, g, name, *on);
                     if resp.clicked() {
-                        st.anim.auto_key = !st.anim.auto_key;
+                        *on = !*on;
                     }
                     y += palette_row(k);
                     index += 1;

@@ -281,6 +281,9 @@ struct Cli {
     anim_auto_key: bool,
     #[arg(long, hide = true)]
     anim_onion: bool,
+    /// Start with the motion trail on.
+    #[arg(long, hide = true)]
+    anim_trail: bool,
     /// The frames either side the onion skin starts with.
     #[arg(long, hide = true)]
     anim_onion_frames: Option<u32>,
@@ -933,6 +936,7 @@ impl Studio {
         state.anim.graph = cli.anim_graph;
         state.anim.auto_key = cli.anim_auto_key;
         state.anim.onion = cli.anim_onion;
+        state.anim.trail = cli.anim_trail;
         if let Some(frames) = cli.anim_onion_frames {
             state.anim.onion_frames = frames.clamp(1, 30) as f32;
         }

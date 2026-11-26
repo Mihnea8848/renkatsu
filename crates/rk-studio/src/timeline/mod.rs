@@ -14,6 +14,7 @@ pub mod sheet;
 pub mod slider;
 pub mod time;
 pub mod tracks;
+pub mod trail;
 
 use crate::scene::{Content, ObjectId};
 use crate::sequence::BAKED;
@@ -110,6 +111,10 @@ pub struct Anim {
     /// Ghosts of the poses this many frames either side.
     pub onion: bool,
     pub onion_frames: f32,
+    /// Lines through the scene where the chosen bones go.
+    pub trail: bool,
+    /// The trails' places, kept until what they come from changes.
+    pub trails: Option<trail::Trails>,
     /// Curves in place of the sheet.
     pub graph: bool,
     /// Drags scale the keys around the playhead.
@@ -138,6 +143,8 @@ impl Default for Anim {
             snap: true,
             onion: false,
             onion_frames: 3.0,
+            trail: false,
+            trails: None,
             graph: false,
             scale: false,
             clipboard: Vec::new(),

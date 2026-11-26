@@ -37,7 +37,7 @@ pub fn show(ui: &mut Ui, k: &Look, st: &mut State, rect: Rect) {
         time::transport(ui, k, st);
         time::frame_field(ui, k, st);
     });
-    let tools = 180.0 + if time::range(st).is_some() { 88.0 } else { 0.0 } + if st.anim.onion { 38.0 } else { 0.0 };
+    let tools = 206.0 + if time::range(st).is_some() { 88.0 } else { 0.0 } + if st.anim.onion { 38.0 } else { 0.0 };
     let right = Rect::from_min_max(Pos2::new(inner.right() - tools, inner.top()), inner.max);
     let frames = Rect::from_min_max(
         Pos2::new(left + 8.0, rect.top() + 5.0),
